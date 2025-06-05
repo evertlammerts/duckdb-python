@@ -1,25 +1,20 @@
-[build-system]
-requires = [
-	"setuptools>=60",
-	"setuptools_scm>=6.4,<8.0",
-	"pybind11>=2.6.0",
-]
-build-backend = "setuptools.build_meta"
-
 [project]
-name = "duckdb"
-dynamic = ["version"]
+name = "duckdb-python"
+version = "v0.0.1a1"
 description = "DuckDB in-process database"
 readme = "README.md"
 keywords = ["DuckDB", "Database", "SQL", "OLAP"]
-requires-python = ">=3.7.0"
+requires-python = ">=3.9.0"
 classifiers = [
     "Topic :: Database :: Database Engines/Servers",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License"
 ]
 authors = [
-	{name = "Hannes Muehleisen", email = "hannes@cwi.nl"}
+    {name = "Hannes Muehleisen", email = "hannes@cwi.nl"}
+]
+maintainers = [
+    {name = "DuckDB Labs", email = "info@duckdblabs.nl"}
 ]
 
 [project.urls]
@@ -30,8 +25,9 @@ Changelog = "https://github.com/duckdb/duckdb/releases"
 
 [project.optional-dependencies]
 dev = [
+    "scikit-build-core",
+    "pybind11[global]>=2.6.0",
     "numpy>=1.14",
-    "pybind11[global]>=2.9.0",
     "pytest",
     "pytest-reraise",
     "pytest-timeout",
@@ -39,31 +35,9 @@ dev = [
     "mypy<=1.13"
 ]
 
-### CI Builwheel configurations ###
-
-# Default config runs all tests and requires at least one extension to be tested against
-[tool.cibuildwheel]
-dependency-versions = "pinned"
-before-build = 'pip install numpy>=2.0'
-before-test = 'python scripts/optional_requirements.py'
-test-requires = ["pytest", "google-cloud-storage", "mypy"]
-test-command = 'DUCKDB_PYTHON_TEST_EXTENSION_PATH={project} DUCKDB_PYTHON_TEST_EXTENSION_REQUIRED=1 python -m pytest {project}/tests --verbose'
-
-[tool.cibuildwheel.environment]
-PIP_CONSTRAINT = 'build-constraints.txt'
-
-[[tool.cibuildwheel.overrides]]
-select = [
-    "*-musllinux*", # For musllinux we currently don't build extensions yet
-    "*i686*", # For 32 bit we don't build extensions
-    "*aarch64*", # For aarch64 we don't build extensions
+[build-system]
+build-backend = "scikit_build_core.build"
+requires = [
+    "scikit-build-core",
+	"pybind11>=2.6.0",
 ]
-test-command = "python -m pytest {project}/tests/fast --verbose"
-
-[tool.cibuildwheel.windows]
-archs = ["AMD64"]
-test-command = "python -m pytest {project}/tests/fast --verbose"
-
-# See https://github.com/duckdblabs/duckdb-internal/issues/1923 for context
-[tool.cibuildwheel.macos]
-before-test = 'python scripts/optional_requirements.py --exclude polars --exclude tensorflow'

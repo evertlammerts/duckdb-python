@@ -1,14 +1,10 @@
-# ────────────────────────────────────────────
-# IMPORTANT: Cmake is NOT used to build this library. This is here only for
-# Intellisense and clang-tidy.
-#
-# See README.md for more information on how to use this file and how to build
-# the library.
-# ────────────────────────────────────────────
-
 cmake_minimum_required(VERSION 3.18...3.29)
+project(duckdb-python)
 
+# Create compile_commands.json for IntelliSense and clang-tidy
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+# C++ 11
+set(CMAKE_CXX_STANDARD 11)
 
 # ────────────────────────────────────────────
 # Policy hygiene
@@ -28,15 +24,7 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
 message(STATUS "CPython executable: ${Python3_EXECUTABLE}")
 message(STATUS "CPython include dirs: ${Python3_INCLUDE_DIRS}")
 message(STATUS "CPython libraries: ${Python3_LIBRARIES}")
-
-find_package(pybind11 CONFIG QUIET)
-# Header-only shim: good enough for clang-tidy / IntelliSense
-if(NOT TARGET pybind11::pybind11)
-  add_library(pybind11::pybind11 INTERFACE IMPORTED)
-  target_include_directories(
-    pybind11::pybind11
-    INTERFACE $<BUILD_INTERFACE:${Python3_SITEARCH}/pybind11/include>)
-endif()
+find_package(pybind11 REQUIRED CONFIG)
 
 # ────────────────────────────────────────────
 # INTERFACE library that **only** carries usage requirements
