@@ -1,4 +1,4 @@
-from duckdb.duckdb.typing import (
+from _duckdb.typing import (
     DuckDBPyType,
     BIGINT,
     BIT,

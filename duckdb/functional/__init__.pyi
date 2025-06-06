@@ -1,5 +1,3 @@
-from .. import DuckDBPyConnection
-
 from typing import Dict
 
 SPECIAL: FunctionNullHandling

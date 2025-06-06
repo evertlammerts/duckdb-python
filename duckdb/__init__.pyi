@@ -4,7 +4,7 @@
 # # stubgen override
 # to help the sanity of maintainers.
 
-import duckdb.typing as typing
+import duckdb.typing
 import duckdb.functional as functional
 from duckdb.typing import DuckDBPyType
 from duckdb.functional import FunctionNullHandling, PythonUDFType
@@ -42,11 +42,11 @@ from duckdb.value.constant import (
 # We also run this in python3.7, where this is needed
 from typing_extensions import Literal
 # stubgen override - missing import of Set
-from typing import Any, ClassVar, Set, Optional, Callable
+from typing import Any, ClassVar, Set, Optional
 from io import StringIO, TextIOBase
 from pathlib import Path
 
-from typing import overload, Dict, List, Union, Tuple
+from typing import Dict, List, Union, Tuple
 import pandas
 # stubgen override - unfortunately we need this for version checks
 import sys

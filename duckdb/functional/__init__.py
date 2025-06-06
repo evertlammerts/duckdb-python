@@ -1,4 +1,4 @@
-from duckdb.duckdb.functional import (
+from _duckdb.functional import (
 	FunctionNullHandling,
 	PythonUDFType,
 	SPECIAL,

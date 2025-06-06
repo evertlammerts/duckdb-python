@@ -1,5 +1,4 @@
-from .. import DuckDBPyConnection
-from typing import List
+from duckdb import DuckDBPyConnection
 
 SQLNULL: DuckDBPyType
 BOOLEAN: DuckDBPyType

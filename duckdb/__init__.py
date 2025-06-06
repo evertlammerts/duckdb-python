@@ -3,7 +3,6 @@ _exported_symbols = []
 # Modules
 import duckdb.functional as functional
 import duckdb.typing as typing
-import functools
 
 _exported_symbols.extend([
     "typing",
@@ -11,7 +10,7 @@ _exported_symbols.extend([
 ])
 
 # Classes
-from .duckdb import (
+from _duckdb import (
     DuckDBPyRelation,
     DuckDBPyConnection,
     Statement,
@@ -54,7 +53,7 @@ _exported_symbols.extend([
     'df',
     'arrow'
 ])
-from .duckdb import (
+from _duckdb import (
     df,
     arrow
 )
@@ -64,7 +63,7 @@ from .duckdb import (
 
 # START OF CONNECTION WRAPPER
 
-from .duckdb import (
+from _duckdb import (
 	cursor,
 	register_filesystem,
 	unregister_filesystem,
@@ -227,7 +226,7 @@ _exported_symbols.extend([
 # END OF CONNECTION WRAPPER
 
 # Enums
-from .duckdb import (
+from _duckdb import (
     ANALYZE,
     DEFAULT,
     RETURN_NULL,
@@ -244,7 +243,7 @@ _exported_symbols.extend([
 
 
 # read-only properties
-from .duckdb import (
+from _duckdb import (
     __standard_vector_size__,
     __interactive__,
     __jupyter__,
@@ -282,7 +281,7 @@ _exported_symbols.extend([
 ])
 
 
-from .duckdb import (
+from _duckdb import (
     connect,
     default_connection,
     set_default_connection,
@@ -295,7 +294,7 @@ _exported_symbols.extend([
 ])
 
 # Exceptions
-from .duckdb import (
+from _duckdb import (
     Error,
     DataError,
     ConversionException,
@@ -361,7 +360,7 @@ _exported_symbols.extend([
 ])
 
 # Value
-from .value.constant import (
+from duckdb.value.constant import (
     Value,
     NullValue,
     BooleanValue,

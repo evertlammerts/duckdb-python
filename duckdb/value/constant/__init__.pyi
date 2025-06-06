@@ -1,5 +1,4 @@
-from ... import DuckDBPyConnection
-from ...typing import DuckDBPyType
+from duckdb.typing import DuckDBPyType
 from typing import Any
 
 class NullValue(Value):

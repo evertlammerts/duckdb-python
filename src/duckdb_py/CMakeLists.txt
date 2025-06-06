@@ -12,20 +12,22 @@ add_subdirectory(common)
 add_subdirectory(pandas)
 add_subdirectory(arrow)
 
-add_library(
-  python_src OBJECT
-  path_like.cpp
-  python_udf.cpp
-  pyconnection.cpp
-  pystatement.cpp
-  python_import_cache.cpp
-  python_replacement_scan.cpp
-  python_dependency.cpp
-  pyrelation.cpp
-  pyexpression.cpp
-  dataframe.cpp
-  pyresult.cpp
-  pyfilesystem.cpp
-  map.cpp)
+add_library(python_src OBJECT
+        dataframe.cpp
+        duckdb_python.cpp
+        importer.cpp
+        map.cpp
+        path_like.cpp
+        pyconnection.cpp
+        pyexpression.cpp
+        pyfilesystem.cpp
+        pyrelation.cpp
+        pyresult.cpp
+        pystatement.cpp
+        python_dependency.cpp
+        python_import_cache.cpp
+        python_replacement_scan.cpp
+        python_udf.cpp
+)
 
 target_link_libraries(python_src PRIVATE pytooling)

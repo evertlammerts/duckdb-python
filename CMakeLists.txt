@@ -1,10 +1,20 @@
 cmake_minimum_required(VERSION 3.22...3.29)
 project(duckdb_py LANGUAGES CXX)
 
-# Create compile_commands.json for IntelliSense and clang-tidy
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # C++ 11
 set(CMAKE_CXX_STANDARD 11)
+
+# ────────────────────────────────────────────
+# IDE support
+# ────────────────────────────────────────────
+# Create compile_commands.json for IntelliSense and clang-tidy
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+# If we're not building through scikit-build-core then we have to set a different dest dir
+include(GNUInstallDirs)
+set(_DUCKDB_PY_INSTALL_DIR "${SKBUILD_PLATLIB_DIR}")
+if(NOT _DUCKDB_PY_INSTALL_DIR)
+  set(_DUCKDB_PY_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}")
+endif()
 
 # ────────────────────────────────────────────
 # Policy hygiene
@@ -67,7 +77,7 @@ target_link_libraries(pytooling INTERFACE
         duckdb_thirdparty_headers
 )
 target_include_directories(pytooling INTERFACE
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/duckdb_py/include>
         # headers exported by duckdb_static
         $<TARGET_PROPERTY:duckdb_static,INTERFACE_INCLUDE_DIRECTORIES>
 )
@@ -75,10 +85,9 @@ target_include_directories(pytooling INTERFACE
 # ────────────────────────────────────────────
 # Descend into the real DuckDB‑Python sources
 # ────────────────────────────────────────────
-add_subdirectory(src)
+add_subdirectory(src/duckdb_py)
 
-pybind11_add_module(_duckdb_py
-        duckdb_python.cpp
+pybind11_add_module(_duckdb
         $<TARGET_OBJECTS:python_src>
         $<TARGET_OBJECTS:python_arrow>
         $<TARGET_OBJECTS:python_common>
@@ -93,4 +102,9 @@ pybind11_add_module(_duckdb_py
         $<TARGET_OBJECTS:python_relation>
         $<TARGET_OBJECTS:python_type>
 )
-target_link_libraries(_duckdb_py PRIVATE pytooling)
+target_link_libraries(_duckdb PRIVATE pytooling duckdb_static)
+
+# ────────────────────────────────────────────
+# Put the object file in the correct place
+# ────────────────────────────────────────────
+install(TARGETS _duckdb LIBRARY DESTINATION "${_DUCKDB_PY_INSTALL_DIR}")

@@ -1,5 +1,5 @@
 [project]
-name = "duckdb-py"
+name = "duckdb"
 version = "v0.0.1a1"
 description = "DuckDB in-process database"
 readme = "README.md"
@@ -38,9 +38,20 @@ dev = [
 [build-system]
 build-backend = "scikit_build_core.build"
 requires = [
-    "scikit-build-core",
+    "scikit-build-core>=0.11.4",
 	"pybind11>=2.6.0",
 ]
 
 [tool.scikit-build]
-cmake.minimum-version = "3.22"
+minimum-version = "0.10"
+cmake.version = ">=3.22.0"
+#wheel.py-api = "cp310"  # Indicates stable ABI targeting Python 3.10+
+#minimum-version = "0.5"
+#sdist.include = ["CMakeLists.txt", "src/", "include/", "LICENSE", "README.md"]
+#cmake.args = ["-DCMAKE_OSX_ARCHITECTURES=arm64"]
+#build-dir = "build"
+#build.targets = ""
+#editable.mode = "redirect"
+
+[tool.scikit-build.wheel.packages]
+duckdb = "duckdb"
