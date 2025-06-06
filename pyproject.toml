@@ -1,5 +1,5 @@
 [project]
-name = "duckdb-python"
+name = "duckdb-py"
 version = "v0.0.1a1"
 description = "DuckDB in-process database"
 readme = "README.md"
@@ -41,3 +41,6 @@ requires = [
     "scikit-build-core",
 	"pybind11>=2.6.0",
 ]
+
+[tool.scikit-build]
+cmake.minimum-version = "3.22"
