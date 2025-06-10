@@ -1,4 +1,9 @@
 cmake_minimum_required(VERSION 3.22...3.29)
+
+# Check if we can use ccache
+include(cmake/compiler_launcher.cmake)
+setup_compiler_launcher_if_available()
+
 project(duckdb_py LANGUAGES CXX)
 
 # C++ 11

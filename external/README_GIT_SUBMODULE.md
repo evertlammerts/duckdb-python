@@ -17,20 +17,20 @@ git clone --recurse-submodules git@github.com:<you>/duckdb-python.git
 
 ### Switch submodule to fork
 ```shell
-git submodule set-url extern/duckdb git@github.com:<you>/duckdb.git
+git submodule set-url external/duckdb git@github.com:<you>/duckdb.git
 ```
 
 ### Work on a feature branch
 ```shell
-git -C extern/duckdb checkout my-branch
+git -C external/duckdb checkout my-branch
 ```
 
 ### Jump to latest DuckDB tag
 ```shell
-git -C extern/duckdb fetch --tags && git -C extern/duckdb checkout v1.3.1 # Example
+git -C external/duckdb fetch --tags && git -C external/duckdb checkout v1.3.1 # Example
 ```
 
 ### Pull latest changes
 ```shell
-git submodule update --remote --merge extern/duckdb
+git submodule update --remote --merge external/duckdb
 ```
