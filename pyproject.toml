@@ -24,19 +24,71 @@ Issues = "https://github.com/duckdb/duckdb/issues"
 Changelog = "https://github.com/duckdb/duckdb/releases"
 
 [project.optional-dependencies]
-dev = [
-    "scikit-build-core",
-    "pybind11[global]>=2.6.0",
-    "numpy>=1.14",
+all = [ # users can install duckdb with 'duckdb[all]', which will install this list
+    "ipython", # used in duckdb.query_graph
+    "fsspec",  # used in duckdb.filesystem
+    "numpy",   # used in duckdb.experimental.spark and in duckdb.fetchnumpy()
+    "pandas",  # used for pandas dataframes all over the place
+    "pyarrow", # used for pyarrow support
+    "adbc_driver_manager", # for the adbc driver (TODO: this should live under the duckdb package)
+]
+
+[dependency-groups] # used for development only, requires pip >=25.1.0
+stubdeps = [ # dependencies used for typehints in the stubs
+    "fsspec",
+    "pandas",
+    "polars",
+    "pyarrow",
+]
+tests = [ # dependencies used for running tests
+    "fsspec>=2022.11.0",
+    "gcsfs",
+    "mypy",
+    "numpy",
+    "packaging",
+    "pandas>=2.0.0",
+    "polars",
+    "psutil",
+    "py4j",
+    "pyarrow>=18.0.0",
+    "pyspark",
     "pytest",
     "pytest-reraise",
     "pytest-timeout",
+    "pytz",
+    "requests",
+    "tensorflow; python_version <= '3.12'",
+    "torch",
+]
+scripts = [ # dependencies used for running scripts
+    "cxxheaderparser",
+    "ipython",
+    "ipywidgets",
+    "numpy",
     "pandas",
-    "mypy<=1.13"
+    "pcpp",
+    "polars",
+    "pyarrow",
+    "pytz"
+]
+sqllogic = [ # dependencies used for running sqllogic
+    "pytest",
+]
+duckdb_pytooling = [ # dependencies used for using included tooling
+    "scikit_build_core"
+]
+dev = [ # tooling like uv will install this automatically when syncing the environment
+    "pybind11[global]>=2.6.0",
+    {include-group = "stubdeps"},
+    {include-group = "tests"},
+    {include-group = "scripts"},
+    {include-group = "sqllogic"},
+    {include-group = "duckdb_pytooling"},
 ]
 
 [build-system]
-build-backend = "scikit_build_core.build"
+build-backend = "duckdb_pytooling.build_backend"
+backend-path = ["./"]
 requires = [
     "scikit-build-core",
 	"pybind11>=2.6.0",
