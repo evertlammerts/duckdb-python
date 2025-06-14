@@ -85,6 +85,7 @@ dev = [ # tooling like uv will install this automatically when syncing the envir
     {include-group = "sqllogic"},
     {include-group = "duckdb_pytooling"},
 ]
+build = ["pipx"]
 
 [build-system]
 build-backend = "duckdb_pytooling.build_backend"
@@ -92,7 +93,17 @@ backend-path = ["./"]
 requires = [
     "scikit-build-core",
 	"pybind11>=2.6.0",
+    "tomli; python_version <= '3.10'"
 ]
+
+[tool.duckdb]
+extensions = ["json", "parquet", "icu"] # default list
+
+[tool.duckdb.sdist]
+duckdb_src_target = "generated/duckdb_src"
+
+[tool.scikit-build.wheel.packages]
+duckdb = "duckdb"
 
 [tool.scikit-build]
 minimum-version = "0.10"
@@ -101,105 +112,37 @@ ninja.version = ">=1.10"
 ninja.make-fallback = false
 sdist.cmake = false
 sdist.include = [
-    # --- Python package itself -------------------------------------------------
     "./pyproject.toml",
     "./CMakeLists.txt",
     "./LICENSE",
     "./src/**",
     "./duckdb/**",
+    "./duckdb_pytooling/**",
     "./cmake/**",
     "./adbc_driver_duckdb/**",
-
-    # --- DuckDB core -----------------------------------------------------------
-    "./external/duckdb/CMakeLists.txt",
-    "./external/duckdb/src/**",
-    "./external/duckdb/third_party/**",
-    "./external/duckdb/extension/**",
-    "./external/duckdb/src/include/**",
-    "./external/duckdb/tools/CMakeLists.txt",
-    "./external/duckdb/LICENSE",
 ]
 sdist.exclude = [
-    # --- VCS, build artefacts, etc ---------------------------------------------
-    "**/*.git*",
-    "**/.gitignore",
-    "**/.gitmodules",
-    "**/.gitattributes",
-    "**/CMakeFiles/**",
-    "**/build/**",
-    "**/dist/**",
-    "**/__pycache__/**",
-    "**/*.pyc",
-    "**/*.pyo",
-    "**/*.egg-info/**",
-    "**/.DS_Store",
-    "**/Thumbs.db",
+    # --- Directories -----------------------------------------------------------
+    ".github/**",
+    "external/**",
+    "scripts/**",
+    "sqllogic/**",
+    "tests/**",
+    "tools/**",
 
-    # --- Development environment and IDE files --------------------------------
-    "**/.github/**",
-    "**/.idea/**",
-    "**/.vscode/**",
-    "**/.pytest_cache/**",
-    "**/.mypy_cache/**",
-    "**/.ruff_cache/**",
-    "**/.clang-format",
-    "**/.clang-tidy",
-    "**/.codecov.yml",
-    "**/.coverage*",
-    "**/coverage.xml",
-    "**/MakeFile",
-    "**/Doxyfile",
-
-    # --- Test files and directories --------------------------------------------
-    "**/test/**",
-    "**/tests/**",
-    "**/sqllogic/**",
-
-    # --- Development configuration and dependencies ---------------------------
-    "**/requirements*.txt",
-    "**/uv.lock",
-    "**/mypy.ini",
-    "**/tox.ini",
-    "**/.env*",
-
-    # --- Development scripts and tools ----------------------------------------
-    "**/scripts/**",
-    "**/tools/**",
-
-    # --- Documentation development files --------------------------------------
-    "**/CONTRIBUTING.md",
-    "**/pyodide.md",
-
-    # --- Log and temporary files -----------------------------------------------
-    "**/*.log",
-    "**/tmp/**",
-    "**/temp/**",
-
-    # --- DuckDB core -----------------------------------------------------------
-    "external/**/*.md",
-    "external/duckdb/benchmark/**",
-    "external/duckdb/data/**",
-    "external/duckdb/examples/**",
-    "external/duckdb/logo/**",
-    "external/duckdb/scripts/**",
-    "external/duckdb/tools/**/!(CMakeLists.txt)",
-
-    # --- Third-party vendor stuff ----------------------------------------------
-    "external/duckdb/third_party/**/test*/**",
-    "external/duckdb/third_party/**/benchmark*/**",
-    "external/duckdb/third_party/**/example*/**",
-    "external/duckdb/third_party/**/doc*/**",
+    # --- Files -----------------------------------------------------------------
+    ".clang-format",
+    ".clang-tidy",
+    ".clangd",
+    ".codecov.yml",
+    ".editorconfig",
+    "*.gitignore",
+    "*.gitmodules",
+    "CONTRIBUTING.md",
+    "pyodide.md",
+    "README.md",
 ]
 
-#cmake.args = ["-DCMAKE_OSX_ARCHITECTURES=arm64"]
-
-[tool.scikit-build.wheel.packages]
-duckdb = "duckdb"
-
-[tool.uv.workspace]
-members = ["dist"]
-
 [tool.scikit-build.cmake.define]
-BUILD_EXTENSIONS = ["json", "parquet", "icu"] # default list
 BUILD_UNITTESTS = "0" # do not build tests
 BUILD_SHELL = "0" # do not include anything in external/duckdb/tools
