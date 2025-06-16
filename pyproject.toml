@@ -100,7 +100,7 @@ requires = [
 extensions = ["json", "parquet", "icu"] # default list
 
 [tool.duckdb.sdist]
-duckdb_src_target = "generated/duckdb_src"
+duckdb_src_target = "extracted/duckdb_src"
 
 [tool.scikit-build.wheel.packages]
 duckdb = "duckdb"
@@ -120,6 +120,7 @@ sdist.include = [
     "./duckdb_pytooling/**",
     "./cmake/**",
     "./adbc_driver_duckdb/**",
+    "./README.md",
 ]
 sdist.exclude = [
     # --- Directories -----------------------------------------------------------
@@ -140,7 +141,6 @@ sdist.exclude = [
     "*.gitmodules",
     "CONTRIBUTING.md",
     "pyodide.md",
-    "README.md",
 ]
 
 [tool.scikit-build.cmake.define]

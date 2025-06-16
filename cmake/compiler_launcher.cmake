@@ -1,4 +1,10 @@
+# cmake/compiler_launcher.cmake
+include_guard()      # make the file idempotent
+include(CMakeParseArguments)
+
 # ────────────────────────────────────────────
+# setup_compiler_launcher_if_available()
+#
 # Function to look for ccache and sccache to speed up builds, if available
 # ────────────────────────────────────────────
 function(setup_compiler_launcher_if_available)

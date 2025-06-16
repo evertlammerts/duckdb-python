@@ -9,6 +9,13 @@ set(CMAKE_CXX_STANDARD 11)
 include(cmake/compiler_launcher.cmake)
 setup_compiler_launcher_if_available()
 
+# Documentation for DUCKDB_UNITY_BUILD_PATH
+set(DUCKDB_UNITY_BUILD_PATH "" CACHE STRING "Path to the DuckDB unity build. Will be set automatically by the build backend when building a wheel from an sdist.")
+
+# Documentation for DUCKDB_UNITY_BUILD_INCLUDE_LIST
+set(DUCKDB_UNITY_BUILD_INCLUDE_LIST "" CACHE STRING "List of include dirs to include in the DuckDB unity build. Will be set automatically by the build backend when building a wheel from an sdist.")
+
+
 # ────────────────────────────────────────────
 # IDE support
 # ────────────────────────────────────────────
@@ -44,47 +51,32 @@ find_package(pybind11 REQUIRED CONFIG)
 # ────────────────────────────────────────────
 # Include DuckDB source
 # ────────────────────────────────────────────
-set(DUCKDB_BUILD_TESTS      OFF CACHE BOOL "" FORCE)
-set(DUCKDB_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
-set(DUCKDB_UNITY_BUILD      OFF CACHE BOOL "" FORCE)
-add_subdirectory(external/duckdb EXCLUDE_FROM_ALL)
-
-# ────────────────────────────────────────────
-# Temp create INTERFACE lib to deal with leaking
-# 3rd party headers in duckdb headers
-# See https://github.com/duckdblabs/duckdb-internal/issues/5084
-# ────────────────────────────────────────────
-add_library(duckdb_thirdparty_headers INTERFACE)
-
-target_include_directories(duckdb_thirdparty_headers INTERFACE
-        # include third_party as include dir (we need fastpforlib, concurrentqueue, fsst)
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/external/duckdb/third_party>
-        # same for third_party/re2
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/external/duckdb/third_party/re2>
-        # same for third_party/fast_float
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/external/duckdb/third_party/fast_float>
-
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/external/duckdb/third_party/utf8proc/include>
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/external/duckdb/third_party/libpg_query/include>
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/external/duckdb/third_party/fmt/include>
-)
+include(cmake/duckdb_loader.cmake)
+if(DUCKDB_UNITY_BUILD_PATH STREQUAL "")
+  load_duckdb_submodule(DUCKDB_STATIC_TARGET
+          SUBMODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/external/duckdb"
+  )
+else()
+  load_duckdb_unity_build(DUCKDB_STATIC_TARGET
+          UNITY_BUILD_PATH "${DUCKDB_UNITY_BUILD_PATH}"
+          UNITY_BUILD_INCLUDE_LIST "${DUCKDB_UNITY_BUILD_INCLUDE_LIST}"
+  )
+endif()
 
 # ────────────────────────────────────────────
 # INTERFACE library that **only** carries usage requirements
 # ────────────────────────────────────────────
 add_library(pytooling INTERFACE)
 
-# 1. All the imported dependency targets: they bring their own include dirs +
-#   compile definitions automatically.
+# All the imported dependency targets: they bring their own include dirs and compile definitions automatically.
 target_link_libraries(pytooling INTERFACE
         Python3::Python # defined by FindPython3
         pybind11::pybind11 # defined by pybind11Config.cmake
-        duckdb_thirdparty_headers
 )
 target_include_directories(pytooling INTERFACE
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/duckdb_py/include>
         # headers exported by duckdb_static
-        $<TARGET_PROPERTY:duckdb_static,INTERFACE_INCLUDE_DIRECTORIES>
+        $<TARGET_PROPERTY:${DUCKDB_STATIC_TARGET},INTERFACE_INCLUDE_DIRECTORIES>
 )
 
 # ────────────────────────────────────────────
@@ -107,7 +99,7 @@ pybind11_add_module(_duckdb
         $<TARGET_OBJECTS:python_relation>
         $<TARGET_OBJECTS:python_type>
 )
-target_link_libraries(_duckdb PRIVATE pytooling duckdb_static)
+target_link_libraries(_duckdb PRIVATE pytooling ${DUCKDB_STATIC_TARGET})
 
 # ────────────────────────────────────────────
 # Put the object file in the correct place
