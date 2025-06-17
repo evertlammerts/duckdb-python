@@ -1,9 +1,13 @@
-"""Minimal custom build backend that allows us to prepare for building an sdist.
+"""Custom PEP 517/660 build backend that prepares sdist and wheel builds before handing off to scikit-build-core.
 
-TODO: we need to support the same versioning scheme.
-TODO: we need to check extension compatibility.
-TODO: we need to have at least the same testsuites run in CI as we currently are.
-TODO: we may want to extend the testsuites to include installing and using a number of critical extensions.
+The DuckDB Python package supports all build types:
+- Editable install: **[no custom logic]** Compiles DuckDB sources from the git submodule using DuckDB's CMake config.
+- Source distribution (sdist): **[build_sdist]** Extracts DuckDB sources from the git submodule and includes only these
+    sources in the resulting tarball, including two files with the list of sources files and the list of include paths.
+    Note that cmake doesn't run for this step.
+- Wheel build: **[build_wheel]** Wheels can be built either from the git submodule or from pre-extracted sources. The
+    build backend (see build_wheel) assumes it should use the git submodule if it is executing from within a git
+    repository.
 """
 import importlib
 import os
@@ -56,7 +60,7 @@ def _in_git_repository() -> bool:
 
 
 def _duckdb_submodule_path() -> str:
-    """ Verify that the duckdb submodule is checked out and usable and return its path."""
+    """Verify that the duckdb submodule is checked out and usable and return its path."""
     assert _in_git_repository(), "Not in a git repository, no duckdb submodule present"
     # search the duckdb submodule
     gitmodules_path = Path(".gitmodules")
@@ -123,7 +127,8 @@ def _build_package(target_dir, extensions, linenumbers, unity_count, short_paths
     )
     # unity build files paths are prefixed with target_dir so we strip the prefix.
     target_dir_path = Path(target_dir).absolute()
-    sources_list = [p if p[0] != '/' else str(Path(p).relative_to(target_dir_path)) for p in sources_list]
+    ub_to_rel = lambda p: p if not Path(p).is_absolute() else str(Path(p).relative_to(target_dir_path))
+    sources_list = [ub_to_rel(p) for p in sources_list]
     return sources_list, include_dirs_list, all_sources_list
 
 
@@ -205,7 +210,7 @@ def _extracted_duckdb_sources_path() -> Path:
     abs_duckdb_target_dir, include_line_numbers, unity_count, short_paths, extensions = _duckdb_build_config()
     # if the target dir exists we remove all unity build files from it to make sure previously generated files do not
     # clutter the sources
-    duckdb_target_dir_path = Path(abs_duckdb_target_dir).relative_to(Path('./').absolute())
+    duckdb_target_dir_path = Path(abs_duckdb_target_dir).relative_to(Path().absolute())
     if duckdb_target_dir_path.exists():
         for file in duckdb_target_dir_path.iterdir():
             if file.is_file() and file.name.startswith("ub_"):
@@ -249,7 +254,8 @@ def build_wheel(
         config_settings: Optional[Dict[str, List[str]|str]] = None,
         metadata_directory: Optional[str] = None,
 ) -> str:
-    """Build a wheel. This will compile against extracted duckdb sources, i.e. _not_ against the git submodule."""
+    """Build a wheel either against the git submodule (if we're in a git repository) or from extracted sources
+    (probably because we're in an sdist)."""
     if _in_git_repository():
         # if we're in a repo then we extract the sources from the submodule
         _log("Building duckdb wheel using git submodule")
@@ -258,7 +264,7 @@ def build_wheel(
         # otherwise we just get the target dir from the config
         _log("Building duckdb wheel using extracted sources")
         abs_duckdb_target_dir, _, _ , _, _ = _duckdb_build_config()
-        duckdb_target_dir_path = Path(abs_duckdb_target_dir).relative_to(Path('./').absolute())
+        duckdb_target_dir_path = Path(abs_duckdb_target_dir).relative_to(Path().absolute())
         assert duckdb_target_dir_path.exists(), \
             f"Can't build a wheel without duckdb sources (none found in {abs_duckdb_target_dir})"
 

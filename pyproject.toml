@@ -79,6 +79,7 @@ duckdb_pytooling = [ # dependencies used for using included tooling
 ]
 dev = [ # tooling like uv will install this automatically when syncing the environment
     "pybind11[global]>=2.6.0",
+    "ruff>=0.11.13",
     {include-group = "stubdeps"},
     {include-group = "tests"},
     {include-group = "scripts"},
