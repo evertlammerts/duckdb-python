@@ -49,13 +49,10 @@ endfunction()
 function(load_duckdb_unity_build OUT_LIB)
     # parse arguments
     set(options)
-    set(oneValueArgs UNITY_BUILD_PATH)
-    set(multiValueArgs UNITY_BUILD_INCLUDE_LIST)
-    cmake_parse_arguments(LUB "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
-    # load the unity build sources
-    file(GLOB _duckdb_src CONFIGURE_DEPENDS "${LUB_UNITY_BUILD_PATH}/*.cpp")
+    set(multiValueArgs UNITY_BUILD_SOURCES_LIST UNITY_BUILD_INCLUDE_LIST)
+    cmake_parse_arguments(LUB "${options}" "" "${multiValueArgs}" ${ARGN})
     # create the duckdb_ub library
-    add_library(duckdb_ub STATIC ${_duckdb_src})
+    add_library(duckdb_ub STATIC ${LUB_UNITY_BUILD_SOURCES_LIST})
     # add include paths
     target_include_directories(
             duckdb_ub PUBLIC

@@ -1,17 +1,5 @@
 """Minimal custom build backend that allows us to prepare for building an sdist.
 
-TODO: feed cmake with a list of sources and includes instead of adding duckdb's complete CMakeLists.txt. We can
-    distinguish between an editable install and other installs: for editable we refer directly to the sources in the
-    submodule, and for other installs we refer to the extracted sources. We can set the default location to the
-    submodule directory, and feed in the location of the extracted sources only when running a build. That should help
-    with keeping a clean development workflow.
-    It might make sense to automate the submodule checkout / clone as part of creating an editable install. That would
-    give an opportunity to glob all source files and somehow (persistently) feed them into CMakeLists.txt. The
-    challenge is then to allow devs to check out other branches and forks of the submodule, which would require them to
-    re-generate the globbed sources. This feels like it defeats the purpose of an editable install.
-    Approach: default location of submodule in cmakelists.txt; load it iff its present and SKBUILD_STATE is not sdist
-    or wheel / metadata_wheel; otherwise load the extracted sources through a cmake var that was set in the build
-    backend.
 TODO: we need to support the same versioning scheme.
 TODO: we need to check extension compatibility.
 TODO: we need to have at least the same testsuites run in CI as we currently are.
@@ -23,7 +11,7 @@ import subprocess
 import sys
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, Optional, Callable, List, Tuple
+from typing import Any, Dict, Optional, List, Tuple
 
 # Import scikit-build-core backend functions
 from scikit_build_core.build import (
@@ -51,9 +39,10 @@ _CONF_SDIST_SHORT_PATHS = "short_paths"
 
 _SKBUILD_SDIST_INCLUDE_KEY = "sdist.include"
 _SKBUILD_CMAKE_VAR_UB_INCLUDE_DIRS_KEY = "cmake.define.DUCKDB_UNITY_BUILD_INCLUDE_LIST"
-_SKBUILD_CMAKE_VAR_UB_PATH_KEY = "cmake.define.DUCKDB_UNITY_BUILD_PATH"
+_SKBUILD_CMAKE_VAR_UB_SOURCES_LIST_KEY = "cmake.define.DUCKDB_UNITY_BUILD_SOURCES_LIST"
 
 _INCLUDE_DIRS_FILENAME = "duckdb_include_dirs.txt"
+_SOURCE_FILES_FILENAME = "duckdb_source_files.txt"
 
 _LOGGING_FORMAT = "[duckdb_pytooling.build_backend] {}"
 
@@ -62,13 +51,13 @@ def _log(msg: str, is_error: bool=False) -> None:
     print(_LOGGING_FORMAT.format(msg), flush=True, file=sys.stderr if is_error else sys.stdout)
 
 
-def _in_get_repository() -> bool:
+def _in_git_repository() -> bool:
     return Path(".git").exists()
 
 
 def _duckdb_submodule_path() -> str:
     """ Verify that the duckdb submodule is checked out and usable and return its path."""
-    assert _in_get_repository(), "Not in a git repository, no duckdb submodule present"
+    assert _in_git_repository(), "Not in a git repository, no duckdb submodule present"
     # search the duckdb submodule
     gitmodules_path = Path(".gitmodules")
     modules = dict()
@@ -103,7 +92,7 @@ def _duckdb_submodule_path() -> str:
         if line.startswith("U"):
             raise ValueError(f"Duckdb submodule has merge conflicts: {line}")
         if line.startswith("+"):
-            print(f"WARNING: Duckdb submodule not clean: {line}")
+            _log(f"WARNING: Duckdb submodule not clean: {line}")
     # all good
     return duckdb_path
 
@@ -121,22 +110,27 @@ def _build_package(target_dir, extensions, linenumbers, unity_count, short_paths
     # resolve and load the build_package function
     duckdb_path = _duckdb_submodule_path()
     module_path = Path(duckdb_path) / _DUCKDB_SCRIPTS_RELPATH
-    print(module_path.absolute())
     sys.path.append(str(module_path.absolute()))
     mod = importlib.import_module(_DUCKDB_BUILD_BACKEND_MODNAME)
     # return the sources, include_list, and original_sources
-    return mod.build_package(
+    sources_list, include_dirs_list, all_sources_list = mod.build_package(
         target_dir,
         extensions,
         linenumbers=linenumbers,
         unity_count=unity_count,
-        short_paths=short_paths
+        short_paths=short_paths,
+        folder_name="" # disable prefixing sources
     )
+    # unity build files paths are prefixed with target_dir so we strip the prefix.
+    target_dir_path = Path(target_dir).absolute()
+    sources_list = [p if p[0] != '/' else str(Path(p).relative_to(target_dir_path)) for p in sources_list]
+    return sources_list, include_dirs_list, all_sources_list
 
 
 @lru_cache(maxsize=1)
-def _sdist_config() -> Tuple[str, bool, int, bool, List[str]]:
-    """Load and validate all configuration needed for building an sdist."""
+def _duckdb_build_config() -> Tuple[str, bool, int, bool, List[str]]:
+    """Load and validate all configuration needed for building a wheel or sdist. The return value is cached so the
+    config can be read at any time by any caller in this module."""
     config = _pyproject_config()
     sdist_config = config.get(_CONF_SDIST_NAME, {})
     # 1. get and validate duckdb_src_target
@@ -158,17 +152,18 @@ def _sdist_config() -> Tuple[str, bool, int, bool, List[str]]:
     # 4. get short_paths
     short_paths = sdist_config.get(_CONF_SDIST_SHORT_PATHS, False)
     # 5. get and validate extensions
-    extensions = sdist_config.get(_CONF_EXTENSIONS, [])
+    extensions = config.get(_CONF_EXTENSIONS, [])
     assert isinstance(extensions, list), f"{_CONF_EXTENSIONS} is not a list"
     return duckdb_target_dir, include_line_numbers, unity_count, short_paths, extensions
 
 
-def _skbuild_config_add(key: str, value: list | str, config_settings: Dict[str, any]) -> None:
+def _skbuild_config_add(key: str, value: list | str, config_settings: Dict[str, List[str]|str]) -> None:
     """Add the given value to the given key in the config settings for skbuild. Only for list and string-typed
     settings.
 
     If the key is not found, will add the setting under the key while prepending the "skbuild." prefix.
     """
+    assert config_settings is not None, "config_settings must not be None"
     store_key = key if key in config_settings else "skbuild." + key
     if isinstance(value, str):
         base_val = f"{config_settings[store_key]};" if store_key in config_settings else ""
@@ -180,17 +175,25 @@ def _skbuild_config_add(key: str, value: list | str, config_settings: Dict[str, 
     else:
         raise ValueError(f"{store_key} is not a string or list")
 
-def _write_include_dirs_file(include_dirs: List[str], duckdb_target_dir_path: Path) -> None:
-    """Write the given include dirs list as a semicolon separated list to a file in the given duckdb target
+def _write_sources_and_includes_files(
+        source_files: List[str], include_dirs: List[str], target_dir_path: Path
+)-> None:
+    """Write the given source files list and include dirs list as semicolon separated lists to file in the given target
     directory."""
-    with open(str(duckdb_target_dir_path / _INCLUDE_DIRS_FILENAME), mode="w") as f:
+    with open(str(target_dir_path / _SOURCE_FILES_FILENAME), mode="w") as f:
+        f.write(";".join(source_files))
+    with open(str(target_dir_path / _INCLUDE_DIRS_FILENAME), mode="w") as f:
         f.write(";".join(include_dirs))
 
 
-def _read_include_dirs_file(duckdb_target_dir_path: Path) -> str:
-    """Read an include dirs list as a semicolon separated list from a file in the given duckdb target directory."""
-    with open(str(duckdb_target_dir_path / _INCLUDE_DIRS_FILENAME)) as f:
-        return f.read().strip()
+def _read_sources_and_includes_files(target_dir_path: Path) -> Tuple[str, str]:
+    """Read the source files list and include dirs list as a semicolon separated lists from files in the given target
+    directory."""
+    with open(str(target_dir_path / _SOURCE_FILES_FILENAME)) as f:
+        source_files_list = f.read().strip()
+    with open(str(target_dir_path / _INCLUDE_DIRS_FILENAME)) as f:
+        include_dirs_list = f.read().strip()
+    return source_files_list, include_dirs_list
 
 
 def _extracted_duckdb_sources_path() -> Path:
@@ -199,7 +202,7 @@ def _extracted_duckdb_sources_path() -> Path:
     Note: if the target directory exists, then the unity build files (ub_*) will be removed.
     """
     # get the settings
-    abs_duckdb_target_dir, include_line_numbers, unity_count, short_paths, extensions = _sdist_config()
+    abs_duckdb_target_dir, include_line_numbers, unity_count, short_paths, extensions = _duckdb_build_config()
     # if the target dir exists we remove all unity build files from it to make sure previously generated files do not
     # clutter the sources
     duckdb_target_dir_path = Path(abs_duckdb_target_dir).relative_to(Path('./').absolute())
@@ -208,18 +211,31 @@ def _extracted_duckdb_sources_path() -> Path:
             if file.is_file() and file.name.startswith("ub_"):
                 file.unlink()
     # extract the duckdb sources into duckdb_target_dir
-    _, include_list, _ = _build_package(abs_duckdb_target_dir, extensions, include_line_numbers, unity_count, short_paths)
-    # save the include list relative to project root (will overwrite if the file exists)
-    include_list_relative_to_root = [str(duckdb_target_dir_path / i) for i in include_list]
-    _write_include_dirs_file(include_list_relative_to_root, duckdb_target_dir_path)
+    source_files_list, include_dirs_list, all_sources_list = _build_package(
+        abs_duckdb_target_dir,
+        extensions,
+        include_line_numbers,
+        unity_count,
+        short_paths
+    )
+    print(source_files_list[0:10])
+    print(include_dirs_list[0:10])
+    print(all_sources_list[0:10])
+    # save the source files list and include dirs list relative to project root (will overwrite if the file exists)
+    source_files_list_relative_to_root = [str(duckdb_target_dir_path / s) for s in source_files_list]
+    include_dirs_list_relative_to_root = [str(duckdb_target_dir_path / i) for i in include_dirs_list]
+    _write_sources_and_includes_files(
+        source_files_list_relative_to_root,
+        include_dirs_list_relative_to_root,
+        duckdb_target_dir_path
+    )
     return duckdb_target_dir_path
 
 
-def build_sdist(sdist_directory: str, config_settings: Optional[Dict[str, Any]] = None) -> str:
+def build_sdist(sdist_directory: str, config_settings: Optional[Dict[str, List[str]|str]] = None) -> str:
     """Build a source dist including duckdb's extracted sources."""
     _log("Building duckdb sdist")
     duckdb_target_dir_path = _extracted_duckdb_sources_path()
-    # Add needed settings for scikit-build-core
     config_settings = config_settings or {}
     # glob for the included duckdb sources in the sdist
     unity_build_sources_glob = str(duckdb_target_dir_path / "**")
@@ -230,28 +246,27 @@ def build_sdist(sdist_directory: str, config_settings: Optional[Dict[str, Any]] 
 
 def build_wheel(
         wheel_directory: str,
-        config_settings: dict[str, list[str] | str] | None = None,
-        metadata_directory: str | None = None,
+        config_settings: Optional[Dict[str, List[str]|str]] = None,
+        metadata_directory: Optional[str] = None,
 ) -> str:
     """Build a wheel. This will compile against extracted duckdb sources, i.e. _not_ against the git submodule."""
-    if _in_get_repository():
+    if _in_git_repository():
         # if we're in a repo then we extract the sources from the submodule
         _log("Building duckdb wheel using git submodule")
         duckdb_target_dir_path = _extracted_duckdb_sources_path()
     else:
         # otherwise we just get the target dir from the config
         _log("Building duckdb wheel using extracted sources")
-        abs_duckdb_target_dir, _, _ , _, _ = _sdist_config()
+        abs_duckdb_target_dir, _, _ , _, _ = _duckdb_build_config()
         duckdb_target_dir_path = Path(abs_duckdb_target_dir).relative_to(Path('./').absolute())
         assert duckdb_target_dir_path.exists(), \
             f"Can't build a wheel without duckdb sources (none found in {abs_duckdb_target_dir})"
-    # Add needed settings for scikit-build-core
+
     config_settings = config_settings or {}
-    # add the include dirs to the cmake config
-    include_dirs_str = _read_include_dirs_file(duckdb_target_dir_path)
-    _log(f"Setting {_SKBUILD_CMAKE_VAR_UB_INCLUDE_DIRS_KEY} to {include_dirs_str} (loaded from file)")
+    # add the source list and include dirs to the cmake config
+    source_files_str, include_dirs_str = _read_sources_and_includes_files(duckdb_target_dir_path)
     _skbuild_config_add(_SKBUILD_CMAKE_VAR_UB_INCLUDE_DIRS_KEY, include_dirs_str, config_settings)
-    _skbuild_config_add(_SKBUILD_CMAKE_VAR_UB_PATH_KEY, str(duckdb_target_dir_path), config_settings)
+    _skbuild_config_add(_SKBUILD_CMAKE_VAR_UB_SOURCES_LIST_KEY, source_files_str, config_settings)
     # hand off to scikit-build-core
     return skbuild_build_wheel(wheel_directory, config_settings, metadata_directory)
 

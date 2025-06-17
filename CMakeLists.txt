@@ -9,8 +9,8 @@ set(CMAKE_CXX_STANDARD 11)
 include(cmake/compiler_launcher.cmake)
 setup_compiler_launcher_if_available()
 
-# Documentation for DUCKDB_UNITY_BUILD_PATH
-set(DUCKDB_UNITY_BUILD_PATH "" CACHE STRING "Path to the DuckDB unity build. Will be set automatically by the build backend when building a wheel from an sdist.")
+# Documentation for DUCKDB_UNITY_BUILD_SOURCES_LIST
+set(DUCKDB_UNITY_BUILD_SOURCES_LIST "" CACHE STRING "List of all sources that should be included in an sdist. Will be set automatically by the build backend when building a wheel from an sdist.")
 
 # Documentation for DUCKDB_UNITY_BUILD_INCLUDE_LIST
 set(DUCKDB_UNITY_BUILD_INCLUDE_LIST "" CACHE STRING "List of include dirs to include in the DuckDB unity build. Will be set automatically by the build backend when building a wheel from an sdist.")
@@ -52,13 +52,13 @@ find_package(pybind11 REQUIRED CONFIG)
 # Include DuckDB source
 # ────────────────────────────────────────────
 include(cmake/duckdb_loader.cmake)
-if(DUCKDB_UNITY_BUILD_PATH STREQUAL "")
+if(DUCKDB_UNITY_BUILD_SOURCES_LIST STREQUAL "")
   load_duckdb_submodule(DUCKDB_STATIC_TARGET
           SUBMODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/external/duckdb"
   )
 else()
   load_duckdb_unity_build(DUCKDB_STATIC_TARGET
-          UNITY_BUILD_PATH "${DUCKDB_UNITY_BUILD_PATH}"
+          UNITY_BUILD_SOURCES_LIST "${DUCKDB_UNITY_BUILD_SOURCES_LIST}"
           UNITY_BUILD_INCLUDE_LIST "${DUCKDB_UNITY_BUILD_INCLUDE_LIST}"
   )
 endif()

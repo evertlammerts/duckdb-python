@@ -98,9 +98,7 @@ requires = [
 
 [tool.duckdb]
 extensions = ["json", "parquet", "icu"] # default list
-
-[tool.duckdb.sdist]
-duckdb_src_target = "extracted/duckdb_src"
+sdist.duckdb_src_target = "extracted/duckdb_src"
 
 [tool.scikit-build.wheel.packages]
 duckdb = "duckdb"
@@ -142,7 +140,3 @@ sdist.exclude = [
     "CONTRIBUTING.md",
     "pyodide.md",
 ]
-
-[tool.scikit-build.cmake.define]
-BUILD_UNITTESTS = "0" # do not build tests
-BUILD_SHELL = "0" # do not include anything in external/duckdb/tools
