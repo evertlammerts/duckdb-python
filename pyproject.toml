@@ -1,6 +1,6 @@
 [project]
 name = "duckdb"
-version = "v0.0.1a1"
+dynamic = ["version"]
 description = "DuckDB in-process database"
 readme = "README.md"
 keywords = ["DuckDB", "Database", "SQL", "OLAP"]
@@ -74,8 +74,9 @@ scripts = [ # dependencies used for running scripts
 sqllogic = [ # dependencies used for running sqllogic
     "pytest",
 ]
-duckdb_pytooling = [ # dependencies used for using included tooling
-    "scikit_build_core"
+duckdb_packaging = [ # dependencies used for using included packaging tooling
+    "scikit_build_core",
+    "setuptools_scm"
 ]
 dev = [ # tooling like uv will install this automatically when syncing the environment
     "pybind11[global]>=2.6.0",
@@ -84,16 +85,17 @@ dev = [ # tooling like uv will install this automatically when syncing the envir
     {include-group = "tests"},
     {include-group = "scripts"},
     {include-group = "sqllogic"},
-    {include-group = "duckdb_pytooling"},
+    {include-group = "duckdb_packaging"},
 ]
 build = ["pipx"]
 
 [build-system]
-build-backend = "duckdb_pytooling.build_backend"
+build-backend = "duckdb_packaging.build_backend"
 backend-path = ["./"]
 requires = [
     "scikit-build-core",
 	"pybind11>=2.6.0",
+    "setuptools_scm>=6.4,<8.0",
     "tomli; python_version <= '3.10'"
 ]
 
@@ -141,3 +143,8 @@ sdist.exclude = [
     "CONTRIBUTING.md",
     "pyodide.md",
 ]
+
+[tool.setuptools_scm]
+fallback_version = "1.3.0"
+local_scheme = "no-local-version"
+version_scheme = "duckdb_packaging.setuptools_scm_version:version_scheme"

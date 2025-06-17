@@ -28,7 +28,7 @@ from scikit_build_core.build import (
     prepare_metadata_for_build_wheel,
     prepare_metadata_for_build_editable,
 )
-from duckdb_pytooling import _tomllib
+from ._tomllib import load as toml_load
 
 _DUCKDB_SCRIPTS_RELPATH = "scripts/"
 _DUCKDB_BUILD_BACKEND_MODNAME = "package_build"
@@ -104,7 +104,7 @@ def _pyproject_config() -> Dict[str, Any]:
     """Load pyproject.toml configuration file"""
     pyproject_path = Path("pyproject.toml")
     with pyproject_path.open("rb") as ft:
-        pyproject = _tomllib.load(ft)
+        pyproject = toml_load(ft)
     return pyproject.get("tool", {}).get(_CONF_TOOL_NAME, {})
 
 def _build_package(target_dir, extensions, linenumbers, unity_count, short_paths) -> Tuple[
