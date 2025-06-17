@@ -223,9 +223,6 @@ def _extracted_duckdb_sources_path() -> Path:
         unity_count,
         short_paths
     )
-    print(source_files_list[0:10])
-    print(include_dirs_list[0:10])
-    print(all_sources_list[0:10])
     # save the source files list and include dirs list relative to project root (will overwrite if the file exists)
     source_files_list_relative_to_root = [str(duckdb_target_dir_path / s) for s in source_files_list]
     include_dirs_list_relative_to_root = [str(duckdb_target_dir_path / i) for i in include_dirs_list]

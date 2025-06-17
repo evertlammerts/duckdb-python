@@ -14,6 +14,12 @@ from ._versioning import parse_version, format_version
 
 # MAIN_BRANCH_VERSIONING default should be 'True' for main branch and feature branches
 MAIN_BRANCH_VERSIONING = True
+
+SCM_PRETEND_ENV_VAR = "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_DUCKDB"
+SCM_GLOBAL_PRETEND_ENV_VAR = "SETUPTOOLS_SCM_PRETEND_VERSION"
+OVERRIDE_GIT_DESCRIBE_ENV_VAR = "OVERRIDE_GIT_DESCRIBE"
+
+
 def _main_branch_versioning():
     from_env = os.getenv('MAIN_BRANCH_VERSIONING')
     return from_env == "1" if from_env is not None else MAIN_BRANCH_VERSIONING
@@ -28,10 +34,10 @@ def version_scheme(version: Any) -> str:
     Returns:
         PEP440 compliant version string
     """
-    return bump_version(str(version.tag), version.distance, version.dirty)
+    return _bump_version(str(version.tag), version.distance, version.dirty)
 
 
-def bump_version(base_version: str, distance: int, dirty: bool = False) -> str:
+def _bump_version(base_version: str, distance: int, dirty: bool = False) -> str:
     """Bump the version if needed."""
     # Validate the base version (this should never include anything else than X.Y.Z or X.Y.Z.postN)
     try:
@@ -53,17 +59,30 @@ def bump_version(base_version: str, distance: int, dirty: bool = False) -> str:
     return f"{format_version(major, minor, patch+1)}.dev{distance}"
 
 
-# Here we handle getting versions from env vars. We only support a single way of
-# manually overriding the version, which is through OVERRIDE_GIT_DESCRIBE. If
-# SETUPTOOLS_SCM_PRETEND_VERSION* is set we unset it.
-SCM_PRETEND_ENV_VAR = "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_DUCKDB"
-OVERRIDE_GIT_DESCRIBE_ENV_VAR = "OVERRIDE_GIT_DESCRIBE"
-OVERRIDE = os.getenv(OVERRIDE_GIT_DESCRIBE_ENV_VAR)
+def _handle_version_overrides():
+    """
+    Handle getting versions from environment variables.
 
-if OVERRIDE:
-    # OVERRIDE_GIT_DESCRIBE_ENV_VAR is set, we'll put it in SCM_PRETEND_ENV_VAR_FOR_DUCKDB
-    print(f"[versioning] Found {OVERRIDE_GIT_DESCRIBE_ENV_VAR}={OVERRIDE}")
-    DESCRIBE_RE = re.compile(
+    Only supports a single way of manually overriding the version through
+    OVERRIDE_GIT_DESCRIBE. If SETUPTOOLS_SCM_PRETEND_VERSION* is set, it gets unset.
+    """
+    override_value = os.getenv(OVERRIDE_GIT_DESCRIBE_ENV_VAR)
+
+    if override_value:
+        _process_git_describe_override(override_value, SCM_PRETEND_ENV_VAR, OVERRIDE_GIT_DESCRIBE_ENV_VAR)
+    elif SCM_PRETEND_ENV_VAR in os.environ:
+        _remove_unsupported_env_var(SCM_PRETEND_ENV_VAR)
+
+    # Always check and remove unsupported SETUPTOOLS_SCM_PRETEND_VERSION
+    if SCM_GLOBAL_PRETEND_ENV_VAR in os.environ:
+        _remove_unsupported_env_var(SCM_GLOBAL_PRETEND_ENV_VAR)
+
+
+def _process_git_describe_override(override_value, scm_pretend_env_var, override_env_var):
+    """Process the OVERRIDE_GIT_DESCRIBE environment variable."""
+    print(f"[versioning] Found {override_env_var}={override_value}")
+
+    describe_pattern = re.compile(
         r"""
         ^v(?P<tag>\d+\.\d+\.\d+(?:-post\d+)?)   # vX.Y.Z or vX.Y.Z-postN
         (?:-(?P<distance>\d+))?                  # optional -N
@@ -71,34 +90,32 @@ if OVERRIDE:
         $""",
         re.VERBOSE,
     )
-    match = DESCRIBE_RE.match(OVERRIDE)
+
+    match = describe_pattern.match(override_value)
     if not match:
-        raise ValueError(f"Invalid {OVERRIDE_GIT_DESCRIBE_ENV_VAR}: {OVERRIDE}")
+        raise ValueError(f"Invalid {override_env_var}: {override_value}")
 
     tag = match["tag"]
     distance = match["distance"]
-    commit = match["hash"] and match["hash"].lower()
+    commit_hash = match["hash"]
 
     # Convert git tag format to PEP440 format (v1.3.1-post1 -> 1.3.1.post1)
     if "-post" in tag:
         tag = tag.replace("-post", ".post")
 
-    # If we get an override we do need to bump
-    pep440 = bump_version(tag, int(distance or 0))
-    if commit:
-        pep440 += f"+g{commit}"
+    # Bump version and format according to PEP440
+    pep440_version = _bump_version(tag, int(distance or 0))
+    if commit_hash:
+        pep440_version += f"+g{commit_hash.lower()}"
 
-    os.environ[SCM_PRETEND_ENV_VAR] = pep440
-    print(f"[versioning] Injected {SCM_PRETEND_ENV_VAR}={pep440}")
-elif SCM_PRETEND_ENV_VAR in os.environ:
-    # SCM_PRETEND_ENV_VAR is already set, but we don't allow that
-    print(f"[versioning] WARNING: We do not support {SCM_PRETEND_ENV_VAR}! Removing.")
-    del os.environ[SCM_PRETEND_ENV_VAR]
+    os.environ[scm_pretend_env_var] = pep440_version
+    print(f"[versioning] Injected {scm_pretend_env_var}={pep440_version}")
 
 
-if "SETUPTOOLS_SCM_PRETEND_VERSION" in os.environ:
-    print(f"[versioning] WARNING: We do not support SETUPTOOLS_SCM_PRETEND_VERSION! Removing.")
-    del os.environ["SETUPTOOLS_SCM_PRETEND_VERSION"]
-########################################################################
-# END VERSIONING LOGIC
-########################################################################
+def _remove_unsupported_env_var(env_var):
+    """Remove an unsupported environment variable with a warning."""
+    print(f"[versioning] WARNING: We do not support {env_var}! Removing.")
+    del os.environ[env_var]
+
+# Handle environment overrides on module load
+_handle_version_overrides()

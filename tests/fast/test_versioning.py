@@ -16,7 +16,7 @@ from duckdb_packaging._versioning import (
     get_current_version,
     get_git_describe,
 )
-from duckdb_packaging.setuptools_scm_version import bump_version, version_scheme
+from duckdb_packaging.setuptools_scm_version import _bump_version, version_scheme
 
 
 class TestVersionParsing(unittest.TestCase):
@@ -121,16 +121,16 @@ class TestSetupToolsScmIntegration(unittest.TestCase):
 
     def test_bump_version_exact_tag(self):
         """Test bump_version with exact tag (distance=0, dirty=False)."""
-        assert bump_version("1.2.3", 0, False) == "1.2.3"
-        assert bump_version("1.2.3.post1", 0, False) == "1.2.3.post1"
+        assert _bump_version("1.2.3", 0, False) == "1.2.3"
+        assert _bump_version("1.2.3.post1", 0, False) == "1.2.3.post1"
 
     def test_bump_version_with_distance(self):
         """Test bump_version with distance from tag."""
         # Main branch versioning (default)
-        assert bump_version("1.2.3", 5, False) == "1.3.0.dev5"
+        assert _bump_version("1.2.3", 5, False) == "1.3.0.dev5"
         
         # Post-release development
-        assert bump_version("1.2.3.post1", 3, False) == "1.2.3.post1.dev3"
+        assert _bump_version("1.2.3.post1", 3, False) == "1.2.3.post1.dev3"
 
     @patch.dict('os.environ', {'MAIN_BRANCH_VERSIONING': '0'})
     def test_bump_version_release_branch(self):
@@ -140,12 +140,12 @@ class TestSetupToolsScmIntegration(unittest.TestCase):
         from duckdb_packaging import setuptools_scm_version
         importlib.reload(setuptools_scm_version)
         
-        assert setuptools_scm_version.bump_version("1.2.3", 5, False) == "1.2.4.dev5"
+        assert setuptools_scm_version._bump_version("1.2.3", 5, False) == "1.2.4.dev5"
 
     def test_bump_version_dirty(self):
         """Test bump_version with dirty working directory."""
-        assert bump_version("1.2.3", 0, True) == "1.3.0.dev0"
-        assert bump_version("1.2.3.post1", 0, True) == "1.2.3.post1.dev0"
+        assert _bump_version("1.2.3", 0, True) == "1.3.0.dev0"
+        assert _bump_version("1.2.3.post1", 0, True) == "1.2.3.post1.dev0"
 
     def test_version_scheme_function(self):
         """Test the version_scheme function that setuptools_scm calls."""
@@ -161,7 +161,7 @@ class TestSetupToolsScmIntegration(unittest.TestCase):
     def test_bump_version_invalid_format(self):
         """Test bump_version with invalid version format."""
         with pytest.raises(ValueError, match="Incorrect version format"):
-            bump_version("invalid", 0, False)
+            _bump_version("invalid", 0, False)
 
 
 class TestGitOperations(unittest.TestCase):
