@@ -78,6 +78,7 @@ duckdb_packaging = [ # dependencies used for using included packaging tooling
     "scikit_build_core",
     "setuptools_scm>=8.0"
 ]
+build = ["pipx"]
 dev = [ # tooling like uv will install this automatically when syncing the environment
     "pybind11[global]>=2.6.0",
     "ruff>=0.11.13",
@@ -86,8 +87,8 @@ dev = [ # tooling like uv will install this automatically when syncing the envir
     {include-group = "scripts"},
     {include-group = "sqllogic"},
     {include-group = "duckdb_packaging"},
+    {include-group = "build"},
 ]
-build = ["pipx"]
 
 [build-system]
 build-backend = "duckdb_packaging.build_backend"
