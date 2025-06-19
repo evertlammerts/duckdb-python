@@ -89,26 +89,26 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install build tools
-        shell: bash
-        run: |
-          python -m pip install --upgrade pip
-          pip install build pipx uv
-
       - name: Install test dependencies
         shell: bash
         run: |
-          pip install pytest pytest-timeout
+          python -m pip install --upgrade pip
+          pip install --group test .
 
       - name: Run tests
         shell: bash
         run: |
           python -m pytest tests/fast -v --timeout=300
 
+      - name: Install build tools
+        shell: bash
+        run: |
+          pip install --group build .
+
       - name: Build sdist
         shell: bash
         run: |
-          python -m build --sdist
+          pipx run build -s
 
       - name: Test sdist installation
         shell: bash
@@ -150,26 +150,26 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install build tools
-        shell: bash
-        run: |
-          python -m pip install --upgrade pip
-          pip install build pipx uv
-
       - name: Install test dependencies
         shell: bash
         run: |
-          pip install pytest pytest-timeout
+          python -m pip install --upgrade pip
+          pip install --group test .
 
       - name: Run tests
         shell: bash
         run: |
           python -m pytest tests/fast -v --timeout=300
 
+      - name: Install build tools
+        shell: bash
+        run: |
+          pip install --group build .
+
       - name: Build sdist
         shell: bash
         run: |
-          python -m build --sdist
+          pipx run build -s
 
       - name: Test sdist installation
         shell: bash
