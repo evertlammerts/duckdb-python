@@ -40,7 +40,7 @@ stubdeps = [ # dependencies used for typehints in the stubs
     "polars",
     "pyarrow",
 ]
-tests = [ # dependencies used for running tests
+test = [ # dependencies used for running tests
     "fsspec>=2022.11.0",
     "gcsfs",
     "mypy",
@@ -83,7 +83,7 @@ dev = [ # tooling like uv will install this automatically when syncing the envir
     "pybind11[global]>=2.6.0",
     "ruff>=0.11.13",
     {include-group = "stubdeps"},
-    {include-group = "tests"},
+    {include-group = "test"},
     {include-group = "scripts"},
     {include-group = "sqllogic"},
     {include-group = "duckdb_packaging"},
