@@ -39,7 +39,10 @@ jobs:
           echo "duckdb-main-branch=main" >> $GITHUB_OUTPUT
           
           # Find latest minor version branch in format v1.[0-9]+-[a-z]+
-          MINOR_BRANCH=$(git branch -r | grep -E "origin/v1\.[0-9]+-[a-z]+$" | sed 's/origin\///' | sort -V | tail -1)
+          find_branch() {
+            git branch -r | grep -E "origin/v1\.[0-9]+-[a-z]+$" | sed "s/[ ]*origin\///" | sort -V | tail -1
+          }
+          MINOR_BRANCH=$(find_branch)
           if [ -z "$MINOR_BRANCH" ]; then
             echo "No minor version branch found, using main"
             echo "minor-version-branch=main" >> $GITHUB_OUTPUT
@@ -50,7 +53,7 @@ jobs:
             # Find corresponding DuckDB submodule branch
             cd external/duckdb
             git fetch origin
-            DUCKDB_MINOR_BRANCH=$(git branch -r | grep -E "origin/v1\.[0-9]+-[a-z]+$" | sed 's/origin\///' | sort -V | tail -1)
+            DUCKDB_MINOR_BRANCH=$(find_branch)
             if [ -z "$DUCKDB_MINOR_BRANCH" ]; then
               echo "No corresponding DuckDB minor version branch found, using main"
               echo "duckdb-minor-version-branch=main" >> $GITHUB_OUTPUT
