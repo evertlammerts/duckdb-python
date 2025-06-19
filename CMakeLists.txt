@@ -5,6 +5,10 @@ project(duckdb_py LANGUAGES CXX)
 # C++ 11
 set(CMAKE_CXX_STANDARD 11)
 
+# Always build everything with PIC (so static libs can be linked into shared modules without error)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON CACHE BOOL
+        "Make all targets position independent" FORCE)
+
 # Detect CCache
 include(cmake/compiler_launcher.cmake)
 setup_compiler_launcher_if_available()
