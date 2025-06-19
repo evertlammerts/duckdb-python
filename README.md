@@ -59,7 +59,25 @@ We cut releases as follows:
 | Nightly micro        | _not tagged_ | Combining HEAD of the _micro_ release branches of DuckDB and the Python package |
 | Nightly minor        | _not tagged_ | Combining HEAD of the _minor_ release branches of DuckDB and the Python package |
 
-### Release Management
+### Release Runbooks
+
+We cut a new **stable minor release** with the following steps:
+1. Create a PR on `main` to pin the DuckDB submodule to the tag of its current release.
+1. Iff all tests pass in CI, merge the PR.
+1. Manually start the release workflow with the hash of this commit, and the tag name.
+1. Iff all goes well, create a new PR to let the submodule track DuckDB main.
+
+We cut a new **stable micro release** with the following steps:
+1. Create a PR on the minor release branch to pin the DuckDB submodule to the tag of its current release.
+1. Iff all tests pass in CI, merge the PR.
+1. Manually start the release workflow with the hash of this commit, and the tag name.
+1. Iff all goes well, create a new PR to let the submodule track DuckDB's minor release branch.
+
+We cut a new **stable post release** with the following steps:
+1. Create a PR on the post release branch to pin the DuckDB submodule to the tag of its current release.
+1. Iff all tests pass in CI, merge the PR.
+1. Manually start the release workflow with the hash of this commit, and the tag name.
+1. Iff all goes well, create a new PR to let the submodule track DuckDB's minor release branch.
 
 #### Version Bumping
 ```bash
