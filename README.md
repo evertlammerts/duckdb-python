@@ -18,44 +18,46 @@ pip install duckdb
 
 See the [DuckDB Community Support Policy](https://duckdblabs.com/community_support_policy/). DuckDB Labs also provides [custom support](https://duckdblabs.com/#support).
 
-## Source Code
-
-The Python package is part of the duckdb source tree. If you want to make changes and / or build the package from source, see the [development documentation](https://duckdb.org/docs/stable/dev/building/python) for build instructions, IDE integration, debugging, and other relevant information.
-
 ## Build Configuration Reference
 
-The module supports the following build configuration properties under `tool.duckdb` in pyproject.toml:
-* `tool.duckdb.extensions` **(list, default=[])**: The extensions to build into the wheel and / or sdist
-* `tool.duckdb.sdist` **(dictionary)**: sdist-specific config:
-  * `tool.duckdb.sdist.duckdb_src_target` **(str, required for building sdists)**: The path to a directory to store
-  duckdb source files that will be included in the sdist
-  * `tool.duckdb.sdist.include_line_numbers` **(bool, default false)**: Include line numbers in the unity build. You 
-    may want to set this to true if you want to build e.g. a debug version for lldb with a source map for duckdb.
-  * `tool.duckdb.sdist.unity_count` **(int, default 32)**: The amount of unity source files to create. You might 
-    want to change the default amount created if you want e.g. an amalgamated file, or more control over the
-    parallelism of the build.
-  * `tool.duckdb.sdist.short_paths` **(bool, default false)**: Use short paths in the unity build. You may want to 
-    use this if you're on a platform that has command length limitations (like Windows) _and_ scikit-build-core 
-    doesn't or can't use Ninja for some reason.
+The module includes a custom PEP 517/660 build backend in `duckdb_packaging.build_backend`. This backend prepares sdist and wheel builds before handing off to scikit-build-core.
+
+The following build settings can be used in pyproject.toml:
+
+| Setting                                  | Type | Default | Description                                                                                                                                                                                                 |
+|------------------------------------------|------|---------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `tool.duckdb.extensions`                 | list | []      | DuckDB extensions to compile into the package.                                                                                                                                                              |
+| `tool.duckdb.sdist.duckdb_src_target`    | str  |         | The path to a directory to store duckdb source files that will be included in the sdist. **Required** for building wheels and sdists.                                                                       |
+| `tool.duckdb.sdist.include_line_numbers` | bool | False   | Include line numbers in the unity build. You may want to set this to true if you want to build e.g. a debug version for lldb with a source map for duckdb.                                                  |
+| `tool.duckdb.sdist.unity_count`          | int  | 32      | The amount of unity source files to create. You might want to change the default amount created if you want e.g. an amalgamated file, or more control over the parallelism of the build.                    |
+| `tool.duckdb.sdist.short_paths`          | bool | False   | Use short paths in the unity build. You may want to use this if you're on a platform that has command length limitations (like Windows) _and_ scikit-build-core doesn't or can't use Ninja for some reason. |
 
 ## Versioning and Releases
 
-### Versioning Scheme
+The DuckDB Python package versioning and release scheme follows that of DuckDB itself. This means that a `X.Y.Z[.
+postN]` stable release of the Python package ships the DuckDB stable release `X.Y.Z`. The optional `.postN` releases 
+ship the same stable release of DuckDB as their predecessors plus Python package-specific fixes and / or features.
 
-This package follows DuckDB's versioning scheme with extensions for packaging-specific releases:
+| Types                                                                  | DuckDB Version | Resulting Python Extension Version |
+|------------------------------------------------------------------------|----------------|------------------------------------|
+| Stable release: DuckDB stable release                                  | `1.3.1`        | `1.3.1`                            |
+| Stable post release: DuckDB stable release + Python fixes and features | `1.3.1`        | `1.3.1.postX`                      |
+| Nightly micro: DuckDB next micro nightly + Python next micro nightly   | `1.3.2.devM`   | `1.3.2.devN`                       |
+| Nightly minor: DuckDB next minor nightly + Python next minor nightly   | `1.4.0.devM`   | `1.4.0.devN`                       |
 
-- **Standard releases**: `1.3.1`, `1.3.2` (follows DuckDB core versions)
-- **Post-releases**: `1.3.1.post1`, `1.3.1.post2` (extension-specific features/fixes)
-- **Development versions**: 
-  - `1.4.0.dev42` (main branch, targeting next minor version)
-  - `1.3.2.dev5` (release branch, targeting next patch version)
-  - `1.3.1.post1.dev3` (post-release development)
+Note that we do not ship nightly post releases (e.g. we don't ship `1.3.1.post2.dev3`).
 
-### Branch Strategy
+### Branch and Tag Strategy
 
-- **Main branch (`main`)**: Development for next minor version (e.g., 1.3 → 1.4)
-- **Release branches** (e.g., `v1.3-ossivalis`): Patches for current minor version (e.g., 1.3.1 → 1.3.2)
-- **Post-releases**: Used for extension-specific features that don't align with DuckDB core releases
+We cut releases as follows:
+
+| Type                 | Tag          | How                                                                             |
+|----------------------|--------------|---------------------------------------------------------------------------------|
+| Stable minor release | vX.Y.0       | Adding a tag on `main`                                                          |
+| Stable micro release | vX.Y.Z       | Adding a tag on a minor release branch (e.g. `v1.3-ossivalis`)                  |
+| Stable post release  | vX.Y.Z-postN | Adding a tag on a post release branch (e.g. `v1.3.1-post`)                      |
+| Nightly micro        | _not tagged_ | Combining HEAD of the _micro_ release branches of DuckDB and the Python package |
+| Nightly minor        | _not tagged_ | Combining HEAD of the _minor_ release branches of DuckDB and the Python package |
 
 ### Release Management
 
@@ -95,12 +97,15 @@ export OVERRIDE_GIT_DESCRIBE="v1.3.1-5-g1234567"
 
 ### Dynamic Versioning Integration
 
-The package uses `setuptools_scm` for automatic version determination:
+The package uses `setuptools_scm` with `scikit-build` for automatic version determination, and implements a custom
+versioning scheme.
 
 - **pyproject.toml configuration**:
   ```toml
+  [tool.scikit-build]
+  metadata.version.provider = "scikit_build_core.metadata.setuptools_scm"
+  
   [tool.setuptools_scm]
-  fallback_version = "1.3.0"
   version_scheme = "duckdb_packaging._setuptools_scm_version:version_scheme"
   ```
 
@@ -108,13 +113,6 @@ The package uses `setuptools_scm` for automatic version determination:
   - `MAIN_BRANCH_VERSIONING=0`: Use release branch versioning (patch increments)
   - `MAIN_BRANCH_VERSIONING=1`: Use main branch versioning (minor increments)
   - `OVERRIDE_GIT_DESCRIBE`: Override version detection
-
-### Git Tag Format
-
-- **Standard releases**: `v1.3.1`, `v1.3.2`
-- **Post-releases**: `v1.3.1-post1`, `v1.3.1-post2`
-
-Tags are automatically created by the CLI tools and converted to PEP440 format for Python packaging.
 
 ## Conventions
 
