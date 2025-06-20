@@ -1,5 +1,5 @@
 # cmake/compiler_launcher.cmake
-include_guard()      # make the file idempotent
+include_guard(GLOBAL) # only include once
 include(CMakeParseArguments)
 
 # ────────────────────────────────────────────

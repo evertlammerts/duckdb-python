@@ -13,37 +13,31 @@ import importlib
 import os
 import subprocess
 import sys
-from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, Optional, List, Tuple
+from typing import Dict, Optional, List, Tuple
+from ._build_config import DuckDBBuildConfig
 
 # Import scikit-build-core backend functions
 from scikit_build_core.build import (
     build_wheel as skbuild_build_wheel,
     build_sdist as skbuild_build_sdist,
-    build_editable,
+    build_editable as skbuild_build_editable,
     get_requires_for_build_wheel,
     get_requires_for_build_sdist,
     get_requires_for_build_editable,
     prepare_metadata_for_build_wheel,
     prepare_metadata_for_build_editable,
 )
-from ._tomllib import load as toml_load
 
 _DUCKDB_SCRIPTS_RELPATH = "scripts/"
 _DUCKDB_BUILD_BACKEND_MODNAME = "package_build"
 
-_CONF_TOOL_NAME = "duckdb"
-_CONF_EXTENSIONS = "extensions"
-_CONF_SDIST_NAME = "sdist"
-_CONF_SDIST_DUCKDB_SRC_TARGET = "duckdb_src_target"
-_CONF_SDIST_INCLUDE_LINE_NUMBERS = "include_line_numbers"
-_CONF_SDIST_UNITY_COUNT = "unity_count"
-_CONF_SDIST_SHORT_PATHS = "short_paths"
-
 _SKBUILD_SDIST_INCLUDE_KEY = "sdist.include"
-_SKBUILD_CMAKE_VAR_UB_INCLUDE_DIRS_KEY = "cmake.define.DUCKDB_UNITY_BUILD_INCLUDE_LIST"
-_SKBUILD_CMAKE_VAR_UB_SOURCES_LIST_KEY = "cmake.define.DUCKDB_UNITY_BUILD_SOURCES_LIST"
+_SKBUILD_CMAKE_DEF_UB_INCLUDE_DIRS_KEY = "cmake.define.DUCKDB_UNITY_BUILD_INCLUDE_LIST"
+_SKBUILD_CMAKE_DEF_UB_SOURCES_LIST_KEY = "cmake.define.DUCKDB_UNITY_BUILD_SOURCES_LIST"
+_SKBUILD_CMAKE_DEF_ENABLED_EXTENSIONS = "cmake.define.DUCKDB_ENABLED_EXTENSIONS"
+_SKBUILD_CMAKE_DEF_DISABLE_JEMALLOC = "cmake.define.DUCKDB_DISABLE_JEMALLOC"
+_SKBUILD_CMAKE_DEF_CUSTOM_PLATFORM = "cmake.define.DUCKDB_CUSTOM_PLATFORM"
 
 _INCLUDE_DIRS_FILENAME = "duckdb_include_dirs.txt"
 _SOURCE_FILES_FILENAME = "duckdb_source_files.txt"
@@ -100,13 +94,6 @@ def _duckdb_submodule_path() -> str:
     # all good
     return duckdb_path
 
-def _pyproject_config() -> Dict[str, Any]:
-    """Load pyproject.toml configuration file"""
-    pyproject_path = Path("pyproject.toml")
-    with pyproject_path.open("rb") as ft:
-        pyproject = toml_load(ft)
-    return pyproject.get("tool", {}).get(_CONF_TOOL_NAME, {})
-
 def _build_package(target_dir, extensions, linenumbers, unity_count, short_paths) -> Tuple[
     List[str], List[str], List[str]
 ]:
@@ -130,36 +117,6 @@ def _build_package(target_dir, extensions, linenumbers, unity_count, short_paths
     ub_to_rel = lambda p: p if not Path(p).is_absolute() else str(Path(p).relative_to(target_dir_path))
     sources_list = [ub_to_rel(p) for p in sources_list]
     return sources_list, include_dirs_list, all_sources_list
-
-
-@lru_cache(maxsize=1)
-def _duckdb_build_config() -> Tuple[str, bool, int, bool, List[str]]:
-    """Load and validate all configuration needed for building a wheel or sdist. The return value is cached so the
-    config can be read at any time by any caller in this module."""
-    config = _pyproject_config()
-    sdist_config = config.get(_CONF_SDIST_NAME, {})
-    # 1. get and validate duckdb_src_target
-    duckdb_target_dir = sdist_config.get(_CONF_SDIST_DUCKDB_SRC_TARGET, "")
-    assert duckdb_target_dir != "", \
-        f"{_CONF_SDIST_DUCKDB_SRC_TARGET} must be set to a directory where we can store duckdb source files"
-    duckdb_target_dir_path = Path(duckdb_target_dir).absolute()
-    if duckdb_target_dir_path.exists():
-        assert duckdb_target_dir_path.is_dir(), f"{duckdb_target_dir} is not a directory"
-    duckdb_target_dir_parent_path = duckdb_target_dir_path.parent
-    if not duckdb_target_dir_parent_path.exists():
-        duckdb_target_dir_parent_path.mkdir(parents=True)
-    assert duckdb_target_dir_parent_path.is_dir(), f"{duckdb_target_dir_parent_path} is not a directory"
-    duckdb_target_dir = str(duckdb_target_dir_path)
-    # 2. get include_line_numbers
-    include_line_numbers = sdist_config.get(_CONF_SDIST_INCLUDE_LINE_NUMBERS, False)
-    # 3. get unity_count
-    unity_count = sdist_config.get(_CONF_SDIST_UNITY_COUNT, 32)
-    # 4. get short_paths
-    short_paths = sdist_config.get(_CONF_SDIST_SHORT_PATHS, False)
-    # 5. get and validate extensions
-    extensions = config.get(_CONF_EXTENSIONS, [])
-    assert isinstance(extensions, list), f"{_CONF_EXTENSIONS} is not a list"
-    return duckdb_target_dir, include_line_numbers, unity_count, short_paths, extensions
 
 
 def _skbuild_config_add(key: str, value: list | str, config_settings: Dict[str, List[str]|str]) -> None:
@@ -207,21 +164,21 @@ def _extracted_duckdb_sources_path() -> Path:
     Note: if the target directory exists, then the unity build files (ub_*) will be removed.
     """
     # get the settings
-    abs_duckdb_target_dir, include_line_numbers, unity_count, short_paths, extensions = _duckdb_build_config()
+    conf = DuckDBBuildConfig.load()
     # if the target dir exists we remove all unity build files from it to make sure previously generated files do not
     # clutter the sources
-    duckdb_target_dir_path = Path(abs_duckdb_target_dir).relative_to(Path().absolute())
+    duckdb_target_dir_path = Path(conf.duckdb_target_dir).relative_to(Path().absolute())
     if duckdb_target_dir_path.exists():
         for file in duckdb_target_dir_path.iterdir():
             if file.is_file() and file.name.startswith("ub_"):
                 file.unlink()
     # extract the duckdb sources into duckdb_target_dir
     source_files_list, include_dirs_list, all_sources_list = _build_package(
-        abs_duckdb_target_dir,
-        extensions,
-        include_line_numbers,
-        unity_count,
-        short_paths
+        conf.duckdb_target_dir,
+        conf.extensions,
+        conf.include_line_numbers,
+        conf.unity_count,
+        conf.short_paths
     )
     # save the source files list and include dirs list relative to project root (will overwrite if the file exists)
     source_files_list_relative_to_root = [str(duckdb_target_dir_path / s) for s in source_files_list]
@@ -232,6 +189,31 @@ def _extracted_duckdb_sources_path() -> Path:
         duckdb_target_dir_path
     )
     return duckdb_target_dir_path
+
+
+def _set_cmake_build_config(config_settings: Dict[str, List[str]|str]):
+    """
+    Update the scikit-build-core CMake config settings from DuckDBBuildConfig.
+
+    Reads the project’s build configuration and injects the corresponding
+    CMake definitions into the given `config_settings` dict:
+
+      1. Disables jemalloc if `disable_jemalloc` is set.
+      2. Exports a semicolon-separated list of enabled extensions (excluding jemalloc).
+      3. Adds a custom platform name if one was specified.
+    """
+    conf = DuckDBBuildConfig.load()
+
+    # 1. Explicitly disable jemalloc if configured (cmake will include jemalloc automatically if it is present)
+    if conf.disable_jemalloc:
+        _skbuild_config_add(_SKBUILD_CMAKE_DEF_DISABLE_JEMALLOC, "1", config_settings)
+    # 2. Enable all configured extensions (minus jemalloc)
+    extensions = list(set(conf.extensions)-{"jemalloc"})
+    enabled_extensions = ";".join(extensions)
+    _skbuild_config_add(_SKBUILD_CMAKE_DEF_ENABLED_EXTENSIONS, enabled_extensions, config_settings)
+    # 3. Set a custom platform name
+    if conf.custom_platform_name is not None:
+        _skbuild_config_add(_SKBUILD_CMAKE_DEF_CUSTOM_PLATFORM, conf.custom_platform_name, config_settings)
 
 
 def build_sdist(sdist_directory: str, config_settings: Optional[Dict[str, List[str]|str]] = None) -> str:
@@ -260,18 +242,31 @@ def build_wheel(
     else:
         # otherwise we just get the target dir from the config
         _log("Building duckdb wheel using extracted sources")
-        abs_duckdb_target_dir, _, _ , _, _ = _duckdb_build_config()
-        duckdb_target_dir_path = Path(abs_duckdb_target_dir).relative_to(Path().absolute())
+        conf = DuckDBBuildConfig.load()
+        duckdb_target_dir_path = Path(conf.duckdb_target_dir).relative_to(Path().absolute())
         assert duckdb_target_dir_path.exists(), \
-            f"Can't build a wheel without duckdb sources (none found in {abs_duckdb_target_dir})"
+            f"Can't build a wheel without duckdb sources (none found in {conf.duckdb_target_dir})"
 
     config_settings = config_settings or {}
     # add the source list and include dirs to the cmake config
     source_files_str, include_dirs_str = _read_sources_and_includes_files(duckdb_target_dir_path)
-    _skbuild_config_add(_SKBUILD_CMAKE_VAR_UB_INCLUDE_DIRS_KEY, include_dirs_str, config_settings)
-    _skbuild_config_add(_SKBUILD_CMAKE_VAR_UB_SOURCES_LIST_KEY, source_files_str, config_settings)
+    _skbuild_config_add(_SKBUILD_CMAKE_DEF_UB_INCLUDE_DIRS_KEY, include_dirs_str, config_settings)
+    _skbuild_config_add(_SKBUILD_CMAKE_DEF_UB_SOURCES_LIST_KEY, source_files_str, config_settings)
+    # set cmake build config
+    _set_cmake_build_config(config_settings)
     # hand off to scikit-build-core
     return skbuild_build_wheel(wheel_directory, config_settings, metadata_directory)
+
+
+def build_editable(
+        wheel_directory: str,
+        config_settings: Optional[Dict[str, List[str]|str]] = None,
+        metadata_directory: Optional[str] = None,
+) -> str:
+    # set cmake build config
+    config_settings = config_settings or {}
+    _set_cmake_build_config(config_settings)
+    return skbuild_build_editable(wheel_directory, config_settings, metadata_directory)
 
 
 # Re-export all other functions as-is

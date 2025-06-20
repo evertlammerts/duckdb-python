@@ -101,7 +101,13 @@ requires = [
 ]
 
 [tool.duckdb]
-extensions = ["json", "parquet", "icu"] # default list
+extensions = [
+    "core_functions",
+    "json",
+    "parquet",
+    "icu",
+    "jemalloc" # will only be activated
+]
 sdist.duckdb_src_target = "extracted/duckdb_src"
 
 [tool.scikit-build.wheel.packages]

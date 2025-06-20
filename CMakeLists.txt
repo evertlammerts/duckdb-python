@@ -2,23 +2,19 @@ cmake_minimum_required(VERSION 3.29)
 
 project(duckdb_py LANGUAGES CXX)
 
-# C++ 11
+# CMake defines
+set(DUCKDB_UNITY_BUILD_SOURCES_LIST "" CACHE STRING "List of all sources that should be included in an sdist. Will be set automatically by the build backend when building a wheel from an sdist.")
+set(DUCKDB_UNITY_BUILD_INCLUDE_LIST "" CACHE STRING "List of include dirs to include in the DuckDB unity build. Will be set automatically by the build backend when building a wheel from an sdist.")
+
+# Always use C++11
 set(CMAKE_CXX_STANDARD 11)
 
-# Always build everything with PIC (so static libs can be linked into shared modules without error)
-set(CMAKE_POSITION_INDEPENDENT_CODE ON CACHE BOOL
-        "Make all targets position independent" FORCE)
+# Load build config module - this creates `duckdb_build_config`
+include(cmake/duckdb_build_config.cmake)
 
 # Detect CCache
 include(cmake/compiler_launcher.cmake)
 setup_compiler_launcher_if_available()
-
-# Documentation for DUCKDB_UNITY_BUILD_SOURCES_LIST
-set(DUCKDB_UNITY_BUILD_SOURCES_LIST "" CACHE STRING "List of all sources that should be included in an sdist. Will be set automatically by the build backend when building a wheel from an sdist.")
-
-# Documentation for DUCKDB_UNITY_BUILD_INCLUDE_LIST
-set(DUCKDB_UNITY_BUILD_INCLUDE_LIST "" CACHE STRING "List of include dirs to include in the DuckDB unity build. Will be set automatically by the build backend when building a wheel from an sdist.")
-
 
 # ────────────────────────────────────────────
 # IDE support
@@ -103,7 +99,8 @@ pybind11_add_module(_duckdb
         $<TARGET_OBJECTS:python_relation>
         $<TARGET_OBJECTS:python_type>
 )
-target_link_libraries(_duckdb PRIVATE pytooling ${DUCKDB_STATIC_TARGET})
+# add pytooling, duckdb build config (for consistent compile options) and duckdb itself
+target_link_libraries(_duckdb PRIVATE pytooling duckdb_build_config ${DUCKDB_STATIC_TARGET})
 
 # ────────────────────────────────────────────
 # Put the object file in the correct place
