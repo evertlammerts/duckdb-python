@@ -26,6 +26,7 @@ function(load_duckdb_submodule OUT_LIB)
     get_target_property(BUILD_CONFIG_COMPILE_DEFINITIONS duckdb_build_config INTERFACE_COMPILE_DEFINITIONS)
     get_target_property(BUILD_CONFIG_COMPILE_OPTIONS duckdb_build_config INTERFACE_COMPILE_OPTIONS)
     get_target_property(BUILD_CONFIG_LINK_LIBRARIES duckdb_build_config INTERFACE_LINK_LIBRARIES)
+    get_target_property(BUILD_CONFIG_PIC duckdb_build_config INTERFACE_POSITION_INDEPENDENT_CODE)
     if(BUILD_CONFIG_COMPILE_FEATURES)
         target_compile_features(duckdb_static PRIVATE ${BUILD_CONFIG_COMPILE_FEATURES})
     endif()
@@ -37,6 +38,9 @@ function(load_duckdb_submodule OUT_LIB)
     endif()
     if(BUILD_CONFIG_LINK_LIBRARIES)
         target_link_libraries(duckdb_static PRIVATE ${BUILD_CONFIG_LINK_LIBRARIES})
+    endif()
+    if(BUILD_CONFIG_PIC)
+        set_target_properties(duckdb_static PROPERTIES POSITION_INDEPENDENT_CODE ON)
     endif()
     # create INTERFACE lib to deal with leaking 3rd party headers in duckdb headers
     # See https://github.com/duckdblabs/duckdb-internal/issues/5084
@@ -77,7 +81,7 @@ function(load_duckdb_unity_build OUT_LIB)
     # add include paths
     target_include_directories(duckdb_ub PUBLIC ${LUB_UNITY_BUILD_INCLUDE_LIST})
     # Apply build config
-    target_link_libraries(duckdb_ub PRIVATE duckdb_build_config)
+    target_link_libraries(duckdb_ub PUBLIC duckdb_build_config)
     # return the library
     set(${OUT_LIB} duckdb_ub PARENT_SCOPE)
 endfunction()
