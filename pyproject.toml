@@ -120,7 +120,7 @@ ninja.make-fallback = false
 metadata.version.provider = "scikit_build_core.metadata.setuptools_scm"
 
 [tool.scikit-build.cmake.define]
-ENABLE_EXTENSIONS = "core_functions;json;parquet;icu;jemalloc"
+BUILD_EXTENSIONS = "core_functions;json;parquet;icu;jemalloc"
 
 [tool.setuptools_scm]
 version_scheme = "duckdb_packaging.setuptools_scm_version:version_scheme"
