@@ -120,7 +120,7 @@ ninja.make-fallback = false
 metadata.version.provider = "scikit_build_core.metadata.setuptools_scm"
 
 [tool.scikit-build.cmake.define]
-CORE_EXTENSIONS = "core_functions;json;parquet;icu;jemalloc"
+ENABLE_EXTENSIONS = "core_functions;json;parquet;icu;jemalloc"
 
 [tool.setuptools_scm]
 version_scheme = "duckdb_packaging.setuptools_scm_version:version_scheme"
@@ -150,6 +150,9 @@ include = [
     # Third-party libraries and extensions
     "external/duckdb/third_party/**",
     "external/duckdb/extension/**",
+
+    # Can't avoid including a small subset of /tools
+    "external/duckdb/tools/CMakeLists.txt",
 ]
 exclude = [
     # Remove CI, git, scripts, tests and tools
@@ -172,10 +175,11 @@ exclude = [
     "pyodide.md",
 
     # --------------- DuckDB submodule excludes
-    # Remove tests, benchmarks, tools
+    # Remove tests, benchmarks, tools, scripts
     "external/duckdb/test/**",
     "external/duckdb/benchmark/**",
     "external/duckdb/tools/**",
+    "external/duckdb/scripts/**",
     "external/duckdb/examples/**",
     "external/duckdb/data/**",
 
@@ -198,6 +202,7 @@ exclude = [
     "external/duckdb/.git/**",
     "external/duckdb/.github/**",
     "external/duckdb/.gitignore",
+    "external/duckdb/.gitattributes",
     "external/duckdb/.gitmodules",
     "external/duckdb/build/**",
 

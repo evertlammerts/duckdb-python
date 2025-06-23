@@ -4,4 +4,4 @@ add_library(
   type.cpp numpy_scan.cpp array_wrapper.cpp raw_array_wrapper.cpp
   numpy_bind.cpp numpy_result_conversion.cpp)
 
-target_link_libraries(python_numpy PRIVATE pytooling)
+target_link_libraries(python_numpy PRIVATE _duckdb_dependencies)

@@ -10,7 +10,7 @@
 # Usage:
 #   include(cmake/duckdb_loader.cmake)
 #   # Optionally load extensions
-#   set(CORE_EXTENSIONS "json;parquet;icu")
+#   set(ENABLE_EXTENSIONS "json;parquet;icu")
 #
 #   # set sensible defaults for a debug build:
 #   duckdb_configure_for_debug()
@@ -38,6 +38,9 @@ endmacro()
 # Source configuration
 _duckdb_set_default(DUCKDB_SOURCE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/external/duckdb")
 
+# Extension list - commonly used extensions for Python
+_duckdb_set_default(ENABLE_EXTENSIONS "core_functions;parquet;icu;json")
+
 # Core build options - disable unnecessary components for Python builds
 _duckdb_set_default(BUILD_SHELL OFF)
 _duckdb_set_default(BUILD_UNITTESTS OFF)
@@ -50,9 +53,6 @@ _duckdb_set_default(DISABLE_BUILTIN_EXTENSIONS OFF)
 
 # Performance options - enable optimizations by default
 _duckdb_set_default(NATIVE_ARCH ON)
-
-# Extension list - commonly used extensions for Python
-_duckdb_set_default(CORE_EXTENSIONS "core_functions;parquet;icu;json")
 
 # Debug options - off by default for release builds
 _duckdb_set_default(ENABLE_SANITIZER OFF)
@@ -69,7 +69,6 @@ set(DISABLE_UNITY "${DISABLE_UNITY}" CACHE BOOL "Disable unity builds (slower co
 set(EXTENSION_STATIC_BUILD "${EXTENSION_STATIC_BUILD}" CACHE BOOL "Link extensions statically")
 set(DISABLE_BUILTIN_EXTENSIONS "${DISABLE_BUILTIN_EXTENSIONS}" CACHE BOOL "Disable all built-in extensions")
 set(NATIVE_ARCH "${NATIVE_ARCH}" CACHE BOOL "Optimize for native architecture")
-set(CORE_EXTENSIONS "${CORE_EXTENSIONS}" CACHE STRING "Semicolon-separated list of extensions to enable")
 set(ENABLE_SANITIZER "${ENABLE_SANITIZER}" CACHE BOOL "Enable AddressSanitizer")
 set(DEBUG_ALLOCATION "${DEBUG_ALLOCATION}" CACHE BOOL "Enable allocation tracking (slow)")
 set(FORCE_ASSERT "${FORCE_ASSERT}" CACHE BOOL "Enable assertions in release builds")
@@ -81,7 +80,7 @@ set(JEMALLOC_DEBUG "${JEMALLOC_DEBUG}" CACHE BOOL "Allow jemalloc on non-Linux p
 
 function(_duckdb_validate_jemalloc_config)
     # Check if jemalloc is in the extension list
-    if(NOT CORE_EXTENSIONS MATCHES "jemalloc")
+    if(NOT ENABLE_EXTENSIONS MATCHES "jemalloc")
         return()
     endif()
 
@@ -96,7 +95,7 @@ function(_duckdb_validate_jemalloc_config)
                 message(FATAL_ERROR
                         "jemalloc extension cannot be used on ${CMAKE_SYSTEM_NAME} in release builds.\n"
                         "jemalloc is only supported on Linux for production use.\n"
-                        "Either remove 'jemalloc' from CORE_EXTENSIONS or use a debug build type.")
+                        "Either remove 'jemalloc' from ENABLE_EXTENSIONS or use a debug build type.")
             else()
                 message(WARNING
                         "jemalloc extension enabled on ${CMAKE_SYSTEM_NAME} with JEMALLOC_DEBUG=ON.\n"
@@ -110,10 +109,10 @@ function(_duckdb_validate_jemalloc_config)
                     "jemalloc is only supported on Linux.")
 
             # Remove jemalloc from the extension list
-            string(REPLACE "jemalloc" "" CORE_EXTENSIONS_FILTERED "${CORE_EXTENSIONS}")
-            string(REGEX REPLACE ";+" ";" CORE_EXTENSIONS_FILTERED "${CORE_EXTENSIONS_FILTERED}")
-            string(REGEX REPLACE "^;|;$" "" CORE_EXTENSIONS_FILTERED "${CORE_EXTENSIONS_FILTERED}")
-            set(CORE_EXTENSIONS "${CORE_EXTENSIONS_FILTERED}" PARENT_SCOPE)
+            string(REPLACE "jemalloc" "" ENABLE_EXTENSIONS_FILTERED "${ENABLE_EXTENSIONS}")
+            string(REGEX REPLACE ";+" ";" ENABLE_EXTENSIONS_FILTERED "${ENABLE_EXTENSIONS_FILTERED}")
+            string(REGEX REPLACE "^;|;$" "" ENABLE_EXTENSIONS_FILTERED "${ENABLE_EXTENSIONS_FILTERED}")
+            set(ENABLE_EXTENSIONS "${ENABLE_EXTENSIONS_FILTERED}" PARENT_SCOPE)
         endif()
     endif()
 endfunction()
@@ -172,8 +171,8 @@ function(_duckdb_print_summary)
     message(STATUS "  Static Extensions: ${EXTENSION_STATIC_BUILD}")
     message(STATUS "  Native Arch: ${NATIVE_ARCH}")
 
-    if(CORE_EXTENSIONS)
-        message(STATUS "  Extensions: ${CORE_EXTENSIONS}")
+    if(ENABLE_EXTENSIONS)
+        message(STATUS "  Extensions: ${ENABLE_EXTENSIONS}")
     endif()
 
     set(debug_opts)

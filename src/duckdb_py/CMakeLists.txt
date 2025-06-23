@@ -30,4 +30,4 @@ add_library(python_src OBJECT
         python_udf.cpp
 )
 
-target_link_libraries(python_src PRIVATE pytooling)
+target_link_libraries(python_src PRIVATE _duckdb_dependencies)
