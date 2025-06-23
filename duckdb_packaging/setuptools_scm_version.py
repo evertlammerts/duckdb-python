@@ -34,7 +34,22 @@ def version_scheme(version: Any) -> str:
     Returns:
         PEP440 compliant version string
     """
-    return _bump_version(str(version.tag), version.distance, version.dirty)
+    print(f"[version_scheme] DEBUG: version object: {version}")
+    print(f"[version_scheme] DEBUG: version.tag: {version.tag}")
+    print(f"[version_scheme] DEBUG: version.distance: {version.distance}")
+    print(f"[version_scheme] DEBUG: version.dirty: {version.dirty}")
+    
+    # Handle case where tag is None
+    if version.tag is None:
+        print("[version_scheme] WARNING: version.tag is None, using fallback")
+        return "0.0.1.dev0"
+    
+    try:
+        return _bump_version(str(version.tag), version.distance, version.dirty)
+    except Exception as e:
+        print(f"[version_scheme] ERROR: Failed to process version: {e}")
+        print(f"[version_scheme] Falling back to simple version")
+        return "0.0.1.dev0"
 
 
 def _bump_version(base_version: str, distance: int, dirty: bool = False) -> str:
