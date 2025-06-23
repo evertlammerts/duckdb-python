@@ -10,7 +10,7 @@
 # Usage:
 #   include(cmake/duckdb_loader.cmake)
 #   # Optionally load extensions
-#   set(BUILD_EXTENSIONS "json;parquet;icu")
+#   set(CORE_EXTENSIONS "json;parquet;icu")
 #
 #   # set sensible defaults for a debug build:
 #   duckdb_configure_for_debug()
@@ -39,7 +39,7 @@ endmacro()
 _duckdb_set_default(DUCKDB_SOURCE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/external/duckdb")
 
 # Extension list - commonly used extensions for Python
-_duckdb_set_default(BUILD_EXTENSIONS "core_functions;parquet;icu;json")
+_duckdb_set_default(CORE_EXTENSIONS "core_functions;parquet;icu;json")
 
 # Core build options - disable unnecessary components for Python builds
 _duckdb_set_default(BUILD_SHELL OFF)
@@ -62,7 +62,7 @@ _duckdb_set_default(JEMALLOC_DEBUG OFF)
 
 # Convert to cache variables for CMake GUI/ccmake compatibility
 set(DUCKDB_SOURCE_PATH "${DUCKDB_SOURCE_PATH}" CACHE PATH "Path to DuckDB source directory")
-set(BUILD_EXTENSIONS "${BUILD_EXTENSIONS}" CACHE PATH "Semicolon-separated list of extensions to enable")
+set(CORE_EXTENSIONS "${CORE_EXTENSIONS}" CACHE PATH "Semicolon-separated list of extensions to enable")
 set(BUILD_SHELL "${BUILD_SHELL}" CACHE BOOL "Build the DuckDB shell executable")
 set(BUILD_UNITTESTS "${BUILD_UNITTESTS}" CACHE BOOL "Build DuckDB unit tests")
 set(BUILD_BENCHMARKS "${BUILD_BENCHMARKS}" CACHE BOOL "Build DuckDB benchmarks")
@@ -81,7 +81,7 @@ set(JEMALLOC_DEBUG "${JEMALLOC_DEBUG}" CACHE BOOL "Allow jemalloc on non-Linux p
 
 function(_duckdb_validate_jemalloc_config)
     # Check if jemalloc is in the extension list
-    if(NOT BUILD_EXTENSIONS MATCHES "jemalloc")
+    if(NOT CORE_EXTENSIONS MATCHES "jemalloc")
         return()
     endif()
 
@@ -96,7 +96,7 @@ function(_duckdb_validate_jemalloc_config)
                 message(FATAL_ERROR
                         "jemalloc extension cannot be used on ${CMAKE_SYSTEM_NAME} in release builds.\n"
                         "jemalloc is only supported on Linux for production use.\n"
-                        "Either remove 'jemalloc' from BUILD_EXTENSIONS or use a debug build type.")
+                        "Either remove 'jemalloc' from CORE_EXTENSIONS or use a debug build type.")
             else()
                 message(WARNING
                         "jemalloc extension enabled on ${CMAKE_SYSTEM_NAME} with JEMALLOC_DEBUG=ON.\n"
@@ -110,10 +110,10 @@ function(_duckdb_validate_jemalloc_config)
                     "jemalloc is only supported on Linux.")
 
             # Remove jemalloc from the extension list
-            string(REPLACE "jemalloc" "" BUILD_EXTENSIONS_FILTERED "${BUILD_EXTENSIONS}")
-            string(REGEX REPLACE ";+" ";" BUILD_EXTENSIONS_FILTERED "${BUILD_EXTENSIONS_FILTERED}")
-            string(REGEX REPLACE "^;|;$" "" BUILD_EXTENSIONS_FILTERED "${BUILD_EXTENSIONS_FILTERED}")
-            set(BUILD_EXTENSIONS "${BUILD_EXTENSIONS_FILTERED}" PARENT_SCOPE)
+            string(REPLACE "jemalloc" "" CORE_EXTENSIONS_FILTERED "${CORE_EXTENSIONS}")
+            string(REGEX REPLACE ";+" ";" CORE_EXTENSIONS_FILTERED "${CORE_EXTENSIONS_FILTERED}")
+            string(REGEX REPLACE "^;|;$" "" CORE_EXTENSIONS_FILTERED "${CORE_EXTENSIONS_FILTERED}")
+            set(CORE_EXTENSIONS "${CORE_EXTENSIONS_FILTERED}" PARENT_SCOPE)
         endif()
     endif()
 endfunction()
@@ -172,8 +172,8 @@ function(_duckdb_print_summary)
     message(STATUS "  Static Extensions: ${EXTENSION_STATIC_BUILD}")
     message(STATUS "  Native Arch: ${NATIVE_ARCH}")
 
-    if(BUILD_EXTENSIONS)
-        message(STATUS "  Extensions: ${BUILD_EXTENSIONS}")
+    if(CORE_EXTENSIONS)
+        message(STATUS "  Extensions: ${CORE_EXTENSIONS}")
     endif()
 
     set(debug_opts)
