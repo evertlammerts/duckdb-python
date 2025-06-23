@@ -2,15 +2,11 @@ cmake_minimum_required(VERSION 3.29)
 
 project(duckdb_py LANGUAGES CXX)
 
-# CMake defines
-set(DUCKDB_UNITY_BUILD_SOURCES_LIST "" CACHE STRING "List of all sources that should be included in an sdist. Will be set automatically by the build backend when building a wheel from an sdist.")
-set(DUCKDB_UNITY_BUILD_INCLUDE_LIST "" CACHE STRING "List of include dirs to include in the DuckDB unity build. Will be set automatically by the build backend when building a wheel from an sdist.")
-
 # Always use C++11
 set(CMAKE_CXX_STANDARD 11)
 
-# Load build config module - this creates `duckdb_build_config`
-include(cmake/duckdb_build_config.cmake)
+# Set the library name
+set(DUCKDB_PYTHON_LIB_NAME "_duckdb")
 
 # Detect CCache
 include(cmake/compiler_launcher.cmake)
@@ -51,32 +47,29 @@ find_package(pybind11 REQUIRED CONFIG)
 # ────────────────────────────────────────────
 # Include DuckDB source
 # ────────────────────────────────────────────
+# Load duckdb loader module
 include(cmake/duckdb_loader.cmake)
-if(DUCKDB_UNITY_BUILD_SOURCES_LIST STREQUAL "")
-  load_duckdb_submodule(DUCKDB_STATIC_TARGET
-          SUBMODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/external/duckdb"
-  )
+
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  duckdb_configure_for_debug()
 else()
-  load_duckdb_unity_build(DUCKDB_STATIC_TARGET
-          UNITY_BUILD_SOURCES_LIST "${DUCKDB_UNITY_BUILD_SOURCES_LIST}"
-          UNITY_BUILD_INCLUDE_LIST "${DUCKDB_UNITY_BUILD_INCLUDE_LIST}"
-  )
+  duckdb_configure_for_release()
 endif()
+duckdb_add_library(duckdb_target)
 
 # ────────────────────────────────────────────
-# INTERFACE library that **only** carries usage requirements
+# INTERFACE library that **only** carries dependencies
 # ────────────────────────────────────────────
-add_library(pytooling INTERFACE)
+add_library(_duckdb_dependencies INTERFACE)
 
 # All the imported dependency targets: they bring their own include dirs and compile definitions automatically.
-target_link_libraries(pytooling INTERFACE
+target_link_libraries(_duckdb_dependencies INTERFACE
         Python3::Python # defined by FindPython3
         pybind11::pybind11 # defined by pybind11Config.cmake
+        duckdb_target
 )
-target_include_directories(pytooling INTERFACE
+target_include_directories(_duckdb_dependencies INTERFACE
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/duckdb_py/include>
-        # headers exported by duckdb_static
-        $<TARGET_PROPERTY:${DUCKDB_STATIC_TARGET},INTERFACE_INCLUDE_DIRECTORIES>
 )
 
 # ────────────────────────────────────────────
@@ -99,8 +92,8 @@ pybind11_add_module(_duckdb
         $<TARGET_OBJECTS:python_relation>
         $<TARGET_OBJECTS:python_type>
 )
-# add pytooling, duckdb build config (for consistent compile options) and duckdb itself
-target_link_libraries(_duckdb PRIVATE pytooling duckdb_build_config ${DUCKDB_STATIC_TARGET})
+# add _duckdb_dependencies
+target_link_libraries(_duckdb PRIVATE _duckdb_dependencies)
 
 # ────────────────────────────────────────────
 # Put the object file in the correct place

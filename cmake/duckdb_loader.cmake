@@ -1,87 +1,241 @@
-# cmake/duckdb_loader.cmake - uses the `duckdb_build_config` target if it exists
-include_guard(GLOBAL) # only include once
-include(CMakeParseArguments)
-
-# Include the build config so it's available in this module
-include(${CMAKE_CURRENT_LIST_DIR}/duckdb_build_config.cmake)
-
-# ────────────────────────────────────────────
-# load_duckdb(<out_target>
-#             SUBMODULE_PATH <dir>)
+# cmake/duckdb_loader.cmake
 #
-# Loads the duckdb source from the given git submodule path.
-# * <out_target> is set to the duckdb library name the caller can link against
-# * SUBMODULE_PATH <dir> must point to an existing duckdb submodule with its CMakeLists.txt
-# ────────────────────────────────────────────
-function(load_duckdb_submodule OUT_LIB)
-    # parse arguments
-    set(options)
-    set(oneValueArgs SUBMODULE_PATH)
-    cmake_parse_arguments(LDB "${options}" "${oneValueArgs}" "" ${ARGN})
-    # load the submodule
-    add_subdirectory(${LDB_SUBMODULE_PATH} EXCLUDE_FROM_ALL)
-    # Apply build config properties directly to duckdb_static. Note that we can't link since
-    # duckdb_static might get exported
-    get_target_property(BUILD_CONFIG_COMPILE_FEATURES duckdb_build_config INTERFACE_COMPILE_FEATURES)
-    get_target_property(BUILD_CONFIG_COMPILE_DEFINITIONS duckdb_build_config INTERFACE_COMPILE_DEFINITIONS)
-    get_target_property(BUILD_CONFIG_COMPILE_OPTIONS duckdb_build_config INTERFACE_COMPILE_OPTIONS)
-    get_target_property(BUILD_CONFIG_LINK_LIBRARIES duckdb_build_config INTERFACE_LINK_LIBRARIES)
-    get_target_property(BUILD_CONFIG_PIC duckdb_build_config INTERFACE_POSITION_INDEPENDENT_CODE)
-    if(BUILD_CONFIG_COMPILE_FEATURES)
-        target_compile_features(duckdb_static PRIVATE ${BUILD_CONFIG_COMPILE_FEATURES})
-    endif()
-    if(BUILD_CONFIG_COMPILE_DEFINITIONS)
-        target_compile_definitions(duckdb_static PRIVATE ${BUILD_CONFIG_COMPILE_DEFINITIONS})
-    endif()
-    if(BUILD_CONFIG_COMPILE_OPTIONS)
-        target_compile_options(duckdb_static PRIVATE ${BUILD_CONFIG_COMPILE_OPTIONS})
-    endif()
-    if(BUILD_CONFIG_LINK_LIBRARIES)
-        target_link_libraries(duckdb_static PRIVATE ${BUILD_CONFIG_LINK_LIBRARIES})
-    endif()
-    if(BUILD_CONFIG_PIC)
-        set_target_properties(duckdb_static PROPERTIES POSITION_INDEPENDENT_CODE ON)
-    endif()
-    # create INTERFACE lib to deal with leaking 3rd party headers in duckdb headers
-    # See https://github.com/duckdblabs/duckdb-internal/issues/5084
-    add_library(duckdb_plus_thirdparty_headers INTERFACE)
-    target_include_directories(duckdb_plus_thirdparty_headers INTERFACE
-            # include third_party as include dir (we need fastpforlib, concurrentqueue, fsst)
-            $<BUILD_INTERFACE:${LDB_SUBMODULE_PATH}/third_party>
-            # same for third_party/re2
-            $<BUILD_INTERFACE:${LDB_SUBMODULE_PATH}/third_party/re2>
-            # same for third_party/fast_float
-            $<BUILD_INTERFACE:${LDB_SUBMODULE_PATH}/third_party/fast_float>
+# Simple DuckDB Build Configuration Module
+#
+# Sets sensible defaults for DuckDB Python extension builds and provides
+# a clean interface for adding DuckDB as a library target. Adds jemalloc
+# option for debugging but will never allow jemalloc in a release build if
+# not on Linux.
+#
+# Usage:
+#   include(cmake/duckdb_loader.cmake)
+#   # Optionally load extensions
+#   set(CORE_EXTENSIONS "json;parquet;icu")
+#
+#   # set sensible defaults for a debug build:
+#   duckdb_configure_for_debug()
+#
+#   # ...or, set sensible defaults for a release build:
+#   duckdb_configure_for_release()
+#
+#   # Link to your target
+#   duckdb_add_library(duckdb_target)
+#   target_link_libraries(my_lib PRIVATE ${duckdb_target})
 
-            $<BUILD_INTERFACE:${LDB_SUBMODULE_PATH}/third_party/utf8proc/include>
-            $<BUILD_INTERFACE:${LDB_SUBMODULE_PATH}/third_party/libpg_query/include>
-            $<BUILD_INTERFACE:${LDB_SUBMODULE_PATH}/third_party/fmt/include>
-    )
-    target_link_libraries(duckdb_plus_thirdparty_headers INTERFACE duckdb_static)
-    # return the libraries
-    set(${OUT_LIB} duckdb_plus_thirdparty_headers PARENT_SCOPE)
+include_guard(GLOBAL)
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Configuration Defaults - Optimized for Python Extension Builds
+# ════════════════════════════════════════════════════════════════════════════════
+
+# Helper macro to set default values that can be overridden from command line
+macro(_duckdb_set_default var_name default_value)
+    if(NOT DEFINED ${var_name})
+        set(${var_name} ${default_value})
+    endif()
+endmacro()
+
+# Source configuration
+_duckdb_set_default(DUCKDB_SOURCE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/external/duckdb")
+
+# Core build options - disable unnecessary components for Python builds
+_duckdb_set_default(BUILD_SHELL OFF)
+_duckdb_set_default(BUILD_UNITTESTS OFF)
+_duckdb_set_default(BUILD_BENCHMARKS OFF)
+_duckdb_set_default(DISABLE_UNITY OFF)
+
+# Extension configuration - static linking for Python modules
+_duckdb_set_default(EXTENSION_STATIC_BUILD ON)
+_duckdb_set_default(DISABLE_BUILTIN_EXTENSIONS OFF)
+
+# Performance options - enable optimizations by default
+_duckdb_set_default(NATIVE_ARCH ON)
+
+# Extension list - commonly used extensions for Python
+_duckdb_set_default(CORE_EXTENSIONS "core_functions;parquet;icu;json")
+
+# Debug options - off by default for release builds
+_duckdb_set_default(ENABLE_SANITIZER OFF)
+_duckdb_set_default(DEBUG_ALLOCATION OFF)
+_duckdb_set_default(FORCE_ASSERT OFF)
+_duckdb_set_default(JEMALLOC_DEBUG OFF)
+
+# Convert to cache variables for CMake GUI/ccmake compatibility
+set(DUCKDB_SOURCE_PATH "${DUCKDB_SOURCE_PATH}" CACHE PATH "Path to DuckDB source directory")
+set(BUILD_SHELL "${BUILD_SHELL}" CACHE BOOL "Build the DuckDB shell executable")
+set(BUILD_UNITTESTS "${BUILD_UNITTESTS}" CACHE BOOL "Build DuckDB unit tests")
+set(BUILD_BENCHMARKS "${BUILD_BENCHMARKS}" CACHE BOOL "Build DuckDB benchmarks")
+set(DISABLE_UNITY "${DISABLE_UNITY}" CACHE BOOL "Disable unity builds (slower compilation)")
+set(EXTENSION_STATIC_BUILD "${EXTENSION_STATIC_BUILD}" CACHE BOOL "Link extensions statically")
+set(DISABLE_BUILTIN_EXTENSIONS "${DISABLE_BUILTIN_EXTENSIONS}" CACHE BOOL "Disable all built-in extensions")
+set(NATIVE_ARCH "${NATIVE_ARCH}" CACHE BOOL "Optimize for native architecture")
+set(CORE_EXTENSIONS "${CORE_EXTENSIONS}" CACHE STRING "Semicolon-separated list of extensions to enable")
+set(ENABLE_SANITIZER "${ENABLE_SANITIZER}" CACHE BOOL "Enable AddressSanitizer")
+set(DEBUG_ALLOCATION "${DEBUG_ALLOCATION}" CACHE BOOL "Enable allocation tracking (slow)")
+set(FORCE_ASSERT "${FORCE_ASSERT}" CACHE BOOL "Enable assertions in release builds")
+set(JEMALLOC_DEBUG "${JEMALLOC_DEBUG}" CACHE BOOL "Allow jemalloc on non-Linux platforms for debugging")
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Internal Functions
+# ════════════════════════════════════════════════════════════════════════════════
+
+function(_duckdb_validate_jemalloc_config)
+    # Check if jemalloc is in the extension list
+    if(NOT CORE_EXTENSIONS MATCHES "jemalloc")
+        return()
+    endif()
+
+    set(is_release_build FALSE)
+    if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+        set(is_release_build TRUE)
+    endif()
+
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        if(JEMALLOC_DEBUG)
+            if(is_release_build)
+                message(FATAL_ERROR
+                        "jemalloc extension cannot be used on ${CMAKE_SYSTEM_NAME} in release builds.\n"
+                        "jemalloc is only supported on Linux for production use.\n"
+                        "Either remove 'jemalloc' from CORE_EXTENSIONS or use a debug build type.")
+            else()
+                message(WARNING
+                        "jemalloc extension enabled on ${CMAKE_SYSTEM_NAME} with JEMALLOC_DEBUG=ON.\n"
+                        "This is only recommended for debugging purposes.\n"
+                        "jemalloc is officially supported only on Linux.")
+            endif()
+        else()
+            message(WARNING
+                    "jemalloc extension is not supported on ${CMAKE_SYSTEM_NAME}.\n"
+                    "Removing jemalloc from extension list.\n"
+                    "jemalloc is only supported on Linux.")
+
+            # Remove jemalloc from the extension list
+            string(REPLACE "jemalloc" "" CORE_EXTENSIONS_FILTERED "${CORE_EXTENSIONS}")
+            string(REGEX REPLACE ";+" ";" CORE_EXTENSIONS_FILTERED "${CORE_EXTENSIONS_FILTERED}")
+            string(REGEX REPLACE "^;|;$" "" CORE_EXTENSIONS_FILTERED "${CORE_EXTENSIONS_FILTERED}")
+            set(CORE_EXTENSIONS "${CORE_EXTENSIONS_FILTERED}" PARENT_SCOPE)
+        endif()
+    endif()
 endfunction()
 
-# ────────────────────────────────────────────
-# load_duckdb_unity_build(<out_target>
-#             UNITY_BUILD_PATH <dir>
-#             UNITY_BUILD_INCLUDE_LIST <list>)
-#
-# Loads the duckdb source from the given unity build path.
-# * <out_target> is set to the duckdb library name the caller can link against
-# * UNITY_BUILD_PATH <dir> must point to a path containing the extracted duckdb unity build sources
-# ────────────────────────────────────────────
-function(load_duckdb_unity_build OUT_LIB)
-    # parse arguments
-    set(options)
-    set(multiValueArgs UNITY_BUILD_SOURCES_LIST UNITY_BUILD_INCLUDE_LIST)
-    cmake_parse_arguments(LUB "${options}" "" "${multiValueArgs}" ${ARGN})
-    # create the duckdb_ub library
-    add_library(duckdb_ub STATIC ${LUB_UNITY_BUILD_SOURCES_LIST})
-    # add include paths
-    target_include_directories(duckdb_ub PUBLIC ${LUB_UNITY_BUILD_INCLUDE_LIST})
-    # Apply build config
-    target_link_libraries(duckdb_ub PUBLIC duckdb_build_config)
-    # return the library
-    set(${OUT_LIB} duckdb_ub PARENT_SCOPE)
+function(_duckdb_validate_source_path)
+    if(NOT EXISTS "${DUCKDB_SOURCE_PATH}")
+        message(FATAL_ERROR
+                "DuckDB source path does not exist: ${DUCKDB_SOURCE_PATH}\n"
+                "Please set DUCKDB_SOURCE_PATH to the correct location.")
+    endif()
+
+    if(NOT EXISTS "${DUCKDB_SOURCE_PATH}/CMakeLists.txt")
+        message(FATAL_ERROR
+                "DuckDB source path does not contain CMakeLists.txt: ${DUCKDB_SOURCE_PATH}\n"
+                "Please ensure this points to the root of DuckDB source tree.")
+    endif()
+endfunction()
+
+function(_duckdb_create_interface_target target_name)
+    add_library(${target_name} INTERFACE)
+
+    # Include directories to deal with leaking 3rd party headers in duckdb headers
+    # See https://github.com/duckdblabs/duckdb-internal/issues/5084
+    target_include_directories(${target_name} INTERFACE
+            # Main DuckDB headers
+            $<BUILD_INTERFACE:${DUCKDB_SOURCE_PATH}/src/include>
+            # Third-party headers that leak through DuckDB's API
+            $<BUILD_INTERFACE:${DUCKDB_SOURCE_PATH}/third_party>
+            $<BUILD_INTERFACE:${DUCKDB_SOURCE_PATH}/third_party/re2>
+            $<BUILD_INTERFACE:${DUCKDB_SOURCE_PATH}/third_party/fast_float>
+            $<BUILD_INTERFACE:${DUCKDB_SOURCE_PATH}/third_party/utf8proc/include>
+            $<BUILD_INTERFACE:${DUCKDB_SOURCE_PATH}/third_party/libpg_query/include>
+            $<BUILD_INTERFACE:${DUCKDB_SOURCE_PATH}/third_party/fmt/include>
+    )
+
+    # Compile definitions based on configuration
+    target_compile_definitions(${target_name} INTERFACE
+            $<$<BOOL:${FORCE_ASSERT}>:DUCKDB_FORCE_ASSERT>
+            $<$<BOOL:${DEBUG_ALLOCATION}>:DUCKDB_DEBUG_ALLOCATION>
+            $<$<CONFIG:Debug>:DUCKDB_DEBUG_MODE>
+    )
+
+    # Link to the DuckDB static library
+    target_link_libraries(${target_name} INTERFACE duckdb_static)
+
+    # Enable position independent code for shared library builds
+    set_target_properties(${target_name} PROPERTIES
+            INTERFACE_POSITION_INDEPENDENT_CODE ON
+    )
+endfunction()
+
+function(_duckdb_print_summary)
+    message(STATUS "DuckDB Configuration:")
+    message(STATUS "  Source: ${DUCKDB_SOURCE_PATH}")
+    message(STATUS "  Build Type: ${CMAKE_BUILD_TYPE}")
+    message(STATUS "  Static Extensions: ${EXTENSION_STATIC_BUILD}")
+    message(STATUS "  Native Arch: ${NATIVE_ARCH}")
+
+    if(CORE_EXTENSIONS)
+        message(STATUS "  Extensions: ${CORE_EXTENSIONS}")
+    endif()
+
+    set(debug_opts)
+    if(ENABLE_SANITIZER)
+        list(APPEND debug_opts "ASAN")
+    endif()
+    if(DEBUG_ALLOCATION)
+        list(APPEND debug_opts "AllocDebug")
+    endif()
+    if(FORCE_ASSERT)
+        list(APPEND debug_opts "ForceAssert")
+    endif()
+
+    if(debug_opts)
+        message(STATUS "  Debug Options: ${debug_opts}")
+    endif()
+endfunction()
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Public API
+# ════════════════════════════════════════════════════════════════════════════════
+
+function(duckdb_add_library target_name)
+    _duckdb_validate_source_path()
+    _duckdb_validate_jemalloc_config()
+    _duckdb_print_summary()
+
+    # Add DuckDB subdirectory - it will use our variables
+    add_subdirectory("${DUCKDB_SOURCE_PATH}" duckdb EXCLUDE_FROM_ALL)
+
+    # Create clean interface target
+    _duckdb_create_interface_target(${target_name})
+endfunction()
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Convenience Functions
+# ════════════════════════════════════════════════════════════════════════════════
+
+function(duckdb_configure_for_debug)
+    # Only set if not already defined (allows override from command line)
+    if(NOT DEFINED ENABLE_SANITIZER)
+        set(ENABLE_SANITIZER ON PARENT_SCOPE)
+    endif()
+    if(NOT DEFINED DEBUG_ALLOCATION)
+        set(DEBUG_ALLOCATION ON PARENT_SCOPE)
+    endif()
+    if(NOT DEFINED FORCE_ASSERT)
+        set(FORCE_ASSERT ON PARENT_SCOPE)
+    endif()
+    message(STATUS "DuckDB: Configured for debug build")
+endfunction()
+
+function(duckdb_configure_for_release)
+    # Only set if not already defined (allows override from command line)
+    if(NOT DEFINED ENABLE_SANITIZER)
+        set(ENABLE_SANITIZER OFF PARENT_SCOPE)
+    endif()
+    if(NOT DEFINED DEBUG_ALLOCATION)
+        set(DEBUG_ALLOCATION OFF PARENT_SCOPE)
+    endif()
+    if(NOT DEFINED FORCE_ASSERT)
+        set(FORCE_ASSERT OFF PARENT_SCOPE)
+    endif()
+    message(STATUS "DuckDB: Configured for release build")
 endfunction()
