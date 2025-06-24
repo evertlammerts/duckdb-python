@@ -59,6 +59,7 @@ test = [ # dependencies used for running tests
     "requests",
     "tensorflow; python_version <= '3.12'",
     "torch",
+    "urllib3",
 ]
 scripts = [ # dependencies used for running scripts
     "cxxheaderparser",

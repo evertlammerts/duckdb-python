@@ -201,7 +201,7 @@ static void InitializeConnectionMethods(py::class_<DuckDBPyConnection, shared_pt
 	      "Fetch a chunk of the result as DataFrame following execute()", py::arg("vectors_per_chunk") = 1,
 	      py::kw_only(), py::arg("date_as_object") = false);
 	m.def("pl", &DuckDBPyConnection::FetchPolars, "Fetch a result as Polars DataFrame following execute()",
-	      py::arg("rows_per_batch") = 1000000);
+	      py::arg("rows_per_batch") = 1000000, py::kw_only(), py::arg("lazy") = false);
 	m.def("fetch_arrow_table", &DuckDBPyConnection::FetchArrow, "Fetch a result as Arrow table following execute()",
 	      py::arg("rows_per_batch") = 1000000);
 	m.def("arrow", &DuckDBPyConnection::FetchArrow, "Fetch a result as Arrow table following execute()",
@@ -279,7 +279,7 @@ static void InitializeConnectionMethods(py::class_<DuckDBPyConnection, shared_pt
 	      py::arg("filename") = false, py::arg("hive_partitioning") = false, py::arg("union_by_name") = false,
 	      py::arg("compression") = py::none());
 	m.def("get_table_names", &DuckDBPyConnection::GetTableNames, "Extract the required table names from a query",
-	      py::arg("query"));
+	      py::arg("query"), py::kw_only(), py::arg("qualified") = false);
 	m.def("install_extension", &DuckDBPyConnection::InstallExtension,
 	      "Install an extension by name, with an optional version and/or repository to get the extension from",
 	      py::arg("extension"), py::kw_only(), py::arg("force_install") = false, py::arg("repository") = py::none(),
@@ -1760,9 +1760,9 @@ unique_ptr<DuckDBPyRelation> DuckDBPyConnection::FromArrow(py::object &arrow_obj
 	return make_uniq<DuckDBPyRelation>(std::move(rel));
 }
 
-unordered_set<string> DuckDBPyConnection::GetTableNames(const string &query) {
+unordered_set<string> DuckDBPyConnection::GetTableNames(const string &query, bool qualified) {
 	auto &connection = con.GetConnection();
-	return connection.GetTableNames(query);
+	return connection.GetTableNames(query, qualified);
 }
 
 shared_ptr<DuckDBPyConnection> DuckDBPyConnection::UnregisterPythonObject(const string &name) {
@@ -2021,12 +2021,12 @@ py::dict DuckDBPyConnection::FetchTF() {
 	return result.FetchTF();
 }
 
-PolarsDataFrame DuckDBPyConnection::FetchPolars(idx_t rows_per_batch) {
+PolarsDataFrame DuckDBPyConnection::FetchPolars(idx_t rows_per_batch, bool lazy) {
 	if (!con.HasResult()) {
 		throw InvalidInputException("No open result set");
 	}
 	auto &result = con.GetResult();
-	return result.ToPolars(rows_per_batch);
+	return result.ToPolars(rows_per_batch, lazy);
 }
 
 duckdb::pyarrow::RecordBatchReader DuckDBPyConnection::FetchRecordBatchReader(const idx_t rows_per_batch) {
