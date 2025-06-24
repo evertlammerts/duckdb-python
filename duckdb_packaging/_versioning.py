@@ -1,5 +1,4 @@
-"""
-DuckDB Python versioning utilities.
+"""DuckDB Python versioning utilities. This will only work on Python >= 3.3 and on non-mobile platforms.
 
 This module provides utilities for version management including:
 - Version bumping (major, minor, patch, post)

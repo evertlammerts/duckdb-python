@@ -34,22 +34,19 @@ def version_scheme(version: Any) -> str:
     Returns:
         PEP440 compliant version string
     """
-    print(f"[version_scheme] DEBUG: version object: {version}")
-    print(f"[version_scheme] DEBUG: version.tag: {version.tag}")
-    print(f"[version_scheme] DEBUG: version.distance: {version.distance}")
-    print(f"[version_scheme] DEBUG: version.dirty: {version.dirty}")
+    print(f"[version_scheme] version object: {version}")
+    print(f"[version_scheme] version.tag: {version.tag}")
+    print(f"[version_scheme] version.distance: {version.distance}")
+    print(f"[version_scheme] version.dirty: {version.dirty}")
     
     # Handle case where tag is None
     if version.tag is None:
-        print("[version_scheme] WARNING: version.tag is None, using fallback")
-        return "0.0.1.dev0"
+        raise ValueError("Need a valid version. Did you set a fallback_version in pyproject.toml?")
     
     try:
         return _bump_version(str(version.tag), version.distance, version.dirty)
     except Exception as e:
-        print(f"[version_scheme] ERROR: Failed to process version: {e}")
-        print(f"[version_scheme] Falling back to simple version")
-        return "0.0.1.dev0"
+        raise RuntimeError(f"Failed to bump version: {e}")
 
 
 def _bump_version(base_version: str, distance: int, dirty: bool = False) -> str:
@@ -58,7 +55,7 @@ def _bump_version(base_version: str, distance: int, dirty: bool = False) -> str:
     try:
         major, minor, patch, post = parse_version(base_version)
     except ValueError as e:
-        raise ValueError(f"Incorrect version format: {base_version} (expected X.Y.Z or X.Y.Z.postN)") from e
+        raise ValueError(f"Incorrect version format: {base_version} (expected X.Y.Z or X.Y.Z.postN)")
 
     # If we're exactly on a tag (distance = 0, dirty=False)
     distance = int(distance or 0)

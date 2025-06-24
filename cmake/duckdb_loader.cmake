@@ -62,7 +62,7 @@ _duckdb_set_default(JEMALLOC_DEBUG OFF)
 
 # Convert to cache variables for CMake GUI/ccmake compatibility
 set(DUCKDB_SOURCE_PATH "${DUCKDB_SOURCE_PATH}" CACHE PATH "Path to DuckDB source directory")
-set(CORE_EXTENSIONS "${CORE_EXTENSIONS}" CACHE PATH "Semicolon-separated list of extensions to enable")
+set(CORE_EXTENSIONS "${CORE_EXTENSIONS}" CACHE STRING "Semicolon-separated list of extensions to enable")
 set(BUILD_SHELL "${BUILD_SHELL}" CACHE BOOL "Build the DuckDB shell executable")
 set(BUILD_UNITTESTS "${BUILD_UNITTESTS}" CACHE BOOL "Build DuckDB unit tests")
 set(BUILD_BENCHMARKS "${BUILD_BENCHMARKS}" CACHE BOOL "Build DuckDB benchmarks")

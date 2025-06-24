@@ -91,7 +91,7 @@ dev = [ # tooling like uv will install this automatically when syncing the envir
 ]
 
 [build-system]
-build-backend = "duckdb_packaging"
+build-backend = "duckdb_packaging.build_backend"
 backend-path = ["./"]
 requires = [
     "scikit-build-core",
