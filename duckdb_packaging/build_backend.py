@@ -34,15 +34,30 @@ _SKBUILD_CMAKE_OVERRIDE_GIT_DESCRIBE = "cmake.define.OVERRIDE_GIT_DESCRIBE"
 
 
 def _log(msg: str, is_error: bool=False) -> None:
+    """Log a message with build backend prefix.
+    
+    Args:
+        msg: The message to log.
+        is_error: If True, log to stderr; otherwise log to stdout.
+    """
     print(_LOGGING_FORMAT.format(msg), flush=True, file=sys.stderr if is_error else sys.stdout)
 
 
 def _in_git_repository() -> bool:
+    """Check if the current directory is inside a git repository.
+    
+    Returns:
+        True if .git directory exists, False otherwise.
+    """
     return Path(".git").exists()
 
 
 def _in_sdist() -> bool:
-    """We assume we're in an sdist iff the duckdb version file exists and PKG-INFO exists."""
+    """Check if the current directory is inside a git repository.
+
+    Returns:
+        True if the duckdb version file exists and PKG-INFO exists, False otherwise.
+    """
     return _version_file_path().exists() and Path("PKG-INFO").exists()
 
 
@@ -90,6 +105,17 @@ def _duckdb_submodule_path() -> Path:
 
 
 def _duckdb_long_version(submodule_path: Path) -> str:
+    """Get the long version string from the DuckDB submodule using git describe.
+    
+    Args:
+        submodule_path: Path to the DuckDB submodule directory.
+        
+    Returns:
+        The version string from git describe --tags --long.
+        
+    Raises:
+        RuntimeError: If git executable is not found or git command fails.
+    """
     try:
         result = subprocess.run(
             ["git", "describe", "--tags", "--long", "--match", "v*.*.*"],
@@ -122,17 +148,31 @@ def _read_duckdb_long_version() -> str:
 def _skbuild_config_add(
         key: str, value: Union[List, str], config_settings: Dict[str, Union[List[str],str]], fail_if_exists: bool=False
 ):
-    """Add the given value to the given key in the config settings for skbuild. Only for list and string-typed
-    settings.
+    """Add or modify a configuration setting for scikit-build-core.
+    
+    This function handles adding values to scikit-build-core configuration settings,
+    supporting both string and list types with appropriate merging behavior.
 
-    Rules:
-    - If the value is a string and config_settings[key] is a list, the value will be appended.
-    - If the value is a string and config_settings[key] is a string, the existing value will be overridden.
-    - If the value is a list and config_settings[key] is a list, the existing list will be extended.
-    - If the value is a list and config_settings[key] is a string, we raise an exception.
+    Args:
+        key: The configuration key to set (will be prefixed with 'skbuild.' if needed).
+        value: The value to add (string or list).
+        config_settings: The configuration dictionary to modify.
+        fail_if_exists: If True, raise an error if the key already exists.
 
-    Note: scikit-build-core's preference logic for config sources still applies, meaning that it considers config from
-          env vars, config_settings and pyproject, in that order, and **doesn't merge** those settings.
+    Raises:
+        RuntimeError: If fail_if_exists is True and key exists, or on type mismatches.
+        AssertionError: If config_settings is None.
+
+    Behavior Rules:
+        - String value + list setting: value is appended to the list
+        - String value + string setting: existing value is overridden  
+        - List value + list setting: existing list is extended
+        - List value + string setting: raises RuntimeError
+
+    Note:
+        scikit-build-core's preference logic for config sources still applies,
+        considering env vars, config_settings and pyproject in that order,
+        without merging between those sources.
     """
     assert config_settings is not None, "config_settings must not be None"
     store_key = key if key in config_settings else "skbuild." + key
@@ -159,7 +199,21 @@ def _skbuild_config_add(
 
 
 def build_sdist(sdist_directory: str, config_settings: Optional[Dict[str, Union[List[str],str]]] = None) -> str:
-    """Build an sdist using the duckdb submoule"""
+    """Build a source distribution using the DuckDB submodule.
+    
+    This function extracts the DuckDB version from the git submodule and saves it
+    to a version file before building the sdist with scikit-build-core.
+    
+    Args:
+        sdist_directory: Directory where the sdist will be created.
+        config_settings: Optional build configuration settings.
+        
+    Returns:
+        The filename of the created sdist.
+        
+    Raises:
+        RuntimeError: If not in a git repository or DuckDB submodule issues.
+    """
     if not _in_git_repository():
         raise RuntimeError("Not in a git repository, can't create an sdist")
     submodule_path = _duckdb_submodule_path()
@@ -173,8 +227,23 @@ def build_wheel(
         config_settings: Optional[Dict[str, List[str]|str]] = None,
         metadata_directory: Optional[str] = None,
 ) -> str:
-    """Build a wheel either against the git submodule (if we're in a git repository) or from extracted sources
-    (probably because we're in an sdist)."""
+    """Build a wheel from either git submodule or extracted sdist sources.
+    
+    This function builds a wheel using scikit-build-core, handling two scenarios:
+    1. In a git repository: builds directly from the DuckDB submodule
+    2. In an sdist: reads the saved DuckDB version and passes it to CMake
+    
+    Args:
+        wheel_directory: Directory where the wheel will be created.
+        config_settings: Optional build configuration settings.
+        metadata_directory: Optional directory for metadata preparation.
+        
+    Returns:
+        The filename of the created wheel.
+        
+    Raises:
+        RuntimeError: If not in a git repository or sdist environment.
+    """
     if not _in_git_repository():
         if not _in_sdist():
             raise RuntimeError("Not in a git repository nor in an sdist, can't build a wheel")
