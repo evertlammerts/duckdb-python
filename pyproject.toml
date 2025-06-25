@@ -33,6 +33,75 @@ all = [ # users can install duckdb with 'duckdb[all]', which will install this l
     "adbc_driver_manager", # for the adbc driver (TODO: this should live under the duckdb package)
 ]
 
+[build-system]
+build-backend = "duckdb_packaging.build_backend"
+backend-path = ["./"]
+requires = [
+    "scikit-build-core",
+	"pybind11>=2.6.0",
+    "setuptools_scm>=8.0",
+]
+
+[tool.scikit-build]
+minimum-version = "0.10"
+cmake.version = ">=3.29.0"
+ninja.version = ">=1.10"
+ninja.make-fallback = false
+metadata.version.provider = "scikit_build_core.metadata.setuptools_scm"
+
+[tool.scikit-build.wheel.packages]
+duckdb = "duckdb"
+
+[tool.scikit-build.cmake.define]
+CORE_EXTENSIONS = "core_functions;json;parquet;icu;jemalloc"
+
+[tool.setuptools_scm]
+version_scheme = "duckdb_packaging.setuptools_scm_version:version_scheme"
+local_scheme = "no-local-version"
+fallback_version = "0.0.1.dev1"
+
+[tool.scikit-build.sdist]
+include = [
+    "README.md",
+    "LICENSE",
+
+    # Build configuration
+    "pyproject.toml",
+    "CMakeLists.txt",
+    "cmake/**",
+
+    # Source code
+    "src/**",
+    "duckdb/**",
+    "duckdb_packaging/**",
+    "adbc_driver_duckdb/**",
+
+    # Generated during sdist build, contains git describe string for duckdb
+    "duckdb_packaging/duckdb_version.txt",
+
+    # --------------- DuckDB submodule includes
+    # Core DuckDB source and build system
+    "external/duckdb/LICENSE",
+    "external/duckdb/src/**",
+    "external/duckdb/CMakeLists.txt",
+    "external/duckdb/DuckDBConfig.cmake.in",
+    "external/duckdb/DuckDBConfigVersion.cmake.in",
+
+    # Third-party libraries and extensions
+    "external/duckdb/third_party/**",
+    "external/duckdb/extension/**",
+
+    # Can't avoid including a small subset of ./tools and ./.github
+    "external/duckdb/tools/CMakeLists.txt",
+    "external/duckdb/tools/utils/test_platform.cpp",
+    "external/duckdb/.github/config/out_of_tree_extensions.cmake",
+    "external/duckdb/.github/config/in_tree_extensions.cmake",
+]
+exclude = [
+    "/*",
+    "/.*",
+]
+
 [dependency-groups] # used for development only, requires pip >=25.1.0
 stubdeps = [ # dependencies used for typehints in the stubs
     "fsspec",
@@ -89,162 +158,4 @@ dev = [ # tooling like uv will install this automatically when syncing the envir
     {include-group = "sqllogic"},
     {include-group = "duckdb_packaging"},
     {include-group = "build"},
-]
-
-[build-system]
-build-backend = "duckdb_packaging.build_backend"
-backend-path = ["./"]
-requires = [
-    "scikit-build-core",
-	"pybind11>=2.6.0",
-    "setuptools_scm>=8.0",
-]
-
-[tool.duckdb]
-extensions = [
-    "core_functions",
-    "json",
-    "parquet",
-    "icu",
-    "jemalloc" # will only be activated
-]
-sdist.duckdb_src_target = "extracted/duckdb_src"
-
-[tool.scikit-build.wheel.packages]
-duckdb = "duckdb"
-
-[tool.scikit-build]
-minimum-version = "0.10"
-cmake.version = ">=3.29.0"
-ninja.version = ">=1.10"
-ninja.make-fallback = false
-metadata.version.provider = "scikit_build_core.metadata.setuptools_scm"
-
-[tool.scikit-build.cmake.define]
-CORE_EXTENSIONS = "core_functions;json;parquet;icu;jemalloc"
-
-[tool.setuptools_scm]
-version_scheme = "duckdb_packaging.setuptools_scm_version:version_scheme"
-local_scheme = "no-local-version"
-fallback_version = "0.0.1.dev1"
-
-[tool.scikit-build.sdist]
-include = [
-    "./pyproject.toml",
-    "./CMakeLists.txt",
-    "./LICENSE",
-    "./src/**",
-    "./duckdb/**",
-    "./duckdb_packaging/**",
-    "./cmake/**",
-    "./adbc_driver_duckdb/**",
-    "./README.md",
-
-    # --------------- DuckDB submodule includes
-    # Core DuckDB source and build system
-    "external/duckdb/LICENSE",
-    "external/duckdb/src/**",
-    "external/duckdb/CMakeLists.txt",
-    "external/duckdb/DuckDBConfig.cmake.in",
-    "external/duckdb/DuckDBConfigVersion.cmake.in",
-
-    # Third-party libraries and extensions
-    "external/duckdb/third_party/**",
-    "external/duckdb/extension/**",
-
-    # Can't avoid including a small subset of ./tools and ./.github
-    "external/duckdb/tools/CMakeLists.txt",
-    "external/duckdb/tools/utils/test_platform.cpp",
-    "external/duckdb/.github/config/out_of_tree_extensions.cmake",
-    "external/duckdb/.github/config/in_tree_extensions.cmake",
-]
-exclude = [
-    # Remove CI, git, scripts, tests and tools
-    ".github/**",
-    ".git/**",
-    "scripts/**",
-    "sqllogic/**",
-    "tests/**",
-    "tools/**",
-
-    # Remove config and markdown files
-    ".clang-format",
-    ".clang-tidy",
-    ".clangd",
-    ".codecov.yml",
-    ".editorconfig",
-    "*.gitignore",
-    "*.gitmodules",
-    "CONTRIBUTING.md",
-    "pyodide.md",
-
-    # --------------- DuckDB submodule excludes
-    # Remove tests, benchmarks, tools, scripts
-    "external/duckdb/test/**",
-    "external/duckdb/benchmark/**",
-    "external/duckdb/tools/**",
-    "external/duckdb/scripts/**",
-    "external/duckdb/examples/**",
-    "external/duckdb/data/**",
-
-    # Remove documentation
-    "external/duckdb/README.md",
-    "external/duckdb/CONTRIBUTING.md",
-    "external/duckdb/CODE_OF_CONDUCT.md",
-    "external/duckdb/CITATION.cff",
-    "external/duckdb/Doxyfile",
-    "external/duckdb/Makefile",
-    "external/duckdb/logo/**",
-    "external/duckdb/extension/**/*.md",
-
-    # Remove non-essential extensions
-    "external/duckdb/extension/tpch/**",
-    "external/duckdb/extension/tpcds/**",
-    "external/duckdb/extension/demo_capi/**",
-
-    # Remove VCS and build artifacts
-    "external/duckdb/.git/**",
-    "external/duckdb/.github/**",
-    "external/duckdb/.gitignore",
-    "external/duckdb/.gitattributes",
-    "external/duckdb/.gitmodules",
-    "external/duckdb/build/**",
-
-    # Remove large data files
-    "external/duckdb/**/*.gz",
-    "external/duckdb/**/*.zip",
-    "external/duckdb/**/*.tar",
-    "external/duckdb/**/*.parquet",
-    "external/duckdb/**/*.csv",
-    "external/duckdb/**/*.json",
-    "external/duckdb/**/*.ndjson",
-    "external/duckdb/**/*.jsonl",
-    "external/duckdb/**/*.db",
-    "external/duckdb/**/*.wal",
-
-    # Remove generated/temporary files
-    "external/duckdb/**/*.pyc",
-    "external/duckdb/**/__pycache__/**",
-    "external/duckdb/**/.DS_Store",
-    "external/duckdb/**/*~",
-    "external/duckdb/**/*.swp",
-    "external/duckdb/**/*.o",
-    "external/duckdb/**/*.so",
-    "external/duckdb/**/*.dylib",
-    "external/duckdb/**/*.dll",
-    "external/duckdb/**/*.exe",
-    "external/duckdb/**/*.a",
-    "external/duckdb/**/*.lib",
-
-    # Remove IDE files
-    "external/duckdb/**/.vscode/**",
-    "external/duckdb/**/.idea/**",
-    "external/duckdb/**/*.vcxproj",
-    "external/duckdb/**/*.sln",
-    "external/duckdb/**/*.xcodeproj",
-
-    # Remove specific large generated files (only if they exist)
-    "external/duckdb/src/parser/grammar.cpp",
-    "external/duckdb/src/parser/grammar.hpp",
-    "external/duckdb/src/amalgamation/**",
 ]

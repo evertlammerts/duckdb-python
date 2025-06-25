@@ -119,6 +119,45 @@ def _read_duckdb_long_version() -> str:
     return _version_file_path().read_text(encoding="utf-8").strip()
 
 
+def _skbuild_config_add(
+        key: str, value: Union[List, str], config_settings: Dict[str, Union[List[str],str]], fail_if_exists: bool=False
+):
+    """Add the given value to the given key in the config settings for skbuild. Only for list and string-typed
+    settings.
+
+    Rules:
+    - If the value is a string and config_settings[key] is a list, the value will be appended.
+    - If the value is a string and config_settings[key] is a string, the existing value will be overridden.
+    - If the value is a list and config_settings[key] is a list, the existing list will be extended.
+    - If the value is a list and config_settings[key] is a string, we raise an exception.
+
+    Note: scikit-build-core's preference logic for config sources still applies, meaning that it considers config from
+          env vars, config_settings and pyproject, in that order, and **doesn't merge** those settings.
+    """
+    assert config_settings is not None, "config_settings must not be None"
+    store_key = key if key in config_settings else "skbuild." + key
+    key_exists = store_key in config_settings
+    key_exists_as_str = key_exists and isinstance(config_settings[store_key], str)
+    key_exists_as_list = key_exists and isinstance(config_settings[store_key], list)
+    val_is_str = isinstance(value, str)
+    val_is_list = isinstance(value, list)
+    if not key_exists:
+        config_settings[store_key] = value
+    elif fail_if_exists:
+        raise RuntimeError(f"{key} already present in config and may not be overridden")
+    elif key_exists_as_list and val_is_list:
+        config_settings[store_key].extend(value)
+    elif key_exists_as_list and val_is_str:
+        config_settings[store_key].append(value)
+    elif key_exists_as_str and val_is_str:
+        _log(f"WARNING: overriding existing value in {store_key}")
+        config_settings[store_key] = value
+    else:
+        raise RuntimeError(
+            f"Type mismatch: cannot set {store_key} ({type(config_settings[store_key])}) to `{value}` ({type(value)})"
+        )
+
+
 def build_sdist(sdist_directory: str, config_settings: Optional[Dict[str, Union[List[str],str]]] = None) -> str:
     """Build an sdist using the duckdb submoule"""
     if not _in_git_repository():
@@ -142,11 +181,8 @@ def build_wheel(
         _log("Building duckdb wheel from sdist. Reading git describe override value.")
         config_settings = config_settings or {}
         duckdb_version = _read_duckdb_long_version()
-        git_decribe_override_key = f"skbuild.{_SKBUILD_CMAKE_OVERRIDE_GIT_DESCRIBE}"
-        if _SKBUILD_CMAKE_OVERRIDE_GIT_DESCRIBE in config_settings or git_decribe_override_key in config_settings:
-            raise RuntimeError(f"{_SKBUILD_CMAKE_OVERRIDE_GIT_DESCRIBE} already set, can't build a wheel.")
-        config_settings[git_decribe_override_key] = duckdb_version
-        _log(f"{git_decribe_override_key} set to {duckdb_version}")
+        _skbuild_config_add(_SKBUILD_CMAKE_OVERRIDE_GIT_DESCRIBE, duckdb_version, config_settings, fail_if_exists=True)
+        _log(f"{_SKBUILD_CMAKE_OVERRIDE_GIT_DESCRIBE} set to {duckdb_version}")
     else:
         _log(f"Building wheel from git repository")
 

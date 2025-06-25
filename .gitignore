@@ -43,7 +43,6 @@ cmake_build
 cmake-build-debug
 cmake-build-release
 cmake-build-relwithdebinfo
-extracted
 duckdb_packaging/duckdb_version.txt
 
 #==============================================================================#
