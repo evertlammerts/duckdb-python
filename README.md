@@ -1,42 +1,51 @@
-# DuckDB Python package
+<div align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/duckdb/duckdb/refs/heads/main/logo/DuckDB_Logo-horizontal.svg">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/duckdb/duckdb/refs/heads/main/logo/DuckDB_Logo-horizontal-dark-mode.svg">
+    <img alt="DuckDB logo" src="https://raw.githubusercontent.com/duckdb/duckdb/refs/heads/main/logo/DuckDB_Logo-horizontal.svg" height="100">
+  </picture>
+</div>
+<br />
+<p align="center">
+  <a href="https://discord.gg/tcvwpjfnZx"><img src="https://shields.io/discord/909674491309850675" alt="discord" /></a>
+  <a href="https://pypi.org/project/duckdb/"><img src="https://img.shields.io/pypi/v/duckdb.svg" alt="PyPi Latest Release"/></a>
+</p>
+<br />
+<p align="center">
+  <a href="https://duckdb.org">DuckDB.org</a>
+  |
+  <a href="https://duckdb.org/docs/stable/guides/python/install">User Guide (Python)</a>
+  -
+  <a href="https://duckdb.org/docs/stable/clients/python/overview">API Docs (Python)</a>
+</p>
 
-## Where to get it
+# DuckDB: A Fast, In-Process, Portable, Open Source, Analytical Database System
 
-You can install the latest release of DuckDB directly from [PyPi](https://pypi.org/project/duckdb/):
+* **Simple**: DuckDB is easy to install and deploy. It has zero external dependencies and runs in-process in its host application or as a single binary.
+* **Portable**: DuckDB runs on Linux, macOS, Windows, Android, iOS and all popular hardware architectures. It has idiomatic client APIs for major programming languages.
+* **Feature-rich**: DuckDB offers a rich SQL dialect. It can read and write file formats such as CSV, Parquet, and JSON, to and from the local file system and remote endpoints such as S3 buckets.
+* **Fast**: DuckDB runs analytical queries at blazing speed thanks to its columnar engine, which supports parallel execution and can process larger-than-memory workloads.
+* **Extensible**: DuckDB is extensible by third-party features such as new data types, functions, file formats and new SQL syntax. User contributions are available as community extensions.
+* **Free**: DuckDB and its core extensions are open-source under the permissive MIT License. The intellectual property of the project is held by the DuckDB Foundation.
+
+## Installation
+
+Install the latest release of DuckDB directly from [PyPi](https://pypi.org/project/duckdb/):
 
 ```bash
 pip install duckdb
 ```
 
-## Documentation
+Install with all optional dependencies:
 
-[DuckDB.org](https://duckdb.org) is a great resource for documentation:
-* We recommend the [Python user guide](https://duckdb.org/docs/stable/guides/python/install) to get started.
-* And make sure to check out [the latest API documentation](https://duckdb.org/docs/stable/clients/python/overview).
-
-## Getting Help
-
-See the [DuckDB Community Support Policy](https://duckdblabs.com/community_support_policy/). DuckDB Labs also provides [custom support](https://duckdblabs.com/#support).
-
-## Build Configuration Reference
-
-The module includes a custom PEP 517/660 build backend in `duckdb_packaging.build_backend`. This backend prepares sdist and wheel builds before handing off to scikit-build-core.
-
-The following build settings can be used in pyproject.toml:
-
-| Setting                                  | Type | Default | Description                                                                                                                                                                                                 |
-|------------------------------------------|------|---------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `tool.duckdb.extensions`                 | list | []      | DuckDB extensions to compile into the package.                                                                                                                                                              |
-| `tool.duckdb.sdist.duckdb_src_target`    | str  |         | The path to a directory to store duckdb source files that will be included in the sdist. **Required** for building wheels and sdists.                                                                       |
-| `tool.duckdb.sdist.include_line_numbers` | bool | False   | Include line numbers in the unity build. You may want to set this to true if you want to build e.g. a debug version for lldb with a source map for duckdb.                                                  |
-| `tool.duckdb.sdist.unity_count`          | int  | 32      | The amount of unity source files to create. You might want to change the default amount created if you want e.g. an amalgamated file, or more control over the parallelism of the build.                    |
-| `tool.duckdb.sdist.short_paths`          | bool | False   | Use short paths in the unity build. You may want to use this if you're on a platform that has command length limitations (like Windows) _and_ scikit-build-core doesn't or can't use Ninja for some reason. |
+```bash
+pip install 'duckdb[all]'
+```
 
 ## Versioning and Releases
 
 The DuckDB Python package versioning and release scheme follows that of DuckDB itself. This means that a `X.Y.Z[.
-postN]` stable release of the Python package ships the DuckDB stable release `X.Y.Z`. The optional `.postN` releases 
-ship the same stable release of DuckDB as their predecessors plus Python package-specific fixes and / or features.
+postN]` release of the Python package ships the DuckDB stable release `X.Y.Z`. The optional `.postN` releases ship the same stable release of DuckDB as their predecessors plus Python package-specific fixes and / or features.
 
 | Types                                                                  | DuckDB Version | Resulting Python Extension Version |
 |------------------------------------------------------------------------|----------------|------------------------------------|
@@ -46,6 +55,8 @@ ship the same stable release of DuckDB as their predecessors plus Python package
 | Nightly minor: DuckDB next minor nightly + Python next minor nightly   | `1.4.0.devM`   | `1.4.0.devN`                       |
 
 Note that we do not ship nightly post releases (e.g. we don't ship `1.3.1.post2.dev3`).
+
+## Contributing
 
 ### Branch and Tag Strategy
 

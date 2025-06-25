@@ -6,16 +6,28 @@ readme = "README.md"
 keywords = ["DuckDB", "Database", "SQL", "OLAP"]
 requires-python = ">=3.9.0"
 classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Database",
     "Topic :: Database :: Database Engines/Servers",
+    "Topic :: Scientific/Engineering",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License"
+    "Intended Audience :: Education",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: C++",
 ]
-authors = [
-    {name = "DuckDB Labs", email = "info@duckdblabs.nl"}
-]
-maintainers = [
-    {name = "DuckDB Labs", email = "info@duckdblabs.nl"}
-]
+authors = [{name = "DuckDB Labs", email = "info@duckdblabs.nl"}]
+maintainers = [{name = "DuckDB Labs", email = "info@duckdblabs.nl"}]
 
 [project.urls]
 Documentation = "https://duckdb.org/docs/stable/clients/python/overview"
@@ -141,9 +153,6 @@ scripts = [ # dependencies used for running scripts
     "pyarrow",
     "pytz"
 ]
-sqllogic = [ # dependencies used for running sqllogic
-    "pytest",
-]
 duckdb_packaging = [ # dependencies used for using included packaging tooling
     "scikit_build_core",
     "setuptools_scm>=8.0"
@@ -155,7 +164,6 @@ dev = [ # tooling like uv will install this automatically when syncing the envir
     {include-group = "stubdeps"},
     {include-group = "test"},
     {include-group = "scripts"},
-    {include-group = "sqllogic"},
     {include-group = "duckdb_packaging"},
     {include-group = "build"},
 ]
