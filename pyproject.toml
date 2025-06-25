@@ -114,6 +114,62 @@ exclude = [
     "/.*",
 ]
 
+[tool.ruff]
+line-length = 88
+indent-width = 4
+target-version = "py39"
+fix = true
+fixable = ["ALL"]
+exclude = ['external/duckdb']
+
+[tool.ruff.lint]
+select = [
+    "ANN", # flake8-annotations
+    "B", # flake8-bugbear
+    "C4", # flake8-comprehensions
+    "D", # flake8-docstrings
+    "E", # pycodestyle
+    "EM", # flake8-errmsg
+    "F", # pyflakes
+    "FA", # flake8-future-annotations
+    "FBT001", # flake8-boolean-trap
+    "I", # isort
+    "ICN", # flake8-import-conventions
+    "INT", # flake8-gettext
+    "PERF", # perflint
+    "PIE", # flake8-pie
+    "PT", # flake8-pytest-style
+    "PTH", # flake8-use-pathlib
+    "PYI", # flake8-pyi
+    "RUF", # ruff-specific rules
+    "SIM", # flake8-simplify
+    "TCH", # flake8-type-checking
+    "TD", # flake8-todos
+    "TID", # flake8-tidy-imports
+    "TRY", # tryceratops
+    "UP", # pyupgrade
+    "W", # pycodestyle
+]
+ignore = []
+
+[tool.ruff.lint.pycodestyle]
+max-doc-length = 88
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.flake8-type-checking]
+strict = true
+
+[tool.ruff.format]
+docstring-code-format = true
+docstring-code-line-length = 88
+quote-style = "double"
+indent-style = "space"
+
 [dependency-groups] # used for development only, requires pip >=25.1.0
 stubdeps = [ # dependencies used for typehints in the stubs
     "fsspec",
