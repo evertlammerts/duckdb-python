@@ -6,8 +6,7 @@ import signal
 import sys
 from typing import Any, Generator, Optional
 
-script_path = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.join(script_path, '..', '..', '..', 'scripts'))
+sys.path.append(str(pathlib.Path(__file__).parent.parent / 'external' / 'duckdb' / 'scripts'))
 from sqllogictest import (
     SQLParserException,
     SQLLogicParser,
