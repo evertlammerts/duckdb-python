@@ -113,39 +113,14 @@ jobs:
     name: Build ${{ matrix.py3_version }} wheels for ${{ matrix.platform }} on ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-latest, windows-latest, macos-13, macos-14 ]
-        py3_version: [ cp39, cp310, cp311, cp312, cp313 ]
-        platform: [ manylinux, macosx, win ]
+        python: [ cp39, cp310, cp311, cp312, cp313 ]
         include:
-          - platform: manylinux
-            arch: x86_64
-          - platform: manylinux
-            arch: aarch64
-          - platform: macosx
-            arch: x86_64
-          - platform: macosx
-            arch: arm64
-          - platform: macosx
-            arch: universal2
-          - platform: windows
-            arch: amd64
-        exclude:
-          - os: ubuntu-latest
-            platform: macosx
-          - os: ubuntu-latest
-            platform: win
-          - os: windows-latest
-            platform: manylinux
-          - os: windows-latest
-            platform: macosx
-          - os: macos-13
-            platform: manylinux
-          - os: macos-13
-            platform: win
-          - os: macos-14
-            platform: manylinux
-          - os: macos-14
-            platform: win
+          - { os: windows-latest, arch: amd64 }
+          - { os: ubuntu-latest,  arch: x86_64 }
+          - { os: ubuntu-latest,  arch: aarch64 }
+          - { os: macos-14,       arch: x86_64 }
+          - { os: macos-14,       arch: arm64 }
+          - { os: macos-14,       arch: universal2 }
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -157,13 +132,15 @@ jobs:
           git submodule update --init external/duckdb
 
       - uses: astral-sh/setup-uv@v1
-        with:
-          version: "0.7.14"
+        with: { version: "0.7.14" }
 
       - name: Build wheels
         uses: pypa/cibuildwheel@v3.0
         env:
-          CIBW_BUILD: "${{ matrix.py3_version }}-${{ matrix.platform }}_${{ matrix.arch }}"
+          CIBW_PLATFORM: ${{ matrix.os == 'ubuntu-latest' && 'manylinux' ||
+                             matrix.os == 'macos-14'      && 'macosx' ||
+                                                             'win' }}
+          CIBW_BUILD: ${{ matrix.py3_version }}-${{ env.CIBW_PLATFORM }}_${{ matrix.arch }}
           CIBW_TEST_SKIP: "*"
 
       - uses: actions/upload-artifact@v4
