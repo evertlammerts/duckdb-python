@@ -193,11 +193,15 @@ build = [
 ]
 build-frontend = "build[uv]"
 test-skip = "*"
-manylinux_x86_64-image = "manylinux_2_28"
+manylinux-x86_64-image = "manylinux_2_28"
 manylinux-pypy_x86_64-image = "manylinux_2_28"
 manylinux-aarch64-image = "manylinux_2_28"
 manylinux-pypy_aarch64-image = "manylinux_2_28"
 
+[tool.cibuildwheel.linux]
+before-build = [
+    "yum install -y ccache",
+]
 
 ###################################################
 # Dependency groups config (use `--group dev` to install all)
