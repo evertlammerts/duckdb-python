@@ -122,6 +122,13 @@ jobs:
         name: sdist-main
         path: sdist/
 
+    - name: Find sdist file
+      id: find-sdist
+      run: |
+        cd sdist/
+        SDIST_FILE=$(find . -name "*.tar.gz" | head -1)
+        echo "sdist-file=$SDIST_FILE" >> $GITHUB_OUTPUT
+
     - name: Build wheels from sdist
       uses: pypa/cibuildwheel@v2.16.5
       env:
@@ -130,7 +137,7 @@ jobs:
         # No testing during wheel build
         CIBW_TEST_SKIP: "*"
       with:
-        package-dir: sdist/
+        package-dir: sdist/${{ steps.find-sdist.outputs.sdist-file }}
 
     - uses: actions/upload-artifact@v4
       with:
