@@ -198,6 +198,9 @@ before-build = [
     "yum install -y ccache",
 ]
 
+[tool.cibuildwheel.macos]
+archs = "x86_64 universal2 arm64"
+
 ###################################################
 # Dependency groups config (use `--group dev` to install all)
 ###################################################

@@ -136,7 +136,6 @@ jobs:
       - name: Build wheels
         uses: pypa/cibuildwheel@v3.0
         env:
-          CIBW_ARCHS_MACOS: ${{ matrix.arch }}
           CIBW_BUILD: ${{ matrix.python }}-${{
               matrix.os == 'ubuntu-latest' && 'manylinux' ||
               matrix.os == 'macos-latest'  && 'macosx' ||
