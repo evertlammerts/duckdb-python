@@ -52,7 +52,7 @@ _duckdb_set_default(EXTENSION_STATIC_BUILD ON)
 _duckdb_set_default(DISABLE_BUILTIN_EXTENSIONS OFF)
 
 # Performance options - enable optimizations by default
-_duckdb_set_default(NATIVE_ARCH ON)
+_duckdb_set_default(NATIVE_ARCH OFF)
 
 # Debug options - off by default for release builds
 _duckdb_set_default(ENABLE_SANITIZER OFF)
