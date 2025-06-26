@@ -120,7 +120,7 @@ jobs:
           - { os: ubuntu-latest,  arch: aarch64 }
           - { os: macos-14,   arch: arm64 }
           - { os: macos-13,   arch: x86_64 }
-          - { os: macos-latest,   arch: universal2 }
+          - { os: macos-13,   arch: universal2 }
     runs-on: ${{ matrix.os }}
 
     steps:
