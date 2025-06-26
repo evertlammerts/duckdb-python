@@ -111,7 +111,6 @@ jobs:
 
   build_main_wheels:
     name: Build ${{ matrix.py3_version }} wheels for ${{ matrix.platform }} on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os: [ ubuntu-latest, windows-latest, macos-13, macos-14 ]
@@ -147,6 +146,8 @@ jobs:
             platform: manylinux
           - os: macos-14
             platform: win
+    runs-on: ${{ matrix.os }}
+
     steps:
       - uses: actions/checkout@v4
 
