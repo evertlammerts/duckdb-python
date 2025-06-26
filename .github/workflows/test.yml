@@ -97,6 +97,9 @@ jobs:
         git checkout ${{ needs.determine-branches.outputs.duckdb-main-branch }}
 
     - uses: astral-sh/setup-uv@v1
+      with:
+        version: "0.7.14"
+
     - name: Build sdist
       run: uv build --sdist
 
