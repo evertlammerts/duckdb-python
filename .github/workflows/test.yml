@@ -137,9 +137,9 @@ jobs:
         uses: pypa/cibuildwheel@v3.0
         env:
           CIBW_BUILD: ${{ matrix.python }}-${{
-              matrix.os == 'ubuntu-latest' && 'manylinux' ||
-              matrix.os == 'macos-latest'  && 'macosx' ||
-                                              'win'
+              matrix.os == 'ubuntu-latest'  && 'manylinux' ||
+              matrix.os == 'windows-latest' && 'win' ||
+                                               'macosx'
             }}_${{ matrix.arch }}
           CIBW_TEST_SKIP: "*"
 
