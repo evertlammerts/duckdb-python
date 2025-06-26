@@ -79,59 +79,96 @@ jobs:
     runs-on: ubuntu-latest
     steps:
 
-    - uses: actions/checkout@v4
-      with:
-        ref: ${{ needs.determine-branches.outputs.main-branch }}
-        fetch-depth: 0
-        submodules: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.determine-branches.outputs.main-branch }}
+          fetch-depth: 0
+          submodules: false
 
-    - name: Initialize submodule
-      shell: bash
-      run: |
-        git submodule update --init external/duckdb
+      - name: Initialize submodule
+        shell: bash
+        run: |
+          git submodule update --init external/duckdb
 
-    - name: Checkout DuckDB main branch
-      shell: bash
-      run: |
-        cd external/duckdb
-        git fetch origin
-        git checkout ${{ needs.determine-branches.outputs.duckdb-main-branch }}
+      - name: Checkout DuckDB main branch
+        shell: bash
+        run: |
+          cd external/duckdb
+          git fetch origin
+          git checkout ${{ needs.determine-branches.outputs.duckdb-main-branch }}
 
-    - uses: astral-sh/setup-uv@v1
-      with:
-        version: "0.7.14"
+      - uses: astral-sh/setup-uv@v1
+        with:
+          version: "0.7.14"
 
-    - name: Build sdist
-      run: uv build --sdist
+      - name: Build sdist
+        run: uv build --sdist
 
-    - uses: actions/upload-artifact@v4
-      with:
-        name: sdist-main
-        path: dist/*.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist-main
+          path: dist/*.tar.gz
 
   build_main_wheels:
-    name: Build main branch wheels
+    name: Build ${{ matrix.py3_version }} wheels for ${{ matrix.platform }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os: [ ubuntu-latest, windows-latest, macos-13, macos-14 ]
+        py3_version: [ cp39, cp310, cp311, cp312, cp313 ]
+        platform: [ manylinux, macosx, win ]
+        include:
+          - platform: manylinux
+            arch: x86_64
+          - platform: manylinux
+            arch: aarch64
+          - platform: macosx
+            arch: x86_64
+          - platform: macosx
+            arch: arm64
+          - platform: macosx
+            arch: universal2
+          - platform: windows
+            arch: amd64
+        exclude:
+          - os: ubuntu-latest
+            platform: macosx
+          - os: ubuntu-latest
+            platform: win
+          - os: windows-latest
+            platform: manylinux
+          - os: windows-latest
+            platform: macosx
+          - os: macos-13
+            platform: manylinux
+          - os: macos-13
+            platform: win
+          - os: macos-14
+            platform: manylinux
+          - os: macos-14
+            platform: win
     steps:
+      - uses: actions/checkout@v4
 
-    - uses: astral-sh/setup-uv@v1
-      with:
-        version: "0.7.14"
+      - name: Initialize submodule
+        shell: bash
+        run: |
+          git submodule update --init external/duckdb
 
-    - name: Build wheels from sdist
-      uses: pypa/cibuildwheel@v3.0
-      env:
-        CIBW_BUILD: "cp39-* cp310-* cp311-* cp312-* cp313-*"
-        CIBW_BUILD_FRONTEND: "build[uv]"
-        CIBW_TEST_SKIP: "*"
+      - uses: astral-sh/setup-uv@v1
+        with:
+          version: "0.7.14"
 
-    - uses: actions/upload-artifact@v4
-      with:
-        name: wheels-${{ matrix.os }}
-        path: wheelhouse/*.whl
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v3.0
+        env:
+          CIBW_BUILD: "${{ matrix.py3_version }}-${{ matrix.platform }}_${{ matrix.arch }}"
+          CIBW_TEST_SKIP: "*"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
 
   summary:
     name: Build Summary
