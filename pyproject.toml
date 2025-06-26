@@ -187,13 +187,7 @@ indent-style = "space"
 # CI config
 ###################################################
 [tool.cibuildwheel]
-build = [
-    "cp3{9..13}-macosx_{x86_64,arm64,universal2}",
-    "cp3{9..13}-manylinux_{x86_64,aarch64}",
-    "cp3{9..13}-win_amd64",
-]
 build-frontend = "build[uv]"
-test-skip = "*"
 manylinux-x86_64-image = "manylinux_2_28"
 manylinux-pypy_x86_64-image = "manylinux_2_28"
 manylinux-aarch64-image = "manylinux_2_28"
