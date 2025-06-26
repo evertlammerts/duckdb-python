@@ -1,0 +1,145 @@
+name: Build SDists
+on:
+  push:
+    branches:
+      - main
+      - 'v1.[0-9]+-*'
+    paths:
+      - .github/workflows/test.yml
+      - pyproject.toml
+      - adbc_driver_duckdb/**
+      - duckdb/**
+      - duckdb_packaging/**
+      - src/duckdb_py/**
+      - tests/**
+  pull_request:
+    paths:
+      - .github/workflows/test.yml
+      - pyproject.toml
+      - adbc_driver_duckdb/**
+      - duckdb/**
+      - duckdb_packaging/**
+      - src/duckdb_py/**
+      - tests/**
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  determine_branches:
+    name: Determine Branches
+    runs-on: ubuntu-latest
+    outputs:
+      main-branch: ${{ steps.branches.outputs.main-branch }}
+      minor-version-branch: ${{ steps.branches.outputs.minor-version-branch }}
+      duckdb-main-branch: ${{ steps.branches.outputs.duckdb-main-branch }}
+      duckdb-minor-version-branch: ${{ steps.branches.outputs.duckdb-minor-version-branch }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        submodules: false
+
+    - name: Determine branches to build
+      id: branches
+      shell: bash
+      run: |
+        # Main branch is always 'main'
+        echo "main-branch=main" >> $GITHUB_OUTPUT
+        echo "duckdb-main-branch=main" >> $GITHUB_OUTPUT
+        
+        # Find latest minor version branch in format v1.[0-9]+-[a-z]+
+        find_branch() {
+          git branch -r | grep -E "origin/v1\.[0-9]+-[a-z]+$" | sed "s/[ ]*origin\///" | sort -V | tail -1
+        }
+        MINOR_BRANCH=$(find_branch)
+        if [ -z "$MINOR_BRANCH" ]; then
+          echo "No minor version branch found, using main"
+          echo "minor-version-branch=main" >> $GITHUB_OUTPUT
+          echo "duckdb-minor-version-branch=main" >> $GITHUB_OUTPUT
+        else
+          echo "minor-version-branch=$MINOR_BRANCH" >> $GITHUB_OUTPUT
+          
+          # Find corresponding DuckDB submodule branch
+          cd external/duckdb
+          git fetch origin
+          DUCKDB_MINOR_BRANCH=$(find_branch)
+          if [ -z "$DUCKDB_MINOR_BRANCH" ]; then
+            echo "No corresponding DuckDB minor version branch found, using main"
+            echo "duckdb-minor-version-branch=main" >> $GITHUB_OUTPUT
+          else
+            echo "duckdb-minor-version-branch=$DUCKDB_MINOR_BRANCH" >> $GITHUB_OUTPUT
+          fi
+        fi
+
+  build_main_sdist:
+    name: Build SDist of Main Branch
+    needs: determine_branches
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ needs.determine-branches.outputs.main-branch }}
+        fetch-depth: 0
+        submodules: false
+
+    - name: Initialize submodule
+      shell: bash
+      run: |
+        git submodule update --init external/duckdb
+
+    - name: Checkout DuckDB main branch
+      shell: bash
+      run: |
+        cd external/duckdb
+        git fetch origin
+        git checkout ${{ needs.determine-branches.outputs.duckdb-main-branch }}
+
+    - uses: astral-sh/setup-uv@v1
+    - name: Build sdist
+      run: uv build --sdist
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: sdist-main
+        path: dist/*.tar.gz
+
+  build_wheels:
+    needs: build_main_sdist
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ ubuntu-latest, windows-latest, macos-13, macos-14 ]
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        name: sdist
+        path: sdist/
+    - name: Build wheels from sdist
+      uses: pypa/cibuildwheel@v2.16.5
+      env:
+        CIBW_BUILD: "cp39-* cp310-* cp311-* cp312-* cp313-*"
+        CIBW_BUILD_FRONTEND: "build[uv]"
+        # No testing during wheel build
+        CIBW_TEST_SKIP: "*"
+      with:
+        package-dir: sdist/
+    - uses: actions/upload-artifact@v4
+      with:
+        name: wheels-${{ matrix.os }}
+        path: wheelhouse/*.whl
+
+  summary:
+    name: Build Summary
+    runs-on: ubuntu-latest
+    needs: [determine_branches, build_main_sdist]
+    if: always()
+    steps:
+      - name: Summary
+        shell: bash
+        run: |
+          echo "## SDist Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- Main branch: ${{ needs.determine-branches.outputs.main-branch }}" >> $GITHUB_STEP_SUMMARY
+          echo "- DuckDB main branch: ${{ needs.determine-branches.outputs.duckdb-main-branch }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Main SDist build: ${{ needs.build-main-sdist.result }}" >> $GITHUB_STEP_SUMMARY

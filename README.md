@@ -147,3 +147,5 @@ versioning scheme.
 
 * Follow the [Google Python styleguide](https://google.github.io/styleguide/pyguide.html)
   * See the section on [Comments and Docstrings](https://google.github.io/styleguide/pyguide.html#s3.8-comments-and-docstrings)
+* cibuildwheel:
+  * `CIBW_BUILD='cp39-*' uvx cibuildwheel --platform linux .`

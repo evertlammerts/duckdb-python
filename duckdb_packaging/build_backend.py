@@ -224,7 +224,7 @@ def build_sdist(sdist_directory: str, config_settings: Optional[Dict[str, Union[
 
 def build_wheel(
         wheel_directory: str,
-        config_settings: Optional[Dict[str, List[str]|str]] = None,
+        config_settings: Optional[Dict[str, Union[List[str],str]]] = None,
         metadata_directory: Optional[str] = None,
 ) -> str:
     """Build a wheel from either git submodule or extracted sdist sources.

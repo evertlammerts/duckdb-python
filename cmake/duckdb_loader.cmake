@@ -58,7 +58,6 @@ _duckdb_set_default(NATIVE_ARCH ON)
 _duckdb_set_default(ENABLE_SANITIZER OFF)
 _duckdb_set_default(DEBUG_ALLOCATION OFF)
 _duckdb_set_default(FORCE_ASSERT OFF)
-_duckdb_set_default(JEMALLOC_DEBUG OFF)
 
 # Convert to cache variables for CMake GUI/ccmake compatibility
 set(DUCKDB_SOURCE_PATH "${DUCKDB_SOURCE_PATH}" CACHE PATH "Path to DuckDB source directory")
@@ -73,7 +72,6 @@ set(NATIVE_ARCH "${NATIVE_ARCH}" CACHE BOOL "Optimize for native architecture")
 set(ENABLE_SANITIZER "${ENABLE_SANITIZER}" CACHE BOOL "Enable AddressSanitizer")
 set(DEBUG_ALLOCATION "${DEBUG_ALLOCATION}" CACHE BOOL "Enable allocation tracking (slow)")
 set(FORCE_ASSERT "${FORCE_ASSERT}" CACHE BOOL "Enable assertions in release builds")
-set(JEMALLOC_DEBUG "${JEMALLOC_DEBUG}" CACHE BOOL "Allow jemalloc on non-Linux platforms for debugging")
 
 # ════════════════════════════════════════════════════════════════════════════════
 # Internal Functions
@@ -85,30 +83,22 @@ function(_duckdb_validate_jemalloc_config)
         return()
     endif()
 
-    set(is_release_build FALSE)
-    if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
-        set(is_release_build TRUE)
-    endif()
-
+    # If we're on Linux then using jemalloc is fine, otherwise we only allow it in debug builds
     if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        if(JEMALLOC_DEBUG)
-            if(is_release_build)
-                message(FATAL_ERROR
-                        "jemalloc extension cannot be used on ${CMAKE_SYSTEM_NAME} in release builds.\n"
-                        "jemalloc is only supported on Linux for production use.\n"
-                        "Either remove 'jemalloc' from CORE_EXTENSIONS or use a debug build type.")
-            else()
-                message(WARNING
-                        "jemalloc extension enabled on ${CMAKE_SYSTEM_NAME} with JEMALLOC_DEBUG=ON.\n"
-                        "This is only recommended for debugging purposes.\n"
-                        "jemalloc is officially supported only on Linux.")
-            endif()
+        set(is_debug_build FALSE)
+        if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+            set(is_debug_build TRUE)
+        endif()
+        if(is_debug_build)
+            message(WARNING
+                    "jemalloc extension enabled on ${CMAKE_SYSTEM_NAME} in Debug build.\n"
+                    "This is only recommended for debugging purposes.\n"
+                    "jemalloc is officially supported only on Linux.")
         else()
             message(WARNING
-                    "jemalloc extension is not supported on ${CMAKE_SYSTEM_NAME}.\n"
+                    "jemalloc extension is only supported on ${CMAKE_SYSTEM_NAME} in Debug builds.\n"
                     "Removing jemalloc from extension list.\n"
-                    "jemalloc is only supported on Linux.")
-
+                    "In non-debug builds, jemalloc is only supported on Linux.")
             # Remove jemalloc from the extension list
             string(REPLACE "jemalloc" "" CORE_EXTENSIONS_FILTERED "${CORE_EXTENSIONS}")
             string(REGEX REPLACE ";+" ";" CORE_EXTENSIONS_FILTERED "${CORE_EXTENSIONS_FILTERED}")

@@ -38,18 +38,11 @@ endif()
 # ────────────────────────────────────────────
 # Dependencies
 # ────────────────────────────────────────────
-find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
-message(STATUS "CPython executable: ${Python3_EXECUTABLE}")
-message(STATUS "CPython include dirs: ${Python3_INCLUDE_DIRS}")
-message(STATUS "CPython libraries: ${Python3_LIBRARIES}")
+# PyBind11
 find_package(pybind11 REQUIRED CONFIG)
 
-# ────────────────────────────────────────────
-# Include DuckDB source
-# ────────────────────────────────────────────
-# Load duckdb loader module
+# DuckDB
 include(cmake/duckdb_loader.cmake)
-
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   duckdb_configure_for_debug()
 else()
@@ -57,17 +50,13 @@ else()
 endif()
 duckdb_add_library(duckdb_target)
 
-# ────────────────────────────────────────────
-# INTERFACE library that **only** carries dependencies
-# ────────────────────────────────────────────
+# Bundle in INTERFACE library
 add_library(_duckdb_dependencies INTERFACE)
-
-# All the imported dependency targets: they bring their own include dirs and compile definitions automatically.
 target_link_libraries(_duckdb_dependencies INTERFACE
-        Python3::Python # defined by FindPython3
-        pybind11::pybind11 # defined by pybind11Config.cmake
+        pybind11::pybind11
         duckdb_target
 )
+# Also add include directory
 target_include_directories(_duckdb_dependencies INTERFACE
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/duckdb_py/include>
 )

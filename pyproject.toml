@@ -50,7 +50,7 @@ build-backend = "duckdb_packaging.build_backend"
 backend-path = ["./"]
 requires = [
     "scikit-build-core",
-	"pybind11>=2.6.0",
+	"pybind11[global]>=2.6.0",
     "setuptools_scm>=8.0",
 ]
 
@@ -215,7 +215,7 @@ duckdb_packaging = [ # dependencies used for using included packaging tooling
 ]
 build = ["pipx"]
 dev = [ # tooling like uv will install this automatically when syncing the environment
-    "pybind11[global]>=2.6.0",
+    "pybind11>=2.6.0",
     "ruff>=0.11.13",
     {include-group = "stubdeps"},
     {include-group = "test"},
