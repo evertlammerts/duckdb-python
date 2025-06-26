@@ -137,7 +137,11 @@ jobs:
       - name: Build wheels
         uses: pypa/cibuildwheel@v3.0
         env:
-          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.os == 'ubuntu-latest' && 'manylinux' || '*'}}_${{ matrix.arch }}
+          CIBW_BUILD: ${{ matrix.python }}-${
+            { matrix.os == 'ubuntu-latest' && 'manylinux' ||
+              matrix.os == 'macos-14'      && 'macosx' ||
+                                              'win' }
+            }_${{ matrix.arch }}
           CIBW_TEST_SKIP: "*"
 
       - uses: actions/upload-artifact@v4
