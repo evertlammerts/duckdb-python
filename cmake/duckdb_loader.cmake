@@ -161,6 +161,7 @@ function(_duckdb_print_summary)
     message(STATUS "  Build Type: ${CMAKE_BUILD_TYPE}")
     message(STATUS "  Static Extensions: ${EXTENSION_STATIC_BUILD}")
     message(STATUS "  Native Arch: ${NATIVE_ARCH}")
+    message(STATUS "  Unity Build Disabled: ${DISABLE_UNITY}")
 
     if(CORE_EXTENSIONS)
         message(STATUS "  Extensions: ${CORE_EXTENSIONS}")

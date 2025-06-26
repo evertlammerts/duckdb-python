@@ -1,3 +1,9 @@
+# pyproject.toml: contains most project, build, linting, formatting and ci configuration
+
+###################################################
+# General project config
+###################################################
+
 [project]
 name = "duckdb"
 dynamic = ["version"]
@@ -44,6 +50,10 @@ all = [ # users can install duckdb with 'duckdb[all]', which will install this l
     "pyarrow", # used for pyarrow support
     "adbc_driver_manager", # for the adbc driver (TODO: this should live under the duckdb package)
 ]
+
+###################################################
+# Build config (scikit-build-core, cmake)
+###################################################
 
 [build-system]
 build-backend = "duckdb_packaging.build_backend"
@@ -114,6 +124,9 @@ exclude = [
     "/.*",
 ]
 
+###################################################
+# Ruff config (linting and formatting)
+###################################################
 [tool.ruff]
 line-length = 88
 indent-width = 4
@@ -170,6 +183,25 @@ docstring-code-line-length = 88
 quote-style = "double"
 indent-style = "space"
 
+###################################################
+# CI config
+###################################################
+[tool.cibuildwheel]
+build = [
+    "cp3{9..13}-macosx_{x86_64,arm64,universal2}",
+    "cp3{9..13}-manylinux_{x86_64,aarch64}",
+]
+build-frontend = "build[uv]"
+test-skip = "*"
+manylinux_x86_64-image = "manylinux_2_28"
+manylinux-pypy_x86_64-image = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"
+manylinux-pypy_aarch64-image = "manylinux_2_28"
+
+
+###################################################
+# Dependency groups config (use `--group dev` to install all)
+###################################################
 [dependency-groups] # used for development only, requires pip >=25.1.0
 stubdeps = [ # dependencies used for typehints in the stubs
     "fsspec",
@@ -213,7 +245,10 @@ duckdb_packaging = [ # dependencies used for using included packaging tooling
     "scikit_build_core",
     "setuptools_scm>=8.0"
 ]
-build = ["pipx"]
+build = [
+    "pipx",
+    "cibuildwheel[uv]>=v3.0",
+]
 dev = [ # tooling like uv will install this automatically when syncing the environment
     "pybind11>=2.6.0",
     "ruff>=0.11.13",
