@@ -118,8 +118,8 @@ jobs:
           - { os: windows-latest, arch: amd64 }
           - { os: ubuntu-latest,  arch: x86_64 }
           - { os: ubuntu-latest,  arch: aarch64 }
-          - { os: macos-latest,   arch: arm64 }
-          - { os: macos-latest,   arch: x86_64 }
+          - { os: macos-14,   arch: arm64 }
+          - { os: macos-13,   arch: x86_64 }
           - { os: macos-latest,   arch: universal2 }
     runs-on: ${{ matrix.os }}
 
@@ -137,7 +137,7 @@ jobs:
       - name: Build wheels
         uses: pypa/cibuildwheel@v3.0
         env:
-          CIBW_ARCH: ${{ matrix.arch }}
+          CIBW_ARCHS_MACOS: ${{ matrix.arch }}
           CIBW_BUILD: ${{ matrix.python }}-${{
               matrix.os == 'ubuntu-latest' && 'manylinux' ||
               matrix.os == 'macos-latest'  && 'macosx' ||
