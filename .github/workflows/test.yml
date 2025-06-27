@@ -110,18 +110,18 @@ jobs:
           path: dist/*.tar.gz
 
   build_main_wheels:
-    name: Build ${{ matrix.python }}-${{ matrix.arch }} wheel on ${{ matrix.os }}
+    name: Build ${{ matrix.python }}-${{ matrix.platform.arch }} wheel on ${{ matrix.platform.os }}
     strategy:
       matrix:
         python: [ cp39, cp310, cp311, cp312, cp313 ]
-        include:
+        platform:
           - { os: windows-latest, arch: amd64  }
           - { os: ubuntu-latest,  arch: x86_64 }
           - { os: ubuntu-latest,  arch: aarch64 }
           - { os: macos-14,   arch: arm64 }
           - { os: macos-13,   arch: x86_64 }
           - { os: macos-13,   arch: universal2 }
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.platform.os }}
 
     steps:
       - uses: actions/checkout@v4
@@ -137,15 +137,15 @@ jobs:
         uses: pypa/cibuildwheel@v3.0
         env:
           CIBW_BUILD: ${{ matrix.python }}-${{
-              matrix.os == 'ubuntu-latest'  && 'manylinux' ||
-              matrix.os == 'windows-latest' && 'win' ||
-                                               'macosx'
-            }}_${{ matrix.arch }}
+              matrix.platform.os == 'ubuntu-latest'  && 'manylinux' ||
+              matrix.platform.os == 'windows-latest' && 'win' ||
+                                                        'macosx'
+            }}_${{ matrix.platform.arch }}
           CIBW_TEST_SKIP: "*"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wheel-${{ matrix.python }}-${{ matrix.os }}-${{ matrix.arch }}
+          name: wheel-${{ matrix.python }}-${{ matrix.platform.os }}-${{ matrix.platform.arch }}
           path: wheelhouse/*.whl
 
   summary:
