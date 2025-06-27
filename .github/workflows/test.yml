@@ -110,32 +110,23 @@ jobs:
           path: dist/*.tar.gz
 
   build_main_wheels:
-    name: Build ${{ matrix.python }}-${{ matrix.platform.arch }} wheel on ${{ matrix.platform.os }}
+    name: 'Wheel: ${{ matrix.platform.os }}-${{ matrix.platform.arch }}-${{ matrix.python }}'
     strategy:
       matrix:
         python: [ cp39, cp310, cp311, cp312, cp313 ]
         platform:
-          - { os: windows-latest,   arch: amd64,      ccache_install_cmd: 'choco install ccache'  }
-          - { os: ubuntu-latest,    arch: x86_64,     ccache_install_cmd: 'yum install -y ccache' }
-          - { os: ubuntu-24.04-arm, arch: aarch64,    ccache_install_cmd: 'yum install -y ccache' }
-          - { os: macos-15,         arch: arm64,      ccache_install_cmd: 'brew install ccache' }
-          - { os: macos-15,         arch: universal2, ccache_install_cmd: 'brew install ccache' }
-          - { os: macos-13,         arch: x86_64,     ccache_install_cmd: 'brew install ccache' }
+          - { os: windows-latest,   arch: amd64 }
+          - { os: ubuntu-latest,    arch: x86_64 }
+          - { os: ubuntu-latest,    arch: aarch64 }
+          - { os: macos-15,         arch: arm64 }
+          - { os: macos-15,         arch: universal2 }
+          - { os: macos-13,         arch: x86_64 }
     runs-on: ${{ matrix.platform.os }}
 
     steps:
       # Install Astral UV, which will be used as build-frontend for cibuildwheel
       - uses: astral-sh/setup-uv@v1
         with: { version: "0.7.14" }
-
-      # Install and configure ccache to speed up builds
-      - name: Configure ccache
-        run: |
-          ${{ matrix.platform.ccache_install_cmd }}
-          ccache --set-config=max_size=2G
-          ccache --set-config=compression=true
-          ccache --set-config=compression_level=6
-          ccache --zero-stats
 
       - uses: actions/checkout@v4
         with:
@@ -146,6 +137,7 @@ jobs:
       - name: Build wheels
         uses: pypa/cibuildwheel@v3.0
         env:
+          CIBW_ARCHS: ${{ matrix.platform.arch }}
           CIBW_BUILD: ${{ matrix.python }}-${{
               matrix.platform.os == 'ubuntu-latest'  && 'manylinux' ||
               matrix.platform.os == 'windows-latest' && 'win' ||
