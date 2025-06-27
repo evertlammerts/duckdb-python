@@ -194,18 +194,16 @@ manylinux-aarch64-image = "manylinux_2_28"
 manylinux-pypy_aarch64-image = "manylinux_2_28"
 
 [tool.cibuildwheel.linux]
-before-build = [
-    "yum install -y ccache",
-]
+archs = "x86_64 aarch64"
+before-build = ["yum install -y ccache"]
 
 [tool.cibuildwheel.macos]
 archs = "x86_64 universal2 arm64"
-
-[tool.cibuildwheel.linux]
-archs = "x86_64 aarch64"
+before-build = ["brew install ccache"]
 
 [tool.cibuildwheel.windows]
 archs = "amd64"
+before-build = ["choco install ccache"]
 
 ###################################################
 # Dependency groups config (use `--group dev` to install all)

@@ -124,14 +124,28 @@ jobs:
     runs-on: ${{ matrix.platform.os }}
 
     steps:
+      - uses: astral-sh/setup-uv@v1
+        with: { version: "0.7.14" }
+
+      - name: Configure ccache
+        run: |
+          ccache --set-config=cache_dir=${{ github.workspace }}/.ccache
+          ccache --set-config=max_size=2G
+          ccache --set-config=compression=true
+          ccache --set-config=compression_level=6
+          ccache --zero-stats
+
+      - name: Cache ccache across builds of the same git hash
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-${{ matrix.python }}-${{ matrix.platform.os }}-${{ matrix.platform.arch }}-${{ github.sha }}
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.determine-branches.outputs.main-branch }}
           fetch-depth: 0
           submodules: true
-
-      - uses: astral-sh/setup-uv@v1
-        with: { version: "0.7.14" }
 
       - name: Build wheels
         uses: pypa/cibuildwheel@v3.0
