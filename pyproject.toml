@@ -201,6 +201,12 @@ before-build = [
 [tool.cibuildwheel.macos]
 archs = "x86_64 universal2 arm64"
 
+[tool.cibuildwheel.linux]
+archs = "x86_64 aarch64"
+
+[tool.cibuildwheel.windows]
+archs = "amd64"
+
 ###################################################
 # Dependency groups config (use `--group dev` to install all)
 ###################################################
