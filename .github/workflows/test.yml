@@ -137,7 +137,7 @@ jobs:
       - name: Build wheels
         uses: pypa/cibuildwheel@v3.0
         env:
-          CIBW_ARCHS: ${{ matrix.platform.arch }}
+          CIBW_ARCHS: ${{ matrix.platform.arch == 'amd64' && 'AMD64' || matrix.platform.arch }}
           CIBW_BUILD: ${{ matrix.python }}-${{
               matrix.platform.os == 'ubuntu-latest'  && 'manylinux' ||
               matrix.platform.os == 'windows-latest' && 'win' ||
