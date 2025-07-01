@@ -48,16 +48,18 @@ _duckdb_set_default(BUILD_BENCHMARKS OFF)
 _duckdb_set_default(DISABLE_UNITY OFF)
 
 # Extension configuration - static linking for Python modules
-_duckdb_set_default(EXTENSION_STATIC_BUILD ON)
 _duckdb_set_default(DISABLE_BUILTIN_EXTENSIONS OFF)
 
 # Performance options - enable optimizations by default
 _duckdb_set_default(NATIVE_ARCH OFF)
 
-# Debug options - off by default for release builds
+# Sanitizers are off for Python by default. Enabling might result in "symbol not found" for  '___ubsan_vptr_type_cache'
 _duckdb_set_default(ENABLE_SANITIZER OFF)
-_duckdb_set_default(DEBUG_ALLOCATION OFF)
+_duckdb_set_default(ENABLE_UBSAN OFF)
+
+# Debug options - off by default for release builds
 _duckdb_set_default(FORCE_ASSERT OFF)
+_duckdb_set_default(DEBUG_STACKTRACE OFF)
 
 # Convert to cache variables for CMake GUI/ccmake compatibility
 set(DUCKDB_SOURCE_PATH "${DUCKDB_SOURCE_PATH}" CACHE PATH "Path to DuckDB source directory")
@@ -66,12 +68,12 @@ set(BUILD_SHELL "${BUILD_SHELL}" CACHE BOOL "Build the DuckDB shell executable")
 set(BUILD_UNITTESTS "${BUILD_UNITTESTS}" CACHE BOOL "Build DuckDB unit tests")
 set(BUILD_BENCHMARKS "${BUILD_BENCHMARKS}" CACHE BOOL "Build DuckDB benchmarks")
 set(DISABLE_UNITY "${DISABLE_UNITY}" CACHE BOOL "Disable unity builds (slower compilation)")
-set(EXTENSION_STATIC_BUILD "${EXTENSION_STATIC_BUILD}" CACHE BOOL "Link extensions statically")
 set(DISABLE_BUILTIN_EXTENSIONS "${DISABLE_BUILTIN_EXTENSIONS}" CACHE BOOL "Disable all built-in extensions")
 set(NATIVE_ARCH "${NATIVE_ARCH}" CACHE BOOL "Optimize for native architecture")
-set(ENABLE_SANITIZER "${ENABLE_SANITIZER}" CACHE BOOL "Enable AddressSanitizer")
-set(DEBUG_ALLOCATION "${DEBUG_ALLOCATION}" CACHE BOOL "Enable allocation tracking (slow)")
+set(ENABLE_SANITIZER "${ENABLE_SANITIZER}" CACHE BOOL "Enable address sanitizer")
+set(ENABLE_UBSAN "${ENABLE_UBSAN}" CACHE BOOL "Enable undefined behavior sanitizer")
 set(FORCE_ASSERT "${FORCE_ASSERT}" CACHE BOOL "Enable assertions in release builds")
+set(DEBUG_STACKTRACE "${DEBUG_STACKTRACE}" CACHE BOOL "Print a stracktrace on asserts and when testing crashes")
 
 # ════════════════════════════════════════════════════════════════════════════════
 # Internal Functions
@@ -142,7 +144,6 @@ function(_duckdb_create_interface_target target_name)
     # Compile definitions based on configuration
     target_compile_definitions(${target_name} INTERFACE
             $<$<BOOL:${FORCE_ASSERT}>:DUCKDB_FORCE_ASSERT>
-            $<$<BOOL:${DEBUG_ALLOCATION}>:DUCKDB_DEBUG_ALLOCATION>
             $<$<CONFIG:Debug>:DUCKDB_DEBUG_MODE>
     )
 
@@ -159,7 +160,6 @@ function(_duckdb_print_summary)
     message(STATUS "DuckDB Configuration:")
     message(STATUS "  Source: ${DUCKDB_SOURCE_PATH}")
     message(STATUS "  Build Type: ${CMAKE_BUILD_TYPE}")
-    message(STATUS "  Static Extensions: ${EXTENSION_STATIC_BUILD}")
     message(STATUS "  Native Arch: ${NATIVE_ARCH}")
     message(STATUS "  Unity Build Disabled: ${DISABLE_UNITY}")
 
@@ -168,14 +168,11 @@ function(_duckdb_print_summary)
     endif()
 
     set(debug_opts)
-    if(ENABLE_SANITIZER)
-        list(APPEND debug_opts "ASAN")
-    endif()
-    if(DEBUG_ALLOCATION)
-        list(APPEND debug_opts "AllocDebug")
-    endif()
     if(FORCE_ASSERT)
-        list(APPEND debug_opts "ForceAssert")
+        list(APPEND debug_opts "FORCE_ASSERT")
+    endif()
+    if(DEBUG_STACKTRACE)
+        list(APPEND debug_opts "DEBUG_STACKTRACE")
     endif()
 
     if(debug_opts)
@@ -205,28 +202,15 @@ endfunction()
 
 function(duckdb_configure_for_debug)
     # Only set if not already defined (allows override from command line)
-    if(NOT DEFINED ENABLE_SANITIZER)
-        set(ENABLE_SANITIZER ON PARENT_SCOPE)
-    endif()
-    if(NOT DEFINED DEBUG_ALLOCATION)
-        set(DEBUG_ALLOCATION ON PARENT_SCOPE)
-    endif()
     if(NOT DEFINED FORCE_ASSERT)
         set(FORCE_ASSERT ON PARENT_SCOPE)
+    endif()
+    if(NOT DEFINED DEBUG_STACKTRACE)
+        set(DEBUG_STACKTRACE ON PARENT_SCOPE)
     endif()
     message(STATUS "DuckDB: Configured for debug build")
 endfunction()
 
 function(duckdb_configure_for_release)
-    # Only set if not already defined (allows override from command line)
-    if(NOT DEFINED ENABLE_SANITIZER)
-        set(ENABLE_SANITIZER OFF PARENT_SCOPE)
-    endif()
-    if(NOT DEFINED DEBUG_ALLOCATION)
-        set(DEBUG_ALLOCATION OFF PARENT_SCOPE)
-    endif()
-    if(NOT DEFINED FORCE_ASSERT)
-        set(FORCE_ASSERT OFF PARENT_SCOPE)
-    endif()
     message(STATUS "DuckDB: Configured for release build")
 endfunction()

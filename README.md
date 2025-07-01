@@ -118,7 +118,8 @@ versioning scheme.
 
 ## Development
 
-We use Astral UV for local development and recommend you do as well.
+We use Astral UV for local development and recommend you do as well. Note: we require pip >= 25.1.0 for development, 
+because we work with dependency groups.
 
 Some useful commands:
 
@@ -128,7 +129,124 @@ brew install uv
 uv sync -p 3.9
 ```
 
-Run all pytests:
+Run all pytests (this includes tests/slow and _will_ take very long):
 ```bash
 uv run pytest ./tests --verbose
+```
+
+Exclude the test/slow directory:
+```bash
+uv run pytest ./tests --verbose --ignore=./tests/slow
+```
+
+Run with coverage:
+```bash
+COVERAGE=1 uv run coverage run -m pytest ./tests --verbose
+```
+
+The `COVERAGE` env var will compile the3 extension with `--coverage`, allowing us to collect coverage stats of C++ 
+code as well as Python code.
+
+Check coverage for Python code:
+```bash
+uv run coverage report
+```
+
+- We're not running any mypy typechecking tests at the moment
+- We're not running any ruff / linting / formatting at the moment
+
+## Merging changes to pythonpkg from duckdb main
+
+Check the git log for the last changes to the pythonpkg since the last ref you have 
+
+```bash
+git log <hash>..HEAD -- tools/pythonpkg/
+```
+
+## Which duckdb options should we add to the compile definitions?
+
+```bash
+duckdb/src/include on  py_oot [⇕] via C v16.0.0-clang via 🐍 v3.9.6 (duckdb)
+❯ ag '#ifdef' | rg 'ifdef (.*)' -or '$1' | sort -u
+CreateDirectory
+DEBUG
+DUCKDB_ALTERNATIVE_VERIFY
+DUCKDB_API_1_0
+DUCKDB_BUILD_LOADABLE_EXTENSION
+DUCKDB_CLANG_TIDY
+DUCKDB_DEBUG_ASYNC_SINK_SOURCE
+DUCKDB_DEBUG_MOVE
+DUCKDB_DEBUG_NO_INLINE
+DUCKDB_DEBUG_NO_SAFETY
+DUCKDB_DISABLE_POINTER_SALT
+DUCKDB_ENABLE_DEPRECATED_API
+DUCKDB_EXTENSION_API_UNSTABLE_VERSION
+DUCKDB_EXTENSION_API_VERSION_UNSTABLE
+DUCKDB_EXTENSION_AUTOINSTALL_DEFAULT
+DUCKDB_EXTENSION_AUTOLOAD_DEFAULT
+DUCKDB_EXTENSION_NAME
+DUCKDB_PLATFORM_RTOOLS
+DUCKDB_SMALLER_BINARY
+DUCKDB_STATIC_BUILD
+DUCKDB_WINDOWS
+ERROR
+MoveFile
+RemoveDirectory
+SOME_DEFINE
+UUID
+WIN32
+_MSC_VER
+_WIN32
+__MINGW32__
+__MVS__
+__clang__
+__cplusplus
+interface
+max
+min
+small
+```
+
+```bash
+duckdb/src/include on  py_oot [⇕] via C v16.0.0-clang via 🐍 v3.9.6 (duckdb)
+❯ ag '#if defined' | rg '#if defined\((.*)\)' -or '$1' | sort -u
+ADBC_EXPORTING
+DEBUG) || defined(UNSAFE_NUMERIC_CAST
+DUCKDB_BUILD_LIBRARY) && !defined(DUCKDB_BUILD_LOADABLE_EXTENSION
+DUCKDB_CUSTOM_PLATFORM
+DUCKDB_DEBUG_NO_SAFETY) || defined(DUCKDB_CLANG_TIDY
+DUCKDB_WASM_VERSION
+GENERATED_EXTENSION_HEADERS) && !defined(DUCKDB_AMALGAMATION
+UINTPTR_MAX
+_WIN32
+_WIN32) && !defined(__MINGW32__
+_WIN32) || defined(_WIN64
+_WIN32) || defined(__APPLE__) || defined(__FreeBSD__
+__ANDROID__
+__MUSL__
+__aarch64__) || defined(__ARM_ARCH_ISA_A64
+```
+
+```bash
+duckdb/src/include on  py_oot [⇕] via C v16.0.0-clang via 🐍 v3.9.6 (duckdb) took 8s
+❯ ag '#if ' | grep -v '#if defined' | rg '#if (.*)' -or '$1' | sort -u
+!defined(ADBC_EXPORT)
+!defined(DUCKDB_DISABLE_POINTER_SALT) && defined(__ANDROID__)
+!defined(DUCKDB_EXTENSION_API_VERSION_MAJOR) && !defined(DUCKDB_EXTENSION_API_VERSION_MINOR) &&                    \
+!defined(_GNU_SOURCE)
+!defined(__GNUC__) || (__GNUC__ >= 5)
+( \
+((__GNUC__ >= 5) || defined(__clang__)) && defined(__SIZEOF_INT128__)
+(DEFAULT_BLOCK_ALLOC_SIZE & (DEFAULT_BLOCK_ALLOC_SIZE - 1) != 0)
+(DEFAULT_ROW_GROUP_SIZE % STANDARD_VECTOR_SIZE != 0)
+(DEFAULT_ROW_GROUP_SIZE < STANDARD_VECTOR_SIZE)
+(DUCKDB_BLOCK_ALLOC_SIZE & (DUCKDB_BLOCK_ALLOC_SIZE - 1) != 0)
+(STANDARD_VECTOR_SIZE & (STANDARD_VECTOR_SIZE - 1) != 0)
+DUCKDB_EXTENSION_API_VERSION_MAJOR != 1
+DUCKDB_EXTENSION_API_VERSION_MINOR > 2 ||                                                                          \
+INTPTR_MAX == INT64_MAX
+_LIBCPP_STD_VER >= 17
+_LIBCPP_STD_VER >= 20
+__GNUC__
+__has_cpp_attribute(clang::fallthrough)
 ```

@@ -1,7 +1,7 @@
 # pyproject.toml: contains most project, build, linting, formatting and ci configuration
 
 ###################################################
-# General project config
+# PROJECT CONFIG
 ###################################################
 
 [project]
@@ -52,7 +52,10 @@ all = [ # users can install duckdb with 'duckdb[all]', which will install this l
 ]
 
 ###################################################
-# Build config (scikit-build-core, cmake, uv)
+# BUILD CONFIG
+#
+# Includes config used for building wheels, sdists and for installing
+# Tools: scikit-build-core and cmake
 ###################################################
 
 [build-system]
@@ -82,6 +85,28 @@ version_scheme = "duckdb_packaging.setuptools_scm_version:version_scheme"
 local_scheme = "no-local-version"
 fallback_version = "0.0.1.dev1"
 
+# Override: if COVERAGE is set then:
+# - we create a RelWithDebInfo build
+# - we make sure we use a persistent build dir so we get access to the .gcda files
+# - we build the extension with --coverage
+# - we disable unity builds
+# Note: we have to inherit cmake.define in order not to overwrite other defines
+#       see https://scikit-build-core.readthedocs.io/en/latest/configuration/overrides.html#inheriting-for-tables-and-arrays
+[[tool.scikit-build.overrides]]
+if.env.COVERAGE = true
+cmake.build-type = "RelWithDebInfo"
+build-dir  = "build/{build_type}"
+#inherit.cmake.define = "append"
+cmake.define.CMAKE_CXX_FLAGS = "--coverage -O0"
+cmake.define.CMAKE_C_FLAGS = "--coverage -O0"
+cmake.define.CMAKE_SHARED_LINKER_FLAGS = "--coverage"
+cmake.define.DISABLE_UNITY = "1"
+
+# Override: if we're in editable mode then make sure a build dir is set and re-used
+[[tool.scikit-build.overrides]]
+if.state   = "editable"
+build-dir  = "build/{build_type}"
+
 [tool.scikit-build.sdist]
 include = [
     "README.md",
@@ -101,7 +126,7 @@ include = [
     # Generated during sdist build, contains git describe string for duckdb
     "duckdb_packaging/duckdb_version.txt",
 
-    # --------------- DuckDB submodule includes
+    # -------------- DuckDB submodule includes
     # Core DuckDB source and build system
     "external/duckdb/LICENSE",
     "external/duckdb/src/**",
@@ -124,12 +149,95 @@ exclude = [
     "/.*",
 ]
 
+###################################################
+# DEV CONFIG
+#
+# Config for environment management, dependency groups,
+# testing, type checking, linting, formatting and coverage
+#
+# Tools:
+# - uv: Python package and project manager
+# - mypy: Static type checking for Python
+# - ruff: Python linter and code formatter
+# - coverage.py: Code coverage (Python and C++)
+# - pytest
+###################################################
+
 [tool.uv]
 default-groups = ["dev"]
 
-###################################################
-# Ruff config (linting and formatting)
-###################################################
+[dependency-groups] # used for development only, requires pip >=25.1.0
+stubdeps = [ # dependencies used for typehints in the stubs
+    "fsspec",
+    "pandas",
+    "polars",
+    "pyarrow",
+]
+test = [ # dependencies used for running tests
+    "pytest",
+    "pytest-reraise",
+    "pytest-timeout",
+    "mypy",
+    "coverage",
+    "gcovr",
+    "fsspec>=2022.11.0",
+    "gcsfs",
+    "numpy",
+    "packaging",
+    "pandas>=2.0.0",
+    "polars",
+    "psutil",
+    "py4j",
+    "pyarrow>=18.0.0",
+    "pyspark",
+    "pytz",
+    "requests",
+    "tensorflow; python_version <= '3.12'",
+    "torch",
+    "urllib3",
+]
+scripts = [ # dependencies used for running scripts
+    "cxxheaderparser",
+    "ipython",
+    "ipywidgets",
+    "numpy",
+    "pandas",
+    "pcpp",
+    "polars",
+    "pyarrow",
+    "pytz"
+]
+duckdb_packaging = [ # dependencies used for using included packaging tooling
+    "scikit_build_core>=0.11",
+    "setuptools_scm>=8.0"
+]
+dev = [ # tooling like uv will install this automatically when syncing the environment
+    "pybind11>=2.6.0",
+    "ruff>=0.11.13",
+    {include-group = "stubdeps"},
+    {include-group = "test"},
+    {include-group = "scripts"},
+    {include-group = "duckdb_packaging"},
+]
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q"
+testpaths = ["tests"]
+filterwarnings = [
+    "error",
+    "ignore::UserWarning",
+    # Jupyter is throwing DeprecationWarnings
+    "ignore:function ham() is deprecated:DeprecationWarning",
+    # Pyspark is throwing these warnings
+    "ignore:distutils Version classes are deprecated:DeprecationWarning",
+    "ignore:is_datetime64tz_dtype is deprecated:DeprecationWarning",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["duckdb"]
+
 [tool.ruff]
 line-length = 88
 indent-width = 4
@@ -187,7 +295,10 @@ quote-style = "double"
 indent-style = "space"
 
 ###################################################
-# CI config
+# CI CONFIG
+#
+# Configuration for CI Workflows
+# Tools: cibuildwheel
 ###################################################
 [tool.cibuildwheel]
 build-frontend = "build[uv]"
@@ -204,58 +315,3 @@ before-build = ["brew install ccache"]
 
 [tool.cibuildwheel.windows]
 before-build = ["choco install ccache"]
-
-###################################################
-# Dependency groups config (use `--group dev` to install all)
-###################################################
-[dependency-groups] # used for development only, requires pip >=25.1.0
-stubdeps = [ # dependencies used for typehints in the stubs
-    "fsspec",
-    "pandas",
-    "polars",
-    "pyarrow",
-]
-test = [ # dependencies used for running tests
-    "fsspec>=2022.11.0",
-    "gcsfs",
-    "mypy",
-    "numpy",
-    "packaging",
-    "pandas>=2.0.0",
-    "polars",
-    "psutil",
-    "py4j",
-    "pyarrow>=18.0.0",
-    "pyspark",
-    "pytest",
-    "pytest-reraise",
-    "pytest-timeout",
-    "pytz",
-    "requests",
-    "tensorflow; python_version <= '3.12'",
-    "torch",
-    "urllib3",
-]
-scripts = [ # dependencies used for running scripts
-    "cxxheaderparser",
-    "ipython",
-    "ipywidgets",
-    "numpy",
-    "pandas",
-    "pcpp",
-    "polars",
-    "pyarrow",
-    "pytz"
-]
-duckdb_packaging = [ # dependencies used for using included packaging tooling
-    "scikit_build_core",
-    "setuptools_scm>=8.0"
-]
-dev = [ # tooling like uv will install this automatically when syncing the environment
-    "pybind11>=2.6.0",
-    "ruff>=0.11.13",
-    {include-group = "stubdeps"},
-    {include-group = "test"},
-    {include-group = "scripts"},
-    {include-group = "duckdb_packaging"},
-]
