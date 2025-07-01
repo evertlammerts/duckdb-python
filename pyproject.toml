@@ -52,7 +52,7 @@ all = [ # users can install duckdb with 'duckdb[all]', which will install this l
 ]
 
 ###################################################
-# Build config (scikit-build-core, cmake)
+# Build config (scikit-build-core, cmake, uv)
 ###################################################
 
 [build-system]
@@ -123,6 +123,9 @@ exclude = [
     "/*",
     "/.*",
 ]
+
+[tool.uv]
+default-groups = ["dev"]
 
 ###################################################
 # Ruff config (linting and formatting)
@@ -248,10 +251,6 @@ duckdb_packaging = [ # dependencies used for using included packaging tooling
     "scikit_build_core",
     "setuptools_scm>=8.0"
 ]
-build = [
-    "pipx",
-    "cibuildwheel[uv]>=v3.0",
-]
 dev = [ # tooling like uv will install this automatically when syncing the environment
     "pybind11>=2.6.0",
     "ruff>=0.11.13",
@@ -259,5 +258,4 @@ dev = [ # tooling like uv will install this automatically when syncing the envir
     {include-group = "test"},
     {include-group = "scripts"},
     {include-group = "duckdb_packaging"},
-    {include-group = "build"},
 ]

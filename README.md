@@ -90,40 +90,6 @@ We cut a new **stable post release** with the following steps:
 1. Manually start the release workflow with the hash of this commit, and the tag name.
 1. Iff all goes well, create a new PR to let the submodule track DuckDB's minor release branch.
 
-#### Version Bumping
-```bash
-# Bump to next major version (1.3.1 → 2.0.0)
-python -m duckdb_packaging.bump_version major
-
-# Bump to next minor version (1.3.1 → 1.4.0)  
-python -m duckdb_packaging.bump_version minor
-
-# Bump to next patch version (1.3.1 → 1.3.2)
-python -m duckdb_packaging.bump_version patch
-
-# Create post-release (1.3.1 → 1.3.1.post1)
-python -m duckdb_packaging.bump_version post
-```
-
-#### Post-Release Creation
-```bash
-# Create post-release with auto-detected base version
-python -m duckdb_packaging.create_post_release --reason "Extension-specific bug fix"
-
-# Create post-release with specific base version
-python -m duckdb_packaging.create_post_release --base-version 1.3.1 --reason "New extension feature"
-
-# Dry run to preview changes
-python -m duckdb_packaging.create_post_release --dry-run
-```
-
-#### Manual Version Overrides
-For CI/CD scenarios, versions can be overridden using the `OVERRIDE_GIT_DESCRIBE` environment variable:
-```bash
-export OVERRIDE_GIT_DESCRIBE="v1.3.1-5-g1234567"
-# Build will use version 1.4.0.dev5+g1234567
-```
-
 ### Dynamic Versioning Integration
 
 The package uses `setuptools_scm` with `scikit-build` for automatic version determination, and implements a custom
@@ -149,3 +115,20 @@ versioning scheme.
   * See the section on [Comments and Docstrings](https://google.github.io/styleguide/pyguide.html#s3.8-comments-and-docstrings)
 * cibuildwheel:
   * `CIBW_BUILD='cp39-*' uvx cibuildwheel --platform linux .`
+
+## Development
+
+We use Astral UV for local development and recommend you do as well.
+
+Some useful commands:
+
+Install duckdb together with the `dev` dependency group in `editable` mode in a Python 3.9 virtual environment:
+```bash
+brew install uv
+uv sync -p 3.9
+```
+
+Run all pytests:
+```bash
+uv run pytest ./tests --verbose
+```

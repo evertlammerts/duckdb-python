@@ -1,4 +1,4 @@
-name: Wheels and sdist builder
+name: Build all packages and upload to PyPI
 on:
   push:
     branches:
