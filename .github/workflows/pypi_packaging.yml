@@ -133,11 +133,11 @@ jobs:
       - name: Summarize all
         shell: bash
         run: |
-          to_table_row=( awk '{ print "|", $1, "|", $2, "|" }' )
+          to_table_row() { awk '{ print "|", $1, "|", $2, "|" }'; }
           echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
           echo "| Filesize | Filename |" >> $GITHUB_STEP_SUMMARY
           echo "|----------|----------|" >> $GITHUB_STEP_SUMMARY
-          echo "${{ needs.build_main_sdist.outputs.summary }}" | $to_table_row >> $GITHUB_STEP_SUMMARY 
+          echo "${{ needs.build_main_sdist.outputs.summary }}" | to_table_row >> $GITHUB_STEP_SUMMARY 
           for f in metadata/metadata-*; do
-            cat $f | $to_table_row >> $GITHUB_STEP_SUMMARY
+            cat $f | to_table_row >> $GITHUB_STEP_SUMMARY
           done

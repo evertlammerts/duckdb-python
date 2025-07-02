@@ -24,7 +24,7 @@ concurrency:
 jobs:
   generate_coverage_reports:
     name: Generate code coverage reports for both Python and C++ code
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       summary_py: ${{ steps.py_coverage.outputs.summary }}
       summary_cpp: ${{ steps.cpp_coverage.outputs.summary }}
@@ -46,12 +46,15 @@ jobs:
       - name: Install Ccache
         shell: bash
         run: |
+          sudo apt-get update
           sudo apt-get -y install ccache
 
-      - uses: astral-sh/setup-uv@v6
+      - name: Install Astral UV and enable the cache
+        uses: astral-sh/setup-uv@v6
         with:
           version: "0.7.14"
           python-version: 3.9
+          enable-cache: true
 
       - name: Run tests with coverage
         shell: bash
