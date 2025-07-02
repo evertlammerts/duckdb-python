@@ -61,9 +61,9 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ inputs.testsuite }}" == "all" ]]; then
-            COVERAGE=1 uv run coverage run -m pytest ./tests --verbose --ignore=./tests/stubs
+            COVERAGE=1 uv run -v coverage run -m pytest ./tests --verbose --ignore=./tests/stubs
           elif [[ "${{ inputs.testsuite }}" == "fast" ]]; then
-            COVERAGE=1 uv run coverage run -m pytest ./tests/fast --verbose
+            COVERAGE=1 uv run -v coverage run -m pytest ./tests/fast --verbose
           else
             echo "Invalid testsuite!"
             exit 1
