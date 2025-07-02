@@ -55,6 +55,7 @@ dist
 duckdb.egg-info
 .eggs
 .pytest_cache
+.coverage
 duckdb_build
 
 # python parquet files used in tests
