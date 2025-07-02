@@ -55,6 +55,7 @@ jobs:
           version: "0.7.14"
           python-version: 3.9
           enable-cache: true
+          cache-suffix: -${{ github.workflow }}
 
       - name: Run tests with coverage
         shell: bash

@@ -69,7 +69,10 @@ jobs:
     steps:
       # Install Astral UV, which will be used as build-frontend for cibuildwheel
       - uses: astral-sh/setup-uv@v1
-        with: { version: "0.7.14" }
+        with:
+          version: "0.7.14"
+          enable-cache: true
+          cache-suffix: -${{ github.workflow }}-${{ matrix.python }}-${{ matrix.platform.os }}-${{ matrix.platform.arch }}
 
       - uses: actions/checkout@v4
         with:
