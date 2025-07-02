@@ -43,6 +43,11 @@ jobs:
           git fetch origin
           git checkout ${{ inputs.duckdb_git_ref }}
 
+      - name: Install Ccache
+        shell: bash
+        run: |
+          apt-get -y install ccache
+
       - uses: astral-sh/setup-uv@v6
         with:
           version: "0.7.14"
