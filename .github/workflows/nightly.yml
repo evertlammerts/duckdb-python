@@ -1,6 +1,0 @@
-name: Nothing here yet
-on:
-  workflow_dispatch:
-jobs:
-  foobar:
-    runs-on: ubuntu-24.04
