@@ -152,7 +152,7 @@ code as well as Python code.
 Check coverage for Python code:
 ```bash
 uvx coverage html -d htmlcov-python
-uvx coverage report --show-missing
+uvx coverage report --format=markdown
 ```
 
 Check coverage for C++ code (note: this will clutter your project dir with html files, consider saving them in some 

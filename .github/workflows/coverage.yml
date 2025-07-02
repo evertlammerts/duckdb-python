@@ -1,0 +1,106 @@
+name: coverage.yml
+on:
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        type: string
+        description: Git ref of the DuckDB python package
+      duckdb_git_ref:
+        type: string
+        description: Git ref of DuckDB
+      testsuite:
+        description: The tests that should be run
+        required: true
+        type: choice
+        default: fast
+        options:
+          - fast
+          - all
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  generate_coverage_reports:
+    name: Generate code coverage reports for both Python and C++ code
+    runs-on: ubuntu-latest
+    outputs:
+      summary_py: ${{ steps.py_coverage.outputs.summary }}
+      summary_cpp: ${{ steps.cpp_coverage.outputs.summary }}
+    steps:
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.git_ref }}
+          fetch-depth: 0
+          submodules: true
+
+      - name: Checkout DuckDB
+        shell: bash
+        run: |
+          cd external/duckdb
+          git fetch origin
+          git checkout ${{ inputs.duckdb_git_ref }}
+
+      - uses: astral-sh/setup-uv@v1
+        with:
+          version: "0.7.14"
+
+      - name: Run tests with coverage
+        shell: bash
+        run: |
+          if [ "${{ inputs.testsuite }}" -eq "all" ]; then
+            COVERAGE=1 uv run coverage run -m pytest ./tests --verbose --ignore=./tests/stubs
+          elif [ "${{ inputs.testsuite }}" -eq "fast" ]; then
+            COVERAGE=1 uv run coverage run -m pytest ./tests/fast --verbose
+          else
+            echo "Invalid testsuite!"
+            exit 1
+          fi
+
+      - name: Get Python coverage data
+        id: py_coverage
+        shell: bash
+        run: |
+          # save HTML report in coverage-python
+          uvx coverage html -d coverage-python
+          # save markdown summary in step output
+          echo "summary<<EOF" >> $GITHUB_OUTPUT
+          uvx coverage report --format=markdown >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Upload Python coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report-python
+          path: coverage-python
+
+      - name: Get C++ coverage data
+        id: cpp_coverage
+        shell: bash
+        run: |
+          mkdir coverage-cpp
+          uvx gcovr \
+            --gcov-ignore-errors all \
+            --root "$PWD" \
+            --filter "${PWD}/src/duckdb_py" \
+            --exclude '.*/\.cache/.*' \
+            --gcov-exclude '.*/\.cache/.*' \
+            --gcov-exclude '.*/external/.*' \
+            --gcov-exclude '.*/site-packages/.*' \
+            --exclude-unreachable-branches \
+            --exclude-throw-branches \
+            --html --html-details -o coverage-cpp/index.html \
+            build/coverage/src/duckdb_py \
+            --print-summary > cpp_summary.txt
+          # save the summary in the output
+          echo "summary<<EOF" >> $GITHUB_OUTPUT
+          cat cpp_summary.txt >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Upload C++ coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report-cpp
+          path: coverage-cpp
