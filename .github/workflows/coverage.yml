@@ -43,9 +43,10 @@ jobs:
           git fetch origin
           git checkout ${{ inputs.duckdb_git_ref }}
 
-      - uses: astral-sh/setup-uv@v1
+      - uses: astral-sh/setup-uv@v6
         with:
           version: "0.7.14"
+          python-version: 3.9
 
       - name: Run tests with coverage
         shell: bash
