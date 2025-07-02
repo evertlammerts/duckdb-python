@@ -46,7 +46,7 @@ jobs:
       - name: Install Ccache
         shell: bash
         run: |
-          apt-get -y install ccache
+          sudo apt-get -y install ccache
 
       - uses: astral-sh/setup-uv@v6
         with:
