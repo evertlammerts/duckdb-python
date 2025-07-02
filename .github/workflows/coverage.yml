@@ -1,4 +1,4 @@
-name: coverage.yml
+name: Test coverage
 on:
   workflow_dispatch:
     inputs:
@@ -50,9 +50,9 @@ jobs:
       - name: Run tests with coverage
         shell: bash
         run: |
-          if [ "${{ inputs.testsuite }}" -eq "all" ]; then
+          if [[ "${{ inputs.testsuite }}" == "all" ]]; then
             COVERAGE=1 uv run coverage run -m pytest ./tests --verbose --ignore=./tests/stubs
-          elif [ "${{ inputs.testsuite }}" -eq "fast" ]; then
+          elif [[ "${{ inputs.testsuite }}" == "fast" ]]; then
             COVERAGE=1 uv run coverage run -m pytest ./tests/fast --verbose
           else
             echo "Invalid testsuite!"

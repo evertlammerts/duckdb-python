@@ -1,4 +1,4 @@
-name: Build all packages and upload to PyPI
+name: Packaging
 on:
   workflow_dispatch:
     inputs:
