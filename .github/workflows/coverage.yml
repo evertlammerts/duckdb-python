@@ -25,6 +25,7 @@ jobs:
   generate_coverage_reports:
     name: Generate code coverage reports for both Python and C++ code
     runs-on: ubuntu-24.04
+    env: { COVERAGE: 1 }
     outputs:
       summary_py: ${{ steps.py_coverage.outputs.summary }}
       summary_cpp: ${{ steps.cpp_coverage.outputs.summary }}
@@ -61,9 +62,9 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ inputs.testsuite }}" == "all" ]]; then
-            COVERAGE=1 uv run -v coverage run -m pytest ./tests --verbose --ignore=./tests/stubs
+            uv run -v coverage run -m pytest ./tests --verbose --ignore=./tests/stubs
           elif [[ "${{ inputs.testsuite }}" == "fast" ]]; then
-            COVERAGE=1 uv run -v coverage run -m pytest ./tests/fast --verbose
+            uv run -v coverage run -m pytest ./tests/fast --verbose
           else
             echo "Invalid testsuite!"
             exit 1
@@ -74,10 +75,10 @@ jobs:
         shell: bash
         run: |
           # save HTML report in coverage-python
-          uvx coverage html -d coverage-python
+          uv run coverage html -d coverage-python
           # save markdown summary in step output
           echo "summary<<EOF" >> $GITHUB_OUTPUT
-          uvx coverage report --format=markdown >> $GITHUB_OUTPUT
+          uv run coverage report --format=markdown >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Upload Python coverage report
@@ -91,7 +92,7 @@ jobs:
         shell: bash
         run: |
           mkdir coverage-cpp
-          uvx gcovr \
+          uv run gcovr \
             --gcov-ignore-errors all \
             --root "$PWD" \
             --filter "${PWD}/src/duckdb_py" \
