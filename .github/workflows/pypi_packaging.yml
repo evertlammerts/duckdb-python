@@ -65,6 +65,11 @@ jobs:
           - { os: macos-15,         arch: universal2 }
           - { os: macos-13,         arch: x86_64 }
     runs-on: ${{ matrix.platform.os }}
+    concurrency:
+      # Ensure we have no more than len(matrix.py) running jobs in parallel.
+      # Note that the cross compile job for aarch64 is by far the slowest, so grouping by os-arch might seem a better
+      # option but probably isn't.
+      group: ${{ matrix.python }}
 
     steps:
       # Install Astral UV, which will be used as build-frontend for cibuildwheel
