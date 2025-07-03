@@ -127,8 +127,8 @@ jobs:
         run: |
           echo "## Coverage Summary" >> $GITHUB_STEP_SUMMARY
           echo "### Python Coverage Summary" >> $GITHUB_STEP_SUMMARY
-          echo "${{ needs.generate_coverage_reports.outputs.summary_py }}" >> $GITHUB_STEP_SUMMARY
+          printf '%s\n' "${{ needs.generate_coverage_reports.outputs.summary_py }}" >> $GITHUB_STEP_SUMMARY
           echo "### C++ Coverage Summary" >> $GITHUB_STEP_SUMMARY
           echo "```" >> $GITHUB_STEP_SUMMARY
-          echo "${{ needs.generate_coverage_reports.outputs.summary_cpp }}" >> $GITHUB_STEP_SUMMARY
+          printf '%s\n' "${{ needs.generate_coverage_reports.outputs.summary_cpp }}" >> $GITHUB_STEP_SUMMARY
           echo "```" >> $GITHUB_STEP_SUMMARY
