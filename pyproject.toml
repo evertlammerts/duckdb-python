@@ -207,7 +207,7 @@ test = [ # dependencies used for running tests
     "coverage",
     "fsspec>=2022.11.0",
     "gcsfs",
-    "numpy",
+    "numpy<2",
     "packaging",
     "pandas>=2.0.0",
     "polars",
