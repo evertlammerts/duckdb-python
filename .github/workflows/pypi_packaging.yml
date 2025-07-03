@@ -68,7 +68,7 @@ jobs:
           - { os: macos-15,         arch: arm64 }
           - { os: macos-15,         arch: universal2 }
           - { os: macos-13,         arch: x86_64 }
-        minimal: ${{ inputs.minimal }}
+        minimal: [ ${{ inputs.minimal }} ]
         exclude:
           - { minimal: true, python: cp310 }
           - { minimal: true, python: cp311 }
