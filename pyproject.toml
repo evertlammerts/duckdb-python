@@ -89,7 +89,7 @@ fallback_version = "0.0.1.dev1"
 # - we create a RelWithDebInfo build
 # - we make sure we use a persistent build dir so we get access to the .gcda files
 # - we build the extension with --coverage
-# - we disable unity builds
+# note: unity builds should be enabled to speeds things up (and use significantly less space)
 [[tool.scikit-build.overrides]]
 if.env.COVERAGE = true
 cmake.build-type = "RelWithDebInfo"
@@ -103,15 +103,15 @@ inherit.cmake.define = "append"
 cmake.define.CMAKE_CXX_FLAGS = "--coverage -O0"
 cmake.define.CMAKE_C_FLAGS = "--coverage -O0"
 cmake.define.CMAKE_SHARED_LINKER_FLAGS = "--coverage"
-cmake.define.DISABLE_UNITY = "1"
 
 # Override: if we're in editable mode then make sure a build dir is set. Note that COVERAGE runs have their own
-#   build-dir, and we don't want to interfere with that.
+#   build-dir, and we don't want to interfere with that. We're also disabling unity builds to help with debugging.
 [[tool.scikit-build.overrides]]
 if.state   = "editable"
 if.env.COVERAGE = false
 build-dir  = "build/{build_type}"
 editable.rebuild = true
+cmake.build-type = "Debug"
 
 # Separate override because we have to append to cmake.define with `inherit` in order not to overwrite other defines.
 #   see https://scikit-build-core.readthedocs.io/en/latest/configuration/overrides.html#inheriting-for-tables-and-arrays
