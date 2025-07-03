@@ -5,7 +5,7 @@ on:
       minimal:
         type: boolean
         default: false
-        description: Build the sdist and a minimal set of wheels to do a sanity check
+        description: Build a minimal set of wheels to do a sanity check
       git_ref:
         type: string
         description: Git ref of the DuckDB python package
@@ -57,7 +57,7 @@ jobs:
           echo "summary=$(du -h -- *.tar.gz)" >> $GITHUB_OUTPUT
 
   build_main_wheels:
-    name: 'Wheel: ${{ matrix.platform.os }}-${{ matrix.platform.arch }}-${{ matrix.python }}'
+    name: 'Wheel: ${{ matrix.platform.arch }}-${{ matrix.python }}-${{ matrix.platform.os }}'
     strategy:
       matrix:
         python: [ cp39, cp310, cp311, cp312, cp313 ]
