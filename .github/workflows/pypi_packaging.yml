@@ -2,6 +2,10 @@ name: Packaging
 on:
   workflow_dispatch:
     inputs:
+      minimal:
+        type: boolean
+        default: false
+        description: Build the sdist and a minimal set of wheels to do a sanity check
       git_ref:
         type: string
         description: Git ref of the DuckDB python package
@@ -64,6 +68,13 @@ jobs:
           - { os: macos-15,         arch: arm64 }
           - { os: macos-15,         arch: universal2 }
           - { os: macos-13,         arch: x86_64 }
+        minimal: ${{ inputs.minimal }}
+        exclude:
+          - { minimal: true, python: cp310 }
+          - { minimal: true, python: cp311 }
+          - { minimal: true, python: cp312 }
+          - { minimal: true, platform: { arch: aarch64 } }
+          - { minimal: true, platform: { arch: universal2 } }
     runs-on: ${{ matrix.platform.os }}
 
     steps:
