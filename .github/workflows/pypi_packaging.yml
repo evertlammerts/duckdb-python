@@ -57,17 +57,17 @@ jobs:
           echo "summary=$(du -h -- *.tar.gz)" >> $GITHUB_OUTPUT
 
   build_main_wheels:
-    name: 'Wheel: ${{ matrix.platform.arch }}-${{ matrix.python }}-${{ matrix.platform.os }}'
+    name: 'Wheel: ${{ matrix.python }}-${{ matrix.platform.cibw_system }}_${{ matrix.platform.arch }}'
     strategy:
       matrix:
         python: [ cp39, cp310, cp311, cp312, cp313 ]
         platform:
-          - { os: windows-latest,   arch: amd64 }
-          - { os: ubuntu-24.04,     arch: x86_64 }
-          - { os: ubuntu-24.04,     arch: aarch64 }
-          - { os: macos-15,         arch: arm64 }
-          - { os: macos-15,         arch: universal2 }
-          - { os: macos-13,         arch: x86_64 }
+          - { os: windows-latest,   arch: amd64,      cibw_system: win }
+          - { os: ubuntu-24.04,     arch: x86_64,     cibw_system: manylinux }
+          - { os: ubuntu-24.04,     arch: aarch64,    cibw_system: manylinux }
+          - { os: macos-15,         arch: arm64,      cibw_system: macosx }
+          - { os: macos-15,         arch: universal2, cibw_system: macosx }
+          - { os: macos-13,         arch: x86_64,     cibw_system: macosx }
         minimal:
           - ${{ inputs.minimal }}
         exclude:
@@ -109,28 +109,24 @@ jobs:
         uses: pypa/cibuildwheel@v3.0
         env:
           CIBW_ARCHS: ${{ matrix.platform.arch == 'amd64' && 'AMD64' || matrix.platform.arch }}
-          CIBW_BUILD: ${{ matrix.python }}-${{
-              matrix.platform.os == 'ubuntu-24.04'  && 'manylinux' ||
-              matrix.platform.os == 'windows-latest' && 'win' ||
-                                                        'macosx'
-            }}_${{ matrix.platform.arch }}
+          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform.cibw_system }}_${{ matrix.platform.arch }}
           CIBW_TEST_SKIP: "*"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wheel-${{ matrix.python }}-${{ matrix.platform.os }}-${{ matrix.platform.arch }}
+          name: wheel-${{ matrix.python }}-${{ matrix.platform.cibw_system }}_${{ matrix.platform.arch }}
           path: wheelhouse/*.whl
 
       - name: Create summary
         run: |
           cd wheelhouse
-          du -h -- *.whl > wheels.txt
+          du -h -- *.whl > metadata-${{ matrix.python }}-${{ matrix.platform.cibw_system }}_${{ matrix.platform.arch }}
 
       - name: Upload summary
         uses: actions/upload-artifact@v4
         with:
-          name: metadata-${{ matrix.python }}-${{ matrix.platform.os }}-${{ matrix.platform.arch }}
-          path: wheelhouse/wheels.txt
+          name: metadata-${{ matrix.python }}-${{ matrix.platform.cibw_system }}_${{ matrix.platform.arch }}
+          path: wheelhouse/metadata-${{ matrix.python }}-${{ matrix.platform.cibw_system }}_${{ matrix.platform.arch }}
 
   summary:
     name: Build Summary
