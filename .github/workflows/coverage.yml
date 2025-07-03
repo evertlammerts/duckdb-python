@@ -115,3 +115,20 @@ jobs:
         with:
           name: coverage-report-cpp
           path: coverage-cpp
+
+  summary:
+    name: Coverage Summary
+    runs-on: ubuntu-24.04
+    needs: [generate_coverage_reports]
+    if: always()
+    steps:
+      - name: Summarize
+        shell: bash
+        run: |
+          echo "## Coverage Summary" >> $GITHUB_STEP_SUMMARY
+          echo "### Python Coverage Summary" >> $GITHUB_STEP_SUMMARY
+          echo "${{ needs.generate_coverage_reports.outputs.summary_py }}" >> $GITHUB_STEP_SUMMARY
+          echo "### C++ Coverage Summary" >> $GITHUB_STEP_SUMMARY
+          echo "```" >> $GITHUB_STEP_SUMMARY
+          echo "${{ needs.generate_coverage_reports.outputs.summary_cpp }}" >> $GITHUB_STEP_SUMMARY
+          echo "```" >> $GITHUB_STEP_SUMMARY
