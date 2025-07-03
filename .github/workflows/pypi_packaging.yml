@@ -141,6 +141,6 @@ jobs:
           echo "| Filesize | Filename |" >> $GITHUB_STEP_SUMMARY
           echo "|----------|----------|" >> $GITHUB_STEP_SUMMARY
           echo "${{ needs.build_main_sdist.outputs.summary }}" | to_table_row >> $GITHUB_STEP_SUMMARY 
-          for f in metadata/metadata-*; do
+          for f in metadata/*; do
             cat $f | to_table_row >> $GITHUB_STEP_SUMMARY
           done
