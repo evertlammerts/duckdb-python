@@ -7,6 +7,8 @@ import pytest
 import subprocess
 from unittest.mock import patch, MagicMock
 
+duckdb_packaging = pytest.importorskip("duckdb_packaging")
+
 from duckdb_packaging._versioning import (
     parse_version,
     format_version,
