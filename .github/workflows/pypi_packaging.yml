@@ -30,12 +30,8 @@ on:
         default: auto
         options:
           - auto
-          - nightly_micro
-          - nightly_minor
-          - rc_micro
-          - rc_minor
-          - stable_micro
-          - stable_minor
+          - rc
+          - stable
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -82,7 +78,7 @@ jobs:
         run: |
           # install the test requirements
           uv export --only-group test --no-hashes --no-emit-project > test-requirements.txt
-          uv pip install --python .test-env -r test-requirements.txt 
+          uv pip install --python .test-env -r test-requirements.txt --index https://download.pytorch.org/whl/cpu
           # run tests
           tests_dir="${{ github.workspace }}/tests${{ inputs.testsuite == 'fast' && '/fast' || '' }}"
           .test-env/bin/pytest ${tests_dir} --verbose --ignore=./tests/stubs
