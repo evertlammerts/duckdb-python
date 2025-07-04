@@ -6,6 +6,15 @@ on:
         type: boolean
         default: false
         description: Build a minimal set of wheels to do a sanity check
+      testsuite:
+        description: The tests that should be run
+        required: true
+        type: choice
+        default: none
+        options:
+          - none
+          - fast
+          - all
       git_ref:
         type: string
         description: Git ref of the DuckDB python package
@@ -77,6 +86,10 @@ jobs:
           - { minimal: true, platform: { arch: aarch64 } }
           - { minimal: true, platform: { arch: universal2 } }
     runs-on: ${{ matrix.platform.os }}
+    env:
+      CIBW_TEST_SKIP: ${{ inputs.testsuite == 'none' && '*' || '*-macosx_universal2' }}
+      CIBW_TEST_SOURCES: tests
+      CIBW_TEST_COMMAND: uv run -v pytest ${{ inputs.testsuite == 'fast' && './tests/fast' || './tests' }} --verbose --ignore=./tests/stubs
 
     steps:
 
@@ -111,7 +124,6 @@ jobs:
         env:
           CIBW_ARCHS: ${{ matrix.platform.arch == 'amd64' && 'AMD64' || matrix.platform.arch }}
           CIBW_BUILD: ${{ matrix.python }}-${{ matrix.platform.cibw_system }}_${{ matrix.platform.arch }}
-          CIBW_TEST_SKIP: "*"
 
       - uses: actions/upload-artifact@v4
         with:
