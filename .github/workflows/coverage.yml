@@ -130,12 +130,8 @@ jobs:
         run: |
           echo "## Coverage Summary" >> $GITHUB_STEP_SUMMARY
           echo "### Python Coverage Summary" >> $GITHUB_STEP_SUMMARY
-          cat <<'EOF'  >> $GITHUB_STEP_SUMMARY
-          $SUMMARY_PY
-          EOF
+          echo "$SUMMARY_PY" >> $GITHUB_STEP_SUMMARY
           echo "### C++ Coverage Summary" >> $GITHUB_STEP_SUMMARY
-          echo "```" >> $GITHUB_STEP_SUMMARY
-          cat <<'EOF'  >> $GITHUB_STEP_SUMMARY
-          $SUMMARY_CPP
-          EOF
-          echo "```" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "$SUMMARY_CPP" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY

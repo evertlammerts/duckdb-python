@@ -55,29 +55,20 @@ jobs:
         run: uv build --sdist
 
       - name: Install sdist
-        if: ${{ inputs.testsuite == 'none' }}
         run: |
-          # create a fresh environment
-          mkdir ${{ runner.temp }}/test && cd ${{ runner.temp }}/test
-          cp ${{ github.workspace }}/dist/duckdb-*.tar.gz duckdb.tar.gz
-          # install duckdb sdist
-          uv venv
-          uv pip install ./duckdb.tar.gz
+          uv venv .test-env
+          uv pip install --python .test-env ./dist/duckdb-*.tar.gz
 
-      - name: Install and test sdist
+      - name: Test sdist
         if: ${{ inputs.testsuite != 'none' }}
         shell: bash
         run: |
-          # create a fresh environment
-          mkdir ${{ runner.temp }}/test && cd ${{ runner.temp }}/test
-          cp ${{ github.workspace }}/dist/duckdb-*.tar.gz duckdb.tar.gz
-          cp -r ${{ github.workspace }}/tests .
-          # install duckdb sdist with test dependencies
-          uv venv
-          uv pip install --upgrade pip && uv pip install --group test duckdb.tar.gz
+          # install the test requirements
+          uv export --only-group test --no-hashes --no-emit-project > test-requirements.txt
+          uv pip install --python .test-env -r test-requirements.txt 
           # run tests
-          tests_dir="tests${{ inputs.testsuite == 'fast' && '/fast' || '' }}"
-          uv run pytest ${tests_dir} --verbose --ignore=./tests/stubs
+          tests_dir="${{ github.workspace }}}/tests${{ inputs.testsuite == 'fast' && '/fast' || '' }}"
+          .test-env/bin/pytest ${tests_dir} --verbose --ignore=./tests/stubs
 
       - uses: actions/upload-artifact@v4
         with:
@@ -114,7 +105,7 @@ jobs:
     env:
       CIBW_TEST_SKIP: ${{ inputs.testsuite == 'none' && '*' || '*-macosx_universal2' }}
       CIBW_TEST_SOURCES: tests
-      CIBW_BEFORE_TEST: uv pip install --upgrade pip && uv pip install --group test {package}
+      CIBW_TEST_GROUPS: test
       CIBW_TEST_COMMAND: uv run -v pytest ${{ inputs.testsuite == 'fast' && './tests/fast' || './tests' }} --verbose --ignore=./tests/stubs
 
     steps:
