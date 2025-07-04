@@ -56,17 +56,28 @@ jobs:
 
       - name: Install sdist
         if: ${{ inputs.testsuite == 'none' }}
-        run: uv pip install dist/*.tar.gz
+        run: |
+          # create a fresh environment
+          mkdir ${{ runner.temp }}/test && cd ${{ runner.temp }}/test
+          cp ${{ github.workspace }}/dist/duckdb-*.tar.gz duckdb.tar.gz
+          # install duckdb sdist
+          uv venv
+          uv pip install ./duckdb.tar.gz
 
       - name: Install and test sdist
         if: ${{ inputs.testsuite != 'none' }}
         shell: bash
         run: |
-          # install with test dependencies
-          uv pip install 'pip>=25.1.0' && uv pip install --group test dist/*.tar.gz
-          # run tests from a different directory
-          tests_dir="${{ github.workspace }}/tests${{ inputs.testsuite == 'fast' && '/fast' || '' }}"
-          uv --directory ${{ runner.temp }} run pytest ${tests_dir} --verbose --ignore=./tests/stubs
+          # create a fresh environment
+          mkdir ${{ runner.temp }}/test && cd ${{ runner.temp }}/test
+          cp ${{ github.workspace }}/dist/duckdb-*.tar.gz duckdb.tar.gz
+          cp -r ${{ github.workspace }}/tests .
+          # install duckdb sdist with test dependencies
+          uv venv
+          uv pip install --upgrade pip && uv pip install --group test duckdb.tar.gz
+          # run tests
+          tests_dir="tests${{ inputs.testsuite == 'fast' && '/fast' || '' }}"
+          uv run pytest ${tests_dir} --verbose --ignore=./tests/stubs
 
       - uses: actions/upload-artifact@v4
         with:
