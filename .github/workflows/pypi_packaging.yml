@@ -50,6 +50,7 @@ jobs:
       - uses: astral-sh/setup-uv@v1
         with:
           version: "0.7.14"
+          python-version: 3.11
 
       - name: Build sdist
         run: uv build --sdist
