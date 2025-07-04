@@ -120,6 +120,9 @@ jobs:
     name: Coverage Summary
     runs-on: ubuntu-24.04
     needs: [generate_coverage_reports]
+    env:
+      SUMMARY_PY: ${{ needs.generate_coverage_reports.outputs.summary_py }}
+      SUMMARY_CPP: ${{ needs.generate_coverage_reports.outputs.summary_cpp }}
     if: always()
     steps:
       - name: Summarize
@@ -128,11 +131,11 @@ jobs:
           echo "## Coverage Summary" >> $GITHUB_STEP_SUMMARY
           echo "### Python Coverage Summary" >> $GITHUB_STEP_SUMMARY
           cat <<'EOF'  >> $GITHUB_STEP_SUMMARY
-          ${{ needs.generate_coverage_reports.outputs.summary_py }}
+          $SUMMARY_PY
           EOF
           echo "### C++ Coverage Summary" >> $GITHUB_STEP_SUMMARY
           echo "```" >> $GITHUB_STEP_SUMMARY
           cat <<'EOF'  >> $GITHUB_STEP_SUMMARY
-          ${{ needs.generate_coverage_reports.outputs.summary_cpp }}
+          $SUMMARY_CPP
           EOF
           echo "```" >> $GITHUB_STEP_SUMMARY
