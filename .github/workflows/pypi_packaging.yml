@@ -68,7 +68,7 @@ jobs:
           uv export --only-group test --no-hashes --no-emit-project > test-requirements.txt
           uv pip install --python .test-env -r test-requirements.txt 
           # run tests
-          tests_dir="${{ github.workspace }}}/tests${{ inputs.testsuite == 'fast' && '/fast' || '' }}"
+          tests_dir="${{ github.workspace }}/tests${{ inputs.testsuite == 'fast' && '/fast' || '' }}"
           .test-env/bin/pytest ${tests_dir} --verbose --ignore=./tests/stubs
 
       - uses: actions/upload-artifact@v4
