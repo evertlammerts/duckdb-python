@@ -77,11 +77,17 @@ jobs:
         shell: bash
         run: |
           # install the test requirements
-          uv export --only-group test --no-hashes --no-emit-project > test-requirements.txt
-          uv pip install --python .test-env -r test-requirements.txt --index https://download.pytorch.org/whl/cpu
+          uv sync -v --python .test-env --group test --no-install-project
           # run tests
-          tests_dir="${{ github.workspace }}/tests${{ inputs.testsuite == 'fast' && '/fast' || '' }}"
-          .test-env/bin/pytest ${tests_dir} --verbose --ignore=./tests/stubs
+          tests_root="${{ github.workspace }}/tests"
+          tests_dir="${tests_root}/${{ inputs.testsuite == 'fast' && '/fast' || '' }}"
+          venv_dir="${PWD}/.test-env"
+          uv run \
+            --directory ${{ runner.temp }} \
+            --no-project \
+            --python $venv_dir \
+            --verbose \
+            pytest $tests_dir --verbose --ignore=${tests_root}/stubs
 
       - uses: actions/upload-artifact@v4
         with:
@@ -118,8 +124,11 @@ jobs:
     env:
       CIBW_TEST_SKIP: ${{ inputs.testsuite == 'none' && '*' || '*-macosx_universal2' }}
       CIBW_TEST_SOURCES: tests
-      CIBW_TEST_GROUPS: test
-      CIBW_TEST_COMMAND: uv run -v pytest ${{ inputs.testsuite == 'fast' && './tests/fast' || './tests' }} --verbose --ignore=./tests/stubs
+      CIBW_BEFORE_TEST: >
+        uv export --only-group test --no-emit-project --output-file $PWD/pylock.toml --directory {project} --quiet &&
+        uv pip install -r pylock.toml
+      CIBW_TEST_COMMAND: >
+        uv run -v pytest ${{ inputs.testsuite == 'fast' && './tests/fast' || './tests' }} --verbose --ignore=./tests/stubs
 
     steps:
 
