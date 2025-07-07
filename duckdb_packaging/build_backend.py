@@ -199,9 +199,9 @@ def build_sdist(sdist_directory: str, config_settings: Optional[Dict[str, Union[
         raise RuntimeError("Not in a git repository, can't create an sdist")
     submodule_path = _duckdb_submodule_path()
     if _FORCED_PEP440_VERSION is not None:
-        version = strip_post_from_version(_FORCED_PEP440_VERSION)
-        create_git_tag(version, repo_path=submodule_path)
-    duckdb_version = get_git_describe(repo_path=submodule_path)
+        duckdb_version = pep440_to_git_tag(strip_post_from_version(_FORCED_PEP440_VERSION))
+    else:
+        duckdb_version = get_git_describe(repo_path=submodule_path)
     _write_duckdb_long_version(duckdb_version)
     return skbuild_build_sdist(sdist_directory, config_settings=config_settings)
 
