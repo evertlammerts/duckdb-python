@@ -74,7 +74,7 @@ def _bump_version(base_version: str, distance: int, dirty: bool = False) -> str:
     return f"{format_version(major, minor, patch+1)}.dev{distance}"
 
 
-def handle_version_overrides():
+def forced_version_from_env():
     """
     Handle getting versions from environment variables.
 
@@ -82,9 +82,13 @@ def handle_version_overrides():
     OVERRIDE_GIT_DESCRIBE. If SETUPTOOLS_SCM_PRETEND_VERSION* is set, it gets unset.
     """
     override_value = os.getenv(OVERRIDE_GIT_DESCRIBE_ENV_VAR)
+    pep440_version = None
 
     if override_value:
-        _process_git_describe_override(override_value, SCM_PRETEND_ENV_VAR, OVERRIDE_GIT_DESCRIBE_ENV_VAR)
+        print(f"[versioning] Found {OVERRIDE_GIT_DESCRIBE_ENV_VAR}={override_value}")
+        pep440_version = _git_describe_override_to_pep_440(override_value)
+        os.environ[SCM_PRETEND_ENV_VAR] = pep440_version
+        print(f"[versioning] Injected {SCM_PRETEND_ENV_VAR}={pep440_version}")
     elif SCM_PRETEND_ENV_VAR in os.environ:
         _remove_unsupported_env_var(SCM_PRETEND_ENV_VAR)
 
@@ -92,11 +96,11 @@ def handle_version_overrides():
     if SCM_GLOBAL_PRETEND_ENV_VAR in os.environ:
         _remove_unsupported_env_var(SCM_GLOBAL_PRETEND_ENV_VAR)
 
+    return pep440_version
 
-def _process_git_describe_override(override_value, scm_pretend_env_var, override_env_var):
-    """Process the OVERRIDE_GIT_DESCRIBE environment variable."""
-    print(f"[versioning] Found {override_env_var}={override_value}")
 
+def _git_describe_override_to_pep_440(override_value: str) -> str:
+    """Process the OVERRIDE_GIT_DESCRIBE value."""
     describe_pattern = re.compile(
         r"""
         ^v(?P<tag>\d+\.\d+\.\d+(?:-post\d+|-rc\d+)?) # vX.Y.Z or vX.Y.Z-postN or vX.Y.Z-rcN
@@ -108,7 +112,7 @@ def _process_git_describe_override(override_value, scm_pretend_env_var, override
 
     match = describe_pattern.match(override_value)
     if not match:
-        raise ValueError(f"Invalid {override_env_var}: {override_value}")
+        raise ValueError(f"Invalid git describe override: {override_value}")
 
     version, distance, commit_hash = match.groups()
 
@@ -123,8 +127,7 @@ def _process_git_describe_override(override_value, scm_pretend_env_var, override
     if commit_hash:
         pep440_version += f"+g{commit_hash.lower()}"
 
-    os.environ[scm_pretend_env_var] = pep440_version
-    print(f"[versioning] Injected {scm_pretend_env_var}={pep440_version}")
+    return pep440_version
 
 
 def _remove_unsupported_env_var(env_var):
