@@ -25,15 +25,10 @@ on:
         description: Git ref of DuckDB
         default: refs/heads/main
         required: true
-      artifact_type:
-        description: Artifact type to build
-        required: true
-        type: choice
-        default: nightly
-        options:
-          - nightly
-          - rc
-          - stable
+      force_version:
+        description: Force version (vX.Y.Z-((rc|post)N))
+        required: false
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -64,6 +59,10 @@ jobs:
           cd external/duckdb
           git fetch origin
           git checkout ${{ inputs.duckdb_git_ref }}
+
+      - name: Set OVERRIDE_GIT_DESCRIBE
+        if: ${{ inputs.force_version != '' }}
+        run: echo "OVERRIDE_GIT_DESCRIBE=${{ inputs.force_version }}" >> $GITHUB_ENV
 
       - name: Install Astral UV
         uses: astral-sh/setup-uv@v6
@@ -148,6 +147,10 @@ jobs:
           cd external/duckdb
           git fetch origin
           git checkout ${{ inputs.duckdb_git_ref }}
+
+      - name: Set OVERRIDE_GIT_DESCRIBE
+        if: ${{ inputs.force_version != '' }}
+        run: echo "OVERRIDE_GIT_DESCRIBE=${{ inputs.force_version }}" >> $GITHUB_ENV
 
       - name: Set up QEMU only for (non-native) aarch64
         if: runner.os == 'Linux' && matrix.platform.arch == 'aarch64'

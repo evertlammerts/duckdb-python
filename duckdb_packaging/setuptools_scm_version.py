@@ -63,7 +63,7 @@ def _bump_version(base_version: str, distance: int, dirty: bool = False) -> str:
     # If we're exactly on a tag (distance = 0, dirty=False)
     distance = int(distance or 0)
     if distance == 0 and not dirty:
-        return format_version(major, minor, patch, post)
+        return format_version(major, minor, patch, post=post, rc=rc)
 
     # Otherwise we're at a distance and / or dirty, and need to bump
     if post != 0:
@@ -102,9 +102,9 @@ def _process_git_describe_override(override_value, scm_pretend_env_var, override
 
     describe_pattern = re.compile(
         r"""
-        ^v(?P<tag>\d+\.\d+\.\d+(?:-post\d+)?)   # vX.Y.Z or vX.Y.Z-postN
-        (?:-(?P<distance>\d+))?                  # optional -N
-        (?:-g(?P<hash>[0-9a-fA-F]+))?            # optional -g<sha>
+        ^v(?P<tag>\d+\.\d+\.\d+(?:-post\d+|-rc\d+)?) # vX.Y.Z or vX.Y.Z-postN or vX.Y.Z-rcN
+        (?:-(?P<distance>\d+))?                      # optional -N
+        (?:-g(?P<hash>[0-9a-fA-F]+))?                # optional -g<sha>
         $""",
         re.VERBOSE,
     )
@@ -113,16 +113,14 @@ def _process_git_describe_override(override_value, scm_pretend_env_var, override
     if not match:
         raise ValueError(f"Invalid {override_env_var}: {override_value}")
 
-    tag = match["tag"]
-    distance = match["distance"]
-    commit_hash = match["hash"]
+    version, distance, commit_hash = match.groups()
 
-    # Convert git tag format to PEP440 format (v1.3.1-post1 -> 1.3.1.post1)
-    if "-post" in tag:
-        tag = tag.replace("-post", ".post")
+    # Convert version format to PEP440 format (v1.3.1-[post|rc]1 -> 1.3.1.[post|rc]1)
+    if '-' in version:
+        version = version.replace("-", ".")
 
     # Bump version and format according to PEP440
-    pep440_version = _bump_version(tag, int(distance or 0))
+    pep440_version = _bump_version(version, int(distance or 0))
     if commit_hash:
         pep440_version += f"+g{commit_hash.lower()}"
 
