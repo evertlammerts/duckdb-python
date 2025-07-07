@@ -105,6 +105,7 @@ jobs:
   build_wheels:
     name: 'Wheel: ${{ matrix.python }}-${{ matrix.platform.cibw_system }}_${{ matrix.platform.arch }}'
     strategy:
+      fail-fast: false
       matrix:
         python: [ cp39, cp310, cp311, cp312, cp313 ]
         platform:
