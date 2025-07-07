@@ -11,7 +11,7 @@ from typing import Optional, Tuple
 import re
 
 
-VERSION_RE = re.compile(r"^(?P<major>[0-9]+)\.(?P<minor>[0-9]+)\.(?P<patch>[0-9]+)(?:\.post(?P<post>[0-9]+)|\.rc(?P<rc>[0-9]+))?$")
+VERSION_RE = re.compile(r"^(?P<major>[0-9]+)\.(?P<minor>[0-9]+)\.(?P<patch>[0-9]+)(?:rc(?P<rc>[0-9]+)|\.post(?P<post>[0-9]+))?$")
 GIT_TAG_RE = re.compile(r"^v(?P<version>\d+\.\d+\.\d+(?:-post\d+)?)(?:-(?P<distance>\d+)-g(?P<hash>[0-9a-fA-F]+))?(?:-dirty)?$")
 
 
