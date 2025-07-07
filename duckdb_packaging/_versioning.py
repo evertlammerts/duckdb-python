@@ -12,7 +12,6 @@ import re
 
 
 VERSION_RE = re.compile(r"^(?P<major>[0-9]+)\.(?P<minor>[0-9]+)\.(?P<patch>[0-9]+)(?:rc(?P<rc>[0-9]+)|\.post(?P<post>[0-9]+))?$")
-GIT_TAG_RE = re.compile(r"^v(?P<version>\d+\.\d+\.\d+(?:-post\d+)?)(?:-(?P<distance>\d+)-g(?P<hash>[0-9a-fA-F]+))?(?:-dirty)?$")
 
 
 def parse_version(version: str) -> tuple[int, int, int, int, int]:
@@ -31,7 +30,7 @@ def parse_version(version: str) -> tuple[int, int, int, int, int]:
     if not match:
         raise ValueError(f"Invalid version format: {version} (expected X.Y.Z, X.Y.Z.rcM or X.Y.Z.postN)")
     
-    major, minor, patch, post, rc = match.groups()
+    major, minor, patch, rc, post = match.groups()
     return int(major), int(minor), int(patch), int(post or 0), int(rc or 0)
 
 
