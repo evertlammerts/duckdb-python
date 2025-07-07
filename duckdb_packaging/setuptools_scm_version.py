@@ -18,9 +18,6 @@ MAIN_BRANCH_VERSIONING = True
 SCM_PRETEND_ENV_VAR = "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_DUCKDB"
 SCM_GLOBAL_PRETEND_ENV_VAR = "SETUPTOOLS_SCM_PRETEND_VERSION"
 OVERRIDE_GIT_DESCRIBE_ENV_VAR = "OVERRIDE_GIT_DESCRIBE"
-FORCE_STABLE_BUMP_ENV_VAR = "FORCE_STABLE_BUMP"
-FORCE_POST_BUMP_ENV_VAR = "FORCE_POST_BUMP"
-FORCE_RC_BUMP_ENV_VAR = "FORCE_RC_BUMP"
 
 
 def _main_branch_versioning():
@@ -115,9 +112,11 @@ def _process_git_describe_override(override_value, scm_pretend_env_var, override
 
     version, distance, commit_hash = match.groups()
 
-    # Convert version format to PEP440 format (v1.3.1-[post|rc]1 -> 1.3.1.[post|rc]1)
-    if '-' in version:
-        version = version.replace("-", ".")
+    # Convert version format to PEP440 format (v1.3.1-post1 -> 1.3.1.post1)
+    if '-post' in version:
+        version = version.replace("-post", ".post")
+    elif '-rc' in version:
+        version = version.replace("-rc", "rc")
 
     # Bump version and format according to PEP440
     pep440_version = _bump_version(version, int(distance or 0))
