@@ -51,12 +51,19 @@ jobs:
       summary: ${{ steps.sdist_summary.outputs.summary }}
     steps:
 
-      - name: Checkout and prepare repo
-        uses: ./.github/actions/prepare-repo-for-build
+      - name: Checkout DuckDB Python
+        uses: actions/checkout@v4
         with:
-          git_ref: ${{ inputs.git_ref }}
-          duckdb_git_ref: ${{ inputs.duckdb_git_ref }}
-          artifact_type: ${{ inputs.artifact_type }}
+          ref: ${{ inputs.git_ref }}
+          fetch-depth: 0
+          submodules: true
+
+      - name: Checkout DuckDB
+        shell: bash
+        run: |
+          cd external/duckdb
+          git fetch origin
+          git checkout ${{ inputs.duckdb_git_ref }}
 
       - name: Install Astral UV
         uses: astral-sh/setup-uv@v6
@@ -128,12 +135,19 @@ jobs:
 
     steps:
 
-      - name: Checkout and prepare repo
-        uses: ./.github/actions/prepare-repo-for-build
+      - name: Checkout DuckDB Python
+        uses: actions/checkout@v4
         with:
-          git_ref: ${{ inputs.git_ref }}
-          duckdb_git_ref: ${{ inputs.duckdb_git_ref }}
-          artifact_type: ${{ inputs.artifact_type }}
+          ref: ${{ inputs.git_ref }}
+          fetch-depth: 0
+          submodules: true
+
+      - name: Checkout DuckDB
+        shell: bash
+        run: |
+          cd external/duckdb
+          git fetch origin
+          git checkout ${{ inputs.duckdb_git_ref }}
 
       - name: Set up QEMU only for (non-native) aarch64
         if: runner.os == 'Linux' && matrix.platform.arch == 'aarch64'
