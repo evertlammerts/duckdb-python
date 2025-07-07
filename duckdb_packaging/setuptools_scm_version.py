@@ -18,6 +18,9 @@ MAIN_BRANCH_VERSIONING = True
 SCM_PRETEND_ENV_VAR = "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_DUCKDB"
 SCM_GLOBAL_PRETEND_ENV_VAR = "SETUPTOOLS_SCM_PRETEND_VERSION"
 OVERRIDE_GIT_DESCRIBE_ENV_VAR = "OVERRIDE_GIT_DESCRIBE"
+FORCE_STABLE_BUMP_ENV_VAR = "FORCE_STABLE_BUMP"
+FORCE_POST_BUMP_ENV_VAR = "FORCE_POST_BUMP"
+FORCE_RC_BUMP_ENV_VAR = "FORCE_RC_BUMP"
 
 
 def _main_branch_versioning():
@@ -51,9 +54,9 @@ def version_scheme(version: Any) -> str:
 
 def _bump_version(base_version: str, distance: int, dirty: bool = False) -> str:
     """Bump the version if needed."""
-    # Validate the base version (this should never include anything else than X.Y.Z or X.Y.Z.postN)
+    # Validate the base version (this should never include anything else than X.Y.Z or X.Y.Z.[rc|post]N)
     try:
-        major, minor, patch, post = parse_version(base_version)
+        major, minor, patch, post, rc = parse_version(base_version)
     except ValueError as e:
         raise ValueError(f"Incorrect version format: {base_version} (expected X.Y.Z or X.Y.Z.postN)")
 
@@ -63,9 +66,12 @@ def _bump_version(base_version: str, distance: int, dirty: bool = False) -> str:
         return format_version(major, minor, patch, post)
 
     # Otherwise we're at a distance and / or dirty, and need to bump
-    if post is not None:
+    if post != 0:
         # We're developing on top of a post-release
-        return f"{format_version(major, minor, patch, post)}.dev{distance}"
+        return f"{format_version(major, minor, patch, post=post+1)}.dev{distance}"
+    elif rc != 0:
+        # We're developing on top of an rc
+        return f"{format_version(major, minor, patch, rc=rc+1)}.dev{distance}"
     elif _main_branch_versioning():
         return f"{format_version(major, minor+1, 0)}.dev{distance}"
     return f"{format_version(major, minor, patch+1)}.dev{distance}"

@@ -26,14 +26,19 @@ class TestVersionParsing(unittest.TestCase):
 
     def test_parse_version_basic(self):
         """Test parsing basic semantic versions."""
-        assert parse_version("1.2.3") == (1, 2, 3, None)
-        assert parse_version("0.0.1") == (0, 0, 1, None)
-        assert parse_version("10.20.30") == (10, 20, 30, None)
+        assert parse_version("1.2.3") == (1, 2, 3, 0, 0)
+        assert parse_version("0.0.1") == (0, 0, 1, 0, 0)
+        assert parse_version("10.20.30") == (10, 20, 30, 0, 0)
 
     def test_parse_version_post_release(self):
         """Test parsing post-release versions."""
-        assert parse_version("1.2.3.post1") == (1, 2, 3, 1)
-        assert parse_version("1.2.3.post10") == (1, 2, 3, 10)
+        assert parse_version("1.2.3.post1") == (1, 2, 3, 1, 0)
+        assert parse_version("1.2.3.post10") == (1, 2, 3, 10, 0)
+
+    def test_parse_version_rc_release(self):
+        """Test parsing post-release versions."""
+        assert parse_version("1.2.3.rc1") == (1, 2, 3, 0, 1)
+        assert parse_version("1.2.3.rc10") == (1, 2, 3, 0, 10)
 
     def test_parse_version_invalid(self):
         """Test parsing invalid version formats."""
@@ -45,6 +50,10 @@ class TestVersionParsing(unittest.TestCase):
             parse_version("v1.2.3")
         with pytest.raises(ValueError, match="Invalid version format"):
             parse_version("1.2.3-alpha")
+        with pytest.raises(ValueError, match="Invalid version format"):
+            parse_version("1.2.3.post2.rc5")
+        with pytest.raises(ValueError, match="Invalid version format"):
+            parse_version("1.2.3.rc5.post2")
 
     def test_format_version_basic(self):
         """Test formatting basic semantic versions."""
@@ -54,8 +63,13 @@ class TestVersionParsing(unittest.TestCase):
 
     def test_format_version_post_release(self):
         """Test formatting post-release versions."""
-        assert format_version(1, 2, 3, 1) == "1.2.3.post1"
-        assert format_version(1, 2, 3, 10) == "1.2.3.post10"
+        assert format_version(1, 2, 3, post=1) == "1.2.3.post1"
+        assert format_version(1, 2, 3, post=10) == "1.2.3.post10"
+
+    def test_format_version_rc_release(self):
+        """Test formatting post-release versions."""
+        assert format_version(1, 2, 3, rc=1) == "1.2.3.rc1"
+        assert format_version(1, 2, 3, rc=10) == "1.2.3.rc10"
 
 
 class TestGitTagConversion(unittest.TestCase):
@@ -132,7 +146,7 @@ class TestSetupToolsScmIntegration(unittest.TestCase):
         assert _bump_version("1.2.3", 5, False) == "1.3.0.dev5"
         
         # Post-release development
-        assert _bump_version("1.2.3.post1", 3, False) == "1.2.3.post1.dev3"
+        assert _bump_version("1.2.3.post1", 3, False) == "1.2.3.post2.dev3"
 
     @patch.dict('os.environ', {'MAIN_BRANCH_VERSIONING': '0'})
     def test_bump_version_release_branch(self):

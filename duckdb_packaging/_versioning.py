@@ -11,31 +11,31 @@ from typing import Optional, Tuple
 import re
 
 
-VERSION_RE = re.compile(r"^(?P<major>[0-9]+)\.(?P<minor>[0-9]+)\.(?P<patch>[0-9]+)(?:\.post(?P<post>[0-9]+))?$")
+VERSION_RE = re.compile(r"^(?P<major>[0-9]+)\.(?P<minor>[0-9]+)\.(?P<patch>[0-9]+)(?:\.post(?P<post>[0-9]+)|\.rc(?P<rc>[0-9]+))?$")
 GIT_TAG_RE = re.compile(r"^v(?P<version>\d+\.\d+\.\d+(?:-post\d+)?)(?:-(?P<distance>\d+)-g(?P<hash>[0-9a-fA-F]+))?(?:-dirty)?$")
 
 
-def parse_version(version: str) -> Tuple[int, int, int, Optional[int]]:
+def parse_version(version: str) -> tuple[int, int, int, int, int]:
     """Parse a version string into its components.
     
     Args:
-        version: Version string (e.g., "1.3.1" or "1.3.1.post2")
+        version: Version string (e.g., "1.3.1", "1.3.2.rc3" or "1.3.1.post2")
         
     Returns:
-        Tuple of (major, minor, patch, post) where post is None if not present
+        Tuple of (major, minor, patch, post, rc)
         
     Raises:
         ValueError: If version format is invalid
     """
     match = VERSION_RE.match(version)
     if not match:
-        raise ValueError(f"Invalid version format: {version} (expected X.Y.Z or X.Y.Z.postN)")
+        raise ValueError(f"Invalid version format: {version} (expected X.Y.Z, X.Y.Z.rcM or X.Y.Z.postN)")
     
-    major, minor, patch, post = match.groups()
-    return int(major), int(minor), int(patch), int(post) if post else None
+    major, minor, patch, post, rc = match.groups()
+    return int(major), int(minor), int(patch), int(post or 0), int(rc or 0)
 
 
-def format_version(major: int, minor: int, patch: int, post: Optional[int] = None) -> str:
+def format_version(major: int, minor: int, patch: int, post: Optional[int] = None, rc: Optional[int] = None) -> str:
     """Format version components into a version string.
     
     Args:
@@ -43,13 +43,18 @@ def format_version(major: int, minor: int, patch: int, post: Optional[int] = Non
         minor: Minor version number  
         patch: Patch version number
         post: Post-release number (optional)
+        rc: RC number (optional)
         
     Returns:
         Formatted version string
     """
     version = f"{major}.{minor}.{patch}"
+    if post is not None and rc is not None:
+        raise ValueError("post and rc are mutually exclusive")
     if post is not None:
         version += f".post{post}"
+    if rc is not None:
+        version += f".rc{rc}"
     return version
 
 
