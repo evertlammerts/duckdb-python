@@ -14,7 +14,6 @@ from duckdb_packaging._versioning import (
     format_version,
     git_tag_to_pep440,
     pep440_to_git_tag,
-    bump_version_string,
     get_current_version,
     get_git_describe,
 )
@@ -101,35 +100,6 @@ class TestGitTagConversion(unittest.TestCase):
             git_tag = pep440_to_git_tag(version)
             converted_back = git_tag_to_pep440(git_tag)
             assert converted_back == version
-
-
-class TestVersionBumping(unittest.TestCase):
-    """Test version bumping functionality."""
-
-    def test_bump_version_string_major(self):
-        """Test major version bumping."""
-        assert bump_version_string("1.2.3", "major") == "2.0.0"
-        assert bump_version_string("1.2.3.post5", "major") == "2.0.0"
-
-    def test_bump_version_string_minor(self):
-        """Test minor version bumping."""
-        assert bump_version_string("1.2.3", "minor") == "1.3.0"
-        assert bump_version_string("1.2.3.post5", "minor") == "1.3.0"
-
-    def test_bump_version_string_patch(self):
-        """Test patch version bumping."""
-        assert bump_version_string("1.2.3", "patch") == "1.2.4"
-        assert bump_version_string("1.2.3.post5", "patch") == "1.2.4"
-
-    def test_bump_version_string_post(self):
-        """Test post-release bumping."""
-        assert bump_version_string("1.2.3", "post") == "1.2.3.post1"
-        assert bump_version_string("1.2.3.post5", "post") == "1.2.3.post6"
-
-    def test_bump_version_string_invalid(self):
-        """Test invalid bump types."""
-        with pytest.raises(ValueError, match="Invalid bump type"):
-            bump_version_string("1.2.3", "invalid")
 
 
 class TestSetupToolsScmIntegration(unittest.TestCase):

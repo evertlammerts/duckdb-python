@@ -35,25 +35,25 @@ def parse_version(version: str) -> tuple[int, int, int, int, int]:
     return int(major), int(minor), int(patch), int(post or 0), int(rc or 0)
 
 
-def format_version(major: int, minor: int, patch: int, post: Optional[int] = None, rc: Optional[int] = None) -> str:
+def format_version(major: int, minor: int, patch: int, post: int = 0, rc: int = 0) -> str:
     """Format version components into a version string.
     
     Args:
         major: Major version number
         minor: Minor version number  
         patch: Patch version number
-        post: Post-release number (optional)
-        rc: RC number (optional)
+        post: Post-release number
+        rc: RC number
         
     Returns:
         Formatted version string
     """
     version = f"{major}.{minor}.{patch}"
-    if post is not None and rc is not None:
+    if post != 0 and rc != 0:
         raise ValueError("post and rc are mutually exclusive")
-    if post is not None:
+    if post != 0:
         version += f".post{post}"
-    if rc is not None:
+    if rc != 0:
         version += f".rc{rc}"
     return version
 
@@ -109,34 +109,6 @@ def get_current_version() -> Optional[str]:
         return git_tag_to_pep440(tag)
     except subprocess.CalledProcessError:
         return None
-
-
-def bump_version_string(version: str, bump_type: str) -> str:
-    """Bump a version string by the specified type.
-    
-    Args:
-        version: Current version string
-        bump_type: Type of bump ('major', 'minor', 'patch', 'post')
-        
-    Returns:
-        New version string
-        
-    Raises:
-        ValueError: If bump_type is invalid or version format is invalid
-    """
-    major, minor, patch, post = parse_version(version)
-    
-    if bump_type == "major":
-        return format_version(major + 1, 0, 0)
-    elif bump_type == "minor":
-        return format_version(major, minor + 1, 0)
-    elif bump_type == "patch":
-        return format_version(major, minor, patch + 1)
-    elif bump_type == "post":
-        new_post = (post or 0) + 1
-        return format_version(major, minor, patch, new_post)
-    else:
-        raise ValueError(f"Invalid bump type: {bump_type}. Must be one of: major, minor, patch, post")
 
 
 def create_git_tag(version: str, message: Optional[str] = None) -> None:
