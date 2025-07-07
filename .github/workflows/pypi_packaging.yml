@@ -80,14 +80,13 @@ jobs:
           uv sync -v --python .test-env --group test --no-install-project
           # run tests
           tests_root="${{ github.workspace }}/tests"
-          tests_dir="${tests_root}/${{ inputs.testsuite == 'fast' && '/fast' || '' }}"
+          tests_dir="${tests_root}${{ inputs.testsuite == 'fast' && '/fast' || '/' }}"
           venv_dir="${PWD}/.test-env"
           uv run \
             --directory ${{ runner.temp }} \
-            --no-project \
             --python $venv_dir \
             --verbose \
-            pytest $tests_dir --verbose --ignore=${tests_root}/stubs
+            ${venv_dir}/bin/pytest $tests_dir --verbose --ignore=${tests_root}/stubs
 
       - uses: actions/upload-artifact@v4
         with:
