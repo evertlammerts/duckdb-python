@@ -28,6 +28,8 @@ from scikit_build_core.build import (
     prepare_metadata_for_build_editable,
 )
 
+from duckdb_packaging import process_force_version
+
 _DUCKDB_VERSION_FILENAME = "duckdb_version.txt"
 _LOGGING_FORMAT = "[duckdb_pytooling.build_backend] {}"
 _SKBUILD_CMAKE_OVERRIDE_GIT_DESCRIBE = "cmake.define.OVERRIDE_GIT_DESCRIBE"
@@ -198,6 +200,7 @@ def _skbuild_config_add(
         )
 
 
+@process_force_version
 def build_sdist(sdist_directory: str, config_settings: Optional[Dict[str, Union[List[str],str]]] = None) -> str:
     """Build a source distribution using the DuckDB submodule.
     
@@ -222,6 +225,7 @@ def build_sdist(sdist_directory: str, config_settings: Optional[Dict[str, Union[
     return skbuild_build_sdist(sdist_directory, config_settings=config_settings)
 
 
+@process_force_version
 def build_wheel(
         wheel_directory: str,
         config_settings: Optional[Dict[str, Union[List[str],str]]] = None,

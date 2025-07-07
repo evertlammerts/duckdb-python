@@ -74,7 +74,7 @@ def _bump_version(base_version: str, distance: int, dirty: bool = False) -> str:
     return f"{format_version(major, minor, patch+1)}.dev{distance}"
 
 
-def _handle_version_overrides():
+def handle_version_overrides():
     """
     Handle getting versions from environment variables.
 
@@ -131,6 +131,3 @@ def _remove_unsupported_env_var(env_var):
     """Remove an unsupported environment variable with a warning."""
     print(f"[versioning] WARNING: We do not support {env_var}! Removing.")
     del os.environ[env_var]
-
-# Handle environment overrides on module load
-_handle_version_overrides()
