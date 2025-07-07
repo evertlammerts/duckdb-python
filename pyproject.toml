@@ -208,7 +208,6 @@ test = [ # dependencies used for running tests
     "gcovr",
     "fsspec>=2022.11.0",
     "gcsfs",
-    "numpy<2",
     "packaging",
     "pandas>=2.0.0",
     "polars",
@@ -218,11 +217,10 @@ test = [ # dependencies used for running tests
     "pyspark",
     "pytz",
     "requests",
-    "tensorflow-cpu; ( platform_system == 'Linux' ) and python_version <= '3.12'",
-    "tensorflow-cpu>=2.19.0; ( platform_system == 'Windows' and platform_machine == 'AMD64' ) and python_version <= '3.12'",
-    "tensorflow; ( platform_system == 'Darwin' and platform_machine == 'arm64' ) and python_version <= '3.12'",
-    "torch; ( platform_system != 'Darwin' or platform_machine != 'x86_64' ) and python_version <= '3.11'",
     "urllib3",
+    "torch>=2.7.1",
+    "tensorflow-cpu>=2.18.0",
+    "numpy>=2.0.2",
 ]
 scripts = [ # dependencies used for running scripts
     "cxxheaderparser",
