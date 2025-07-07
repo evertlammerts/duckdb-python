@@ -69,24 +69,22 @@ jobs:
 
       - name: Install sdist
         run: |
-          uv venv .test-env
-          uv pip install --python .test-env ./dist/duckdb-*.tar.gz
+          cd ${{ runner.temp }}
+          uv venv
+          uv pip install ${{ github.workspace }}/dist/duckdb-*.tar.gz
 
       - name: Test sdist
         if: ${{ inputs.testsuite != 'none' }}
         shell: bash
         run: |
           # install the test requirements
-          uv sync -v --python .test-env --group test --no-install-project
+          uv export --only-group test --no-emit-project --output-file ${{ runner.temp }}/pylock.toml --quiet
+          cd ${{ runner.temp }}
+          uv pip install -r pylock.toml
           # run tests
           tests_root="${{ github.workspace }}/tests"
           tests_dir="${tests_root}${{ inputs.testsuite == 'fast' && '/fast' || '/' }}"
-          venv_dir="${PWD}/.test-env"
-          uv run \
-            --directory ${{ runner.temp }} \
-            --python $venv_dir \
-            --verbose \
-            ${venv_dir}/bin/pytest $tests_dir --verbose --ignore=${tests_root}/stubs
+          uv run --verbose pytest $tests_dir --verbose --ignore=${tests_root}/stubs
 
       - uses: actions/upload-artifact@v4
         with:
