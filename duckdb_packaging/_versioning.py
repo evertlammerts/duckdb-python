@@ -53,7 +53,7 @@ def format_version(major: int, minor: int, patch: int, post: int = 0, rc: int = 
     if post != 0:
         version += f".post{post}"
     if rc != 0:
-        version += f".rc{rc}"
+        version += f"rc{rc}"
     return version
 
 
