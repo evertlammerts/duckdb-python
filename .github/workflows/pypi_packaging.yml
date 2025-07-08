@@ -128,7 +128,7 @@ jobs:
       CIBW_TEST_SKIP: ${{ inputs.testsuite == 'none' && '*' || '*-macosx_universal2' }}
       CIBW_TEST_SOURCES: tests
       CIBW_BEFORE_TEST: >
-        uv export --only-group test --no-emit-project --output-file pylock.toml --directory {project} --quiet &&
+        uv export --only-group test --no-emit-project --output-file pylock.toml --directory {project} &&
         uv pip install -r pylock.toml
       CIBW_TEST_COMMAND: >
         uv run -v pytest ${{ inputs.testsuite == 'fast' && './tests/fast' || './tests' }} --verbose --ignore=./tests/stubs
@@ -149,9 +149,10 @@ jobs:
           git fetch origin
           git checkout ${{ inputs.duckdb_git_ref }}
 
+      # Make sure that OVERRIDE_GIT_DESCRIBE is propagated to cibuildwhel's env, also when it's running linux builds
       - name: Set OVERRIDE_GIT_DESCRIBE
         if: ${{ inputs.force_version != '' }}
-        run: echo "OVERRIDE_GIT_DESCRIBE=${{ inputs.force_version }}" >> $GITHUB_ENV
+        run: echo "CIBW_ENVIRONMENT=OVERRIDE_GIT_DESCRIBE=${{ inputs.force_version }}" >> $GITHUB_ENV
 
       - name: Set up QEMU only for (non-native) aarch64
         if: runner.os == 'Linux' && matrix.platform.arch == 'aarch64'
@@ -163,7 +164,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           version: "0.7.14"
-          enable-cache: true
+          enable-cache: false
           cache-suffix: -${{ matrix.python }}-${{ matrix.platform.cibw_system }}_${{ matrix.platform.arch }}
 
       - name: Build wheels
