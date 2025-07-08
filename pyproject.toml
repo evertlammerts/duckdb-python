@@ -180,13 +180,13 @@ exclude = [
 
 [tool.uv]
 default-groups = ["dev"]
-#environments = [
-#    "sys_platform == 'darwin' and platform_machine == 'arm64'",
-#    "sys_platform == 'darwin' and platform_machine == 'x86_64'",
-#    "sys_platform == 'win32' and platform_machine == 'AMD64'",
-#    "sys_platform == 'linux' and platform_machine == 'x86_64'",
-#    "sys_platform == 'linux' and platform_machine == 'aarch64'",
-#]
+environments = [
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "sys_platform == 'win32' and platform_machine == 'AMD64'",
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'linux' and platform_machine == 'aarch64'",
+]
 
 # We just need pytorch for tests, wihtout GPU acceleration. PyPI doesn't host a cpu-only version for Linux, so we have
 # to configure the index url for cpu-only pytorch manually
