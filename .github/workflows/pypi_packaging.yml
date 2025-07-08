@@ -109,7 +109,7 @@ jobs:
       matrix:
         python: [ cp39, cp310, cp311, cp312, cp313 ]
         platform:
-          - { os: windows-latest,   arch: amd64,      cibw_system: win }
+          - { os: windows-2025,     arch: amd64,      cibw_system: win }
           - { os: ubuntu-24.04,     arch: x86_64,     cibw_system: manylinux }
           - { os: ubuntu-24.04,     arch: aarch64,    cibw_system: manylinux }
           - { os: macos-15,         arch: arm64,      cibw_system: macosx }
