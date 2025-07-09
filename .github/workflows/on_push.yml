@@ -1,0 +1,20 @@
+name: Tests and coverage on push
+on:
+  push:
+    branches-ignore:
+      - main
+      - v*.*-*
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.editorconfig'
+      - 'scripts/**'
+      - '.github//**'
+      - '!.github/workflows/on_push.yml'
+      - '!.github/workflows/coverage.yml'
+jobs:
+  test:
+    uses: ./.github/workflows/coverage.yml
+    with:
+      git_ref: ${{ github.ref }}
+      testsuite: all

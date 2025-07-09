@@ -1,4 +1,5 @@
 name: Packaging
+run-name: Build ${{ inputs.minimal && 'minimal set of' || 'all' }} packages (version=${{ inputs.force_version != '' && inputs.force_version || 'dev' }}, tests=${{ inputs.testsuite }}, ref=${{ inputs.git_ref }}, duckdb ref=${{ inputs.duckdb_git_ref }})
 on:
   workflow_dispatch:
     inputs:
@@ -42,8 +43,6 @@ jobs:
   build_sdist:
     name: Build sdist
     runs-on: ubuntu-24.04
-    outputs:
-      summary: ${{ steps.sdist_summary.outputs.summary }}
     steps:
 
       - name: Checkout DuckDB Python
@@ -95,12 +94,6 @@ jobs:
         with:
           name: sdist-main
           path: dist/*.tar.gz
-
-      - name: Save summary
-        id: sdist_summary
-        run: |
-          cd dist
-          echo "summary=$(du -h -- *.tar.gz)" >> $GITHUB_OUTPUT
 
   build_wheels:
     name: 'Wheel: ${{ matrix.python }}-${{ matrix.platform.cibw_system }}_${{ matrix.platform.arch }}'
@@ -161,7 +154,7 @@ jobs:
           enable-cache: false
           cache-suffix: -${{ matrix.python }}-${{ matrix.platform.cibw_system }}_${{ matrix.platform.arch }}
 
-      - name: Build wheels
+      - name: Build${{ inputs.testsuite != 'none' && ' and test ' || ' ' }}wheels
         uses: pypa/cibuildwheel@v3.0
         env:
           CIBW_ARCHS: ${{ matrix.platform.arch == 'amd64' && 'AMD64' || matrix.platform.arch }}
@@ -172,38 +165,3 @@ jobs:
         with:
           name: wheel-${{ matrix.python }}-${{ matrix.platform.cibw_system }}_${{ matrix.platform.arch }}
           path: wheelhouse/*.whl
-
-      - name: Create summary
-        run: |
-          cd wheelhouse
-          du -h -- *.whl > metadata-${{ matrix.python }}-${{ matrix.platform.cibw_system }}_${{ matrix.platform.arch }}
-
-      - name: Upload summary
-        uses: actions/upload-artifact@v4
-        with:
-          name: metadata-${{ matrix.python }}-${{ matrix.platform.cibw_system }}_${{ matrix.platform.arch }}
-          path: wheelhouse/metadata-${{ matrix.python }}-${{ matrix.platform.cibw_system }}_${{ matrix.platform.arch }}
-
-  summary:
-    name: Build Summary
-    runs-on: ubuntu-24.04
-    needs: [build_sdist, build_wheels]
-    if: always()
-    steps:
-      - name: Download wheel summaries
-        uses: actions/download-artifact@v4
-        with:
-          pattern: metadata-*
-          path: metadata
-          merge-multiple: true
-
-      - name: Summarize all
-        run: |
-          to_table_row() { awk '{ print "|", $1, "|", $2, "|" }'; }
-          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
-          echo "| Filesize | Filename |" >> $GITHUB_STEP_SUMMARY
-          echo "|----------|----------|" >> $GITHUB_STEP_SUMMARY
-          echo "${{ needs.build_main_sdist.outputs.summary }}" | to_table_row >> $GITHUB_STEP_SUMMARY 
-          for f in metadata/*; do
-            cat $f | to_table_row >> $GITHUB_STEP_SUMMARY
-          done

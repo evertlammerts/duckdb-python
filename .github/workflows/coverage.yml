@@ -5,17 +5,32 @@ on:
       git_ref:
         type: string
         description: Git ref of the DuckDB python package
+        default: refs/heads/main
+        required: true
       duckdb_git_ref:
         type: string
         description: Git ref of DuckDB
       testsuite:
-        description: The tests that should be run
-        required: true
         type: choice
-        default: fast
+        description: Testsuite to run ('all' or 'fast')
+        default: all
+        required: true
         options:
-          - fast
           - all
+          - fast
+  workflow_call:
+    inputs:
+      git_ref:
+        type: string
+        description: Git ref of the DuckDB python package
+        required: true
+      duckdb_git_ref:
+        type: string
+      testsuite:
+        type: string
+        description: Testsuite to run ('all' or 'fast')
+        required: true
+        default: all
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -37,12 +52,17 @@ jobs:
           fetch-depth: 0
           submodules: true
 
-      - name: Checkout DuckDB
+      - name: Checkout DuckDB to provided ref
+        if: ${{ inputs.duckdb_git_ref != '' }}
         shell: bash
         run: |
           cd external/duckdb
           git fetch origin
           git checkout ${{ inputs.duckdb_git_ref }}
+
+      - name: Set DuckDB to HEAD if no ref provided
+        if: ${{ inputs.duckdb_git_ref == '' }}
+        run: git submodule update --remote
 
       - name: Install Ccache
         shell: bash

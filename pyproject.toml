@@ -1,8 +1,8 @@
 # pyproject.toml: contains most project, build, linting, formatting and ci configuration
 
-###################################################
+######################################################################################################
 # PROJECT CONFIG
-###################################################
+######################################################################################################
 
 [project]
 name = "duckdb"
@@ -51,12 +51,12 @@ all = [ # users can install duckdb with 'duckdb[all]', which will install this l
     "adbc_driver_manager", # for the adbc driver (TODO: this should live under the duckdb package)
 ]
 
-###################################################
+######################################################################################################
 # BUILD CONFIG
 #
 # Includes config used for building wheels, sdists and for installing
 # Tools: scikit-build-core and cmake
-###################################################
+######################################################################################################
 
 [build-system]
 build-backend = "duckdb_packaging.build_backend"
@@ -164,22 +164,30 @@ exclude = [
     "/.*",
 ]
 
-###################################################
-# DEV CONFIG
+######################################################################################################
+# TEST AND DEV DEPENDENCY CONFIG
 #
-# Config for environment management, dependency groups,
-# testing, type checking, linting, formatting and coverage
+# !!! HERE BE (CI) DRAGONS !!!
 #
-# Tools:
-# - uv: Python package and project manager
-# - mypy: Static type checking for Python
-# - ruff: Python linter and code formatter
-# - coverage.py: Code coverage (Python and C++)
-# - pytest
-###################################################
+# This section has dependency groups for testing and development. Tread carefully, the current setup makes sure that
+# test dependencies can be installed on as many platforms we build wheel for. Especially picky are:
+# - tensorflow: we can only run tests on cp39-cp311, for osx there is no tensorflow-cpu, for windows we need
+#          tensorflow-cpu-aws and there is no distribution availalbe for Linux aarch64.
+# - torch: since we can't use gpu acceleration, we need to rely on torch-cpu, which isn't available on pypi. We use
+#          `tool.uv.index` and `tool.uv.sources` to make sure the official pytorch index is used. Even there, we don't
+#          have a wheel available for x86_64 OSX + cp313.
+# - numpy: tensorflow doesn't play nice with numpy>2 so for every platform that can run tensorflow (cp39-cp311) we use
+#          numpy<2. numpy<2 has no wheels for cp31[2|3], meaning an sdist will be used. However, on Windows amd64 +
+#          cp313 this results in a segfault / access violation. To get around this, we install numpy>=2 on all >=cp312
+#          platforms.
+######################################################################################################
 
 [tool.uv]
 default-groups = ["dev"]
+# `tool.uv.environments` and `tool.uv.required-environments` are used for dependency resolving. These settings should
+# make sure that all test and dev dependencies can be resolved on these platforms, which are all platforms we currently
+# build wheels for.
+# See https://docs.astral.sh/uv/concepts/resolution/#universal-resolution
 environments = [ # no need to resolve packages beyond these platforms with uv...
     "python_version >= '3.9' and sys_platform == 'darwin' and platform_machine == 'arm64'",
     "python_version >= '3.9' and sys_platform == 'darwin' and platform_machine == 'x86_64'",
@@ -220,20 +228,19 @@ test = [ # dependencies used for running tests
     "mypy",
     "coverage",
     "gcovr",
-    "fsspec>=2022.11.0",
     "gcsfs",
     "packaging",
-    "pandas>=2.0.0",
     "polars",
     "psutil",
     "py4j",
-    "pyarrow>=18.0.0",
     "pyspark",
     "pytz",
     "requests",
     "urllib3",
-    "torch>=2.2.2; sys_platform == 'darwin' and platform_machine == 'x86_64' and python_version < '3.13'",
-    "torch>=2.2.2; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "fsspec>=2022.11.0",
+    "pandas>=2.0.0",
+    "pyarrow>=18.0.0",
+    "torch>=2.2.2; sys_platform != 'darwin' or platform_machine != 'x86_64' or python_version < '3.13'",
     "tensorflow==2.14.0; sys_platform == 'darwin' and python_version < '3.12'",
     "tensorflow-cpu>=2.14.0; sys_platform == 'linux' and platform_machine != 'aarch64' and python_version < '3.12'",
     "tensorflow-cpu>=2.14.0; sys_platform == 'win32' and python_version < '3.12'",
@@ -265,6 +272,18 @@ dev = [ # tooling like uv will install this automatically when syncing the envir
     {include-group = "scripts"},
     {include-group = "duckdb_packaging"},
 ]
+
+######################################################################################################
+# DEV CONFIG
+#
+# Config for testig, coverage, linting and formatting
+#
+# Tools:
+# - mypy: Static type checking for Python
+# - ruff: Python linter and code formatter
+# - coverage.py: Code coverage (Python and C++)
+# - pytest
+######################################################################################################
 
 [tool.pytest.ini_options]
 minversion = "6.0"
@@ -340,12 +359,12 @@ docstring-code-line-length = 88
 quote-style = "double"
 indent-style = "space"
 
-###################################################
+######################################################################################################
 # CI CONFIG
 #
-# Configuration for CI Workflows
-# Tools: cibuildwheel
-###################################################
+# Configuration for CI Workflows. Specified here instead of in the workflow yamls so you can use `cibuildwheel` locally
+# (to some extent).
+######################################################################################################
 [tool.cibuildwheel]
 build-frontend = "build[uv]"
 manylinux-x86_64-image = "manylinux_2_28"
