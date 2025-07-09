@@ -238,7 +238,8 @@ test = [ # dependencies used for running tests
     "tensorflow-cpu>=2.14.0; sys_platform == 'linux' and platform_machine != 'aarch64' and python_version < '3.12'",
     "tensorflow-cpu>=2.14.0; sys_platform == 'win32' and python_version < '3.12'",
     "tensorflow-cpu-aws==2.15.1; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version < '3.12'",
-    "numpy<2",
+    "numpy<2; python_version < '3.12'",
+    "numpy>=2; python_version >= '3.12'",
 ]
 
 scripts = [ # dependencies used for running scripts
