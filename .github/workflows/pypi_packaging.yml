@@ -111,7 +111,7 @@ jobs:
         platform:
           - { os: windows-2025,     arch: amd64,      cibw_system: win }
           - { os: ubuntu-24.04,     arch: x86_64,     cibw_system: manylinux }
-          - { os: ubuntu-24.04,     arch: aarch64,    cibw_system: manylinux }
+          - { os: ubuntu-24.04-arm, arch: aarch64,    cibw_system: manylinux }
           - { os: macos-15,         arch: arm64,      cibw_system: macosx }
           - { os: macos-15,         arch: universal2, cibw_system: macosx }
           - { os: macos-13,         arch: x86_64,     cibw_system: macosx }
@@ -153,12 +153,6 @@ jobs:
       - name: Set OVERRIDE_GIT_DESCRIBE
         if: ${{ inputs.force_version != '' }}
         run: echo "CIBW_ENVIRONMENT=OVERRIDE_GIT_DESCRIBE=${{ inputs.force_version }}" >> $GITHUB_ENV
-
-      - name: Set up QEMU only for (non-native) aarch64
-        if: runner.os == 'Linux' && matrix.platform.arch == 'aarch64'
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: all
 
       # Install Astral UV, which will be used as build-frontend for cibuildwheel
       - uses: astral-sh/setup-uv@v6
