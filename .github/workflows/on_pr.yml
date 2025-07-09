@@ -1,0 +1,39 @@
+name: Tests and builds on PR
+on:
+  pull_request:
+    branches:
+      - main
+      - v*.*-*
+    types: [opened, reopened, ready_for_review, converted_to_draft]
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.editorconfig'
+      - 'scripts/**'
+      - '.github//**'
+      - '!.github/workflows/on_push.yml'
+      - '!.github/workflows/coverage.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  packaging_test:
+    name: Build a minimal set of packages and run all tests on them
+    # Skip packaging tests for draft PRs
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    uses: ./.github/workflows/pypi_packaging.yml
+    with:
+      minimal: true
+      testsuite: all
+      git_ref: ${{ github.ref }}
+      duckdb_git_ref: ${{ github.ref_name }}
+
+  coverage_test:
+    name: Run coverage tests
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    uses: ./.github/workflows/coverage.yml
+    with:
+      git_ref: ${{ github.ref }}
+      testsuite: all

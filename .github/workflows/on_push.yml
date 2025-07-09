@@ -12,9 +12,15 @@ on:
       - '.github//**'
       - '!.github/workflows/on_push.yml'
       - '!.github/workflows/coverage.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
+    name: Run coverage tests
     uses: ./.github/workflows/coverage.yml
     with:
       git_ref: ${{ github.ref }}
-      testsuite: all
+      testsuite: fast

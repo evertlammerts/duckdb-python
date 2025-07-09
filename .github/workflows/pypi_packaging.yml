@@ -5,13 +5,13 @@ on:
     inputs:
       minimal:
         type: boolean
-        default: false
         description: Build a minimal set of wheels to do a sanity check
+        default: false
       testsuite:
-        description: The tests that should be run
-        required: true
         type: choice
-        default: none
+        description: Testsuite to run (none, fast, all)
+        required: true
+        default: all
         options:
           - none
           - fast
@@ -19,12 +19,35 @@ on:
       git_ref:
         type: string
         description: Git ref of the DuckDB python package
+        required: true
         default: refs/heads/main
+      duckdb_git_ref:
+        type: string
+        description: Git ref of DuckDB
+        required: true
+        default: refs/heads/main
+      force_version:
+        type: string
+        description: Force version (vX.Y.Z-((rc|post)N))
+        required: false
+  workflow_call:
+    inputs:
+      minimal:
+        type: boolean
+        description: Build a minimal set of wheels to do a sanity check
+        default: false
+      testsuite:
+        type: string
+        description: Testsuite to run (none, fast, all)
+        required: true
+        default: all
+      git_ref:
+        type: string
+        description: Git ref of the DuckDB python package
         required: true
       duckdb_git_ref:
         type: string
         description: Git ref of DuckDB
-        default: refs/heads/main
         required: true
       force_version:
         description: Force version (vX.Y.Z-((rc|post)N))
@@ -114,7 +137,6 @@ jobs:
           - { minimal: true, python: cp310 }
           - { minimal: true, python: cp311 }
           - { minimal: true, python: cp312 }
-          - { minimal: true, platform: { arch: aarch64 } }
           - { minimal: true, platform: { arch: universal2 } }
     runs-on: ${{ matrix.platform.os }}
     env:
