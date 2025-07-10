@@ -33,7 +33,7 @@ on:
         default: all
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: coverage-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -82,9 +82,9 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ inputs.testsuite }}" == "all" ]]; then
-            uv run -v coverage run -m pytest ./tests --ignore=./tests/stubs
+            uv run coverage run -m pytest ./tests --ignore=./tests/stubs
           elif [[ "${{ inputs.testsuite }}" == "fast" ]]; then
-            uv run -v coverage run -m pytest ./tests/fast
+            uv run coverage run -m pytest ./tests/fast
           else
             echo "Invalid testsuite!"
             exit 1
