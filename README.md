@@ -123,12 +123,19 @@ because we work with dependency groups.
 
 Some useful commands:
 
-Install duckdb together with the `dev` dependency group in `editable` mode without build isolation and with a
-build-dir and automatic rebuilds (i.e. `--editable --no-build-isolation --config-settings=editable.rebuild=true 
--Cbuild-dir=<path>`), in a Python 3.9 virtual environment:
+Install duckdb together with the `dev` dependency group in `editable` mode with a build-dir and automatic rebuilds
+(i.e. `--editable --config-settings=editable.rebuild=true -Cbuild-dir=<path>`), in a Python 3.9 virtual environment:
 ```bash
 brew install uv
 uv sync -p 3.9
+```
+
+For IDE's:
+```bash
+# install all dev dependencies
+uv sync  --no-install-project
+# build and install without build isolation
+uv sync  --no-build-isolation
 ```
 
 Run all pytests (this includes tests/slow and _will_ take very long):

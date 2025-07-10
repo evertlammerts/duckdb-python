@@ -1,6 +1,7 @@
 """
 Tests for duckdb_pytooling versioning functionality.
 """
+import os
 import unittest
 
 import pytest
@@ -17,7 +18,7 @@ from duckdb_packaging._versioning import (
     get_current_version,
     get_git_describe,
 )
-from duckdb_packaging.setuptools_scm_version import _bump_version, version_scheme
+from duckdb_packaging.setuptools_scm_version import _bump_version, version_scheme, forced_version_from_env
 
 
 class TestVersionParsing(unittest.TestCase):
@@ -36,8 +37,8 @@ class TestVersionParsing(unittest.TestCase):
 
     def test_parse_version_rc_release(self):
         """Test parsing post-release versions."""
-        assert parse_version("1.2.3.rc1") == (1, 2, 3, 0, 1)
-        assert parse_version("1.2.3.rc10") == (1, 2, 3, 0, 10)
+        assert parse_version("1.2.3rc1") == (1, 2, 3, 0, 1)
+        assert parse_version("1.2.3rc10") == (1, 2, 3, 0, 10)
 
     def test_parse_version_invalid(self):
         """Test parsing invalid version formats."""
@@ -50,9 +51,7 @@ class TestVersionParsing(unittest.TestCase):
         with pytest.raises(ValueError, match="Invalid version format"):
             parse_version("1.2.3-alpha")
         with pytest.raises(ValueError, match="Invalid version format"):
-            parse_version("1.2.3.post2.rc5")
-        with pytest.raises(ValueError, match="Invalid version format"):
-            parse_version("1.2.3.rc5.post2")
+            parse_version("1.2.3rc5.post2")
 
     def test_format_version_basic(self):
         """Test formatting basic semantic versions."""
@@ -67,8 +66,8 @@ class TestVersionParsing(unittest.TestCase):
 
     def test_format_version_rc_release(self):
         """Test formatting post-release versions."""
-        assert format_version(1, 2, 3, rc=1) == "1.2.3.rc1"
-        assert format_version(1, 2, 3, rc=10) == "1.2.3.rc10"
+        assert format_version(1, 2, 3, rc=1) == "1.2.3rc1"
+        assert format_version(1, 2, 3, rc=10) == "1.2.3rc10"
 
 
 class TestGitTagConversion(unittest.TestCase):
@@ -131,7 +130,7 @@ class TestSetupToolsScmIntegration(unittest.TestCase):
     def test_bump_version_dirty(self):
         """Test bump_version with dirty working directory."""
         assert _bump_version("1.2.3", 0, True) == "1.3.0.dev0"
-        assert _bump_version("1.2.3.post1", 0, True) == "1.2.3.post1.dev0"
+        assert _bump_version("1.2.3.post1", 0, True) == "1.2.3.post2.dev0"
 
     def test_version_scheme_function(self):
         """Test the version_scheme function that setuptools_scm calls."""
@@ -198,9 +197,9 @@ class TestGitOperations(unittest.TestCase):
     def test_get_git_describe_no_tags(self, mock_run):
         """Test git describe when no tags exist."""
         mock_run.side_effect = subprocess.CalledProcessError(1, "git")
-        
-        result = get_git_describe()
-        assert result is None
+
+        with pytest.raises(subprocess.CalledProcessError, match="exit status 1"):
+            result = get_git_describe()
 
 
 class TestEnvironmentVariableHandling(unittest.TestCase):
@@ -209,28 +208,19 @@ class TestEnvironmentVariableHandling(unittest.TestCase):
     @patch.dict('os.environ', {'OVERRIDE_GIT_DESCRIBE': 'v1.2.3-5-g1234567'})
     def test_override_git_describe_basic(self):
         """Test OVERRIDE_GIT_DESCRIBE with basic format."""
-        # Need to reload to pick up environment variables
-        import importlib
-        from duckdb_packaging import setuptools_scm_version
-        importlib.reload(setuptools_scm_version)
-        
+        forced_version_from_env()
         # Check that the environment variable was processed
-        assert 'SETUPTOOLS_SCM_PRETEND_VERSION_FOR_DUCKDB' in setuptools_scm_version.os.environ
+        assert 'SETUPTOOLS_SCM_PRETEND_VERSION_FOR_DUCKDB' in os.environ
 
     @patch.dict('os.environ', {'OVERRIDE_GIT_DESCRIBE': 'v1.2.3-post1-3-g1234567'})
     def test_override_git_describe_post_release(self):
         """Test OVERRIDE_GIT_DESCRIBE with post-release format."""
-        import importlib
-        from duckdb_packaging import setuptools_scm_version
-        importlib.reload(setuptools_scm_version)
-        
+        forced_version_from_env()
         # Check that post-release was converted correctly
-        assert 'SETUPTOOLS_SCM_PRETEND_VERSION_FOR_DUCKDB' in setuptools_scm_version.os.environ
+        assert 'SETUPTOOLS_SCM_PRETEND_VERSION_FOR_DUCKDB' in os.environ
 
     @patch.dict('os.environ', {'OVERRIDE_GIT_DESCRIBE': 'invalid-format'})
     def test_override_git_describe_invalid(self):
         """Test OVERRIDE_GIT_DESCRIBE with invalid format."""
-        with pytest.raises(ValueError, match="Invalid OVERRIDE_GIT_DESCRIBE"):
-            import importlib
-            from duckdb_packaging import setuptools_scm_version
-            importlib.reload(setuptools_scm_version)
+        with pytest.raises(ValueError, match="Invalid git describe override"):
+            forced_version_from_env()
