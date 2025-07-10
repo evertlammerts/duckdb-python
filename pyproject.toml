@@ -107,16 +107,16 @@ cmake.define.CMAKE_SHARED_LINKER_FLAGS = "--coverage"
 # Override: if we're in editable mode then make sure a build dir is set. Note that COVERAGE runs have their own
 #   build-dir, and we don't want to interfere with that. We're also disabling unity builds to help with debugging.
 [[tool.scikit-build.overrides]]
-if.state   = "editable"
+if.state = "editable"
 if.env.COVERAGE = false
-build-dir  = "build/{build_type}"
+build-dir  = "build/debug"
 editable.rebuild = true
 cmake.build-type = "Debug"
 
 # Separate override because we have to append to cmake.define with `inherit` in order not to overwrite other defines.
 #   see https://scikit-build-core.readthedocs.io/en/latest/configuration/overrides.html#inheriting-for-tables-and-arrays
 [[tool.scikit-build.overrides]]
-if.state   = "editable"
+if.state = "editable"
 if.env.COVERAGE = false
 inherit.cmake.define = "append"
 cmake.define.DISABLE_UNITY = "1"
@@ -265,7 +265,7 @@ duckdb_packaging = [ # dependencies used for using included packaging tooling
     "setuptools_scm>=8.0"
 ]
 dev = [ # tooling like uv will install this automatically when syncing the environment
-    "pybind11>=2.6.0",
+    "pybind11[global]>=2.6.0",
     "ruff>=0.11.13",
     {include-group = "stubdeps"},
     {include-group = "test"},
