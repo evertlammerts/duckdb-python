@@ -42,6 +42,128 @@ Install with all optional dependencies:
 pip install 'duckdb[all]'
 ```
 
+## Development
+
+### Building wheels and sdists
+
+  To build a wheel and sdist for your system and the default Python version:
+```bash
+uv build
+````
+
+  To build a wheel for a different Python version:
+```bash
+# E.g. for Python 3.9
+uv build -p 3.9
+```
+
+### Editable installs (general)
+
+  It's good to be aware of the following when creating an editable install:
+- `uv sync` or `uv run [tool]` create editable installs by default, however, it work the way you expect. We have 
+  configured the project so that scikit-build-core will use a persistent build-dir, but since the build itself 
+  happens in an isolated, ephemeral environment, cmake's paths will point to non-existing directories. CMake itself 
+  will be missing.
+- You should install all development dependencies, and then build the project without build isolation, in two separate 
+  steps. After this you can happily keep building and running, as long as you don't forget to pass in the 
+  `--no-build-isolation` flag.
+
+```bash
+# install all dev dependencies without building the project (needed once)
+uv sync -p 3.9 --no-install-project
+# build and install without build isolation
+uv sync  --no-build-isolation
+```
+
+### Editable installs (IDEs)
+
+  If you're using an IDE then life is a little simpler. You install build dependencies and the project in the two 
+  steps outlined above, and from that point on you can rely on e.g. CLion's cmake capabilities to do incremental 
+  compilation and editable rebuilds. This will skip scikit-build-core's build backend and all of uv's dependency 
+  management, so for "real" builds you better revert to the CLI. However, this should work fine for coding and debugging.
+
+### Running tests
+
+  Run all pytests:
+```bash
+uv run --no-build-isolation pytest ./tests --verbose
+```
+
+  Exclude the test/slow directory:
+```bash
+uv run --no-build-isolation pytest ./tests --verbose --ignore=./tests/slow
+```
+
+### Test coverage
+
+  Run with coverage (during development you probably want to specify which tests to run):
+```bash
+COVERAGE=1 uv run --no-build-isolation coverage run -m pytest ./tests --verbose
+```
+
+  The `COVERAGE` env var will compile the extension with `--coverage`, allowing us to collect coverage stats of C++ 
+  code as well as Python code.
+
+  Check coverage for Python code:
+```bash
+uvx coverage html -d htmlcov-python
+uvx coverage report --format=markdown
+```
+
+  Check coverage for C++ code (note: this will clutter your project dir with html files, consider saving them in some 
+  other place):
+```bash
+uvx gcovr \
+  --gcov-ignore-errors all \
+  --root "$PWD" \
+  --filter "${PWD}/src/duckdb_py" \
+  --exclude '.*/\.cache/.*' \
+  --gcov-exclude '.*/\.cache/.*' \
+  --gcov-exclude '.*/external/.*' \
+  --gcov-exclude '.*/site-packages/.*' \
+  --exclude-unreachable-branches \
+  --exclude-throw-branches \
+  --html --html-details -o coverage-cpp.html \
+  build/coverage/src/duckdb_py \
+  --print-summary
+```
+
+### Typechecking and linting
+
+- We're not running any mypy typechecking tests at the moment
+- We're not running any ruff / linting / formatting at the moment
+
+### Cibuildwheel
+
+You can run cibuildwheel locally for linux. E.g. limited to Python 3.9:
+```bash
+CIBW_BUILD='cp39-*' uvx cibuildwheel --platform linux .
+```
+
+### Code conventions
+
+* Follow the [Google Python styleguide](https://google.github.io/styleguide/pyguide.html)
+* See the section on [Comments and Docstrings](https://google.github.io/styleguide/pyguide.html#s3.8-comments-and-docstrings)
+
+### Tooling
+
+This codebase is developed with the following tools:
+- [Astral UV](https://docs.astral.sh/uv/) - for dependency management across all platforms we provide wheels for,
+  and for Python environment management. It will be hard to work on this codebase without having UV installed.
+- [Scikit-build-core](https://scikit-build-core.readthedocs.io/en/latest/index.html) - the build backend for
+  building the extension. On the background, scikit-build-core uses cmake and ninja for compilation.
+- [pybind11](https://pybind11.readthedocs.io/en/stable/index.html) - a bridge between C++ and Python.
+- [CMake](https://cmake.org/) - the build system for both DuckDB itself and the DuckDB Python module.
+- Cibuildwheel
+
+### Merging changes to pythonpkg from duckdb main
+
+Check the git log for the last changes to the pythonpkg since the last ref you have 
+
+```bash
+git log <hash>..HEAD -- tools/pythonpkg/
+```
+
 ## Versioning and Releases
 
 The DuckDB Python package versioning and release scheme follows that of DuckDB itself. This means that a `X.Y.Z[.
@@ -55,8 +177,6 @@ postN]` release of the Python package ships the DuckDB stable release `X.Y.Z`. T
 | Nightly minor: DuckDB next minor nightly + Python next minor nightly   | `1.4.0.devM`   | `1.4.0.devN`                       |
 
 Note that we do not ship nightly post releases (e.g. we don't ship `1.3.1.post2.dev3`).
-
-## Contributing
 
 ### Branch and Tag Strategy
 
@@ -108,159 +228,3 @@ versioning scheme.
   - `MAIN_BRANCH_VERSIONING=0`: Use release branch versioning (patch increments)
   - `MAIN_BRANCH_VERSIONING=1`: Use main branch versioning (minor increments)
   - `OVERRIDE_GIT_DESCRIBE`: Override version detection
-
-## Conventions
-
-* Follow the [Google Python styleguide](https://google.github.io/styleguide/pyguide.html)
-  * See the section on [Comments and Docstrings](https://google.github.io/styleguide/pyguide.html#s3.8-comments-and-docstrings)
-* cibuildwheel:
-  * `CIBW_BUILD='cp39-*' uvx cibuildwheel --platform linux .`
-
-## Development
-
-We use Astral UV for local development and recommend you do as well. Note: we require pip >= 25.1.0 for development, 
-because we work with dependency groups.
-
-Some useful commands:
-
-Install duckdb together with the `dev` dependency group in `editable` mode with a build-dir and automatic rebuilds
-(i.e. `--editable --config-settings=editable.rebuild=true -Cbuild-dir=<path>`), in a Python 3.9 virtual environment:
-```bash
-brew install uv
-uv sync -p 3.9
-```
-
-For IDE's:
-```bash
-# install all dev dependencies
-uv sync  --no-install-project
-# build and install without build isolation
-uv sync  --no-build-isolation
-```
-
-Run all pytests (this includes tests/slow and _will_ take very long):
-```bash
-uv run pytest ./tests --verbose
-```
-
-Exclude the test/slow directory:
-```bash
-uv run pytest ./tests --verbose --ignore=./tests/slow
-```
-
-Run with coverage (during development you probably want to specify which tests to run):
-```bash
-COVERAGE=1 uv run coverage run -m pytest ./tests --verbose
-```
-
-The `COVERAGE` env var will compile the extension with `--coverage`, allowing us to collect coverage stats of C++ 
-code as well as Python code.
-
-Check coverage for Python code:
-```bash
-uvx coverage html -d htmlcov-python
-uvx coverage report --format=markdown
-```
-
-Check coverage for C++ code (note: this will clutter your project dir with html files, consider saving them in some 
-other place):
-```bash
-uvx gcovr \
-  --gcov-ignore-errors all \
-  --root "$PWD" \
-  --filter "${PWD}/src/duckdb_py" \
-  --exclude '.*/\.cache/.*' \
-  --gcov-exclude '.*/\.cache/.*' \
-  --gcov-exclude '.*/external/.*' \
-  --gcov-exclude '.*/site-packages/.*' \
-  --exclude-unreachable-branches \
-  --exclude-throw-branches \
-  --html --html-details -o coverage-cpp.html \
-  build/coverage/src/duckdb_py \
-  --print-summary
-```
-
-- We're not running any mypy typechecking tests at the moment
-- We're not running any ruff / linting / formatting at the moment
-
-## Merging changes to pythonpkg from duckdb main
-
-Check the git log for the last changes to the pythonpkg since the last ref you have 
-
-```bash
-git log <hash>..HEAD -- tools/pythonpkg/
-```
-
-## Which duckdb options should we add to the compile definitions?
-
-```bash
-ADBC_EXPORT
-ADBC_EXPORTING
-CreateDirectory
-DEBUG
-DEFAULT_BLOCK_ALLOC_SIZE
-DEFAULT_ROW_GROUP_SIZE
-DUCKDB_ALTERNATIVE_VERIFY
-DUCKDB_AMALGAMATION
-DUCKDB_API_1_0
-DUCKDB_BUILD_LIBRARY
-DUCKDB_BUILD_LOADABLE_EXTENSION
-DUCKDB_CLANG_TIDY
-DUCKDB_CUSTOM_PLATFORM
-DUCKDB_DEBUG_ASYNC_SINK_SOURCE
-DUCKDB_DEBUG_MOVE
-DUCKDB_DEBUG_NO_INLINE
-DUCKDB_DEBUG_NO_SAFETY
-DUCKDB_DISABLE_POINTER_SALT
-DUCKDB_ENABLE_DEPRECATED_API
-DUCKDB_EXTENSION_API_UNSTABLE_VERSION
-DUCKDB_EXTENSION_API_VERSION_MAJOR
-DUCKDB_EXTENSION_API_VERSION_MINOR
-DUCKDB_EXTENSION_API_VERSION_PATCH
-DUCKDB_EXTENSION_API_VERSION_UNSTABLE
-DUCKDB_EXTENSION_AUTOINSTALL_DEFAULT
-DUCKDB_EXTENSION_AUTOLOAD_DEFAULT
-DUCKDB_EXTENSION_NAME
-DUCKDB_FORCE_ASSERT
-DUCKDB_PLATFORM_RTOOLS
-DUCKDB_SMALLER_BINARY
-DUCKDB_STATIC_BUILD
-DUCKDB_WASM_VERSION
-DUCKDB_WINDOWS
-ERROR
-GENERATED_EXTENSION_HEADERS
-INT64_MAX
-INTPTR_MAX
-MoveFile
-RemoveDirectory
-SOME_DEFINE
-STANDARD_VECTOR_SIZE
-UINTPTR_MAX
-UNSAFE_NUMERIC_CAST
-UUID
-WIN32
-_GLIBCXX_USE_CXX11_ABI
-_GNU_SOURCE
-_LIBCPP_STD_VER
-_MSC_VER
-_WIN32
-_WIN64
-__ANDROID__
-__APPLE__
-__ARM_ARCH_ISA_A64
-__FreeBSD__
-__GNUC__
-__MACH__
-__MINGW32__
-__MUSL__
-__MVS__
-__SIZEOF_INT128__
-__aarch64__
-__clang__
-__cplusplus
-__unix__
-interface
-max
-min
-small
-```

@@ -199,7 +199,7 @@ class TestGitOperations(unittest.TestCase):
         mock_run.side_effect = subprocess.CalledProcessError(1, "git")
 
         with pytest.raises(subprocess.CalledProcessError, match="exit status 1"):
-            result = get_git_describe()
+            get_git_describe()
 
 
 class TestEnvironmentVariableHandling(unittest.TestCase):
