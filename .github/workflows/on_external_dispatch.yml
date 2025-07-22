@@ -30,6 +30,8 @@ jobs:
     outputs:
       sha-after-commit: ${{ steps.git_commit_sha.outputs.commit_sha }}
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - name: Checkout DuckDB Python
         uses: actions/checkout@v4
