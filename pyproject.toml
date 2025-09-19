@@ -77,6 +77,7 @@ metadata.version.provider = "scikit_build_core.metadata.setuptools_scm"
 [tool.scikit-build.wheel]
 cmake = true
 packages.duckdb = "duckdb"
+packages.duckdb-stubs = "duckdb-stubs"
 
 [tool.scikit-build.cmake.define]
 CORE_EXTENSIONS = "core_functions;json;parquet;icu;jemalloc"
@@ -218,6 +219,8 @@ torchvision = [ { index = "pytorch-cpu" } ]
 
 [dependency-groups] # used for development only, requires pip >=25.1.0
 stubdeps = [ # dependencies used for typehints in the stubs
+    "pybind11-stubgen",
+    "mypy",
     "fsspec",
     "pandas",
     "polars",
