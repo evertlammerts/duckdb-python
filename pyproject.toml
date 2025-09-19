@@ -297,6 +297,27 @@ dev = [ # tooling like uv will install this automatically when syncing the envir
 # - pytest
 ######################################################################################################
 
+[tool.mypy]
+packages = ["duckdb"]
+strict = true
+warn_unreachable = true
+pretty = true
+python_version = "3.9"
+exclude = [
+    "duckdb/experimental/",
+    "duckdb/functional/",
+    "duckdb/query_graph/",
+    "duckdb/typing/",
+    "duckdb/value/",
+]
+
+[[tool.mypy.overrides]]
+module = [
+#    "some_untyped_dependency.*",
+#    "another_untyped_lib"
+]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 minversion = "6.0"
 addopts = "-ra -q"

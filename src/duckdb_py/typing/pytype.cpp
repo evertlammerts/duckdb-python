@@ -334,9 +334,11 @@ void DuckDBPyType::Initialize(py::handle &m) {
 	type_module.def_property_readonly("id", &DuckDBPyType::GetId);
 	type_module.def_property_readonly("children", &DuckDBPyType::Children);
 	type_module.def(py::init<>([](const string &type_str, shared_ptr<DuckDBPyConnection> connection = nullptr) {
-		auto ltype = FromString(type_str, std::move(connection));
-		return make_shared_ptr<DuckDBPyType>(ltype);
-	}));
+		                auto ltype = FromString(type_str, std::move(connection));
+		                return make_shared_ptr<DuckDBPyType>(ltype);
+	                }),
+	                "Construct a DuckDBPyType from a type name and connection", py::arg("type_str"),
+	                py::arg("connection"));
 	type_module.def(py::init<>([](const PyGenericAlias &obj) {
 		auto ltype = FromGenericAlias(obj);
 		return make_shared_ptr<DuckDBPyType>(ltype);
@@ -346,9 +348,10 @@ void DuckDBPyType::Initialize(py::handle &m) {
 		return make_shared_ptr<DuckDBPyType>(ltype);
 	}));
 	type_module.def(py::init<>([](const py::object &obj) {
-		auto ltype = FromObject(obj);
-		return make_shared_ptr<DuckDBPyType>(ltype);
-	}));
+		                auto ltype = FromObject(obj);
+		                return make_shared_ptr<DuckDBPyType>(ltype);
+	                }),
+	                "Construct a DuckDBPyType from a Python type (types.*) or object.", py::arg("obj"));
 	type_module.def("__getattr__", &DuckDBPyType::GetAttribute, "Get the child type by 'name'", py::arg("name"));
 	type_module.def("__getitem__", &DuckDBPyType::GetAttribute, "Get the child type by 'name'", py::arg("name"),
 	                py::is_operator());
