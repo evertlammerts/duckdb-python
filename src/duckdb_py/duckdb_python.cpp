@@ -923,112 +923,195 @@ static void InitializeConnectionMethods(py::module_ &m) {
 		    return conn->GetRowcount();
 	    },
 	    "Get result set row count", py::kw_only(), py::arg("connection") = py::none());
-	// END_OF_CONNECTION_METHODS
-
-	// We define these "wrapper" methods manually because they are overloaded
-	m.def(
-	    "arrow",
-	    [](idx_t rows_per_batch, shared_ptr<DuckDBPyConnection> conn) -> duckdb::pyarrow::Table {
-		    if (!conn) {
-			    conn = DuckDBPyConnection::DefaultConnection();
-		    }
-		    return conn->FetchArrow(rows_per_batch);
-	    },
-	    "Fetch a result as Arrow table following execute()", py::arg("rows_per_batch") = 1000000, py::kw_only(),
-	    py::arg("connection") = py::none());
-	m.def(
-	    "arrow",
-	    [](py::object &arrow_object, shared_ptr<DuckDBPyConnection> conn) -> unique_ptr<DuckDBPyRelation> {
-		    if (!conn) {
-			    conn = DuckDBPyConnection::DefaultConnection();
-		    }
-		    return conn->FromArrow(arrow_object);
-	    },
-	    "Create a relation object from an Arrow object", py::arg("arrow_object"), py::kw_only(),
-	    py::arg("connection") = py::none());
-	m.def(
-	    "df",
-	    [](bool date_as_object, shared_ptr<DuckDBPyConnection> conn) -> PandasDataFrame {
-		    if (!conn) {
-			    conn = DuckDBPyConnection::DefaultConnection();
-		    }
-		    return conn->FetchDF(date_as_object);
-	    },
-	    "Fetch a result as DataFrame following execute()", py::kw_only(), py::arg("date_as_object") = false,
-	    py::arg("connection") = py::none());
-	m.def(
-	    "df",
-	    [](const PandasDataFrame &value, shared_ptr<DuckDBPyConnection> conn) -> unique_ptr<DuckDBPyRelation> {
-		    if (!conn) {
-			    conn = DuckDBPyConnection::DefaultConnection();
-		    }
-		    return conn->FromDF(value);
-	    },
-	    "Create a relation object from the DataFrame df", py::arg("df"), py::kw_only(),
-	    py::arg("connection") = py::none());
-}
-
-static void RegisterStatementType(py::handle &m) {
-	auto statement_type = py::enum_<duckdb::StatementType>(m, "StatementType");
-	static const duckdb::StatementType TYPES[] = {
-	    duckdb::StatementType::INVALID_STATEMENT,       duckdb::StatementType::SELECT_STATEMENT,
-	    duckdb::StatementType::INSERT_STATEMENT,        duckdb::StatementType::UPDATE_STATEMENT,
-	    duckdb::StatementType::CREATE_STATEMENT,        duckdb::StatementType::DELETE_STATEMENT,
-	    duckdb::StatementType::PREPARE_STATEMENT,       duckdb::StatementType::EXECUTE_STATEMENT,
-	    duckdb::StatementType::ALTER_STATEMENT,         duckdb::StatementType::TRANSACTION_STATEMENT,
-	    duckdb::StatementType::COPY_STATEMENT,          duckdb::StatementType::ANALYZE_STATEMENT,
-	    duckdb::StatementType::VARIABLE_SET_STATEMENT,  duckdb::StatementType::CREATE_FUNC_STATEMENT,
-	    duckdb::StatementType::EXPLAIN_STATEMENT,       duckdb::StatementType::DROP_STATEMENT,
-	    duckdb::StatementType::EXPORT_STATEMENT,        duckdb::StatementType::PRAGMA_STATEMENT,
-	    duckdb::StatementType::VACUUM_STATEMENT,        duckdb::StatementType::CALL_STATEMENT,
-	    duckdb::StatementType::SET_STATEMENT,           duckdb::StatementType::LOAD_STATEMENT,
-	    duckdb::StatementType::RELATION_STATEMENT,      duckdb::StatementType::EXTENSION_STATEMENT,
-	    duckdb::StatementType::LOGICAL_PLAN_STATEMENT,  duckdb::StatementType::ATTACH_STATEMENT,
-	    duckdb::StatementType::DETACH_STATEMENT,        duckdb::StatementType::MULTI_STATEMENT,
-	    duckdb::StatementType::COPY_DATABASE_STATEMENT, duckdb::StatementType::MERGE_INTO_STATEMENT};
-	static const idx_t AMOUNT = sizeof(TYPES) / sizeof(duckdb::StatementType);
-	for (idx_t i = 0; i < AMOUNT; i++) {
-		auto &type = TYPES[i];
-		statement_type.value(StatementTypeToString(type).c_str(), type);
-	}
-	statement_type.export_values();
-}
-
-static void RegisterExpectedResultType(py::handle &m) {
-	auto expected_return_type = py::enum_<duckdb::StatementReturnType>(m, "ExpectedResultType");
-	static const duckdb::StatementReturnType TYPES[] = {duckdb::StatementReturnType::QUERY_RESULT,
-	                                                    duckdb::StatementReturnType::CHANGED_ROWS,
-	                                                    duckdb::StatementReturnType::NOTHING};
-	static const idx_t AMOUNT = sizeof(TYPES) / sizeof(duckdb::StatementReturnType);
-	for (idx_t i = 0; i < AMOUNT; i++) {
-		auto &type = TYPES[i];
-		expected_return_type.value(StatementReturnTypeToString(type).c_str(), type);
-	}
-	expected_return_type.export_values();
-}
+} // END_OF_CONNECTION_METHODS
 
 PYBIND11_MODULE(DUCKDB_PYTHON_LIB_NAME, m) { // NOLINT
-	py::enum_<duckdb::ExplainType>(m, "ExplainType")
-	    .value("STANDARD", duckdb::ExplainType::EXPLAIN_STANDARD)
-	    .value("ANALYZE", duckdb::ExplainType::EXPLAIN_ANALYZE)
+	py::enum_<duckdb::ExplainType>(m, "ExplainType",
+	                               "Enumeration for different explain types.\n\n"
+	                               "This enum lists the available execution plan explanation types.\n"
+	                               "Different types provide different levels of detail about query execution.")
+	    .value("STANDARD", duckdb::ExplainType::EXPLAIN_STANDARD,
+	           "Standard explain output showing the logical query plan.")
+	    .value("ANALYZE", duckdb::ExplainType::EXPLAIN_ANALYZE,
+	           "Analyze explain with execution statistics and timing information.")
 	    .export_values();
 
-	RegisterStatementType(m);
-	RegisterExpectedResultType(m);
-
-	py::enum_<duckdb::PythonCSVLineTerminator::Type>(m, "CSVLineTerminator")
-	    .value("LINE_FEED", duckdb::PythonCSVLineTerminator::Type::LINE_FEED)
-	    .value("CARRIAGE_RETURN_LINE_FEED", duckdb::PythonCSVLineTerminator::Type::CARRIAGE_RETURN_LINE_FEED)
+	py::enum_<duckdb::StatementReturnType>(m, "ExpectedResultType",
+	                                       "Enumeration for different result types.\n\n"
+	                                       "This enum lists the possible result types from queries.")
+	    .value("QUERY_RESULT", duckdb::StatementReturnType::QUERY_RESULT)
+	    .value("CHANGED_ROWS", duckdb::StatementReturnType::CHANGED_ROWS)
+	    .value("NOTHING", duckdb::StatementReturnType::NOTHING)
 	    .export_values();
 
-	py::enum_<duckdb::PythonExceptionHandling>(m, "PythonExceptionHandling")
-	    .value("DEFAULT", duckdb::PythonExceptionHandling::FORWARD_ERROR)
-	    .value("RETURN_NULL", duckdb::PythonExceptionHandling::RETURN_NULL)
+	py::enum_<duckdb::StatementType>(m, "StatementType",
+	                                 "Enumeration for different SQL statement types.\n\n"
+	                                 "Identifies the type of SQL statement being executed, which is useful\n"
+	                                 "for query analysis, logging, performance monitoring, and implementing\n"
+	                                 "different execution strategies based on statement characteristics.")
+	    .value("INVALID_STATEMENT", duckdb::StatementType::INVALID_STATEMENT,
+	           "Invalid or unrecognized statement.\n"
+	           "Represents a statement that could not be parsed or is malformed.")
+	    .value("SELECT_STATEMENT", duckdb::StatementType::SELECT_STATEMENT,
+	           "Data retrieval statement (SELECT).\n"
+	           "Queries that read data from tables, views, or other relations\n"
+	           "without modifying the database state.")
+	    .value("INSERT_STATEMENT", duckdb::StatementType::INSERT_STATEMENT,
+	           "Data insertion statement (INSERT).\n"
+	           "Statements that add new rows to tables, including INSERT INTO\n"
+	           "and INSERT ... SELECT operations.")
+	    .value("UPDATE_STATEMENT", duckdb::StatementType::UPDATE_STATEMENT,
+	           "Data modification statement (UPDATE).\n"
+	           "Statements that modify existing rows in tables based on\n"
+	           "specified conditions and SET clauses.")
+	    .value("CREATE_STATEMENT", duckdb::StatementType::CREATE_STATEMENT,
+	           "Object creation statement (CREATE).\n"
+	           "Statements that create new database objects such as tables,\n"
+	           "views, indexes, schemas, or other database structures.")
+	    .value("DELETE_STATEMENT", duckdb::StatementType::DELETE_STATEMENT,
+	           "Data deletion statement (DELETE).\n"
+	           "Statements that remove rows from tables based on\n"
+	           "specified WHERE conditions.")
+	    .value("PREPARE_STATEMENT", duckdb::StatementType::PREPARE_STATEMENT,
+	           "Statement preparation (PREPARE).\n"
+	           "Statements that prepare SQL statements for repeated execution\n"
+	           "with different parameter values.")
+	    .value("EXECUTE_STATEMENT", duckdb::StatementType::EXECUTE_STATEMENT,
+	           "Prepared statement execution (EXECUTE).\n"
+	           "Statements that execute previously prepared statements\n"
+	           "with specific parameter bindings.")
+	    .value("ALTER_STATEMENT", duckdb::StatementType::ALTER_STATEMENT,
+	           "Object alteration statement (ALTER).\n"
+	           "Statements that modify the structure or properties of existing\n"
+	           "database objects like tables, columns, or constraints.")
+	    .value("TRANSACTION_STATEMENT", duckdb::StatementType::TRANSACTION_STATEMENT,
+	           "Transaction control statement.\n"
+	           "Statements that control transaction boundaries such as\n"
+	           "BEGIN, COMMIT, ROLLBACK, and SAVEPOINT operations.")
+	    .value("COPY_STATEMENT", duckdb::StatementType::COPY_STATEMENT,
+	           "Data import/export statement (COPY).\n"
+	           "Statements that bulk load data from files into tables\n"
+	           "or export table data to files.")
+	    .value("ANALYZE_STATEMENT", duckdb::StatementType::ANALYZE_STATEMENT,
+	           "Statistics collection statement (ANALYZE).\n"
+	           "Statements that gather or update table statistics used\n"
+	           "by the query optimizer for better execution plans.")
+	    .value("VARIABLE_SET_STATEMENT", duckdb::StatementType::VARIABLE_SET_STATEMENT,
+	           "Variable assignment statement.\n"
+	           "Statements that set or modify session or global variables\n"
+	           "that affect database behavior or query execution.")
+	    .value("CREATE_FUNC_STATEMENT", duckdb::StatementType::CREATE_FUNC_STATEMENT,
+	           "Function creation statement (CREATE FUNCTION).\n"
+	           "Statements that create user-defined functions, including\n"
+	           "scalar functions, aggregate functions, and table functions.")
+	    .value("EXPLAIN_STATEMENT", duckdb::StatementType::EXPLAIN_STATEMENT,
+	           "Query plan explanation statement (EXPLAIN).\n"
+	           "Statements that show the execution plan for other SQL statements\n"
+	           "without actually executing them.")
+	    .value("DROP_STATEMENT", duckdb::StatementType::DROP_STATEMENT,
+	           "Object deletion statement (DROP).\n"
+	           "Statements that remove database objects such as tables,\n"
+	           "views, indexes, functions, or schemas from the database.")
+	    .value("EXPORT_STATEMENT", duckdb::StatementType::EXPORT_STATEMENT,
+	           "Database export statement (EXPORT).\n"
+	           "Statements that export entire databases or large portions\n"
+	           "of database content to external formats.")
+	    .value("PRAGMA_STATEMENT", duckdb::StatementType::PRAGMA_STATEMENT,
+	           "System configuration statement (PRAGMA).\n"
+	           "Statements that query or modify database engine settings,\n"
+	           "configuration options, and system parameters.")
+	    .value("VACUUM_STATEMENT", duckdb::StatementType::VACUUM_STATEMENT,
+	           "Database maintenance statement (VACUUM).\n"
+	           "Statements that perform database cleanup, optimization,\n"
+	           "and space reclamation operations.")
+	    .value("CALL_STATEMENT", duckdb::StatementType::CALL_STATEMENT,
+	           "Procedure or function call statement (CALL).\n"
+	           "Statements that invoke stored procedures, functions,\n"
+	           "or other callable database objects.")
+	    .value("SET_STATEMENT", duckdb::StatementType::SET_STATEMENT,
+	           "Configuration setting statement (SET).\n"
+	           "Statements that modify session-level or connection-level\n"
+	           "configuration parameters and options.")
+	    .value("LOAD_STATEMENT", duckdb::StatementType::LOAD_STATEMENT,
+	           "Extension or module loading statement (LOAD).\n"
+	           "Statements that load extensions, plugins, or external\n"
+	           "modules to extend database functionality.")
+	    .value("RELATION_STATEMENT", duckdb::StatementType::RELATION_STATEMENT,
+	           "Relation-based statement.\n"
+	           "Statements that operate on relation objects or perform\n"
+	           "relational algebra operations programmatically.")
+	    .value("EXTENSION_STATEMENT", duckdb::StatementType::EXTENSION_STATEMENT,
+	           "Extension management statement.\n"
+	           "Statements that install, configure, or manage database\n"
+	           "extensions and their associated functionality.")
+	    .value("LOGICAL_PLAN_STATEMENT", duckdb::StatementType::LOGICAL_PLAN_STATEMENT,
+	           "Logical plan examination statement.\n"
+	           "Statements that expose or manipulate the logical query plan\n"
+	           "representation used internally by the query engine.")
+	    .value("ATTACH_STATEMENT", duckdb::StatementType::ATTACH_STATEMENT,
+	           "Database attachment statement (ATTACH).\n"
+	           "Statements that attach external databases or data sources\n"
+	           "to the current database connection for cross-database queries.")
+	    .value("DETACH_STATEMENT", duckdb::StatementType::DETACH_STATEMENT,
+	           "Database detachment statement (DETACH).\n"
+	           "Statements that detach previously attached databases\n"
+	           "or data sources from the current connection.")
+	    .value("MULTI_STATEMENT", duckdb::StatementType::MULTI_STATEMENT,
+	           "Multiple statement batch.\n"
+	           "Represents a batch containing multiple SQL statements\n"
+	           "that are executed together as a single unit.")
+	    .value("COPY_DATABASE_STATEMENT", duckdb::StatementType::COPY_DATABASE_STATEMENT,
+	           "Database copying statement.\n"
+	           "Statements that copy entire databases or significant\n"
+	           "portions of database content to another location.")
+	    .value("MERGE_INTO_STATEMENT", duckdb::StatementType::MERGE_INTO_STATEMENT,
+	           "Data merging statement (MERGE INTO).\n"
+	           "Statements that perform conditional insert, update, or delete\n"
+	           "operations based on matching conditions between source and target tables.")
 	    .export_values();
 
-	py::enum_<duckdb::RenderMode>(m, "RenderMode")
-	    .value("ROWS", duckdb::RenderMode::ROWS)
-	    .value("COLUMNS", duckdb::RenderMode::COLUMNS)
+	py::enum_<duckdb::PythonCSVLineTerminator::Type>(
+	    m, "CSVLineTerminator",
+	    "Enumeration for CSV line terminator types.\n\n"
+	    "Specifies the character sequence used to terminate lines in CSV files.\n"
+	    "Different operating systems and applications use different conventions\n"
+	    "for line endings, and this enum allows explicit control over parsing.")
+	    .value("LINE_FEED", duckdb::PythonCSVLineTerminator::Type::LINE_FEED,
+	           "Unix-style line terminator using only Line Feed (\\n).\n"
+	           "This is the standard line ending on Unix-like systems including Linux and macOS.")
+	    .value("CARRIAGE_RETURN_LINE_FEED", duckdb::PythonCSVLineTerminator::Type::CARRIAGE_RETURN_LINE_FEED,
+	           "Windows-style line terminator using Carriage Return + Line Feed (\\r\\n).\n"
+	           "This is the standard line ending on Windows systems and some network protocols.")
+	    .export_values();
+
+	py::enum_<duckdb::PythonExceptionHandling>(m, "PythonExceptionHandling",
+	                                           "Enumeration for Python exception handling strategies.\n\n"
+	                                           "Controls how exceptions that occur during Python function execution\n"
+	                                           "are handled within DuckDB queries. This affects the behavior when\n"
+	                                           "user-defined functions or Python expressions encounter errors.")
+	    .value("DEFAULT", duckdb::PythonExceptionHandling::FORWARD_ERROR,
+	           "Forward exceptions to the caller (default behavior).\n"
+	           "When a Python function raises an exception, it will be propagated\n"
+	           "and cause the entire query to fail with an error message.")
+	    .value("RETURN_NULL", duckdb::PythonExceptionHandling::RETURN_NULL,
+	           "Return NULL when Python functions raise exceptions.\n"
+	           "Instead of failing the query, exceptions in Python functions\n"
+	           "will result in NULL values, allowing the query to continue execution.")
+	    .export_values();
+
+	py::enum_<duckdb::RenderMode>(m, "RenderMode",
+	                              "Enumeration for result rendering modes.\n\n"
+	                              "Controls how query results are formatted and displayed.\n"
+	                              "Different modes optimize for different use cases, such as\n"
+	                              "human readability versus programmatic processing.")
+	    .value("ROWS", duckdb::RenderMode::ROWS,
+	           "Row-oriented rendering mode.\n"
+	           "Results are displayed with each row on a separate line,\n"
+	           "which is the traditional tabular format optimized for readability.")
+	    .value("COLUMNS", duckdb::RenderMode::COLUMNS,
+	           "Column-oriented rendering mode.\n"
+	           "Results are displayed with columns grouped together,\n"
+	           "which can be more efficient for wide tables or analytical workflows.")
 	    .export_values();
 
 	DuckDBPyTyping::Initialize(m);
@@ -1041,7 +1124,7 @@ PYBIND11_MODULE(DUCKDB_PYTHON_LIB_NAME, m) { // NOLINT
 
 	py::options pybind_opts;
 
-	m.doc() = "DuckDB is an embeddable SQL OLAP Database Management System";
+	m.doc() = "DuckDB is an embeddable SQL OLAP Database Management System.";
 	m.attr("__package__") = "duckdb";
 	m.attr("__version__") = std::string(DuckDB::LibraryVersion()).substr(1);
 	m.attr("__standard_vector_size__") = DuckDB::StandardVectorSize();
@@ -1070,13 +1153,35 @@ PYBIND11_MODULE(DUCKDB_PYTHON_LIB_NAME, m) { // NOLINT
 	      "Tokenizes a SQL string, returning a list of (position, type) tuples that can be "
 	      "used for e.g., syntax highlighting",
 	      py::arg("query"));
-	py::enum_<PySQLTokenType>(m, "token_type", py::module_local())
-	    .value("identifier", PySQLTokenType::PY_SQL_TOKEN_IDENTIFIER)
-	    .value("numeric_const", PySQLTokenType::PY_SQL_TOKEN_NUMERIC_CONSTANT)
-	    .value("string_const", PySQLTokenType::PY_SQL_TOKEN_STRING_CONSTANT)
-	    .value("operator", PySQLTokenType::PY_SQL_TOKEN_OPERATOR)
-	    .value("keyword", PySQLTokenType::PY_SQL_TOKEN_KEYWORD)
-	    .value("comment", PySQLTokenType::PY_SQL_TOKEN_COMMENT)
+	py::enum_<PySQLTokenType>(m, "token_type", py::module_local(),
+	                          "Enumeration for SQL token types used in lexical analysis.\n\n"
+	                          "Represents the different categories of tokens that can be identified\n"
+	                          "when parsing or tokenizing SQL statements. This is useful for syntax\n"
+	                          "highlighting, query analysis, and building SQL parsing tools.")
+	    .value("identifier", PySQLTokenType::PY_SQL_TOKEN_IDENTIFIER,
+	           "SQL identifier token.\n"
+	           "Represents names of database objects such as table names, column names,\n"
+	           "function names, aliases, and other user-defined identifiers.")
+	    .value("numeric_const", PySQLTokenType::PY_SQL_TOKEN_NUMERIC_CONSTANT,
+	           "Numeric constant token.\n"
+	           "Represents literal numeric values including integers, floating-point numbers,\n"
+	           "decimal numbers, and scientific notation in SQL statements.")
+	    .value("string_const", PySQLTokenType::PY_SQL_TOKEN_STRING_CONSTANT,
+	           "String constant token.\n"
+	           "Represents literal string values enclosed in single or double quotes,\n"
+	           "including escape sequences and multi-line string literals.")
+	    .value("operator", PySQLTokenType::PY_SQL_TOKEN_OPERATOR,
+	           "SQL operator token.\n"
+	           "Represents operators such as arithmetic (+, -, *, /), comparison (=, <, >),\n"
+	           "logical (AND, OR, NOT), and other SQL operators including assignment.")
+	    .value("keyword", PySQLTokenType::PY_SQL_TOKEN_KEYWORD,
+	           "SQL keyword token.\n"
+	           "Represents reserved SQL keywords such as SELECT, FROM, WHERE, INSERT,\n"
+	           "CREATE, ALTER, and other language constructs defined by the SQL standard.")
+	    .value("comment", PySQLTokenType::PY_SQL_TOKEN_COMMENT,
+	           "SQL comment token.\n"
+	           "Represents comment text in SQL statements, including single-line comments\n"
+	           "(-- comment) and multi-line comments (/* comment */) used for documentation.")
 	    .export_values();
 
 	// we need this because otherwise we try to remove registered_dfs on shutdown when python is already dead

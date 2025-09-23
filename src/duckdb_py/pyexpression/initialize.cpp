@@ -51,182 +51,182 @@ static void InitializeDunderMethods(py::class_<DuckDBPyExpression, shared_ptr<Du
 	const char *docs;
 
 	docs = R"(
-		Add expr to self
+        Add other to self
 
-		Parameters:
-			expr: The expression to add together with
+        Parameters:
+            other: The expression to add together with
 
-		Returns:
-			FunctionExpression: self '+' expr
+        Returns:
+            FunctionExpression: self '+' other
 	)";
 
-	m.def("__add__", &DuckDBPyExpression::Add, py::arg("expr"), docs, py::is_operator());
+	m.def("__add__", &DuckDBPyExpression::Add, py::arg("other"), docs, py::is_operator());
 	m.def(
-	    "__radd__", [](const DuckDBPyExpression &a, const DuckDBPyExpression &b) { return b.Add(a); }, docs,
-	    py::is_operator());
+	    "__radd__", [](const DuckDBPyExpression &a, const DuckDBPyExpression &b) { return b.Add(a); }, py::arg("other"),
+	    docs, py::is_operator());
 
 	docs = R"(
-		Negate the expression.
+        Negate the expression.
 
-		Returns:
-			FunctionExpression: -self
+        Returns:
+            FunctionExpression: -self
 	)";
 	m.def("__neg__", &DuckDBPyExpression::Negate, docs, py::is_operator());
 
 	docs = R"(
-		Subtract expr from self
+        Subtract other from self
 
-		Parameters:
-			expr: The expression to subtract from
+        Parameters:
+            other: The expression to subtract from
 
-		Returns:
-			FunctionExpression: self '-' expr
+        Returns:
+		    FunctionExpression: self '-' other
 	)";
-	m.def("__sub__", &DuckDBPyExpression::Subtract, docs, py::is_operator());
+	m.def("__sub__", &DuckDBPyExpression::Subtract, py::arg("other"), docs, py::is_operator());
 	m.def(
-	    "__rsub__", [](const DuckDBPyExpression &a, const DuckDBPyExpression &b) { return b.Subtract(a); }, docs,
-	    py::is_operator());
+	    "__rsub__", [](const DuckDBPyExpression &a, const DuckDBPyExpression &b) { return b.Subtract(a); },
+	    py::arg("other"), docs, py::is_operator());
 
 	docs = R"(
-		Multiply self by expr
+		Multiply self by other
 
 		Parameters:
-			expr: The expression to multiply by
+			other: The expression to multiply by
 
 		Returns:
-			FunctionExpression: self '*' expr
+			FunctionExpression: self '*' other
 	)";
-	m.def("__mul__", &DuckDBPyExpression::Multiply, docs, py::is_operator());
+	m.def("__mul__", &DuckDBPyExpression::Multiply, py::arg("other"), docs, py::is_operator());
 	m.def(
-	    "__rmul__", [](const DuckDBPyExpression &a, const DuckDBPyExpression &b) { return b.Multiply(a); }, docs,
-	    py::is_operator());
+	    "__rmul__", [](const DuckDBPyExpression &a, const DuckDBPyExpression &b) { return b.Multiply(a); },
+	    py::arg("other"), docs, py::is_operator());
 
 	docs = R"(
-		Divide self by expr
+		Divide self by other
 
 		Parameters:
-			expr: The expression to divide by
+			other: The expression to divide by
 
 		Returns:
-			FunctionExpression: self '/' expr
+			FunctionExpression: self '/' other
 	)";
-	m.def("__div__", &DuckDBPyExpression::Division, docs, py::is_operator());
+	m.def("__div__", &DuckDBPyExpression::Division, py::arg("other"), docs, py::is_operator());
 	m.def(
-	    "__rdiv__", [](const DuckDBPyExpression &a, const DuckDBPyExpression &b) { return b.Division(a); }, docs,
-	    py::is_operator());
+	    "__rdiv__", [](const DuckDBPyExpression &a, const DuckDBPyExpression &b) { return b.Division(a); },
+	    py::arg("other"), docs, py::is_operator());
 
-	m.def("__truediv__", &DuckDBPyExpression::Division, docs, py::is_operator());
+	m.def("__truediv__", &DuckDBPyExpression::Division, py::arg("other"), docs, py::is_operator());
 	m.def(
-	    "__rtruediv__", [](const DuckDBPyExpression &a, const DuckDBPyExpression &b) { return b.Division(a); }, docs,
-	    py::is_operator());
+	    "__rtruediv__", [](const DuckDBPyExpression &a, const DuckDBPyExpression &b) { return b.Division(a); },
+	    py::arg("other"), docs, py::is_operator());
 
 	docs = R"(
-		(Floor) Divide self by expr
+		(Floor) Divide self by other
 
 		Parameters:
-			expr: The expression to (floor) divide by
+			other: The expression to (floor) divide by
 
 		Returns:
-			FunctionExpression: self '//' expr
+			FunctionExpression: self '//' other
 	)";
-	m.def("__floordiv__", &DuckDBPyExpression::FloorDivision, docs, py::is_operator());
+	m.def("__floordiv__", &DuckDBPyExpression::FloorDivision, py::arg("other"), docs, py::is_operator());
 	m.def(
 	    "__rfloordiv__", [](const DuckDBPyExpression &a, const DuckDBPyExpression &b) { return b.FloorDivision(a); },
-	    docs, py::is_operator());
+	    py::arg("other"), docs, py::is_operator());
 
 	docs = R"(
-		Modulo self by expr
+		Modulo self by other
 
 		Parameters:
-			expr: The expression to modulo by
+			other: The expression to modulo by
 
 		Returns:
-			FunctionExpression: self '%' expr
+			FunctionExpression: self '%' other
 	)";
-	m.def("__mod__", &DuckDBPyExpression::Modulo, docs, py::is_operator());
+	m.def("__mod__", &DuckDBPyExpression::Modulo, py::arg("other"), docs, py::is_operator());
 	m.def(
-	    "__rmod__", [](const DuckDBPyExpression &a, const DuckDBPyExpression &b) { return b.Modulo(a); }, docs,
-	    py::is_operator());
+	    "__rmod__", [](const DuckDBPyExpression &a, const DuckDBPyExpression &b) { return b.Modulo(a); },
+	    py::arg("other"), docs, py::is_operator());
 
 	docs = R"(
-		Power self by expr
+		Power self by other
 
 		Parameters:
-			expr: The expression to power by
+			other: The expression to power by
 
 		Returns:
-			FunctionExpression: self '**' expr
+			FunctionExpression: self '**' other
 	)";
-	m.def("__pow__", &DuckDBPyExpression::Power, docs, py::is_operator());
+	m.def("__pow__", &DuckDBPyExpression::Power, py::arg("other"), docs, py::is_operator());
 	m.def(
-	    "__rpow__", [](const DuckDBPyExpression &a, const DuckDBPyExpression &b) { return b.Power(a); }, docs,
-	    py::is_operator());
+	    "__rpow__", [](const DuckDBPyExpression &a, const DuckDBPyExpression &b) { return b.Power(a); },
+	    py::arg("other"), docs, py::is_operator());
 
 	docs = R"(
 		Create an equality expression between two expressions
 
 		Parameters:
-			expr: The expression to check equality with
+			other: The expression to check equality with
 
 		Returns:
-			FunctionExpression: self '=' expr
+			FunctionExpression: self '=' other
 	)";
-	m.def("__eq__", &DuckDBPyExpression::Equality, docs, py::is_operator());
+	m.def("__eq__", &DuckDBPyExpression::Equality, py::arg("other"), docs, py::is_operator());
 
 	docs = R"(
 		Create an inequality expression between two expressions
 
 		Parameters:
-			expr: The expression to check inequality with
+			other: The expression to check inequality with
 
 		Returns:
-			FunctionExpression: self '!=' expr
+			FunctionExpression: self '!=' other
 	)";
-	m.def("__ne__", &DuckDBPyExpression::Inequality, docs, py::is_operator());
+	m.def("__ne__", &DuckDBPyExpression::Inequality, py::arg("other"), docs, py::is_operator());
 
 	docs = R"(
 		Create a greater than expression between two expressions
 
 		Parameters:
-			expr: The expression to check
+			other: The expression to check
 
 		Returns:
-			FunctionExpression: self '>' expr
+			FunctionExpression: self '>' other
 	)";
-	m.def("__gt__", &DuckDBPyExpression::GreaterThan, docs, py::is_operator());
+	m.def("__gt__", &DuckDBPyExpression::GreaterThan, py::arg("other"), docs, py::is_operator());
 
 	docs = R"(
 		Create a greater than or equal expression between two expressions
 
 		Parameters:
-			expr: The expression to check
+			other: The expression to check
 
 		Returns:
-			FunctionExpression: self '>=' expr
+			FunctionExpression: self '>=' other
 	)";
-	m.def("__ge__", &DuckDBPyExpression::GreaterThanOrEqual, docs, py::is_operator());
+	m.def("__ge__", &DuckDBPyExpression::GreaterThanOrEqual, py::arg("other"), docs, py::is_operator());
 
 	docs = R"(
 		Create a less than expression between two expressions
 
 		Parameters:
-			expr: The expression to check
+			other: The expression to check
 
 		Returns:
-			FunctionExpression: self '<' expr
+			FunctionExpression: self '<' other
 	)";
-	m.def("__lt__", &DuckDBPyExpression::LessThan, docs, py::is_operator());
+	m.def("__lt__", &DuckDBPyExpression::LessThan, py::arg("other"), docs, py::is_operator());
 
 	docs = R"(
 		Create a less than or equal expression between two expressions
 
 		Parameters:
-			expr: The expression to check
+			other: The expression to check
 
 		Returns:
-			FunctionExpression: self '<=' expr
+			FunctionExpression: self '<=' other
 	)";
-	m.def("__le__", &DuckDBPyExpression::LessThanOrEqual, docs, py::is_operator());
+	m.def("__le__", &DuckDBPyExpression::LessThanOrEqual, py::arg("other"), docs, py::is_operator());
 
 	// AND, NOT and OR
 
@@ -234,23 +234,23 @@ static void InitializeDunderMethods(py::class_<DuckDBPyExpression, shared_ptr<Du
 		Binary-and self together with expr
 
 		Parameters:
-			expr: The expression to AND together with self
+			other: The expression to AND together with self
 
 		Returns:
-			FunctionExpression: self '&' expr
+			FunctionExpression: self '&' other
 	)";
-	m.def("__and__", &DuckDBPyExpression::And, docs, py::is_operator());
+	m.def("__and__", &DuckDBPyExpression::And, py::arg("other"), docs, py::is_operator());
 
 	docs = R"(
-		Binary-or self together with expr
+		Binary-or self together with other
 
 		Parameters:
-			expr: The expression to OR together with self
+			other: The expression to OR together with self
 
 		Returns:
-			FunctionExpression: self '|' expr
+			FunctionExpression: self '|' other
 	)";
-	m.def("__or__", &DuckDBPyExpression::Or, docs, py::is_operator());
+	m.def("__or__", &DuckDBPyExpression::Or, py::arg("other"), docs, py::is_operator());
 
 	docs = R"(
 		Create a binary-not expression from self
@@ -261,30 +261,30 @@ static void InitializeDunderMethods(py::class_<DuckDBPyExpression, shared_ptr<Du
 	m.def("__invert__", &DuckDBPyExpression::Not, docs, py::is_operator());
 
 	docs = R"(
-		Binary-and self together with expr
+		Binary-and self together with other
 
 		Parameters:
-			expr: The expression to AND together with self
+			other: The expression to AND together with self
 
 		Returns:
-			FunctionExpression: expr '&' self
+			FunctionExpression: other '&' self
 	)";
 	m.def(
-	    "__rand__", [](const DuckDBPyExpression &a, const DuckDBPyExpression &b) { return b.And(a); }, docs,
-	    py::is_operator());
+	    "__rand__", [](const DuckDBPyExpression &a, const DuckDBPyExpression &b) { return b.And(a); }, py::arg("other"),
+	    docs, py::is_operator());
 
 	docs = R"(
-		Binary-or self together with expr
+		Binary-or self together with other
 
 		Parameters:
-			expr: The expression to OR together with self
+			other: The expression to OR together with self
 
 		Returns:
-			FunctionExpression: expr '|' self
+			FunctionExpression: other '|' self
 	)";
 	m.def(
-	    "__ror__", [](const DuckDBPyExpression &a, const DuckDBPyExpression &b) { return b.Or(a); }, docs,
-	    py::is_operator());
+	    "__ror__", [](const DuckDBPyExpression &a, const DuckDBPyExpression &b) { return b.Or(a); }, py::arg("other"),
+	    docs, py::is_operator());
 }
 
 static void InitializeImplicitConversion(py::class_<DuckDBPyExpression, shared_ptr<DuckDBPyExpression>> &m) {
@@ -386,7 +386,7 @@ void DuckDBPyExpression::Initialize(py::module_ &m) {
 		Returns:
 			Expression: self with an alias.
 	)";
-	expression.def("alias", &DuckDBPyExpression::SetAlias, docs);
+	expression.def("alias", &DuckDBPyExpression::SetAlias, py::arg("name"), docs);
 
 	docs = R"(
 		Add an additional WHEN <condition> THEN <value> clause to the CaseExpression.

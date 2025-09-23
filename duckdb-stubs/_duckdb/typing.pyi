@@ -1,9 +1,3 @@
-"""
-This module contains classes and methods related to typing
-"""
-
-from __future__ import annotations
-import duckdb
 import typing
 
 __all__: list[str] = [
@@ -13,7 +7,6 @@ __all__: list[str] = [
     "BOOLEAN",
     "DATE",
     "DOUBLE",
-    "DuckDBPyType",
     "FLOAT",
     "HUGEINT",
     "INTEGER",
@@ -35,43 +28,23 @@ __all__: list[str] = [
     "UTINYINT",
     "UUID",
     "VARCHAR",
+    "DuckDBPyType",
 ]
 
 class DuckDBPyType:
     @typing.overload
-    def __eq__(self, other: DuckDBPyType) -> bool:
-        """
-        Compare two types for equality
-        """
-    @typing.overload
-    def __eq__(self, other: str) -> bool:
-        """
-        Compare two types for equality
-        """
-    def __getattr__(self, name: str) -> DuckDBPyType:
-        """
-        Get the child type by 'name'
-        """
-    def __getitem__(self, name: str) -> DuckDBPyType:
-        """
-        Get the child type by 'name'
-        """
+    def __eq__(self, other: DuckDBPyType) -> bool: ...
+    def __eq__(self, other: str) -> bool: ...
+    def __getattr__(self, name: str) -> DuckDBPyType: ...
+    def __getitem__(self, name: str) -> DuckDBPyType: ...
     def __hash__(self) -> int: ...
     @typing.overload
-    def __init__(self, type_str: str, connection: typing.Optional[duckdb.DuckDBPyConnection] = None) -> None:
-        """
-        Construct a DuckDBPyType from a type name and optional connection.
-        """
-
+    def __init__(self, type_str: str, connection: ...) -> None: ...
     @typing.overload
-    def __init__(self, obj: object) -> None:
-        """
-        Construct a DuckDBPyType from a Python type (types.*) or object.
-        """
-    def __repr__(self) -> str:
-        """
-        Stringified representation of the type object
-        """
+    def __init__(self, arg0: ...) -> None: ...
+    @typing.overload
+    def __init__(self, arg0: ...) -> None: ...
+    def __init__(self, obj: typing.Any) -> None: ...
     @property
     def children(self) -> list: ...
     @property
