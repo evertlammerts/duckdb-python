@@ -9,7 +9,6 @@
 #include "duckdb_python/pystatement.hpp"
 #include "duckdb_python/pyrelation.hpp"
 #include "duckdb_python/expression/pyexpression.hpp"
-#include "duckdb_python/pyresult.hpp"
 #include "duckdb_python/pybind11/exceptions.hpp"
 #include "duckdb_python/typing.hpp"
 #include "duckdb_python/functional.hpp"
@@ -923,7 +922,31 @@ static void InitializeConnectionMethods(py::module_ &m) {
 		    return conn->GetRowcount();
 	    },
 	    "Get result set row count", py::kw_only(), py::arg("connection") = py::none());
-} // END_OF_CONNECTION_METHODS
+
+	// END_OF_CONNECTION_METHODS
+
+	// We define these "wrapper" methods manually because they are overloaded to return relations
+	m.def(
+	    "arrow",
+	    [](py::object &arrow_object, shared_ptr<DuckDBPyConnection> conn) -> unique_ptr<DuckDBPyRelation> {
+		    if (!conn) {
+			    conn = DuckDBPyConnection::DefaultConnection();
+		    }
+		    return conn->FromArrow(arrow_object);
+	    },
+	    "Create a relation object from an Arrow object", py::arg("arrow_object"), py::kw_only(),
+	    py::arg("connection") = py::none());
+	m.def(
+	    "df",
+	    [](const PandasDataFrame &value, shared_ptr<DuckDBPyConnection> conn) -> unique_ptr<DuckDBPyRelation> {
+		    if (!conn) {
+			    conn = DuckDBPyConnection::DefaultConnection();
+		    }
+		    return conn->FromDF(value);
+	    },
+	    "Create a relation object from the DataFrame df", py::arg("df"), py::kw_only(),
+	    py::arg("connection") = py::none());
+}
 
 PYBIND11_MODULE(DUCKDB_PYTHON_LIB_NAME, m) { // NOLINT
 	py::enum_<duckdb::ExplainType>(m, "ExplainType",
