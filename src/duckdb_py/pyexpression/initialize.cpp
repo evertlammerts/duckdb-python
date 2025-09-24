@@ -10,40 +10,41 @@ void InitializeStaticMethods(py::module_ &m) {
 	const char *docs;
 
 	// Constant Expression
-	docs = "Create a constant expression from the provided value";
+	docs = "Create a constant expression - e.g. SELECT <constant> - from the provided value.";
 	m.def("ConstantExpression", &DuckDBPyExpression::ConstantExpression, py::arg("value"), docs);
 
 	// ColumnRef Expression
-	docs = "Create a column reference from the provided column name";
-	m.def("ColumnExpression", &DuckDBPyExpression::ColumnExpression, docs);
+	docs = "Create a column expression - e.g. SELECT column - from the provided column name(s).";
+	m.def("ColumnExpression", &DuckDBPyExpression::ColumnExpression, py::arg("names"), docs);
 
 	// Default Expression
-	docs = "";
+	docs = "Create a default expression - e.g. INSERT a=DEFAULT WHERE b=42.";
 	m.def("DefaultExpression", &DuckDBPyExpression::DefaultExpression, docs);
 
 	// Case Expression
-	docs = "";
+	docs = "Create a case expression - e.g. SELECT CASE WHEN b = 42 THEN 'universe' ELSE 'nothing' END as answer.";
 	m.def("CaseExpression", &DuckDBPyExpression::CaseExpression, py::arg("condition"), py::arg("value"), docs);
 
 	// Star Expression
-	docs = "";
+	docs = "Create a star expression - e.g. SELECT * - with an optional list of columns to be excluded.";
 	m.def("StarExpression", &DuckDBPyExpression::StarExpression, py::kw_only(), py::arg("exclude") = py::none(), docs);
 	m.def("StarExpression", []() { return DuckDBPyExpression::StarExpression(); }, docs);
 
 	// Function Expression
-	docs = "";
+	docs = "Create a function expression - e.g. list_filter - on optional input columns.";
 	m.def("FunctionExpression", &DuckDBPyExpression::FunctionExpression, py::arg("function_name"), docs);
 
 	// Coalesce Operator
-	docs = "";
+	docs = "Create a coalesce operator expression - e.g. COLEASCE(expr1, expr2, ...) - given one or more expressions.";
 	m.def("CoalesceOperator", &DuckDBPyExpression::Coalesce, docs);
 
 	// Lambda Expression
-	docs = "";
+	docs = "Create a lambda expression - e.g. lambda param : param > 1 - given lhs (the function's params) and rhs "
+	       "(some expression).";
 	m.def("LambdaExpression", &DuckDBPyExpression::LambdaExpression, py::arg("lhs"), py::arg("rhs"), docs);
 
 	// SQL Expression
-	docs = "";
+	docs = "Create a SQL expression.";
 	m.def("SQLExpression", &DuckDBPyExpression::SQLExpression, docs, py::arg("expression"));
 }
 
