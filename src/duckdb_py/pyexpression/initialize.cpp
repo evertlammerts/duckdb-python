@@ -14,8 +14,8 @@ void InitializeStaticMethods(py::module_ &m) {
 	m.def("ConstantExpression", &DuckDBPyExpression::ConstantExpression, py::arg("value"), docs);
 
 	// ColumnRef Expression
-	docs = "Create a column expression - e.g. SELECT column - from the provided column name(s).";
-	m.def("ColumnExpression", &DuckDBPyExpression::ColumnExpression, py::arg("names"), docs);
+	docs = "Create a column expression - e.g. SELECT column - from the optional column name(s).";
+	m.def("ColumnExpression", &DuckDBPyExpression::ColumnExpression, docs);
 
 	// Default Expression
 	docs = "Create a default expression - e.g. INSERT a=DEFAULT WHERE b=42.";

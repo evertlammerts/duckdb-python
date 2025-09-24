@@ -956,16 +956,14 @@ PYBIND11_MODULE(DUCKDB_PYTHON_LIB_NAME, m) { // NOLINT
 	    .value("STANDARD", duckdb::ExplainType::EXPLAIN_STANDARD,
 	           "Standard explain output showing the logical query plan.")
 	    .value("ANALYZE", duckdb::ExplainType::EXPLAIN_ANALYZE,
-	           "Analyze explain with execution statistics and timing information.")
-	    .export_values();
+	           "Analyze explain with execution statistics and timing information.");
 
 	py::enum_<duckdb::StatementReturnType>(m, "ExpectedResultType",
 	                                       "Enumeration for different result types.\n\n"
 	                                       "This enum lists the possible result types from queries.")
 	    .value("QUERY_RESULT", duckdb::StatementReturnType::QUERY_RESULT)
 	    .value("CHANGED_ROWS", duckdb::StatementReturnType::CHANGED_ROWS)
-	    .value("NOTHING", duckdb::StatementReturnType::NOTHING)
-	    .export_values();
+	    .value("NOTHING", duckdb::StatementReturnType::NOTHING);
 
 	py::enum_<duckdb::StatementType>(m, "StatementType",
 	                                 "Enumeration for different SQL statement types.\n\n"
@@ -1090,8 +1088,7 @@ PYBIND11_MODULE(DUCKDB_PYTHON_LIB_NAME, m) { // NOLINT
 	    .value("MERGE_INTO_STATEMENT", duckdb::StatementType::MERGE_INTO_STATEMENT,
 	           "Data merging statement (MERGE INTO).\n"
 	           "Statements that perform conditional insert, update, or delete\n"
-	           "operations based on matching conditions between source and target tables.")
-	    .export_values();
+	           "operations based on matching conditions between source and target tables.");
 
 	py::enum_<duckdb::PythonCSVLineTerminator::Type>(
 	    m, "CSVLineTerminator",
@@ -1104,8 +1101,7 @@ PYBIND11_MODULE(DUCKDB_PYTHON_LIB_NAME, m) { // NOLINT
 	           "This is the standard line ending on Unix-like systems including Linux and macOS.")
 	    .value("CARRIAGE_RETURN_LINE_FEED", duckdb::PythonCSVLineTerminator::Type::CARRIAGE_RETURN_LINE_FEED,
 	           "Windows-style line terminator using Carriage Return + Line Feed (\\r\\n).\n"
-	           "This is the standard line ending on Windows systems and some network protocols.")
-	    .export_values();
+	           "This is the standard line ending on Windows systems and some network protocols.");
 
 	py::enum_<duckdb::PythonExceptionHandling>(m, "PythonExceptionHandling",
 	                                           "Enumeration for Python exception handling strategies.\n\n"
@@ -1119,8 +1115,7 @@ PYBIND11_MODULE(DUCKDB_PYTHON_LIB_NAME, m) { // NOLINT
 	    .value("RETURN_NULL", duckdb::PythonExceptionHandling::RETURN_NULL,
 	           "Return NULL when Python functions raise exceptions.\n"
 	           "Instead of failing the query, exceptions in Python functions\n"
-	           "will result in NULL values, allowing the query to continue execution.")
-	    .export_values();
+	           "will result in NULL values, allowing the query to continue execution.");
 
 	py::enum_<duckdb::RenderMode>(m, "RenderMode",
 	                              "Enumeration for result rendering modes.\n\n"
@@ -1134,8 +1129,7 @@ PYBIND11_MODULE(DUCKDB_PYTHON_LIB_NAME, m) { // NOLINT
 	    .value("COLUMNS", duckdb::RenderMode::COLUMNS,
 	           "Column-oriented rendering mode.\n"
 	           "Results are displayed with columns grouped together,\n"
-	           "which can be more efficient for wide tables or analytical workflows.")
-	    .export_values();
+	           "which can be more efficient for wide tables or analytical workflows.");
 
 	DuckDBPyTyping::Initialize(m);
 	DuckDBPyFunctional::Initialize(m);
