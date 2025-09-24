@@ -1,4 +1,6 @@
 import collections.abc
+import os
+import pathlib
 import typing
 
 import fsspec
@@ -196,7 +198,7 @@ class DuckDBPyConnection:
         self,
         name: str,
         function: collections.abc.Callable,
-        parameters: typing.Any = None,  # noqa: ANN401
+        parameters: list[duckdb_typing.DuckDBPyType] | None = None,
         return_type: duckdb_typing.DuckDBPyType | None = None,
         *,
         type: functional.PythonUDFType = ...,
@@ -210,8 +212,8 @@ class DuckDBPyConnection:
     def dtype(self, type_str: str) -> duckdb_typing.DuckDBPyType: ...
     def duplicate(self) -> DuckDBPyConnection: ...
     def enum_type(self, name: str, type: duckdb_typing.DuckDBPyType, values: list) -> duckdb_typing.DuckDBPyType: ...
-    def execute(self, query: typing.Any, parameters: typing.Any = None) -> DuckDBPyConnection: ...  # noqa: ANN401
-    def executemany(self, query: typing.Any, parameters: typing.Any = None) -> DuckDBPyConnection: ...  # noqa: ANN401
+    def execute(self, query: Statement | str, parameters: object = None) -> DuckDBPyConnection: ...
+    def executemany(self, query: Statement | str, parameters: object = None) -> DuckDBPyConnection: ...
     def extract_statements(self, query: str) -> list: ...
     def fetch_arrow_table(self, rows_per_batch: typing.SupportsInt = 1000000) -> pyarrow.lib.Table: ...
     def fetch_df(self, *, date_as_object: bool = False) -> pandas.DataFrame: ...
@@ -225,8 +227,52 @@ class DuckDBPyConnection:
     def fetchnumpy(self) -> dict: ...
     def fetchone(self) -> tuple | None: ...
     def filesystem_is_registered(self, name: str) -> bool: ...
-    def from_arrow(self, arrow_object: typing.Any) -> DuckDBPyRelation: ...  # noqa: ANN401
-    def from_csv_auto(self, path_or_buffer: typing.Any, **kwargs) -> DuckDBPyRelation: ...  # noqa: ANN401
+    def from_arrow(self, arrow_object: object) -> DuckDBPyRelation: ...
+    def from_csv_auto(
+        self,
+        path_or_buffer: str | bytes | os.PathLike,
+        header: typing.Optional[typing.Union[bool, int]] = None,
+        compression: str | None = None,
+        sep: str | None = None,
+        delimiter: str | None = None,
+        files_to_sniff: int | None = None,
+        comment: str | None = None,
+        thousands: str | None = None,
+        dtype: typing.Optional[typing.Union[typing.Dict[str, str], typing.List[str]]] = None,
+        na_values: typing.Optional[typing.Union[str, typing.List[str]]] = None,
+        skiprows: int | None = None,
+        quotechar: str | None = None,
+        escapechar: str | None = None,
+        encoding: str | None = None,
+        parallel: bool | None = None,
+        date_format: str | None = None,
+        timestamp_format: str | None = None,
+        sample_size: int | None = None,
+        auto_detect: typing.Optional[bool | int] = None,
+        all_varchar: bool | None = None,
+        normalize_names: bool | None = None,
+        null_padding: bool | None = None,
+        names: typing.Optional[typing.List[str]] = None,
+        lineterminator: str | None = None,
+        columns: typing.Optional[typing.Dict[str, str]] = None,
+        auto_type_candidates: typing.Optional[typing.List[str]] = None,
+        max_line_size: int | None = None,
+        ignore_errors: bool | None = None,
+        store_rejects: bool | None = None,
+        rejects_table: str | None = None,
+        rejects_scan: str | None = None,
+        rejects_limit: int | None = None,
+        force_not_null: typing.Optional[typing.List[str]] = None,
+        buffer_size: int | None = None,
+        decimal: str | None = None,
+        allow_quoted_nulls: bool | None = None,
+        filename: typing.Optional[typing.Union[bool, str]] = None,
+        hive_partitioning: bool | None = None,
+        union_by_name: bool | None = None,
+        hive_types: typing.Optional[typing.Dict[str, str]] = None,
+        hive_types_autocast: bool | None = None,
+        strict_mode: bool | None = None,
+    ) -> DuckDBPyRelation: ...
     def from_df(self, df: pandas.DataFrame) -> DuckDBPyRelation: ...
     @typing.overload
     def from_parquet(
@@ -238,7 +284,7 @@ class DuckDBPyConnection:
         filename: bool = False,
         hive_partitioning: bool = False,
         union_by_name: bool = False,
-        compression: typing.Any = None,  # noqa: ANN401
+        compression: str | None = None,
     ) -> DuckDBPyRelation: ...
     def from_parquet(
         self,
@@ -249,18 +295,18 @@ class DuckDBPyConnection:
         filename: bool = False,
         hive_partitioning: bool = False,
         union_by_name: bool = False,
-        compression: typing.Any = None,
+        compression: str | None = None,
     ) -> DuckDBPyRelation: ...
-    def from_query(self, query: typing.Any, *, alias: str = "", params: typing.Any = None) -> DuckDBPyRelation: ...  # noqa: ANN401
+    def from_query(self, query: str, *, alias: str = "", params: object = None) -> DuckDBPyRelation: ...
     def get_table_names(self, query: str, *, qualified: bool = False) -> set[str]: ...
     def install_extension(
         self,
         extension: str,
         *,
         force_install: bool = False,
-        repository: typing.Any = None,  # noqa: ANN401
-        repository_url: typing.Any = None,  # noqa: ANN401
-        version: typing.Any = None,  # noqa: ANN401
+        repository: str | None = None,
+        repository_url: str | None = None,
+        version: str | None = None,
     ) -> None: ...
     def interrupt(self) -> None: ...
     def list_filesystems(self) -> list: ...
@@ -270,32 +316,76 @@ class DuckDBPyConnection:
         self, key: duckdb_typing.DuckDBPyType, value: duckdb_typing.DuckDBPyType
     ) -> duckdb_typing.DuckDBPyType: ...
     def pl(self, rows_per_batch: typing.SupportsInt = 1000000, *, lazy: bool = False) -> ...: ...
-    def query(self, query: typing.Any, *, alias: str = "", params: typing.Any = None) -> DuckDBPyRelation: ...  # noqa: ANN401
+    def query(self, query: str, *, alias: str = "", params: object = None) -> DuckDBPyRelation: ...
     def query_progress(self) -> float: ...
-    def read_csv(self, path_or_buffer: typing.Any, **kwargs) -> DuckDBPyRelation: ...  # noqa: ANN401
+    def read_csv(
+        self,
+        path_or_buffer: str | bytes | os.PathLike,
+        header: typing.Optional[typing.Union[bool, int]] = None,
+        compression: str | None = None,
+        sep: str | None = None,
+        delimiter: str | None = None,
+        files_to_sniff: int | None = None,
+        comment: str | None = None,
+        thousands: str | None = None,
+        dtype: typing.Optional[typing.Union[typing.Dict[str, str], typing.List[str]]] = None,
+        na_values: typing.Optional[typing.Union[str, typing.List[str]]] = None,
+        skiprows: int | None = None,
+        quotechar: str | None = None,
+        escapechar: str | None = None,
+        encoding: str | None = None,
+        parallel: bool | None = None,
+        date_format: str | None = None,
+        timestamp_format: str | None = None,
+        sample_size: int | None = None,
+        auto_detect: typing.Optional[bool | int] = None,
+        all_varchar: bool | None = None,
+        normalize_names: bool | None = None,
+        null_padding: bool | None = None,
+        names: typing.Optional[typing.List[str]] = None,
+        lineterminator: str | None = None,
+        columns: typing.Optional[typing.Dict[str, str]] = None,
+        auto_type_candidates: typing.Optional[typing.List[str]] = None,
+        max_line_size: int | None = None,
+        ignore_errors: bool | None = None,
+        store_rejects: bool | None = None,
+        rejects_table: str | None = None,
+        rejects_scan: str | None = None,
+        rejects_limit: int | None = None,
+        force_not_null: typing.Optional[typing.List[str]] = None,
+        buffer_size: int | None = None,
+        decimal: str | None = None,
+        allow_quoted_nulls: bool | None = None,
+        filename: typing.Optional[typing.Union[bool, str]] = None,
+        hive_partitioning: bool | None = None,
+        union_by_name: bool | None = None,
+        hive_types: typing.Optional[typing.Dict[str, str]] = None,
+        hive_types_autocast: bool | None = None,
+        strict_mode: bool | None = None,
+    ) -> DuckDBPyRelation: ...
     def read_json(
         self,
-        path_or_buffer: typing.Any,  # noqa: ANN401
+        path_or_buffer: str | bytes | os.PathLike,
         *,
-        columns: typing.Any | None = None,  # noqa: ANN401
-        sample_size: typing.Any | None = None,  # noqa: ANN401
-        maximum_depth: typing.Any | None = None,  # noqa: ANN401
+        columns: typing.Optional[typing.Dict[str, str]] = None,
+        sample_size: int | None = None,
+        maximum_depth: int | None = None,
         records: str | None = None,
         format: str | None = None,
-        date_format: typing.Any | None = None,  # noqa: ANN401
-        timestamp_format: typing.Any | None = None,  # noqa: ANN401
-        compression: typing.Any | None = None,  # noqa: ANN401
-        maximum_object_size: typing.Any | None = None,  # noqa: ANN401
-        ignore_errors: typing.Any | None = None,  # noqa: ANN401
-        convert_strings_to_integers: typing.Any | None = None,  # noqa: ANN401
-        field_appearance_threshold: typing.Any | None = None,  # noqa: ANN401
-        map_inference_threshold: typing.Any | None = None,  # noqa: ANN401
-        maximum_sample_files: typing.Any | None = None,  # noqa: ANN401
-        filename: typing.Any | None = None,  # noqa: ANN401
-        hive_partitioning: typing.Any | None = None,  # noqa: ANN401
-        union_by_name: typing.Any | None = None,  # noqa: ANN401
-        hive_types: typing.Any | None = None,  # noqa: ANN401
-        hive_types_autocast: typing.Any | None = None,  # noqa: ANN401
+        date_format: str | None = None,
+        timestamp_format: str | None = None,
+        compression: str | None = None,
+        maximum_object_size: int | None = None,
+        ignore_errors: bool | None = None,
+        convert_strings_to_integers: bool | None = None,
+        field_appearance_threshold: typing.Optional[float] = None,
+        map_inference_threshold: int | None = None,
+        maximum_sample_files: int | None = None,
+        filename: typing.Optional[typing.Union[bool, str]] = None,
+        hive_partitioning: bool | None = None,
+        union_by_name: bool | None = None,
+        hive_types: typing.Optional[typing.Dict[str, str]] = None,
+        hive_types_autocast: bool | None = None,
     ) -> DuckDBPyRelation: ...
     @typing.overload
     def read_parquet(
@@ -307,7 +397,7 @@ class DuckDBPyConnection:
         filename: bool = False,
         hive_partitioning: bool = False,
         union_by_name: bool = False,
-        compression: typing.Any = None,  # noqa: ANN401
+        compression: str | None = None,
     ) -> DuckDBPyRelation: ...
     def read_parquet(
         self,
@@ -320,21 +410,21 @@ class DuckDBPyConnection:
         union_by_name: bool = False,
         compression: typing.Any = None,
     ) -> DuckDBPyRelation: ...
-    def register(self, view_name: str, python_object: typing.Any) -> DuckDBPyConnection: ...  # noqa: ANN401
+    def register(self, view_name: str, python_object: object) -> DuckDBPyConnection: ...
     def register_filesystem(self, filesystem: fsspec.AbstractFileSystem) -> None: ...
     def remove_function(self, name: str) -> DuckDBPyConnection: ...
     def rollback(self) -> DuckDBPyConnection: ...
-    def row_type(self, fields: typing.Any) -> duckdb_typing.DuckDBPyType: ...  # noqa: ANN401
-    def sql(self, query: typing.Any, *, alias: str = "", params: typing.Any = None) -> DuckDBPyRelation: ...  # noqa: ANN401
+    def row_type(self, fields: Expression | list[Expression] | str | list[str]) -> duckdb_typing.DuckDBPyType: ...
+    def sql(self, query: Statement | str, *, alias: str = "", params: object = None) -> DuckDBPyRelation: ...
     def sqltype(self, type_str: str) -> duckdb_typing.DuckDBPyType: ...
     def string_type(self, collation: str = "") -> duckdb_typing.DuckDBPyType: ...
-    def struct_type(self, fields: typing.Any) -> duckdb_typing.DuckDBPyType: ...  # noqa: ANN401
+    def struct_type(self, fields: Expression | list[Expression] | str | list[str]) -> duckdb_typing.DuckDBPyType: ...
     def table(self, table_name: str) -> DuckDBPyRelation: ...
-    def table_function(self, name: str, parameters: typing.Any = None) -> DuckDBPyRelation: ...  # noqa: ANN401
+    def table_function(self, name: str, parameters: object = None) -> DuckDBPyRelation: ...
     def tf(self) -> dict: ...
     def torch(self) -> dict: ...
     def type(self, type_str: str) -> duckdb_typing.DuckDBPyType: ...
-    def union_type(self, members: typing.Any) -> duckdb_typing.DuckDBPyType: ...  # noqa: ANN401
+    def union_type(self, members: duckdb_typing.DuckDBPyType) -> duckdb_typing.DuckDBPyType: ...
     def unregister(self, view_name: str) -> DuckDBPyConnection: ...
     def unregister_filesystem(self, name: str) -> None: ...
     def values(self, *args) -> DuckDBPyRelation: ...
@@ -345,12 +435,12 @@ class DuckDBPyConnection:
     def rowcount(self) -> int: ...
 
 class DuckDBPyRelation:
-    def __arrow_c_stream__(self, requested_schema: typing.Any = None) -> typing.Any: ...  # noqa: ANN401
+    def __arrow_c_stream__(self, requested_schema: typing.Optional[object] = None) -> typing.Any: ...
     def __contains__(self, name: str) -> bool: ...
     def __getattr__(self, name: str) -> DuckDBPyRelation: ...
     def __getitem__(self, name: str) -> DuckDBPyRelation: ...
     def __len__(self) -> int: ...
-    def aggregate(self, aggr_expr: typing.Any, group_expr: str = "") -> DuckDBPyRelation: ...  # noqa: ANN401
+    def aggregate(self, aggr_expr: Expression | str, group_expr: Expression | str = "") -> DuckDBPyRelation: ...
     def any_value(
         self, column: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
     ) -> DuckDBPyRelation: ...
@@ -384,8 +474,8 @@ class DuckDBPyRelation:
     def bitstring_agg(
         self,
         column: str,
-        min: typing.Any | None = None,  # noqa: ANN401
-        max: typing.Any | None = None,  # noqa: ANN401
+        min: int | None = None,
+        max: int | None = None,
         groups: str = "",
         window_spec: str = "",
         projected_columns: str = "",
@@ -425,7 +515,7 @@ class DuckDBPyRelation:
     def fetchmany(self, size: typing.SupportsInt = 1) -> list: ...
     def fetchnumpy(self) -> dict: ...
     def fetchone(self) -> tuple | None: ...
-    def filter(self, filter_expr: typing.Any) -> DuckDBPyRelation: ...  # noqa: ANN401
+    def filter(self, filter_expr: Expression | str) -> DuckDBPyRelation: ...
     def first(self, column: str, groups: str = "", projected_columns: str = "") -> DuckDBPyRelation: ...
     def first_value(self, column: str, window_spec: str = "", projected_columns: str = "") -> DuckDBPyRelation: ...
     def fsum(
@@ -435,10 +525,12 @@ class DuckDBPyRelation:
     def histogram(
         self, column: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
     ) -> DuckDBPyRelation: ...
-    def insert(self, values: typing.Any) -> None: ...  # noqa: ANN401
+    def insert(self, values: typing.List[object]) -> None: ...
     def insert_into(self, table_name: str) -> None: ...
     def intersect(self, other_rel: DuckDBPyRelation) -> DuckDBPyRelation: ...
-    def join(self, other_rel: DuckDBPyRelation, condition: typing.Any, how: str = "inner") -> DuckDBPyRelation: ...  # noqa: ANN401
+    def join(
+        self, other_rel: DuckDBPyRelation, condition: Expression | str, how: str = "inner"
+    ) -> DuckDBPyRelation: ...
     def lag(
         self,
         column: str,
@@ -463,7 +555,9 @@ class DuckDBPyRelation:
     def list(
         self, column: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
     ) -> DuckDBPyRelation: ...
-    def map(self, map_function: collections.abc.Callable, *, schema: typing.Any | None = None) -> DuckDBPyRelation: ...  # noqa: ANN401
+    def map(
+        self, map_function: collections.abc.Callable, *, schema: dict[str, duckdb_typing.DuckDBPyType] | None = None
+    ) -> DuckDBPyRelation: ...
     def max(
         self, column: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
     ) -> DuckDBPyRelation: ...
@@ -500,35 +594,35 @@ class DuckDBPyRelation:
     def quantile(
         self,
         column: str,
-        q: typing.Any = 0.5,
+        q: float | list[float] = 0.5,
         groups: str = "",
         window_spec: str = "",
-        projected_columns: str = "",  # noqa: ANN401
+        projected_columns: str = "",
     ) -> DuckDBPyRelation: ...
     def quantile_cont(
         self,
         column: str,
-        q: typing.Any = 0.5,
+        q: float | list[float] = 0.5,
         groups: str = "",
         window_spec: str = "",
-        projected_columns: str = "",  # noqa: ANN401
+        projected_columns: str = "",
     ) -> DuckDBPyRelation: ...
     def quantile_disc(
         self,
         column: str,
-        q: typing.Any = 0.5,
+        q: float | list[float] = 0.5,
         groups: str = "",
         window_spec: str = "",
-        projected_columns: str = "",  # noqa: ANN401
+        projected_columns: str = "",
     ) -> DuckDBPyRelation: ...
     def query(self, virtual_table_name: str, sql_query: str) -> DuckDBPyRelation: ...
     def rank(self, window_spec: str, projected_columns: str = "") -> DuckDBPyRelation: ...
     def rank_dense(self, window_spec: str, projected_columns: str = "") -> DuckDBPyRelation: ...
-    def record_batch(self, batch_size: typing.SupportsInt = 1000000) -> typing.Any: ...  # noqa: ANN401
+    def record_batch(self, batch_size: typing.SupportsInt = 1000000) -> pyarrow.RecordBatchReader: ...
     def row_number(self, window_spec: str, projected_columns: str = "") -> DuckDBPyRelation: ...
     def select(self, *args, groups: str = "") -> DuckDBPyRelation: ...
-    def select_dtypes(self, types: typing.Any) -> DuckDBPyRelation: ...  # noqa: ANN401
-    def select_types(self, types: typing.Any) -> DuckDBPyRelation: ...  # noqa: ANN401
+    def select_dtypes(self, types: list[duckdb_typing.DuckDBPyType | str]) -> DuckDBPyRelation: ...
+    def select_types(self, types: list[duckdb_typing.DuckDBPyType | str]) -> DuckDBPyRelation: ...
     def set_alias(self, alias: str) -> DuckDBPyRelation: ...
     def show(
         self,
@@ -537,7 +631,7 @@ class DuckDBPyRelation:
         max_rows: typing.SupportsInt | None = None,
         max_col_width: typing.SupportsInt | None = None,
         null_value: str | None = None,
-        render_mode: typing.Any = None,  # noqa: ANN401
+        render_mode: RenderMode | None = None,
     ) -> None: ...
     def sort(self, *args) -> DuckDBPyRelation: ...
     def sql_query(self) -> str: ...
@@ -565,44 +659,44 @@ class DuckDBPyRelation:
         self,
         file_name: str,
         *,
-        sep: typing.Any = None,  # noqa: ANN401
-        na_rep: typing.Any = None,  # noqa: ANN401
-        header: typing.Any = None,  # noqa: ANN401
-        quotechar: typing.Any = None,  # noqa: ANN401
-        escapechar: typing.Any = None,  # noqa: ANN401
-        date_format: typing.Any = None,  # noqa: ANN401
-        timestamp_format: typing.Any = None,  # noqa: ANN401
-        quoting: typing.Any = None,  # noqa: ANN401
-        encoding: typing.Any = None,  # noqa: ANN401
-        compression: typing.Any = None,  # noqa: ANN401
-        overwrite: typing.Any = None,  # noqa: ANN401
-        per_thread_output: typing.Any = None,  # noqa: ANN401
-        use_tmp_file: typing.Any = None,  # noqa: ANN401
-        partition_by: typing.Any = None,  # noqa: ANN401
-        write_partition_columns: typing.Any = None,  # noqa: ANN401
+        sep: str | None = None,
+        na_rep: str | None = None,
+        header: bool | None = None,
+        quotechar: str | None = None,
+        escapechar: str | None = None,
+        date_format: str | None = None,
+        timestamp_format: str | None = None,
+        quoting: typing.Optional[typing.Union[str, int]] = None,
+        encoding: str | None = None,
+        compression: str | None = None,
+        overwrite: bool | None = None,
+        per_thread_output: bool | None = None,
+        use_tmp_file: bool | None = None,
+        partition_by: typing.Optional[typing.List[str]] = None,
+        write_partition_columns: bool | None = None,
     ) -> None: ...
     def to_df(self, *, date_as_object: bool = False) -> pandas.DataFrame: ...
     def to_parquet(
         self,
         file_name: str,
         *,
-        compression: typing.Any = None,  # noqa: ANN401
-        field_ids: typing.Any = None,  # noqa: ANN401
-        row_group_size_bytes: typing.Any = None,  # noqa: ANN401
-        row_group_size: typing.Any = None,  # noqa: ANN401
-        overwrite: typing.Any = None,  # noqa: ANN401
-        per_thread_output: typing.Any = None,  # noqa: ANN401
-        use_tmp_file: typing.Any = None,  # noqa: ANN401
-        partition_by: typing.Any = None,  # noqa: ANN401
-        write_partition_columns: typing.Any = None,  # noqa: ANN401
-        append: typing.Any = None,  # noqa: ANN401
+        compression: str | None = None,
+        field_ids: typing.Optional[typing.Union[dict, str]] = None,
+        row_group_size_bytes: typing.Optional[typing.Union[int, str]] = None,
+        row_group_size: int | None = None,
+        overwrite: bool | None = None,
+        per_thread_output: bool | None = None,
+        use_tmp_file: bool | None = None,
+        partition_by: typing.Optional[typing.List[str]] = None,
+        write_partition_columns: bool | None = None,
+        append: bool | None = None,
     ) -> None: ...
     def to_table(self, table_name: str) -> None: ...
     def to_view(self, view_name: str, replace: bool = True) -> DuckDBPyRelation: ...
     def torch(self) -> dict: ...
     def union(self, union_rel: DuckDBPyRelation) -> DuckDBPyRelation: ...
     def unique(self, unique_aggr: str) -> DuckDBPyRelation: ...
-    def update(self, set: typing.Any, *, condition: typing.Any = None) -> None: ...  # noqa: ANN401
+    def update(self, set: Expression | str, *, condition: Expression | str = None) -> None: ...
     def value_counts(self, column: str, groups: str = "") -> DuckDBPyRelation: ...
     def var(
         self, column: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
@@ -619,37 +713,35 @@ class DuckDBPyRelation:
     def write_csv(
         self,
         file_name: str,
-        *,
-        sep: typing.Any = None,  # noqa: ANN401
-        na_rep: typing.Any = None,  # noqa: ANN401
-        header: typing.Any = None,  # noqa: ANN401
-        quotechar: typing.Any = None,  # noqa: ANN401
-        escapechar: typing.Any = None,  # noqa: ANN401
-        date_format: typing.Any = None,  # noqa: ANN401
-        timestamp_format: typing.Any = None,  # noqa: ANN401
-        quoting: typing.Any = None,  # noqa: ANN401
-        encoding: typing.Any = None,  # noqa: ANN401
-        compression: typing.Any = None,  # noqa: ANN401
-        overwrite: typing.Any = None,  # noqa: ANN401
-        per_thread_output: typing.Any = None,  # noqa: ANN401
-        use_tmp_file: typing.Any = None,  # noqa: ANN401
-        partition_by: typing.Any = None,  # noqa: ANN401
-        write_partition_columns: typing.Any = None,  # noqa: ANN401
+        sep: str | None = None,
+        na_rep: str | None = None,
+        header: bool | None = None,
+        quotechar: str | None = None,
+        escapechar: str | None = None,
+        date_format: str | None = None,
+        timestamp_format: str | None = None,
+        quoting: str | int | None = None,
+        encoding: str | None = None,
+        compression: str | None = None,
+        overwrite: bool | None = None,
+        per_thread_output: bool | None = None,
+        use_tmp_file: bool | None = None,
+        partition_by: list[str] | None = None,
+        write_partition_columns: bool | None = None,
     ) -> None: ...
     def write_parquet(
         self,
         file_name: str,
-        *,
-        compression: typing.Any = None,  # noqa: ANN401
-        field_ids: typing.Any = None,  # noqa: ANN401
-        row_group_size_bytes: typing.Any = None,  # noqa: ANN401
-        row_group_size: typing.Any = None,  # noqa: ANN401
-        overwrite: typing.Any = None,  # noqa: ANN401
-        per_thread_output: typing.Any = None,  # noqa: ANN401
-        use_tmp_file: typing.Any = None,  # noqa: ANN401
-        partition_by: typing.Any = None,  # noqa: ANN401
-        write_partition_columns: typing.Any = None,  # noqa: ANN401
-        append: typing.Any = None,  # noqa: ANN401
+        compression: str | None = None,
+        field_ids: dict | str | None = None,
+        row_group_size_bytes: str | int | None = None,
+        row_group_size: int | None = None,
+        overwrite: bool | None = None,
+        per_thread_output: bool | None = None,
+        use_tmp_file: bool | None = None,
+        partition_by: list[str] | None = None,
+        write_partition_columns: bool | None = None,
+        append: bool | None = None,
     ) -> None: ...
     @property
     def alias(self) -> str: ...
@@ -904,17 +996,17 @@ class token_type:
 def CaseExpression(condition: Expression, value: Expression) -> Expression: ...
 def CoalesceOperator(*args) -> Expression: ...
 def ColumnExpression(*args) -> Expression: ...
-def ConstantExpression(value: typing.Any) -> Expression: ...  # noqa: ANN401
+def ConstantExpression(value: Expression | str) -> Expression: ...
 def DefaultExpression() -> Expression: ...
 def FunctionExpression(function_name: str, *args) -> Expression: ...
-def LambdaExpression(lhs: typing.Any, rhs: Expression) -> Expression: ...  # noqa: ANN401
+def LambdaExpression(lhs: Expression | str | tuple[str], rhs: Expression) -> Expression: ...
 def SQLExpression(expression: str) -> Expression: ...
 @typing.overload
-def StarExpression(*, exclude: typing.Any = None) -> Expression: ...  # noqa: ANN401
+def StarExpression(*, exclude: Expression | str | tuple[str]) -> Expression: ...
 def StarExpression() -> Expression: ...
 def aggregate(
     df: pandas.DataFrame,
-    aggr_expr: typing.Any,  # noqa: ANN401
+    aggr_expr: Expression | list[Expression] | str | list[str],
     group_expr: str = "",
     *,
     connection: duckdb.DuckDBPyConnection | None = None,
@@ -938,14 +1030,14 @@ def checkpoint(*, connection: duckdb.DuckDBPyConnection | None = None) -> duckdb
 def close(*, connection: duckdb.DuckDBPyConnection | None = None) -> None: ...
 def commit(*, connection: duckdb.DuckDBPyConnection | None = None) -> duckdb.DuckDBPyConnection: ...
 def connect(
-    database: typing.Any = ":memory:",
+    database: str | pathlib.Path = ":memory:",
     read_only: bool = False,
-    config: dict | None = None,  # noqa: ANN401
+    config: dict | None = None,
 ) -> duckdb.DuckDBPyConnection: ...
 def create_function(
     name: str,
     function: collections.abc.Callable,
-    parameters: typing.Any = None,  # noqa: ANN401
+    parameters: list[duckdb_typing.DuckDBPyType] | None = None,
     return_type: duckdb_typing.DuckDBPyType | None = None,
     *,
     type: functional.PythonUDFType = ...,
@@ -970,16 +1062,16 @@ def enum_type(
     name: str, type: duckdb_typing.DuckDBPyType, values: list, *, connection: duckdb.DuckDBPyConnection | None = None
 ) -> duckdb_typing.DuckDBPyType: ...
 def execute(
-    query: typing.Any,
-    parameters: typing.Any = None,
+    query: Statement | str,
+    parameters: object = None,
     *,
-    connection: duckdb.DuckDBPyConnection | None = None,  # noqa: ANN401
+    connection: duckdb.DuckDBPyConnection | None = None,
 ) -> duckdb.DuckDBPyConnection: ...
 def executemany(
-    query: typing.Any,
-    parameters: typing.Any = None,
+    query: Statement | str,
+    parameters: object = None,
     *,
-    connection: duckdb.DuckDBPyConnection | None = None,  # noqa: ANN401
+    connection: duckdb.DuckDBPyConnection | None = None,
 ) -> duckdb.DuckDBPyConnection: ...
 def extract_statements(query: str, *, connection: duckdb.DuckDBPyConnection | None = None) -> list: ...
 def fetch_arrow_table(
@@ -1007,16 +1099,59 @@ def fetchone(*, connection: duckdb.DuckDBPyConnection | None = None) -> tuple | 
 def filesystem_is_registered(name: str, *, connection: duckdb.DuckDBPyConnection | None = None) -> bool: ...
 def filter(
     df: pandas.DataFrame,
-    filter_expr: typing.Any,
+    filter_expr: Expression | str,
     *,
-    connection: duckdb.DuckDBPyConnection | None = None,  # noqa: ANN401
+    connection: duckdb.DuckDBPyConnection | None = None,
 ) -> DuckDBPyRelation: ...
 def from_arrow(
-    arrow_object: typing.Any,
+    arrow_object: object,
     *,
-    connection: duckdb.DuckDBPyConnection | None = None,  # noqa: ANN401
+    connection: duckdb.DuckDBPyConnection | None = None,
 ) -> DuckDBPyRelation: ...
-def from_csv_auto(path_or_buffer: typing.Any, **kwargs) -> DuckDBPyRelation: ...  # noqa: ANN401
+def from_csv_auto(
+    path_or_buffer: str | bytes | os.PathLike,
+    header: typing.Optional[typing.Union[bool, int]] = None,
+    compression: str | None = None,
+    sep: str | None = None,
+    delimiter: str | None = None,
+    files_to_sniff: int | None = None,
+    comment: str | None = None,
+    thousands: str | None = None,
+    dtype: typing.Optional[typing.Union[typing.Dict[str, str], typing.List[str]]] = None,
+    na_values: typing.Optional[typing.Union[str, typing.List[str]]] = None,
+    skiprows: int | None = None,
+    quotechar: str | None = None,
+    escapechar: str | None = None,
+    encoding: str | None = None,
+    parallel: bool | None = None,
+    date_format: str | None = None,
+    timestamp_format: str | None = None,
+    sample_size: int | None = None,
+    auto_detect: typing.Optional[bool | int] = None,
+    all_varchar: bool | None = None,
+    normalize_names: bool | None = None,
+    null_padding: bool | None = None,
+    names: typing.Optional[typing.List[str]] = None,
+    lineterminator: str | None = None,
+    columns: typing.Optional[typing.Dict[str, str]] = None,
+    auto_type_candidates: typing.Optional[typing.List[str]] = None,
+    max_line_size: int | None = None,
+    ignore_errors: bool | None = None,
+    store_rejects: bool | None = None,
+    rejects_table: str | None = None,
+    rejects_scan: str | None = None,
+    rejects_limit: int | None = None,
+    force_not_null: typing.Optional[typing.List[str]] = None,
+    buffer_size: int | None = None,
+    decimal: str | None = None,
+    allow_quoted_nulls: bool | None = None,
+    filename: typing.Optional[typing.Union[bool, str]] = None,
+    hive_partitioning: bool | None = None,
+    union_by_name: bool | None = None,
+    hive_types: typing.Optional[typing.Dict[str, str]] = None,
+    hive_types_autocast: bool | None = None,
+    strict_mode: bool | None = None,
+) -> DuckDBPyRelation: ...
 def from_df(df: pandas.DataFrame, *, connection: duckdb.DuckDBPyConnection | None = None) -> DuckDBPyRelation: ...
 @typing.overload
 def from_parquet(
@@ -1027,7 +1162,7 @@ def from_parquet(
     filename: bool = False,
     hive_partitioning: bool = False,
     union_by_name: bool = False,
-    compression: typing.Any = None,  # noqa: ANN401
+    compression: str | None = None,
     connection: duckdb.DuckDBPyConnection | None = None,
 ) -> DuckDBPyRelation: ...
 def from_parquet(
@@ -1042,10 +1177,10 @@ def from_parquet(
     connection: duckdb.DuckDBPyConnection | None = None,
 ) -> DuckDBPyRelation: ...
 def from_query(
-    query: typing.Any,  # noqa: ANN401
+    query: Statement | str,
     *,
     alias: str = "",
-    params: typing.Any = None,  # noqa: ANN401
+    params: object = None,
     connection: duckdb.DuckDBPyConnection | None = None,
 ) -> DuckDBPyRelation: ...
 def get_table_names(
@@ -1055,9 +1190,9 @@ def install_extension(
     extension: str,
     *,
     force_install: bool = False,
-    repository: typing.Any = None,  # noqa: ANN401
-    repository_url: typing.Any = None,  # noqa: ANN401
-    version: typing.Any = None,  # noqa: ANN401
+    repository: str | None = None,
+    repository_url: str | None = None,
+    version: str | None = None,
     connection: duckdb.DuckDBPyConnection | None = None,
 ) -> None: ...
 def interrupt(*, connection: duckdb.DuckDBPyConnection | None = None) -> None: ...
@@ -1092,10 +1227,10 @@ def project(
     df: pandas.DataFrame, *args, groups: str = "", connection: duckdb.DuckDBPyConnection | None = None
 ) -> DuckDBPyRelation: ...
 def query(
-    query: typing.Any,  # noqa: ANN401
+    query: Statement | str,
     *,
     alias: str = "",
-    params: typing.Any = None,  # noqa: ANN401
+    params: object = None,
     connection: duckdb.DuckDBPyConnection | None = None,
 ) -> DuckDBPyRelation: ...
 def query_df(
@@ -1106,30 +1241,72 @@ def query_df(
     connection: duckdb.DuckDBPyConnection | None = None,
 ) -> DuckDBPyRelation: ...
 def query_progress(*, connection: duckdb.DuckDBPyConnection | None = None) -> float: ...
-def read_csv(path_or_buffer: typing.Any, **kwargs) -> DuckDBPyRelation: ...  # noqa: ANN401
+def read_csv(
+    path_or_buffer: str | bytes | os.PathLike,
+    header: typing.Optional[typing.Union[bool, int]] = None,
+    compression: str | None = None,
+    sep: str | None = None,
+    delimiter: str | None = None,
+    files_to_sniff: int | None = None,
+    comment: str | None = None,
+    thousands: str | None = None,
+    dtype: typing.Optional[typing.Union[typing.Dict[str, str], typing.List[str]]] = None,
+    na_values: typing.Optional[typing.Union[str, typing.List[str]]] = None,
+    skiprows: int | None = None,
+    quotechar: str | None = None,
+    escapechar: str | None = None,
+    encoding: str | None = None,
+    parallel: bool | None = None,
+    date_format: str | None = None,
+    timestamp_format: str | None = None,
+    sample_size: int | None = None,
+    auto_detect: typing.Optional[bool | int] = None,
+    all_varchar: bool | None = None,
+    normalize_names: bool | None = None,
+    null_padding: bool | None = None,
+    names: typing.Optional[typing.List[str]] = None,
+    lineterminator: str | None = None,
+    columns: typing.Optional[typing.Dict[str, str]] = None,
+    auto_type_candidates: typing.Optional[typing.List[str]] = None,
+    max_line_size: int | None = None,
+    ignore_errors: bool | None = None,
+    store_rejects: bool | None = None,
+    rejects_table: str | None = None,
+    rejects_scan: str | None = None,
+    rejects_limit: int | None = None,
+    force_not_null: typing.Optional[typing.List[str]] = None,
+    buffer_size: int | None = None,
+    decimal: str | None = None,
+    allow_quoted_nulls: bool | None = None,
+    filename: typing.Optional[typing.Union[bool, str]] = None,
+    hive_partitioning: bool | None = None,
+    union_by_name: bool | None = None,
+    hive_types: typing.Optional[typing.Dict[str, str]] = None,
+    hive_types_autocast: bool | None = None,
+    strict_mode: bool | None = None,
+) -> DuckDBPyRelation: ...
 def read_json(
-    path_or_buffer: typing.Any,  # noqa: ANN401
+    path_or_buffer: str | bytes | os.PathLike,
     *,
-    columns: typing.Any | None = None,  # noqa: ANN401
-    sample_size: typing.Any | None = None,  # noqa: ANN401
-    maximum_depth: typing.Any | None = None,  # noqa: ANN401
+    columns: typing.Optional[typing.Dict[str, str]] = None,
+    sample_size: int | None = None,
+    maximum_depth: int | None = None,
     records: str | None = None,
     format: str | None = None,
-    date_format: typing.Any | None = None,  # noqa: ANN401
-    timestamp_format: typing.Any | None = None,  # noqa: ANN401
-    compression: typing.Any | None = None,  # noqa: ANN401
-    maximum_object_size: typing.Any | None = None,  # noqa: ANN401
-    ignore_errors: typing.Any | None = None,  # noqa: ANN401
-    convert_strings_to_integers: typing.Any | None = None,  # noqa: ANN401
-    field_appearance_threshold: typing.Any | None = None,  # noqa: ANN401
-    map_inference_threshold: typing.Any | None = None,  # noqa: ANN401
-    maximum_sample_files: typing.Any | None = None,  # noqa: ANN401
-    filename: typing.Any | None = None,  # noqa: ANN401
-    hive_partitioning: typing.Any | None = None,  # noqa: ANN401
-    union_by_name: typing.Any | None = None,  # noqa: ANN401
-    hive_types: typing.Any | None = None,  # noqa: ANN401
-    hive_types_autocast: typing.Any | None = None,  # noqa: ANN401
-    connection: duckdb.DuckDBPyConnection | None = None,
+    date_format: str | None = None,
+    timestamp_format: str | None = None,
+    compression: str | None = None,
+    maximum_object_size: int | None = None,
+    ignore_errors: bool | None = None,
+    convert_strings_to_integers: bool | None = None,
+    field_appearance_threshold: typing.Optional[float] = None,
+    map_inference_threshold: int | None = None,
+    maximum_sample_files: int | None = None,
+    filename: typing.Optional[typing.Union[bool, str]] = None,
+    hive_partitioning: bool | None = None,
+    union_by_name: bool | None = None,
+    hive_types: typing.Optional[typing.Dict[str, str]] = None,
+    hive_types_autocast: bool | None = None,
 ) -> DuckDBPyRelation: ...
 @typing.overload
 def read_parquet(
@@ -1140,7 +1317,7 @@ def read_parquet(
     filename: bool = False,
     hive_partitioning: bool = False,
     union_by_name: bool = False,
-    compression: typing.Any = None,  # noqa: ANN401
+    compression: str | None = None,
     connection: duckdb.DuckDBPyConnection | None = None,
 ) -> DuckDBPyRelation: ...
 def read_parquet(
@@ -1156,9 +1333,9 @@ def read_parquet(
 ) -> DuckDBPyRelation: ...
 def register(
     view_name: str,
-    python_object: typing.Any,
+    python_object: object,
     *,
-    connection: duckdb.DuckDBPyConnection | None = None,  # noqa: ANN401
+    connection: duckdb.DuckDBPyConnection | None = None,
 ) -> duckdb.DuckDBPyConnection: ...
 def register_filesystem(
     filesystem: fsspec.AbstractFileSystem, *, connection: duckdb.DuckDBPyConnection | None = None
@@ -1166,17 +1343,17 @@ def register_filesystem(
 def remove_function(name: str, *, connection: duckdb.DuckDBPyConnection | None = None) -> duckdb.DuckDBPyConnection: ...
 def rollback(*, connection: duckdb.DuckDBPyConnection | None = None) -> duckdb.DuckDBPyConnection: ...
 def row_type(
-    fields: typing.Any,
+    fields: Expression | list[Expression] | str | list[str],
     *,
-    connection: duckdb.DuckDBPyConnection | None = None,  # noqa: ANN401
+    connection: duckdb.DuckDBPyConnection | None = None,
 ) -> duckdb_typing.DuckDBPyType: ...
 def rowcount(*, connection: duckdb.DuckDBPyConnection | None = None) -> int: ...
 def set_default_connection(connection: duckdb.DuckDBPyConnection) -> None: ...
 def sql(
-    query: typing.Any,  # noqa: ANN401
+    query: Statement | str,
     *,
     alias: str = "",
-    params: typing.Any = None,  # noqa: ANN401
+    params: object = None,
     connection: duckdb.DuckDBPyConnection | None = None,
 ) -> DuckDBPyRelation: ...
 def sqltype(type_str: str, *, connection: duckdb.DuckDBPyConnection | None = None) -> duckdb_typing.DuckDBPyType: ...
@@ -1184,25 +1361,25 @@ def string_type(
     collation: str = "", *, connection: duckdb.DuckDBPyConnection | None = None
 ) -> duckdb_typing.DuckDBPyType: ...
 def struct_type(
-    fields: typing.Any,
+    fields: Expression | list[Expression] | str | list[str],
     *,
-    connection: duckdb.DuckDBPyConnection | None = None,  # noqa: ANN401
+    connection: duckdb.DuckDBPyConnection | None = None,
 ) -> duckdb_typing.DuckDBPyType: ...
 def table(table_name: str, *, connection: duckdb.DuckDBPyConnection | None = None) -> DuckDBPyRelation: ...
 def table_function(
     name: str,
-    parameters: typing.Any = None,
+    parameters: object = None,
     *,
-    connection: duckdb.DuckDBPyConnection | None = None,  # noqa: ANN401
+    connection: duckdb.DuckDBPyConnection | None = None,
 ) -> DuckDBPyRelation: ...
 def tf(*, connection: duckdb.DuckDBPyConnection | None = None) -> dict: ...
 def tokenize(query: str) -> list: ...
 def torch(*, connection: duckdb.DuckDBPyConnection | None = None) -> dict: ...
 def type(type_str: str, *, connection: duckdb.DuckDBPyConnection | None = None) -> duckdb_typing.DuckDBPyType: ...
 def union_type(
-    members: typing.Any,
+    members: duckdb_typing.DuckDBPyType,
     *,
-    connection: duckdb.DuckDBPyConnection | None = None,  # noqa: ANN401
+    connection: duckdb.DuckDBPyConnection | None = None,
 ) -> duckdb_typing.DuckDBPyType: ...
 def unregister(view_name: str, *, connection: duckdb.DuckDBPyConnection | None = None) -> duckdb.DuckDBPyConnection: ...
 def unregister_filesystem(name: str, *, connection: duckdb.DuckDBPyConnection | None = None) -> None: ...
@@ -1212,22 +1389,21 @@ def write_csv(
     df: pandas.DataFrame,
     filename: str,
     *,
-    sep: typing.Any = None,  # noqa: ANN401
-    na_rep: typing.Any = None,  # noqa: ANN401
-    header: typing.Any = None,  # noqa: ANN401
-    quotechar: typing.Any = None,  # noqa: ANN401
-    escapechar: typing.Any = None,  # noqa: ANN401
-    date_format: typing.Any = None,  # noqa: ANN401
-    timestamp_format: typing.Any = None,  # noqa: ANN401
-    quoting: typing.Any = None,  # noqa: ANN401
-    encoding: typing.Any = None,  # noqa: ANN401
-    compression: typing.Any = None,  # noqa: ANN401
-    overwrite: typing.Any = None,  # noqa: ANN401
-    per_thread_output: typing.Any = None,  # noqa: ANN401
-    use_tmp_file: typing.Any = None,  # noqa: ANN401
-    partition_by: typing.Any = None,  # noqa: ANN401
-    write_partition_columns: typing.Any = None,  # noqa: ANN401
-    connection: duckdb.DuckDBPyConnection | None = None,
+    sep: str | None = None,
+    na_rep: str | None = None,
+    header: bool | None = None,
+    quotechar: str | None = None,
+    escapechar: str | None = None,
+    date_format: str | None = None,
+    timestamp_format: str | None = None,
+    quoting: str | int | None = None,
+    encoding: str | None = None,
+    compression: str | None = None,
+    overwrite: bool | None = None,
+    per_thread_output: bool | None = None,
+    use_tmp_file: bool | None = None,
+    partition_by: list[str] | None = None,
+    write_partition_columns: bool | None = None,
 ) -> None: ...
 
 __formatted_python_version__: str = "3.11"
