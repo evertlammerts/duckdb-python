@@ -12,47 +12,6 @@ from . import functional
 from . import typing as duckdb_typing
 
 __all__: list[str] = [
-    "ALTER_STATEMENT",
-    "ANALYZE",
-    "ANALYZE_STATEMENT",
-    "ATTACH_STATEMENT",
-    "CALL_STATEMENT",
-    "CARRIAGE_RETURN_LINE_FEED",
-    "CHANGED_ROWS",
-    "COLUMNS",
-    "COPY_DATABASE_STATEMENT",
-    "COPY_STATEMENT",
-    "CREATE_FUNC_STATEMENT",
-    "CREATE_STATEMENT",
-    "DEFAULT",
-    "DELETE_STATEMENT",
-    "DETACH_STATEMENT",
-    "DROP_STATEMENT",
-    "EXECUTE_STATEMENT",
-    "EXPLAIN_STATEMENT",
-    "EXPORT_STATEMENT",
-    "EXTENSION_STATEMENT",
-    "INSERT_STATEMENT",
-    "INVALID_STATEMENT",
-    "LINE_FEED",
-    "LOAD_STATEMENT",
-    "LOGICAL_PLAN_STATEMENT",
-    "MERGE_INTO_STATEMENT",
-    "MULTI_STATEMENT",
-    "NOTHING",
-    "PRAGMA_STATEMENT",
-    "PREPARE_STATEMENT",
-    "QUERY_RESULT",
-    "RELATION_STATEMENT",
-    "RETURN_NULL",
-    "ROWS",
-    "SELECT_STATEMENT",
-    "SET_STATEMENT",
-    "STANDARD",
-    "TRANSACTION_STATEMENT",
-    "UPDATE_STATEMENT",
-    "VACUUM_STATEMENT",
-    "VARIABLE_SET_STATEMENT",
     "BinderException",
     "CSVLineTerminator",
     "CaseExpression",
@@ -113,7 +72,6 @@ __all__: list[str] = [
     "begin",
     "checkpoint",
     "close",
-    "comment",
     "commit",
     "connect",
     "create_function",
@@ -147,17 +105,13 @@ __all__: list[str] = [
     "from_query",
     "functional",
     "get_table_names",
-    "identifier",
     "install_extension",
     "interrupt",
-    "keyword",
     "limit",
     "list_filesystems",
     "list_type",
     "load_extension",
     "map_type",
-    "numeric_const",
-    "operator",
     "order",
     "paramstyle",
     "pl",
@@ -177,7 +131,6 @@ __all__: list[str] = [
     "set_default_connection",
     "sql",
     "sqltype",
-    "string_const",
     "string_type",
     "struct_type",
     "table",
@@ -975,9 +928,11 @@ def append(
 def array_type(
     type: duckdb_typing.DuckDBPyType, size: typing.SupportsInt, *, connection: duckdb.DuckDBPyConnection | None = None
 ) -> duckdb_typing.DuckDBPyType: ...
+@typing.overload
 def arrow(
     rows_per_batch: typing.SupportsInt = 1000000, *, connection: duckdb.DuckDBPyConnection | None = None
 ) -> pyarrow.lib.RecordBatchReader: ...
+def arrow(arrow_object: typing.Any, *, connection: duckdb.DuckDBPyConnection | None = None) -> DuckDBPyRelation: ...
 def begin(*, connection: duckdb.DuckDBPyConnection | None = None) -> duckdb.DuckDBPyConnection: ...
 def checkpoint(*, connection: duckdb.DuckDBPyConnection | None = None) -> duckdb.DuckDBPyConnection: ...
 def close(*, connection: duckdb.DuckDBPyConnection | None = None) -> None: ...
@@ -1005,7 +960,9 @@ def decimal_type(
 ) -> duckdb_typing.DuckDBPyType: ...
 def default_connection() -> duckdb.DuckDBPyConnection: ...
 def description(*, connection: duckdb.DuckDBPyConnection | None = None) -> list | None: ...
+@typing.overload
 def df(*, date_as_object: bool = False, connection: duckdb.DuckDBPyConnection | None = None) -> pandas.DataFrame: ...
+def df(df: pandas.DataFrame, *, connection: duckdb.DuckDBPyConnection | None = None) -> DuckDBPyRelation: ...
 def distinct(df: pandas.DataFrame, *, connection: duckdb.DuckDBPyConnection | None = None) -> DuckDBPyRelation: ...
 def dtype(type_str: str, *, connection: duckdb.DuckDBPyConnection | None = None) -> duckdb_typing.DuckDBPyType: ...
 def duplicate(*, connection: duckdb.DuckDBPyConnection | None = None) -> duckdb.DuckDBPyConnection: ...
@@ -1273,47 +1230,6 @@ def write_csv(
     connection: duckdb.DuckDBPyConnection | None = None,
 ) -> None: ...
 
-ALTER_STATEMENT: StatementType  # value = <StatementType.ALTER_STATEMENT: 8>
-ANALYZE: ExplainType  # value = <ExplainType.ANALYZE: 1>
-ANALYZE_STATEMENT: StatementType  # value = <StatementType.ANALYZE_STATEMENT: 11>
-ATTACH_STATEMENT: StatementType  # value = <StatementType.ATTACH_STATEMENT: 25>
-CALL_STATEMENT: StatementType  # value = <StatementType.CALL_STATEMENT: 19>
-CARRIAGE_RETURN_LINE_FEED: CSVLineTerminator  # value = <CSVLineTerminator.CARRIAGE_RETURN_LINE_FEED: 1>
-CHANGED_ROWS: ExpectedResultType  # value = <ExpectedResultType.CHANGED_ROWS: 1>
-COLUMNS: RenderMode  # value = <RenderMode.COLUMNS: 1>
-COPY_DATABASE_STATEMENT: StatementType  # value = <StatementType.COPY_DATABASE_STATEMENT: 28>
-COPY_STATEMENT: StatementType  # value = <StatementType.COPY_STATEMENT: 10>
-CREATE_FUNC_STATEMENT: StatementType  # value = <StatementType.CREATE_FUNC_STATEMENT: 13>
-CREATE_STATEMENT: StatementType  # value = <StatementType.CREATE_STATEMENT: 4>
-DEFAULT: PythonExceptionHandling  # value = <PythonExceptionHandling.DEFAULT: 0>
-DELETE_STATEMENT: StatementType  # value = <StatementType.DELETE_STATEMENT: 5>
-DETACH_STATEMENT: StatementType  # value = <StatementType.DETACH_STATEMENT: 26>
-DROP_STATEMENT: StatementType  # value = <StatementType.DROP_STATEMENT: 15>
-EXECUTE_STATEMENT: StatementType  # value = <StatementType.EXECUTE_STATEMENT: 7>
-EXPLAIN_STATEMENT: StatementType  # value = <StatementType.EXPLAIN_STATEMENT: 14>
-EXPORT_STATEMENT: StatementType  # value = <StatementType.EXPORT_STATEMENT: 16>
-EXTENSION_STATEMENT: StatementType  # value = <StatementType.EXTENSION_STATEMENT: 23>
-INSERT_STATEMENT: StatementType  # value = <StatementType.INSERT_STATEMENT: 2>
-INVALID_STATEMENT: StatementType  # value = <StatementType.INVALID_STATEMENT: 0>
-LINE_FEED: CSVLineTerminator  # value = <CSVLineTerminator.LINE_FEED: 0>
-LOAD_STATEMENT: StatementType  # value = <StatementType.LOAD_STATEMENT: 21>
-LOGICAL_PLAN_STATEMENT: StatementType  # value = <StatementType.LOGICAL_PLAN_STATEMENT: 24>
-MERGE_INTO_STATEMENT: StatementType  # value = <StatementType.MERGE_INTO_STATEMENT: 30>
-MULTI_STATEMENT: StatementType  # value = <StatementType.MULTI_STATEMENT: 27>
-NOTHING: ExpectedResultType  # value = <ExpectedResultType.NOTHING: 2>
-PRAGMA_STATEMENT: StatementType  # value = <StatementType.PRAGMA_STATEMENT: 17>
-PREPARE_STATEMENT: StatementType  # value = <StatementType.PREPARE_STATEMENT: 6>
-QUERY_RESULT: ExpectedResultType  # value = <ExpectedResultType.QUERY_RESULT: 0>
-RELATION_STATEMENT: StatementType  # value = <StatementType.RELATION_STATEMENT: 22>
-RETURN_NULL: PythonExceptionHandling  # value = <PythonExceptionHandling.RETURN_NULL: 1>
-ROWS: RenderMode  # value = <RenderMode.ROWS: 0>
-SELECT_STATEMENT: StatementType  # value = <StatementType.SELECT_STATEMENT: 1>
-SET_STATEMENT: StatementType  # value = <StatementType.SET_STATEMENT: 20>
-STANDARD: ExplainType  # value = <ExplainType.STANDARD: 0>
-TRANSACTION_STATEMENT: StatementType  # value = <StatementType.TRANSACTION_STATEMENT: 9>
-UPDATE_STATEMENT: StatementType  # value = <StatementType.UPDATE_STATEMENT: 3>
-VACUUM_STATEMENT: StatementType  # value = <StatementType.VACUUM_STATEMENT: 18>
-VARIABLE_SET_STATEMENT: StatementType  # value = <StatementType.VARIABLE_SET_STATEMENT: 12>
 __formatted_python_version__: str = "3.11"
 __git_revision__: str = "b8a06e4a22"
 __interactive__: bool = False
@@ -1322,11 +1238,5 @@ __standard_vector_size__: int = 2048
 __version__: str = "1.4.0"
 _clean_default_connection: typing.Any  # value = <capsule object>
 apilevel: str = "2.0"
-comment: token_type  # value = <token_type.comment: 5>
-identifier: token_type  # value = <token_type.identifier: 0>
-keyword: token_type  # value = <token_type.keyword: 4>
-numeric_const: token_type  # value = <token_type.numeric_const: 1>
-operator: token_type  # value = <token_type.operator: 3>
 paramstyle: str = "qmark"
-string_const: token_type  # value = <token_type.string_const: 2>
 threadsafety: int = 1

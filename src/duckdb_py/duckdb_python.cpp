@@ -1198,8 +1198,7 @@ PYBIND11_MODULE(DUCKDB_PYTHON_LIB_NAME, m) { // NOLINT
 	    .value("comment", PySQLTokenType::PY_SQL_TOKEN_COMMENT,
 	           "SQL comment token.\n"
 	           "Represents comment text in SQL statements, including single-line comments\n"
-	           "(-- comment) and multi-line comments (/* comment */) used for documentation.")
-	    .export_values();
+	           "(-- comment) and multi-line comments (/* comment */) used for documentation.");
 
 	// we need this because otherwise we try to remove registered_dfs on shutdown when python is already dead
 	auto clean_default_connection = []() {
