@@ -305,18 +305,23 @@ pretty = true
 python_version = "3.9"
 exclude = [
     "duckdb/experimental/",
-    "duckdb/functional/",
     "duckdb/query_graph/",
-    "duckdb/typing/",
     "duckdb/value/",
 ]
 
 [[tool.mypy.overrides]]
 module = [
-#    "some_untyped_dependency.*",
-#    "another_untyped_lib"
+    "fsspec.*",
+    "pandas",
+    "polars",
+    "pyarrow",
+    "torch",
 ]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "duckdb.filesystem"
+disallow_subclassing_any = false
 
 [tool.pytest.ini_options]
 minversion = "6.0"
