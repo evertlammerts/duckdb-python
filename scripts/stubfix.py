@@ -65,46 +65,6 @@ def _extract_def_name(def_line: str) -> str | None:
     return m.group(1) if m else None
 
 
-def _remove_docstring_from_block(block: list[str]) -> tuple[list[str], list[str] | None]:
-    """Remove the first docstring in the function body (if present).
-    Return (cleaned_block, docstring_lines_or_None).
-    Docstring lines are returned verbatim (including the triple quotes) so they can be reinserted.
-    Be conservative: if the docstring terminator is missing, we do not remove anything.
-    """
-    def_idx = None
-    for idx, ln in enumerate(block):
-        if ln.lstrip().startswith("def "):
-            def_idx = idx
-            break
-    if def_idx is None:
-        return block, None
-
-    i = def_idx + 1
-    while i < len(block):
-        ln = block[i]
-        if '"""' in ln or "'''" in ln:
-            delim = '"""' if '"""' in ln else "'''"
-            if ln.count(delim) >= 2:
-                # single-line docstring
-                doc_lines = [ln]
-                new_block = block[:i] + block[i + 1 :]
-                return new_block, doc_lines
-            # multi-line: find closing delimiter
-            doc_lines = [ln]
-            j = i + 1
-            while j < len(block) and delim not in block[j]:
-                doc_lines.append(block[j])
-                j += 1
-            if j < len(block):
-                doc_lines.append(block[j])  # include closing line
-                new_block = block[:i] + block[j + 1 :]
-                return new_block, doc_lines
-            # unterminated docstring -> conservative: don't remove
-            return block, None
-        i += 1
-    return block, None
-
-
 def _indent_to_string(s: str) -> str:
     return s[: len(s) - len(s.lstrip(" "))]
 
@@ -144,6 +104,20 @@ def _fix_overloaded_functions(text: str) -> str:
                 group_blocks.append(block)
                 j = block_end
 
+            # Check if there's a non-overloaded function immediately following
+            # that has the same name (this would be the actual implementation)
+            has_implementation = False
+            if j < n and not lines[j].lstrip().startswith("@typing.overload"):
+                # Look for a def line in the next block
+                impl_block_end = _collect_block_boundaries(lines, j)
+                impl_block = lines[j:impl_block_end]
+                for ln in impl_block:
+                    if ln.lstrip().startswith("def "):
+                        impl_name = _extract_def_name(ln)
+                        if impl_name == group_name:
+                            has_implementation = True
+                        break
+
             # if single block only, emit as-is
             if len(group_blocks) <= 1:
                 if j > i:
@@ -154,26 +128,15 @@ def _fix_overloaded_functions(text: str) -> str:
                     i += 1
                 continue
 
-            # multiple overloads for same function name -> clean docstrings
-            best_doc: list[str] | None = None
-            cleaned_blocks: list[list[str]] = []
-            for blk in group_blocks:
-                cleaned, doc = _remove_docstring_from_block(blk)
-                cleaned_blocks.append(cleaned)
-                if best_doc is None and doc:
-                    # choose the first non-empty docstring
-                    joined = "\n".join(line.strip() for line in doc)
-                    if joined.strip():
-                        best_doc = doc
+            # Process multiple overload blocks
+            last_idx = len(group_blocks) - 1
 
-            last_idx = len(cleaned_blocks) - 1
-
-            for idx_bl, blk in enumerate(cleaned_blocks):
+            for idx_bl, blk in enumerate(group_blocks):
                 is_last = idx_bl == last_idx
                 blk_copy = list(blk)
 
-                # drop final @typing.overload on last overload
-                if is_last:
+                # Only drop @typing.overload on the last overload if there's no separate implementation
+                if is_last and not has_implementation:
                     # remove first decorator if it's exactly '@typing.overload'
                     for d_idx, ln in enumerate(blk_copy):
                         if ln.lstrip().startswith("@"):
@@ -203,29 +166,14 @@ def _fix_overloaded_functions(text: str) -> str:
                     def_indent = _indent_to_string(def_line)
                     body_indent = def_indent + "    "
 
-                if not is_last:
-                    # non-last overloads: ensure single `...` body
-                    new_blk = [*blk_copy[: def_idx + 1], body_indent + "..."]
-                    out.extend(new_blk)
+                if not is_last or has_implementation:
+                    # For non-last blocks or when there's a separate implementation,
+                    # just emit the signature
+                    out.extend([*blk_copy[: def_idx + 1]])
                 else:
-                    # last overload: if we have best_doc, reinsert it (reindented)
-                    if best_doc:
-                        # compute minimal leading indent in best_doc (so we can re-indent)
-                        minimal = None
-                        for ln in best_doc:
-                            if ln.strip() == "":
-                                continue
-                            lead = len(ln) - len(ln.lstrip(" "))
-                            if minimal is None or lead < minimal:
-                                minimal = lead
-                        if minimal is None:
-                            minimal = 0
-                        stripped_doc = [body_indent + (ln[minimal:]) for ln in best_doc]
-                        rem = blk_copy[def_idx + 1 :]
-                        new_blk = blk_copy[: def_idx + 1] + stripped_doc + rem
-                        out.extend(new_blk)
-                    else:
-                        out.extend(blk_copy)
+                    # This is the last block and there's no separate implementation
+                    out.extend(blk_copy)
+
             # advance index past the group
             i = j
         else:
@@ -332,8 +280,10 @@ def fix_stub(path: Path):
 
     path.write_text(text)
 
-    print(f"[stub fixer] Replaced typing symbols: {sorted(replaced_typing)}")
-    print(f"[stub fixer] Kept stdlib typing symbols: {sorted(kept_typing)}")
+    if replaced_typing:
+        print(f"[stub fixer] Replaced stdlib typing symbols: {sorted(replaced_typing)}")
+    if kept_typing:
+        print(f"[stub fixer] Kept duckdb typing symbols: {sorted(kept_typing)}")
 
 
 def _is_valid_stubfile(path: Path) -> bool:
