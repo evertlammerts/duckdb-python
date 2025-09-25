@@ -1,7 +1,7 @@
+import argparse
 import re
-import typing as py_typing
+import typing
 from pathlib import Path
-from typing import Optional
 
 
 def _fix_exits(text: str) -> str:
@@ -14,25 +14,9 @@ def _fix_exits(text: str) -> str:
 
 
 def _fix_imports(text: str) -> str:
-    """Ensure 'from . import typing as duckdb_typing' exists (replace plain 'from . import typing'),
-    and ensure 'import typing' (stdlib) is present somewhere.
-    """
-    duckdb_typing_import = "from . import typing as duckdb_typing"
-    # Replace exact `from . import typing` occurrences (line anchored)
-    text = re.sub(r"(?m)^\s*from \. import typing\s*$", duckdb_typing_import, text)
-
-    # Ensure stdlib typing present somewhere
-    if not re.search(r"(?m)^\s*(import typing|from typing import\b)", text):
-        lines = text.splitlines()
-        for i, ln in enumerate(lines):
-            if ln.strip() == duckdb_typing_import:
-                lines.insert(i, "import typing")
-                text = "\n".join(lines)
-                break
-        else:
-            # If we didn't find the duckdb_typing import, put stdlib import at top
-            text = "import typing\n" + text
-    return text
+    """Replace 'import typing' with 'import typing as pytyping'."""
+    import_line = "import typing as pytyping"
+    return re.sub(r"(?m)^\s*import typing\s*$", import_line, text)
 
 
 # -------------------------
@@ -76,12 +60,12 @@ def _collect_block_boundaries(lines: list[str], start: int) -> int:
     return j
 
 
-def _extract_def_name(def_line: str) -> Optional[str]:
+def _extract_def_name(def_line: str) -> str | None:
     m = re.search(r"\bdef\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", def_line)
     return m.group(1) if m else None
 
 
-def _remove_docstring_from_block(block: list[str]) -> tuple[list[str], Optional[list[str]]]:
+def _remove_docstring_from_block(block: list[str]) -> tuple[list[str], list[str] | None]:
     """Remove the first docstring in the function body (if present).
     Return (cleaned_block, docstring_lines_or_None).
     Docstring lines are returned verbatim (including the triple quotes) so they can be reinserted.
@@ -140,7 +124,7 @@ def _fix_overloaded_functions(text: str) -> str:
         if lines[i].lstrip().startswith("@typing.overload"):
             # attempt to build a group of consecutive overload blocks for the same function
             group_blocks: list[list[str]] = []
-            group_name: Optional[str] = None
+            group_name: str | None = None
             j = i
             while j < n and lines[j].lstrip().startswith("@typing.overload"):
                 block_end = _collect_block_boundaries(lines, j)
@@ -171,7 +155,7 @@ def _fix_overloaded_functions(text: str) -> str:
                 continue
 
             # multiple overloads for same function name -> clean docstrings
-            best_doc: Optional[list[str]] = None
+            best_doc: list[str] | None = None
             cleaned_blocks: list[list[str]] = []
             for blk in group_blocks:
                 cleaned, doc = _remove_docstring_from_block(blk)
@@ -255,22 +239,22 @@ def _fix_overloaded_functions(text: str) -> str:
 # Typing shadow replacement
 # -------------------------
 def _fix_typing_shadowing(text: str) -> tuple[str, set, set]:
-    """Replace occurrences of `typing.Symbol` with `duckdb_typing.Symbol` when the symbol
-    is not present in the stdlib `typing` module. Use a negative lookbehind so we don't
-    touch occurrences already prefixed with `duckdb_typing.`.
+    """Replace occurrences of `typing.Symbol` with `pytyping.Symbol` when the symbol
+    is present in the stdlib `typing` module. Use a negative lookbehind so we don't
+    touch occurrences already prefixed with `pytyping.`.
     Returns (new_text, replaced_set, kept_set).
     """
-    typing_pattern = re.compile(r"(?<!duckdb_typing\.)\btyping\.([A-Za-z_][A-Za-z0-9_]*)\b")
+    typing_pattern = re.compile(r"(?<!pytyping\.)\btyping\.([A-Za-z_][A-Za-z0-9_]*)\b")
     replaced_typing = set()
     kept_typing = set()
 
     def typing_repl(m) -> str:
         symbol = m.group(1)
-        if hasattr(py_typing, symbol):
-            kept_typing.add(symbol)
-            return m.group(0)
-        replaced_typing.add(symbol)
-        return f"duckdb_typing.{symbol}"
+        if hasattr(typing, symbol):
+            replaced_typing.add(symbol)
+            return f"pytyping.{symbol}"
+        kept_typing.add(symbol)
+        return m.group(0)
 
     new_text = typing_pattern.sub(typing_repl, text)
     return new_text, replaced_typing, kept_typing
@@ -351,10 +335,40 @@ def fix_stub(path: Path):
     print(f"[stub fixer] Kept stdlib typing symbols: {sorted(kept_typing)}")
 
 
-# -------------------------
-# Quick demonstration (non-executing example)
-# -------------------------
+def _is_valid_stubfile(path: Path) -> bool:
+    assert path.is_file()
+    return path.suffix == ".pyi"
+
+
 if __name__ == "__main__":
-    fix_stub(Path("_duckdb-stubs/__init__.pyi"))
-    fix_stub(Path("_duckdb-stubs/typing.pyi"))
-    fix_stub(Path("_duckdb-stubs/functional.pyi"))
+    description = "Post-processing script for stubs generated with pybind11-stubgen."
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument(
+        "-p", "--path", type=Path, required=True, help="Path to .pyi stub file or dir containing .pyi stubs"
+    )
+    parser.add_argument("-r", "--recursive", action="store_true", default=False)
+    args = parser.parse_args()
+    fix_stub(args.path)
+    args = parser.parse_args()
+    if args.path.is_file():
+        if not _is_valid_stubfile(args.path):
+            print(f"{args.path} is a file, but not a pyi file.")
+        else:
+            fix_stub(args.path)
+    elif args.path.is_dir():
+        dirs: list[Path] = [args.path]
+        files: list[Path] = []
+        while len(dirs) > 0:
+            curdir = dirs.pop()
+            for path in curdir.iterdir():
+                if path.is_file() and _is_valid_stubfile(path):
+                    files.append(path)
+                elif path.is_dir() and args.recursive:
+                    dirs.append(path)
+        if len(files) == 0:
+            print(f"No .pyi stub files found in {args.path}")
+        else:
+            for path in files:
+                fix_stub(path)
+    else:
+        print(f"I can't process {args.path}. Does it exist? Do I have read permission?")
