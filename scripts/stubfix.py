@@ -232,7 +232,7 @@ def _fix_overloaded_functions(text: str) -> str:
             out.append(lines[i])
             i += 1
 
-    return "\n".join(out)
+    return "\n".join(out) + "\n"
 
 
 # -------------------------
@@ -289,15 +289,16 @@ def _fix_optionals(text: str) -> str:
         # Skip if annotation already explicitly optional / contains None (covers `X | None`, `Union[..., None]`, etc.)
         if "none" in ann_lower:
             return colon + ann_raw + trail
-        if ("optional[" in ann_lower) or ("typing.optional[" in ann_lower) or ("duckdb_typing.optional[" in ann_lower):
+        if "optional[" in ann_lower:
             return colon + ann_raw + trail
-        if ("classvar[" in ann_lower) or ("typing.classvar[" in ann_lower):
+        if "classvar[" in ann_lower:
             return colon + ann_raw + trail
-        if ann in {"Any", "typing.Any", "duckdb_typing.Any", "object", "ClassVar"}:
+        if ann in {"Any", "typing.Any", "pytyping.Any", "object", "ClassVar"}:
             return colon + ann_raw + trail
 
         # Otherwise wrap conservatively preserving original whitespace and annotation text
-        return f"{colon}typing.Optional[{ann}]{trail}"
+        # return f"{colon}typing.Optional[{ann}]{trail}"
+        return f"{colon}{ann} | None {trail}"
 
     return pattern.sub(repl, text)
 
@@ -347,8 +348,6 @@ if __name__ == "__main__":
         "-p", "--path", type=Path, required=True, help="Path to .pyi stub file or dir containing .pyi stubs"
     )
     parser.add_argument("-r", "--recursive", action="store_true", default=False)
-    args = parser.parse_args()
-    fix_stub(args.path)
     args = parser.parse_args()
     if args.path.is_file():
         if not _is_valid_stubfile(args.path):
