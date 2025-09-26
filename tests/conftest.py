@@ -47,7 +47,7 @@ def import_pandas():
     if pandas:
         return pandas
     else:
-        pytest.skip("Couldn't import pandas")
+        pytest.skip("Couldn't import pandas", allow_module_level=True)
 
 
 # https://docs.pytest.org/en/latest/example/simple.html#control-skipping-of-tests-according-to-command-line-option
