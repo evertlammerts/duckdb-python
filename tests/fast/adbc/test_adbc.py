@@ -4,10 +4,14 @@ from pathlib import Path
 
 import adbc_driver_manager.dbapi
 import numpy as np
-import pyarrow
 import pytest
 
 import adbc_driver_duckdb.dbapi
+
+if sys.version_info >= (3, 13):
+    pytest.skip("Pyarrow not available on Python 3.13+", allow_module_level=True)
+else:
+    import pyarrow as pa
 
 xfail = pytest.mark.xfail
 driver_path = adbc_driver_duckdb.driver_path()
@@ -20,7 +24,7 @@ def duck_conn():
 
 
 def example_table():
-    return pyarrow.table(
+    return pa.table(
         [
             [1, 2, 3, 4],
             ["a", "b", None, "d"],
@@ -145,7 +149,7 @@ def test_connection_get_table_schema(duck_conn):
     with duck_conn.cursor() as cursor:
         # Test Default Schema
         cursor.execute("CREATE TABLE tableschema (ints BIGINT)")
-        assert duck_conn.adbc_get_table_schema("tableschema") == pyarrow.schema(
+        assert duck_conn.adbc_get_table_schema("tableschema") == pa.schema(
             [
                 ("ints", "int64"),
             ]
@@ -154,12 +158,12 @@ def test_connection_get_table_schema(duck_conn):
         # Test Given Schema
         cursor.execute("CREATE SCHEMA test;")
         cursor.execute("CREATE TABLE test.tableschema (test_ints BIGINT)")
-        assert duck_conn.adbc_get_table_schema("tableschema", db_schema_filter="test") == pyarrow.schema(
+        assert duck_conn.adbc_get_table_schema("tableschema", db_schema_filter="test") == pa.schema(
             [
                 ("test_ints", "int64"),
             ]
         )
-        assert duck_conn.adbc_get_table_schema("tableschema") == pyarrow.schema(
+        assert duck_conn.adbc_get_table_schema("tableschema") == pa.schema(
             [
                 ("ints", "int64"),
             ]
@@ -175,14 +179,14 @@ def test_connection_get_table_schema(duck_conn):
         # Catalog and DB Schema name
         assert duck_conn.adbc_get_table_schema(
             "tableschema", catalog_filter="memory", db_schema_filter="test"
-        ) == pyarrow.schema(
+        ) == pa.schema(
             [
                 ("test_ints", "int64"),
             ]
         )
 
         # DB Schema is inferred to be "main" if unspecified
-        assert duck_conn.adbc_get_table_schema("tableschema", catalog_filter="memory") == pyarrow.schema(
+        assert duck_conn.adbc_get_table_schema("tableschema", catalog_filter="memory") == pa.schema(
             [
                 ("ints", "int64"),
             ]
@@ -285,19 +289,19 @@ def test_large_chunk(tmp_path):
     chunk_size = 10_000
 
     # Create data for each chunk
-    chunks_col1 = [pyarrow.array(np.random.randint(0, 100, chunk_size)) for _ in range(num_chunks)]
-    chunks_col2 = [pyarrow.array(np.random.rand(chunk_size)) for _ in range(num_chunks)]
+    chunks_col1 = [pa.array(np.random.randint(0, 100, chunk_size)) for _ in range(num_chunks)]
+    chunks_col2 = [pa.array(np.random.rand(chunk_size)) for _ in range(num_chunks)]
     chunks_col3 = [
-        pyarrow.array([f"str_{i}" for i in range(j * chunk_size, (j + 1) * chunk_size)]) for j in range(num_chunks)
+        pa.array([f"str_{i}" for i in range(j * chunk_size, (j + 1) * chunk_size)]) for j in range(num_chunks)
     ]
 
     # Create chunked arrays
-    col1 = pyarrow.chunked_array(chunks_col1)
-    col2 = pyarrow.chunked_array(chunks_col2)
-    col3 = pyarrow.chunked_array(chunks_col3)
+    col1 = pa.chunked_array(chunks_col1)
+    col2 = pa.chunked_array(chunks_col2)
+    col3 = pa.chunked_array(chunks_col3)
 
     # Create the table
-    table = pyarrow.table([col1, col2, col3], names=["ints", "floats", "strings"])
+    table = pa.table([col1, col2, col3], names=["ints", "floats", "strings"])
 
     db = Path(tmp_path) / "tmp.db"
     if db.exists():
@@ -320,11 +324,11 @@ def test_large_chunk(tmp_path):
 def test_dictionary_data(tmp_path):
     data = ["apple", "banana", "apple", "orange", "banana", "banana"]
 
-    dict_type = pyarrow.dictionary(index_type=pyarrow.int32(), value_type=pyarrow.string())
-    dict_array = pyarrow.array(data, type=dict_type)
+    dict_type = pa.dictionary(index_type=pa.int32(), value_type=pa.string())
+    dict_array = pa.array(data, type=dict_type)
 
     # Wrap in a table
-    table = pyarrow.table({"fruits": dict_array})
+    table = pa.table({"fruits": dict_array})
     db = Path(tmp_path) / "tmp.db"
     if db.exists():
         db.unlink()
@@ -346,12 +350,12 @@ def test_dictionary_data(tmp_path):
 
 
 def test_ree_data(tmp_path):
-    run_ends = pyarrow.array([3, 5, 6], type=pyarrow.int32())  # positions: [0-2], [3-4], [5]
-    values = pyarrow.array(["apple", "banana", "orange"], type=pyarrow.string())
+    run_ends = pa.array([3, 5, 6], type=pa.int32())  # positions: [0-2], [3-4], [5]
+    values = pa.array(["apple", "banana", "orange"], type=pa.string())
 
-    ree_array = pyarrow.RunEndEncodedArray.from_arrays(run_ends, values)
+    ree_array = pa.RunEndEncodedArray.from_arrays(run_ends, values)
 
-    table = pyarrow.table({"fruits": ree_array})
+    table = pa.table({"fruits": ree_array})
 
     db = Path(tmp_path) / "tmp.db"
     if db.exists():

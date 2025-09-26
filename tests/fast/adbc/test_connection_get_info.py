@@ -1,7 +1,14 @@
-import pyarrow as pa
+import sys
+
+import pytest
 
 import adbc_driver_duckdb.dbapi
 import duckdb
+
+if sys.version_info >= (3, 13):
+    pytest.skip("Pyarrow not available on Python 3.13+", allow_module_level=True)
+else:
+    import pyarrow as pa
 
 
 class TestADBCConnectionGetInfo:
