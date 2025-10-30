@@ -1,5 +1,4 @@
 import datetime
-import sys
 from pathlib import Path
 
 import adbc_driver_manager.dbapi
@@ -29,7 +28,7 @@ def example_table():
     )
 
 
-@xfail(sys.platform == "win32", reason="adbc-driver-manager.adbc_get_info() returns an empty dict on windows")
+# @xfail(sys.platform == "win32", reason="adbc-driver-manager.adbc_get_info() returns an empty dict on windows")
 def test_connection_get_info(duck_conn):
     assert duck_conn.adbc_get_info() != {}
 
@@ -42,9 +41,9 @@ def test_connection_get_table_types(duck_conn):
     assert duck_conn.adbc_get_table_types() == ["BASE TABLE"]
 
 
-@xfail(
-    sys.platform == "win32", reason="adbc-driver-manager.adbc_get_objects() returns an invalid schema dict on windows"
-)
+# @xfail(
+#     sys.platform == "win32", reason="adbc-driver-manager.adbc_get_objects() returns an invalid schema dict on windows"
+# )
 def test_connection_get_objects(duck_conn):
     with duck_conn.cursor() as cursor:
         cursor.execute("CREATE TABLE getobjects (ints BIGINT PRIMARY KEY)")
@@ -66,9 +65,9 @@ def test_connection_get_objects(duck_conn):
     assert depth_all.schema == depth_catalogs.schema
 
 
-@xfail(
-    sys.platform == "win32", reason="adbc-driver-manager.adbc_get_objects() returns an invalid schema dict on windows"
-)
+# @xfail(
+#     sys.platform == "win32", reason="adbc-driver-manager.adbc_get_objects() returns an invalid schema dict on windows"
+# )
 def test_connection_get_objects_filters(duck_conn):
     with duck_conn.cursor() as cursor:
         cursor.execute("CREATE TABLE getobjects (ints BIGINT PRIMARY KEY)")
@@ -207,7 +206,7 @@ def test_statement_query(duck_conn):
         assert cursor.fetch_arrow_table().to_pylist() == [{"foo": 1}]
 
 
-@xfail(sys.platform == "win32", reason="adbc-driver-manager returns an invalid table schema on windows")
+# @xfail(sys.platform == "win32", reason="adbc-driver-manager returns an invalid table schema on windows")
 def test_insertion(duck_conn):
     table = example_table()
     reader = table.to_reader()
@@ -234,7 +233,7 @@ def test_insertion(duck_conn):
         assert cursor.fetch_arrow_table().to_pydict() == {"count_star()": [8]}
 
 
-@xfail(sys.platform == "win32", reason="adbc-driver-manager returns an invalid table schema on windows")
+# @xfail(sys.platform == "win32", reason="adbc-driver-manager returns an invalid table schema on windows")
 def test_read(duck_conn):
     with duck_conn.cursor() as cursor:
         filename = Path(__file__).parent / ".." / "data" / "category.csv"
