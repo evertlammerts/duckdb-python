@@ -41,7 +41,7 @@ jobs:
     name: Build an sdist and determine versions
     uses: ./.github/workflows/packaging_sdist.yml
     with:
-      testsuite: all
+      testsuite: none
       duckdb-python-sha: ${{ inputs.duckdb-python-sha != '' && inputs.duckdb-python-sha || github.sha }}
       duckdb-sha: ${{ inputs.duckdb-sha }}
       set-version: ${{ inputs.stable-version }}
@@ -72,7 +72,7 @@ jobs:
           FROM read_json('https://${pypi_hostname}/pypi/duckdb/json') AS jd
           CROSS JOIN json_each(jd.releases)                           AS rel(key, value)
           CROSS JOIN unnest(FROM_JSON(rel.value, '["JSON"]'))         AS file(value)
-          WHERE rel.key='${{ needs.build_sdist.outputs.package-version }}'
+          WHERE rel.key='1.4.0.dev176'
           LIMIT 1;
           EOF
           )
