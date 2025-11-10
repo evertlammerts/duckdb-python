@@ -1,5 +1,4 @@
 import os
-import sys
 import warnings
 from importlib import import_module
 from pathlib import Path
@@ -20,24 +19,12 @@ except ImportError:
     pandas = None
     pyarrow_dtype = None
 
-    # Only install mock after we've failed to import pandas for conftest.py
-    class MockPandas:
-        def __getattr__(self, name: str) -> object:
-            pytest.skip("pandas not available", allow_module_level=True)
-
-    sys.modules["pandas"] = MockPandas()
-    sys.modules["pandas.testing"] = MockPandas()
-    sys.modules["pandas._testing"] = MockPandas()
-
 # Check if pandas has arrow dtypes enabled
-if pandas is not None:
-    try:
-        from pandas.compat import pa_version_under7p0
+try:
+    from pandas.compat import pa_version_under7p0
 
-        pyarrow_dtypes_enabled = not pa_version_under7p0
-    except (ImportError, AttributeError):
-        pyarrow_dtypes_enabled = False
-else:
+    pyarrow_dtypes_enabled = not pa_version_under7p0
+except ImportError:
     pyarrow_dtypes_enabled = False
 
 
@@ -45,48 +32,7 @@ def import_pandas():
     if pandas:
         return pandas
     else:
-        pytest.skip("Couldn't import pandas", allow_module_level=True)
-
-
-@pytest.hookimpl(hookwrapper=True)
-def pytest_runtest_call(item):
-    """Convert missing pyarrow imports to skips.
-
-    TODO(evertlammerts): Remove skip when pyarrow releases for 3.14.
-        https://github.com/duckdblabs/duckdb-internal/issues/6182
-    """
-    outcome = yield
-    if sys.version_info[:2] == (3, 14):
-        try:
-            outcome.get_result()
-        except ImportError as e:
-            if e.name == "pyarrow":
-                pytest.skip(f"pyarrow not available - {item.name} requires pyarrow")
-            else:
-                raise
-
-
-@pytest.hookimpl(hookwrapper=True)
-def pytest_make_collect_report(collector):
-    """Wrap module collection to catch pyarrow import errors on Python 3.14.
-
-    If we're on Python 3.14 and a test module raises ModuleNotFoundError
-    for 'pyarrow', mark the entire module as xfailed rather than failing collection.
-
-    TODO(evertlammerts): Remove skip when pyarrow releases for 3.14.
-        https://github.com/duckdblabs/duckdb-internal/issues/6182
-    """
-    outcome = yield
-    report: pytest.CollectReport = outcome.get_result()
-
-    if sys.version_info[:2] == (3, 14):
-        # Only handle failures from module collectors
-        if report.failed and collector.__class__.__name__ == "Module":
-            longreprtext = report.longreprtext
-            if "ModuleNotFoundError: No module named 'pyarrow'" in longreprtext:
-                report.outcome = "skipped"
-                reason = f"XFAIL: [pyarrow not available] {longreprtext}"
-                report.longrepr = (report.fspath, None, reason)
+        pytest.skip("Couldn't import pandas")
 
 
 # https://docs.pytest.org/en/latest/example/simple.html#control-skipping-of-tests-according-to-command-line-option
@@ -300,18 +246,18 @@ def integers(duckdb_cursor):
     cursor.execute(
         """
         INSERT INTO integers VALUES
-            (0),
-            (1),
-            (2),
-            (3),
-            (4),
-            (5),
-            (6),
-            (7),
-            (8),
-            (9),
-            (NULL)
-    """
+                                 (0),
+                                 (1),
+                                 (2),
+                                 (3),
+                                 (4),
+                                 (5),
+                                 (6),
+                                 (7),
+                                 (8),
+                                 (9),
+                                 (NULL)
+        """
     )
     yield
     cursor.execute("drop table integers")
