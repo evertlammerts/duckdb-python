@@ -1123,7 +1123,7 @@ class DataFrame:  # noqa: D101
         """
         if allowMissingColumns:
             df1 = self.select(
-                *list(self.relation.columns),
+                *self.relation.columns,
                 *[
                     spark_sql_functions.lit(None).alias(c)
                     for c in other.relation.columns
