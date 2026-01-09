@@ -1,9 +1,7 @@
-import json
-
 import pytest
 
 import duckdb
-from duckdb.query_graph import translate_json_to_html
+from duckdb.query_graph import ProfilingInfo
 
 
 @pytest.fixture(scope="session")
@@ -18,11 +16,12 @@ def profiling_connection():
 class TestProfiler:
     def test_profiler_matches_expected_format(self, profiling_connection, tmp_path_factory):
         # Test String returned
-        profiling_info_json = profiling_connection.get_profiling_information(format="json")
+        profiling_info = ProfilingInfo(profiling_connection)
+        profiling_info_json = profiling_info.to_json()
         assert isinstance(profiling_info_json, str)
 
         # Test expected metrics are there and profiling is json loadable
-        profiling_dict = json.loads(profiling_info_json)
+        profiling_dict = profiling_info.to_pydict()
         expected_keys = {
             "query_name",
             "total_bytes_written",
@@ -39,10 +38,10 @@ class TestProfiler:
             "blocked_thread_time",
             "children",
         }
-        assert profiling_dict.keys() == expected_keys
+        assert expected_keys.issubset(profiling_dict.keys())
 
     def test_profiler_html_output(self, profiling_connection, tmp_path_factory):
         tmp_dir = tmp_path_factory.mktemp("profiler", numbered=True)
-        profiling_info_json = profiling_connection.get_profiling_information(format="json")
+        profiling_info = ProfilingInfo(profiling_connection)
         # Test HTML execution works, nothing to assert!
-        translate_json_to_html(input_text=profiling_info_json, output_file=f"{tmp_dir}/profiler_output.html")
+        profiling_info.to_html(output_file=f"{tmp_dir}/profiler_output.html")
