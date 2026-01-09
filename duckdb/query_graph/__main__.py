@@ -4,6 +4,7 @@ import re
 import webbrowser
 from functools import reduce
 from pathlib import Path
+from typing import Optional
 
 qgraph_css = """
 :root {
@@ -326,8 +327,8 @@ def get_child_timings(top_node: object, query_timings: object, depth: int = 0) -
 
 def get_f7fff0_shade_hex(fraction: float) -> str:
     """Returns a shade between very light (#f7fff0) and a slightly darker green-yellow,
-    depending on the fraction (0..1)
-    """
+    depending on the fraction (0..1).
+    """ #noqa: D205
     fraction = max(0, min(1, fraction))
 
     # Define RGB for light and dark end
@@ -550,7 +551,7 @@ def generate_ipython(json_input: str) -> str:  # noqa: D103
 
 def generate_style_html(graph_json: str, include_meta_info: bool) -> None:  # noqa: D103, FBT001
     treeflex_css = '<link rel="stylesheet" href="https://unpkg.com/treeflex/dist/css/treeflex.css">\n'
-    libraries = '<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">\n'
+    libraries = '<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">\n' # noqa: E501
     return {"treeflex_css": treeflex_css, "duckdb_css": qgraph_css, "libraries": libraries, "chart_script": ""}
 
 
@@ -561,7 +562,7 @@ def gather_timing_information(json: str, query_timings: object) -> None:  # noqa
     get_child_timings(json["children"][0], query_timings)
 
 
-def translate_json_to_html(input_file: str = None, input_text: str = None, output_file: str = "profile.html") -> None:  # noqa: D103
+def translate_json_to_html(input_file: Optional[str] = None, input_text: Optional[str] = None, output_file: str = "profile.html") -> None:  # noqa: D103, E501
     query_timings = AllTimings()
     if input_text is not None:
         text = input_text
@@ -590,7 +591,7 @@ def translate_json_to_html(input_file: str = None, input_text: str = None, outpu
 		${DUCKDB_CSS}
     </style>
 </head>
-<body>    
+<body>
     <div class="container">
         <header>
             <img src="https://raw.githubusercontent.com/duckdb/duckdb/refs/heads/main/logo/DuckDB_Logo-horizontal.svg" alt="DuckDB Logo">
@@ -606,7 +607,7 @@ def translate_json_to_html(input_file: str = None, input_text: str = None, outpu
 	${TREE}
 </body>
 </html>
-"""
+""" # noqa: E501
         html = html.replace("${TREEFLEX_CSS}", html_output["treeflex_css"])
         html = html.replace("${DUCKDB_CSS}", html_output["duckdb_css"])
         html = html.replace("${METRIC_GRID}", highlight_metric_grid)
