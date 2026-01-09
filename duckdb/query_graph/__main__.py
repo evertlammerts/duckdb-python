@@ -624,7 +624,7 @@ def main() -> None:  # noqa: D103
         description="""Given a json profile output, generate a html file showing the query graph and
         timings of operators""",
     )
-    parser.add_argument("profile_input", help="profile input in json")
+    parser.add_argument("--profile_input", help="profile input in json")
     parser.add_argument("--out", required=False, default=False)
     parser.add_argument("--open", required=False, action="store_true", default=True)
     args = parser.parse_args()
@@ -646,7 +646,7 @@ def main() -> None:  # noqa: D103
 
     open_output = args.open
 
-    translate_json_to_html(input, output)
+    translate_json_to_html(input_file=input, output_file=output)
 
     if open_output:
         webbrowser.open(f"file://{Path(output).resolve()}", new=2)
