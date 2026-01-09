@@ -220,6 +220,7 @@ strong {
 @media (prefers-color-scheme: dark) {
   :root {
     --text-primary-color: #e6e6e6;
+    --text-secondary-color: #b3b3b3;
     --doc-codebox-border-color: #2a2a2a;
     --doc-codebox-background-color: #1e1e1e;
     --card-bg: #111;
@@ -233,14 +234,26 @@ strong {
   tbody tr:hover {
     background: #222;
   }
+  
+  /* Fix tree node text visibility in dark mode */
+  .tf-nc .node-body,
+  .tf-nc .node-body p,
+  .tf-nc .node-details {
+    color: #1a1a1a !important;
+  }
+  
+  .chart .metric-title {
+    color: #b3b3b3;
+  }
 }
 """
 
 
 class NodeTiming:  # noqa: D101
-    def __init__(self, phase: str, time: float) -> None:  # noqa: D107
+    def __init__(self, phase: str, time: float, depth: int) -> None:  # noqa: D107
         self.phase = phase
         self.time = time
+        self.depth = depth
         # percentage is determined later.
         self.percentage = 0
 
@@ -250,7 +263,7 @@ class NodeTiming:  # noqa: D101
     def combine_timing(self, r: "NodeTiming") -> "NodeTiming":  # noqa: D102
         # TODO: can only add timings for same-phase nodes  # noqa: TD002, TD003
         total_time = self.time + r.time
-        return NodeTiming(self.phase, total_time)
+        return NodeTiming(self.phase, total_time, self.depth)
 
 
 class AllTimings:  # noqa: D101
@@ -286,11 +299,11 @@ def open_utf8(fpath: str, flags: str) -> object:  # noqa: D103
     return Path(fpath).open(mode=flags, encoding="utf8")
 
 
-def get_child_timings(top_node: object, query_timings: object) -> str:  # noqa: D103
-    node_timing = NodeTiming(top_node["operator_type"], float(top_node["operator_timing"]))
+def get_child_timings(top_node: object, query_timings: object, depth: int = 0) -> str:  # noqa: D103
+    node_timing = NodeTiming(top_node["operator_type"], float(top_node["operator_timing"]), depth)
     query_timings.add_node_timing(node_timing)
     for child in top_node["children"]:
-        get_child_timings(child, query_timings)
+        get_child_timings(child, query_timings, depth + 1)
 
 
 def get_f7fff0_shade_hex(fraction: float) -> str:
@@ -396,7 +409,7 @@ def generate_timing_html(graph_json: object, query_timings: object) -> object:  
     execution_time = query_timings.get_sum_of_all_timings()
 
     all_phases = query_timings.get_phases()
-    query_timings.add_node_timing(NodeTiming("Execution Time (CPU)", execution_time))
+    query_timings.add_node_timing(NodeTiming("Execution Time (CPU)", execution_time, None))
     all_phases = ["Execution Time (CPU)", *all_phases]
     for phase in all_phases:
         summarized_phase = query_timings.get_summary_phase_timings(phase)
