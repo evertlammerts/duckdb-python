@@ -296,7 +296,7 @@ void DuckDBPyConnection::UnregisterFilesystem(const py::str &name) {
 	auto &database = con.GetDatabase();
 	auto &fs = database.GetFileSystem();
 
-	fs.UnregisterSubSystem(name);
+	fs.ExtractSubSystem(name);
 }
 
 void DuckDBPyConnection::RegisterFilesystem(AbstractFileSystem filesystem) {

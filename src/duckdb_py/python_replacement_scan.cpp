@@ -1,7 +1,5 @@
 #include "duckdb_python/python_replacement_scan.hpp"
-
 #include "duckdb/main/db_instance_cache.hpp"
-
 #include "duckdb_python/pybind11/pybind_wrapper.hpp"
 #include "duckdb/main/client_properties.hpp"
 #include "duckdb_python/numpy/numpy_type.hpp"
@@ -14,6 +12,7 @@
 #include "duckdb_python/pandas/pandas_scan.hpp"
 #include "duckdb/parser/tableref/subqueryref.hpp"
 #include "duckdb_python/pyrelation.hpp"
+#include <duckdb/main/settings.hpp>
 
 namespace duckdb {
 
@@ -299,7 +298,7 @@ unique_ptr<TableRef> PythonReplacementScan::Replace(ClientContext &context, Repl
                                                     optional_ptr<ReplacementScanData> data) {
 	auto &table_name = input.table_name;
 	auto &config = DBConfig::GetConfig(context);
-	if (!config.options.enable_external_access) {
+	if (!Settings::Get<EnableExternalAccessSetting>(config)) {
 		return nullptr;
 	}
 
