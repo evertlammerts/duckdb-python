@@ -65,7 +65,16 @@ static NumpyNullableType ConvertNumpyTypeInternal(const string &col_type_str) {
 		return NumpyNullableType::OBJECT;
 	}
 	if (col_type_str == "timedelta64[ns]") {
-		return NumpyNullableType::TIMEDELTA;
+		return NumpyNullableType::TIMEDELTA_NS;
+	}
+	if (col_type_str == "timedelta64[us]") {
+		return NumpyNullableType::TIMEDELTA_US;
+	}
+	if (col_type_str == "timedelta64[ms]") {
+		return NumpyNullableType::TIMEDELTA_MS;
+	}
+	if (col_type_str == "timedelta64[s]") {
+		return NumpyNullableType::TIMEDELTA_S;
 	}
 	// We use 'StartsWith' because it might have ', tz' at the end, indicating timezone
 	if (StringUtil::StartsWith(col_type_str, "datetime64[ns")) {
@@ -143,7 +152,10 @@ LogicalType NumpyToLogicalType(const NumpyType &col_type) {
 		return LogicalType::VARCHAR;
 	case NumpyNullableType::OBJECT:
 		return LogicalType::VARCHAR;
-	case NumpyNullableType::TIMEDELTA:
+	case NumpyNullableType::TIMEDELTA_NS:
+	case NumpyNullableType::TIMEDELTA_US:
+	case NumpyNullableType::TIMEDELTA_MS:
+	case NumpyNullableType::TIMEDELTA_S:
 		return LogicalType::INTERVAL;
 	case NumpyNullableType::DATETIME_MS: {
 		if (col_type.has_timezone) {

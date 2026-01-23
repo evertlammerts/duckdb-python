@@ -108,7 +108,7 @@ string RawArrayWrapper::DuckDBToNumpyDtype(const LogicalType &type) {
 	case LogicalTypeId::DATE:
 		return "datetime64[us]";
 	case LogicalTypeId::INTERVAL:
-		return "timedelta64[ns]";
+		return "timedelta64[us]";
 	case LogicalTypeId::TIME:
 	case LogicalTypeId::TIME_TZ:
 	case LogicalTypeId::VARCHAR:

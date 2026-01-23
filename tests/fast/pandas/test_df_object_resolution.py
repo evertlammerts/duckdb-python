@@ -9,9 +9,9 @@ from decimal import Decimal
 import numpy as np
 import pandas as pd
 import pytest
+from conftest import is_string_dtype
 
 import duckdb
-from tests.conftest import is_string_dtype
 
 standard_vector_size = duckdb.__standard_vector_size__
 
