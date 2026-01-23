@@ -1,10 +1,20 @@
+import importlib.util
+
 import pandas as pd
 import pytest
 
 import duckdb
 
 
-@pytest.mark.parametrize("string_dtype", ["python", "pyarrow"])
+@pytest.mark.parametrize(
+    "string_dtype",
+    [
+        "python",
+        pytest.param(
+            "pyarrow", marks=pytest.mark.skipif(not importlib.util.find_spec("pyarrow"), reason="pyarrow not installed")
+        ),
+    ],
+)
 def test_import_cache_explicit_dtype(string_dtype):
     df = pd.DataFrame(  # noqa: F841
         {
