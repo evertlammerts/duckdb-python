@@ -469,7 +469,8 @@ class TestReplacementScan:
         with pytest.raises(duckdb.CatalogException, match="Table with name df does not exist!"):
             create_relation(con, "select * from df")
         with pytest.raises(
-            duckdb.InvalidInputException, match="Cannot change enable_external_access setting while database is running"
+            duckdb.InvalidInputException,
+            match="Invalid Input Error: Cannot enable external access while database is running",
         ):
             con.execute("set enable_external_access=true")
 

@@ -128,7 +128,8 @@ unique_ptr<DuckDBPyRelation> DuckDBPyRelation::ProjectFromTypes(const py::object
 		LogicalType type;
 		if (py::isinstance<py::str>(item)) {
 			string type_str = py::str(item);
-			type = TransformStringToLogicalType(type_str, *rel->context->GetContext());
+			rel->context->GetContext()->RunFunctionInTransaction(
+			    [&]() { type = TransformStringToLogicalType(type_str, *rel->context->GetContext().get()); });
 		} else if (py::isinstance<DuckDBPyType>(item)) {
 			auto *type_p = item.cast<DuckDBPyType *>();
 			type = type_p->Type();

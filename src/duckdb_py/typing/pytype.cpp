@@ -122,12 +122,10 @@ static LogicalType FromString(const string &type_str, shared_ptr<DuckDBPyConnect
 		pycon = DuckDBPyConnection::DefaultConnection();
 	}
 	auto &connection = pycon->con.GetConnection();
-	if (connection.HasActiveTransaction()) {
-		return TransformStringToLogicalType(type_str, *connection.context);
-	}
-	connection.BeginTransaction();
-	auto type = TransformStringToLogicalType(type_str, *connection.context);
-	connection.Commit();
+
+	LogicalType type;
+	connection.context->RunFunctionInTransaction(
+	    [&]() { type = TransformStringToLogicalType(type_str, *connection.context); });
 	return type;
 }
 
