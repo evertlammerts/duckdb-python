@@ -9,16 +9,9 @@ import time
 from builtins import tuple
 from collections.abc import Iterator, Mapping
 from types import MappingProxyType
-from typing import (
-    Any,
-    ClassVar,
-    NoReturn,
-    Self,
-    TypeVar,
-    Union,
-    cast,
-    overload,
-)
+from typing import Any, ClassVar, NoReturn, TypeVar, Union, cast, overload
+
+from typing_extensions import Self
 
 import duckdb
 from duckdb.sqltypes import DuckDBPyType
