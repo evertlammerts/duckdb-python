@@ -314,7 +314,6 @@ class TestReplacementScan:
         res = rel.fetchall()
         assert res == [(2, 2, 2)]
 
-    @pytest.mark.xfail(reason="Bug in DuckDB core (MRE at #19154)")
     def test_same_name_cte(self, duckdb_cursor):
         query = """
             WITH df AS (
