@@ -6,6 +6,7 @@ import pytest
 import duckdb
 
 pd = pytest.importorskip("pandas", "2.0.0")
+pytest.importorskip("pyarrow")
 
 from pandas.api.types import is_integer_dtype  # noqa: E402
 
