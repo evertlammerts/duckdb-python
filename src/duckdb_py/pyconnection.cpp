@@ -1600,8 +1600,9 @@ unique_ptr<DuckDBPyRelation> DuckDBPyConnection::RunQuery(const py::object &quer
 
 	// Attempt to create a Relation for lazy execution if possible
 	shared_ptr<Relation> relation;
-	if (py::none().is(params)) {
-		// FIXME: currently we can't create relations with prepared parameters
+	bool has_params = !py::none().is(params) && py::len(params) > 0;
+	if (!has_params) {
+		// No params (or empty params) — use lazy QueryRelation path
 		{
 			D_ASSERT(py::gil_check());
 			py::gil_scoped_release gil;
