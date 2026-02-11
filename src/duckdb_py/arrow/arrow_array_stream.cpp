@@ -110,7 +110,7 @@ unique_ptr<ArrowArrayStreamWrapper> PythonTableArrowArrayStreamFactory::Produce(
 		auto capsule = py::reinterpret_borrow<py::capsule>(arrow_obj_handle);
 		auto stream = capsule.get_pointer<struct ArrowArrayStream>();
 		if (!stream->release) {
-			throw InternalException("ArrowArrayStream was released by another thread/library");
+			throw InvalidInputException("This ArrowArrayStream has already been consumed and cannot be scanned again.");
 		}
 		res->arrow_array_stream = *stream;
 		stream->release = nullptr;
@@ -154,7 +154,7 @@ void PythonTableArrowArrayStreamFactory::GetSchemaInternal(py::handle arrow_obj_
 		auto capsule = py::reinterpret_borrow<py::capsule>(arrow_obj_handle);
 		auto stream = capsule.get_pointer<struct ArrowArrayStream>();
 		if (!stream->release) {
-			throw InternalException("ArrowArrayStream was released by another thread/library");
+			throw InvalidInputException("This ArrowArrayStream has already been consumed and cannot be scanned again.");
 		}
 		if (stream->get_schema(stream, &schema.arrow_schema)) {
 			throw InvalidInputException("Failed to get Arrow schema from stream: %s",
