@@ -57,6 +57,7 @@ __all__ = [
     "UnsignedIntegerType",
     "UnsignedLongType",
     "UnsignedShortType",
+    "VariantType",
 ]
 
 
@@ -185,6 +186,13 @@ class BooleanType(AtomicType, metaclass=DataTypeSingleton):
 
     def __init__(self) -> None:  # noqa: D107
         super().__init__(DuckDBPyType("BOOLEAN"))
+
+
+class VariantType(AtomicType, metaclass=DataTypeSingleton):
+    """Variant (semi-structured) data type."""
+
+    def __init__(self) -> None:  # noqa: D107
+        super().__init__(DuckDBPyType("VARIANT"))
 
 
 class DateType(AtomicType, metaclass=DataTypeSingleton):

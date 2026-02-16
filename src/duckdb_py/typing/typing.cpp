@@ -37,6 +37,7 @@ static void DefineBaseTypes(py::handle &m) {
 	m.attr("BLOB") = make_shared_ptr<DuckDBPyType>(LogicalType::BLOB);
 	m.attr("BIT") = make_shared_ptr<DuckDBPyType>(LogicalType::BIT);
 	m.attr("INTERVAL") = make_shared_ptr<DuckDBPyType>(LogicalType::INTERVAL);
+	m.attr("VARIANT") = make_shared_ptr<DuckDBPyType>(LogicalType::VARIANT());
 }
 
 void DuckDBPyTyping::Initialize(py::module_ &parent) {

@@ -29,6 +29,7 @@ __all__: list[str] = [
     "UTINYINT",
     "UUID",
     "VARCHAR",
+    "VARIANT",
     "DuckDBPyType",
 ]
 
@@ -74,3 +75,4 @@ USMALLINT: DuckDBPyType  # value = USMALLINT
 UTINYINT: DuckDBPyType  # value = UTINYINT
 UUID: DuckDBPyType  # value = UUID
 VARCHAR: DuckDBPyType  # value = VARCHAR
+VARIANT: DuckDBPyType  # value = VARIANT

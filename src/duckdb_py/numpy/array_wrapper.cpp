@@ -11,6 +11,8 @@
 #include "duckdb_python/pyresult.hpp"
 #include "duckdb/common/types/uuid.hpp"
 
+#include <duckdb/function/scalar/variant_utils.hpp>
+
 namespace duckdb {
 
 namespace duckdb_py_convert {
@@ -299,6 +301,19 @@ struct UnionConvert {
 		auto value = UnionValue::GetValue(val);
 
 		return PythonObject::FromValue(value, UnionValue::GetType(val), client_properties);
+	}
+};
+
+struct VariantConvert {
+	static py::object ConvertValue(Vector &input, idx_t chunk_offset, NumpyAppendData &append_data) {
+		auto &client_properties = append_data.client_properties;
+		auto val = input.GetValue(chunk_offset);
+		Vector tmp(val);
+		RecursiveUnifiedVectorFormat format;
+		Vector::RecursiveToUnifiedFormat(tmp, 1, format);
+		UnifiedVariantVectorData vector_data(format);
+		auto variant_val = VariantUtils::ConvertVariantToValue(vector_data, 0, 0);
+		return PythonObject::FromValue(variant_val, variant_val.type(), client_properties);
 	}
 };
 
@@ -686,6 +701,9 @@ void ArrayWrapper::Append(idx_t current_offset, Vector &input, idx_t source_size
 		break;
 	case LogicalTypeId::STRUCT:
 		may_have_null = ConvertNested<py::object, duckdb_py_convert::StructConvert>(append_data);
+		break;
+	case LogicalTypeId::VARIANT:
+		may_have_null = ConvertNested<py::object, duckdb_py_convert::VariantConvert>(append_data);
 		break;
 	case LogicalTypeId::UUID:
 		may_have_null = ConvertColumn<hugeint_t, PyObject *, duckdb_py_convert::UUIDConvert>(append_data);
