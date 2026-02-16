@@ -37,6 +37,7 @@ from .types import (
     UnsignedLongType,
     UnsignedShortType,
     UUIDType,
+    VariantType,
 )
 
 _sqltype_to_spark_class = {
@@ -74,6 +75,7 @@ _sqltype_to_spark_class = {
     "float": FloatType,
     "double": DoubleType,
     "decimal": DecimalType,
+    "variant": VariantType,
 }
 
 

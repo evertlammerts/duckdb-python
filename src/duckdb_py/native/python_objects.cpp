@@ -13,6 +13,9 @@
 
 #include "datetime.h" // Python datetime initialize #1
 
+#include <duckdb/common/types/variant_value.hpp>
+#include <duckdb/function/scalar/variant_utils.hpp>
+
 namespace duckdb {
 
 PyDictionary::PyDictionary(py::object dict) {
@@ -445,6 +448,7 @@ static bool KeyIsHashable(const LogicalType &type) {
 	case LogicalTypeId::LIST:
 	case LogicalTypeId::ARRAY:
 	case LogicalTypeId::MAP:
+	case LogicalTypeId::VARIANT:
 		return false;
 	case LogicalTypeId::UNION: {
 		idx_t count = UnionType::GetMemberCount(type);
@@ -699,6 +703,14 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 		int64_t days = duckdb::Interval::DAYS_PER_MONTH * interval_value.months + interval_value.days;
 		return import_cache.datetime.timedelta()(py::arg("days") = days,
 		                                         py::arg("microseconds") = interval_value.micros);
+	}
+	case LogicalTypeId::VARIANT: {
+		Vector tmp(val);
+		RecursiveUnifiedVectorFormat format;
+		Vector::RecursiveToUnifiedFormat(tmp, 1, format);
+		UnifiedVariantVectorData vector_data(format);
+		auto variant_val = VariantUtils::ConvertVariantToValue(vector_data, 0, 0);
+		return FromValue(variant_val, variant_val.type(), client_properties);
 	}
 
 	default:

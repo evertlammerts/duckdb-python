@@ -29,6 +29,7 @@ from _duckdb._sqltypes import (
     UTINYINT,
     UUID,
     VARCHAR,
+    VARIANT,
     DuckDBPyType,
 )
 
@@ -61,5 +62,6 @@ __all__ = [
     "UTINYINT",
     "UUID",
     "VARCHAR",
+    "VARIANT",
     "DuckDBPyType",
 ]

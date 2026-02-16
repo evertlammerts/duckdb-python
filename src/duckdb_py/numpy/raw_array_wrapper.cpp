@@ -60,6 +60,7 @@ static idx_t GetNumpyTypeWidth(const LogicalType &type) {
 	case LogicalTypeId::UNION:
 	case LogicalTypeId::UUID:
 	case LogicalTypeId::ARRAY:
+	case LogicalTypeId::VARIANT:
 		return sizeof(PyObject *);
 	default:
 		throw NotImplementedException("Unsupported type \"%s\" for DuckDB -> NumPy conversion", type.ToString());
@@ -122,6 +123,7 @@ string RawArrayWrapper::DuckDBToNumpyDtype(const LogicalType &type) {
 	case LogicalTypeId::UNION:
 	case LogicalTypeId::UUID:
 	case LogicalTypeId::ARRAY:
+	case LogicalTypeId::VARIANT:
 		return "object";
 	case LogicalTypeId::ENUM: {
 		auto size = EnumType::GetSize(type);
