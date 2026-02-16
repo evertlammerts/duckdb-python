@@ -98,9 +98,11 @@ int64_t PythonFilesystem::Write(FileHandle &handle, void *buffer, int64_t nr_byt
 	return py::int_(write(data));
 }
 void PythonFilesystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) {
-	Seek(handle, location);
-
-	Write(handle, buffer, nr_bytes);
+	PythonGILWrapper gil;
+	auto &py_handle = PythonFileHandle::GetHandle(handle);
+	py_handle.attr("seek")(location);
+	auto data = py::bytes(std::string(const_char_ptr_cast(buffer), nr_bytes));
+	py_handle.attr("write")(data);
 }
 
 int64_t PythonFilesystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes) {
@@ -116,9 +118,11 @@ int64_t PythonFilesystem::Read(FileHandle &handle, void *buffer, int64_t nr_byte
 }
 
 void PythonFilesystem::Read(duckdb::FileHandle &handle, void *buffer, int64_t nr_bytes, uint64_t location) {
-	Seek(handle, location);
-
-	Read(handle, buffer, nr_bytes);
+	PythonGILWrapper gil;
+	auto &py_handle = PythonFileHandle::GetHandle(handle);
+	py_handle.attr("seek")(location);
+	string data = py::bytes(py_handle.attr("read")(nr_bytes));
+	memcpy(buffer, data.c_str(), data.size());
 }
 bool PythonFilesystem::FileExists(const string &filename, optional_ptr<FileOpener> opener) {
 	return Exists(filename, "isfile");
