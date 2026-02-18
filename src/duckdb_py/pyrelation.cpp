@@ -248,6 +248,7 @@ vector<unique_ptr<ParsedExpression>> GetExpressions(ClientContext &context, cons
 		auto aggregate_list = std::string(py::str(expr));
 		return Parser::ParseExpressionList(aggregate_list, context.GetParserOptions());
 	} else {
+		// A single Expression could be supported here by wrapping it in a vector
 		string actual_type = py::str(py::type::of(expr));
 		throw InvalidInputException("Please provide either a string or list of Expression objects, not %s",
 		                            actual_type);

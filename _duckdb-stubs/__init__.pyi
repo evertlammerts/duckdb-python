@@ -9,7 +9,7 @@ if pytyping.TYPE_CHECKING:
     import polars
     import pandas
     import pyarrow.lib
-    from collections.abc import Callable, Sequence, Mapping
+    from collections.abc import Callable, Iterable, Sequence, Mapping
     from duckdb import sqltypes, func
 
     # the field_ids argument to to_parquet and write_parquet has a recursive structure
@@ -476,7 +476,7 @@ class DuckDBPyRelation:
     def __getitem__(self, name: str) -> DuckDBPyRelation: ...
     def __len__(self) -> int: ...
     def aggregate(
-        self, aggr_expr: str | Expression | list[Expression | str], group_expr: Expression | str = ""
+        self, aggr_expr: str | Iterable[Expression | str], group_expr: Expression | str = ""
     ) -> DuckDBPyRelation: ...
     def any_value(
         self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
@@ -1067,10 +1067,10 @@ def DefaultExpression() -> Expression: ...
 def FunctionExpression(function_name: str, *args: Expression) -> Expression: ...
 def LambdaExpression(lhs: pytyping.Any, rhs: Expression) -> Expression: ...
 def SQLExpression(expression: str) -> Expression: ...
-def StarExpression(*, exclude: list[str | Expression] | None = None) -> Expression: ...
+def StarExpression(*, exclude: Iterable[str | Expression] | None = None) -> Expression: ...
 def aggregate(
     df: pandas.DataFrame,
-    aggr_expr: Expression | list[Expression] | str | list[str],
+    aggr_expr: str | Iterable[Expression | str],
     group_expr: str = "",
     *,
     connection: DuckDBPyConnection | None = None,
