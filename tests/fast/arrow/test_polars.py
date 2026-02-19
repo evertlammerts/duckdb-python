@@ -769,3 +769,16 @@ class TestPolars:
         # pl.col("a").cast(pl.Int64) produces a Strict Cast node
         expr = pl.col("a").cast(pl.Int64) > 5
         invalid_filter(expr)
+
+    def test_polars_lazy_cursor_lifetime(self):
+        """Cursor should stay alive while a lazy polars frame derived from it exists (GH #161)."""
+        con = duckdb.connect(":memory:")
+
+        def get_lazy_frame(con):
+            cur = con.cursor()
+            return cur.sql("SELECT 1 AS foo, 2 AS bar").pl(lazy=True)
+
+        lf = get_lazy_frame(con)
+        # Cursor went out of scope, but the lazy frame should keep it alive
+        result = lf.collect()
+        assert result.to_dicts() == [{"foo": 1, "bar": 2}]
