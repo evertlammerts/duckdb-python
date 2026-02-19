@@ -13,6 +13,36 @@
 
 namespace duckdb {
 
+// Like DefaultCastAs, but handles UNION targets by finding the first compatible member. DefaultCastAs raises a
+// Conversion Error when multiple UNION members have the same type (e.g. UNION(u1 DOUBLE, u2 DOUBLE)), so for UNION
+// targets we resolve the member ourselves.
+static Value CastToTarget(Value val, const LogicalType &target_type) {
+	if (target_type.id() != LogicalTypeId::UNION) {
+		return val.DefaultCastAs(target_type);
+	}
+
+	auto member_count = UnionType::GetMemberCount(target_type);
+	auto &source_type = val.type();
+
+	// First pass: if there's an exact type match we use that
+	for (idx_t i = 0; i < member_count; i++) {
+		if (UnionType::GetMemberType(target_type, i) == source_type) {
+			return Value::UNION(UnionType::CopyMemberTypes(target_type), NumericCast<uint8_t>(i), std::move(val));
+		}
+	}
+
+	// Second pass: if there's a type we can implicitly cast to, we do that
+	for (idx_t i = 0; i < member_count; i++) {
+		auto member_type = UnionType::GetMemberType(target_type, i);
+		Value candidate = val;
+		if (candidate.DefaultTryCastAs(member_type)) {
+			return Value::UNION(UnionType::CopyMemberTypes(target_type), NumericCast<uint8_t>(i), std::move(candidate));
+		}
+	}
+	throw ConversionException("Could not convert value of type %s to %s", source_type.ToString(),
+	                          target_type.ToString());
+}
+
 static Value EmptyMapValue() {
 	auto map_type = LogicalType::MAP(LogicalType::SQLNULL, LogicalType::SQLNULL);
 	return Value::MAP(ListType::GetChildType(map_type), vector<Value>());
@@ -265,7 +295,7 @@ static Value TransformPythonLongToHugeInt(py::handle ele, const LogicalType &tar
 		if (target_type.id() == LogicalTypeId::UNKNOWN || target_type.id() == LogicalTypeId::HUGEINT) {
 			return val;
 		}
-		return val.DefaultCastAs(target_type);
+		return CastToTarget(std::move(val), target_type);
 	}
 	PyErr_Clear();
 
@@ -280,7 +310,7 @@ static Value TransformPythonLongToHugeInt(py::handle ele, const LogicalType &tar
 	if (target_type.id() == LogicalTypeId::UNKNOWN || target_type.id() == LogicalTypeId::UHUGEINT) {
 		return val;
 	}
-	return val.DefaultCastAs(target_type);
+	return CastToTarget(std::move(val), target_type);
 }
 
 void TransformPythonUnsigned(uint64_t value, Value &res) {
@@ -410,7 +440,7 @@ bool TryTransformPythonNumeric(Value &res, py::handle ele, const LogicalType &ta
 		if (!TrySniffPythonNumeric(res, value)) {
 			return false;
 		}
-		res = res.DefaultCastAs(target_type, true);
+		res = CastToTarget(std::move(res), target_type);
 		return true;
 	}
 	}
@@ -516,20 +546,20 @@ struct PythonValueConversion {
 			                          target_type.ToString());
 		}
 		default:
-			result = Value::DOUBLE(val).DefaultCastAs(target_type);
+			result = CastToTarget(Value::DOUBLE(val), target_type);
 			break;
 		}
 	}
 	static void HandleLongAsDouble(Value &result, const LogicalType &target_type, double val) {
 		auto cast_as = target_type.id() == LogicalTypeId::UNKNOWN ? LogicalType::DOUBLE : target_type;
-		result = Value::DOUBLE(val).DefaultCastAs(cast_as);
+		result = CastToTarget(Value::DOUBLE(val), cast_as);
 	}
 	static void HandleLongOverflow(Value &result, const LogicalType &target_type, py::handle ele) {
 		result = TransformPythonLongToHugeInt(ele, target_type);
 	}
 	static void HandleUnsignedBigint(Value &result, const LogicalType &target_type, uint64_t val) {
 		auto cast_as = target_type.id() == LogicalTypeId::UNKNOWN ? LogicalType::UBIGINT : target_type;
-		result = Value::UBIGINT(val).DefaultCastAs(cast_as);
+		result = CastToTarget(Value::UBIGINT(val), cast_as);
 	}
 	static void HandleBigint(Value &res, const LogicalType &target_type, int64_t value) {
 		switch (target_type.id()) {
@@ -545,7 +575,7 @@ struct PythonValueConversion {
 			break;
 		}
 		default:
-			res = Value::BIGINT(value).DefaultCastAs(target_type);
+			res = CastToTarget(Value::BIGINT(value), target_type);
 			break;
 		}
 	}
@@ -555,7 +585,7 @@ struct PythonValueConversion {
 		    (target_type.id() == LogicalTypeId::VARCHAR && !target_type.HasAlias())) {
 			result = Value(value);
 		} else {
-			result = Value(value).DefaultCastAs(target_type);
+			result = CastToTarget(Value(value), target_type);
 		}
 	}
 
@@ -692,7 +722,7 @@ struct PythonVectorConversion {
 			break;
 		}
 		default:
-			FallbackValueConversion(result, result_offset, Value::DOUBLE(val).DefaultCastAs(result.GetType()));
+			FallbackValueConversion(result, result_offset, CastToTarget(Value::DOUBLE(val), result.GetType()));
 			break;
 		}
 	}
@@ -716,7 +746,7 @@ struct PythonVectorConversion {
 			FlatVector::GetData<uint64_t>(result)[result_offset] = value;
 			break;
 		default:
-			FallbackValueConversion(result, result_offset, Value::UBIGINT(value));
+			FallbackValueConversion(result, result_offset, CastToTarget(Value::UBIGINT(value), result.GetType()));
 			break;
 		}
 	}
@@ -787,7 +817,7 @@ struct PythonVectorConversion {
 			break;
 		}
 		default:
-			FallbackValueConversion(result, result_offset, Value::BIGINT(value));
+			FallbackValueConversion(result, result_offset, CastToTarget(Value::BIGINT(value), result.GetType()));
 			break;
 		}
 	}
