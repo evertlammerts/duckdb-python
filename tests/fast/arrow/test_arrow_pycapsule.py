@@ -2,6 +2,7 @@ import pytest
 
 import duckdb
 
+pa = pytest.importorskip("pyarrow")
 pl = pytest.importorskip("polars")
 
 
@@ -9,6 +10,73 @@ def polars_supports_capsule():
     from packaging.version import Version
 
     return Version(pl.__version__) >= Version("1.4.1")
+
+
+class TestArrowPyCapsuleExport:
+    """Tests for the PyCapsule export path (rel.__arrow_c_stream__).
+
+    Validates that the fast path (PhysicalArrowCollector + ArrowQueryResultStreamWrapper)
+    produces correct data, matching to_arrow_table() across types and edge cases.
+    """
+
+    def test_capsule_matches_to_arrow_table(self):
+        """Fast path produces identical data to to_arrow_table for various types."""
+        conn = duckdb.connect()
+        sql = """
+            SELECT
+                i AS int_col,
+                i::DOUBLE AS double_col,
+                'row_' || i::VARCHAR AS str_col,
+                i % 2 = 0 AS bool_col,
+                CASE WHEN i % 3 = 0 THEN NULL ELSE i END AS nullable_col
+            FROM range(1000) t(i)
+        """
+        expected = conn.sql(sql).to_arrow_table()
+        actual = pa.table(conn.sql(sql))
+        assert actual.equals(expected)
+
+    def test_capsule_matches_to_arrow_table_nested_types(self):
+        """Fast path handles nested types (struct, list, map)."""
+        conn = duckdb.connect()
+        sql = """
+            SELECT
+                {'x': i, 'y': i::VARCHAR} AS struct_col,
+                [i, i+1, i+2] AS list_col,
+                MAP {i::VARCHAR: i*10} AS map_col,
+            FROM range(100) t(i)
+        """
+        expected = conn.sql(sql).to_arrow_table()
+        actual = pa.table(conn.sql(sql))
+        assert actual.equals(expected)
+
+    def test_capsule_multi_batch(self):
+        """Data exceeding the 1M batch size produces multiple batches, all yielded correctly."""
+        conn = duckdb.connect()
+        sql = "SELECT i, i::DOUBLE AS d FROM range(1500000) t(i)"
+        expected = conn.sql(sql).to_arrow_table()
+        actual = pa.table(conn.sql(sql))
+        assert actual.num_rows == 1500000
+        assert actual.equals(expected)
+
+    def test_capsule_empty_result(self):
+        """Empty result set produces a valid empty table with correct schema."""
+        conn = duckdb.connect()
+        sql = "SELECT i AS a, i::VARCHAR AS b FROM range(10) t(i) WHERE i < 0"
+        expected = conn.sql(sql).to_arrow_table()
+        actual = pa.table(conn.sql(sql))
+        assert actual.num_rows == 0
+        assert actual.schema.equals(expected.schema)
+
+    def test_capsule_slow_path_after_execute(self):
+        """Pre-executed relation takes the slow path (MaterializedQueryResult) and still works."""
+        conn = duckdb.connect()
+        sql = "SELECT i, i::DOUBLE AS d FROM range(500) t(i)"
+        expected = conn.sql(sql).to_arrow_table()
+
+        rel = conn.sql(sql)
+        rel.execute()  # forces MaterializedCollector, not PhysicalArrowCollector
+        actual = pa.table(rel)
+        assert actual.equals(expected)
 
 
 @pytest.mark.skipif(
