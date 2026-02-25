@@ -992,6 +992,19 @@ py::object DuckDBPyRelation::ToArrowCapsule(const py::object &requested_schema) 
 		if (!rel) {
 			return py::none();
 		}
+		// The PyCapsule protocol doesn't allow custom parameters, so we use the same
+		// default batch size as fetch_arrow_table / fetch_record_batch.
+		idx_t batch_size = 1000000;
+		auto &config = ClientConfig::GetConfig(*rel->context->GetContext());
+		ScopedConfigSetting scoped_setting(
+		    config,
+		    [&batch_size](ClientConfig &config) {
+			    config.get_result_collector = [&batch_size](ClientContext &context,
+			                                                PreparedStatementData &data) -> PhysicalOperator & {
+				    return PhysicalArrowCollector::Create(context, data, batch_size);
+			    };
+		    },
+		    [](ClientConfig &config) { config.get_result_collector = nullptr; });
 		ExecuteOrThrow();
 	}
 	AssertResultOpen();
@@ -1003,7 +1016,8 @@ py::object DuckDBPyRelation::ToArrowCapsule(const py::object &requested_schema) 
 PolarsDataFrame DuckDBPyRelation::ToPolars(idx_t batch_size, bool lazy) {
 	if (!lazy) {
 		auto arrow = ToArrowTableInternal(batch_size, true);
-		return py::cast<PolarsDataFrame>(pybind11::module_::import("polars").attr("DataFrame")(arrow));
+		return py::cast<PolarsDataFrame>(
+		    pybind11::module_::import("polars").attr("from_arrow")(arrow, py::arg("rechunk") = false));
 	}
 	auto &import_cache = *DuckDBPyConnection::ImportCache();
 	auto lazy_frame_produce = import_cache.duckdb.polars_io.duckdb_source();
