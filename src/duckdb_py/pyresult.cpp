@@ -583,26 +583,17 @@ static void ArrowArrayStreamPyCapsuleDestructor(PyObject *object) {
 	delete stream;
 }
 
-// Destructor for capsules pointing at an embedded ArrowArrayStream (fast path).
-// The stream is owned by an ArrowQueryResultStreamWrapper; Release() frees both.
-static void ArrowArrayStreamEmbeddedPyCapsuleDestructor(PyObject *object) {
-	auto data = PyCapsule_GetPointer(object, "arrow_array_stream");
-	if (!data) {
-		return;
-	}
-	auto stream = reinterpret_cast<ArrowArrayStream *>(data);
-	if (stream->release) {
-		stream->release(stream);
-	}
-}
-
 py::object DuckDBPyResult::FetchArrowCapsule(idx_t rows_per_batch) {
 	if (result && result->type == QueryResultType::ARROW_RESULT) {
 		// Fast path: yield pre-built Arrow arrays directly.
 		// The wrapper is heap-allocated; Release() deletes it via private_data.
-		// The capsule points at the embedded stream field — no separate heap allocation needed.
+		// We heap-allocate a separate ArrowArrayStream for the capsule so that the capsule
+		// holds a stable pointer even after the wrapper is consumed and deleted by a scan.
 		auto wrapper = new ArrowQueryResultStreamWrapper(std::move(result));
-		return py::capsule(&wrapper->stream, "arrow_array_stream", ArrowArrayStreamEmbeddedPyCapsuleDestructor);
+		auto stream = new ArrowArrayStream();
+		*stream = wrapper->stream;
+		wrapper->stream.release = nullptr;
+		return py::capsule(stream, "arrow_array_stream", ArrowArrayStreamPyCapsuleDestructor);
 	}
 	// Existing slow path for MaterializedQueryResult / StreamQueryResult
 	auto stream_p = FetchArrowArrayStream(rows_per_batch);
