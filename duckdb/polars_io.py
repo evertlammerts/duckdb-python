@@ -170,8 +170,17 @@ def _pl_tree_to_sql(tree: _ExpressionTree) -> str:
     if node_type == "Cast":
         cast_tree = tree[node_type]
         assert isinstance(cast_tree, dict), f"A {node_type} should be a dict but got {type(cast_tree)}"
-        if cast_tree.get("options") not in ("NonStrict", "Strict"):
-            msg = f"Only NonStrict/Strict casts can be safely unwrapped, got {cast_tree.get('options')!r}"
+        options = cast_tree.get("options")
+        if options == "Strict":
+            # Strict casts on literals (e.g. pl.lit(1, dtype=pl.Int8)) are safe to unwrap —
+            # the value is known at expression creation time. Strict casts on columns
+            # (e.g. pl.col("a").cast(pl.Int64)) are semantically meaningful and must not be dropped.
+            cast_expr = cast_tree.get("expr", {})
+            if not isinstance(cast_expr, dict) or "Literal" not in cast_expr:
+                msg = "Strict cast on non-literal expression cannot be pushed down"
+                raise NotImplementedError(msg)
+        elif options != "NonStrict":
+            msg = f"Only NonStrict/Strict casts can be safely unwrapped, got {options!r}"
             raise NotImplementedError(msg)
         cast_expr = cast_tree["expr"]
         assert isinstance(cast_expr, dict), f"A {node_type} should be a dict but got {type(cast_expr)}"

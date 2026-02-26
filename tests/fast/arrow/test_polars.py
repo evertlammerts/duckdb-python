@@ -12,6 +12,7 @@ pl_testing = pytest.importorskip("polars.testing")
 
 from duckdb.polars_io import _pl_tree_to_sql, _predicate_to_expression  # noqa: E402
 
+pl_pre_1_35_0 = parse_version(pl.__version__) < parse_version("1.35.0")
 pl_pre_1_36_0 = parse_version(pl.__version__) < parse_version("1.36.0")
 
 
@@ -437,7 +438,7 @@ class TestPolars:
             lazy_df.filter((pl.col("a") == ts_2020) | (pl.col("b") == ts_2008)).select(pl.len()).collect().item() == 2
         )
 
-    @pytest.mark.skipif(pl_pre_1_36_0, reason="Polars < 1.36.0 expressions on dates produce casts in predicates")
+    @pytest.mark.skipif(pl_pre_1_35_0, reason="Polars < 1.36.0 expressions on dates produce casts in predicates")
     def test_polars_predicate_to_expression_post_1_36_0(self):
         ts_2008 = datetime.datetime(2008, 1, 1, 0, 0, 1)
         ts_2010 = datetime.datetime(2010, 1, 1, 10, 0, 1)
@@ -454,7 +455,7 @@ class TestPolars:
         valid_filter((pl.col("a") == ts_2020) & (pl.col("b") == ts_2010) & (pl.col("c") == ts_2020))
         valid_filter((pl.col("a") == ts_2020) | (pl.col("b") == ts_2008))
 
-    @pytest.mark.skipif(not pl_pre_1_36_0, reason="Polars >= 1.36.0 expressions on dates don't produce casts")
+    @pytest.mark.skipif(not pl_pre_1_35_0, reason="Polars >= 1.36.0 expressions on dates don't produce casts")
     def test_polars_predicate_to_expression_pre_1_36_0(self):
         ts_2008 = datetime.datetime(2008, 1, 1, 0, 0, 1)
         ts_2010 = datetime.datetime(2010, 1, 1, 10, 0, 1)
