@@ -10,29 +10,10 @@ if typing.TYPE_CHECKING:
     import polars
     import pandas
     import pyarrow.lib
+    from builtins import list as lst
     from collections.abc import Callable, Iterable, Sequence
     from ._typing import ParquetFieldIdsType, IntoExpr, IntoExprColumn
     from duckdb import sqltypes, func
-    from builtins import list as lst  # needed to avoid mypy error on DuckDBPyRelation.list method shadowing
-
-    # the field_ids argument to to_parquet and write_parquet has a recursive structure
-    ParquetFieldIdsType = Mapping[str, int | "ParquetFieldIdsType"]
-
-_ExpressionLike: typing.TypeAlias = (
-    "Expression"
-    | str
-    | int
-    | float
-    | bool
-    | bytes
-    | None
-    | datetime.date
-    | datetime.datetime
-    | datetime.time
-    | datetime.timedelta
-    | decimal.Decimal
-    | uuid.UUID
-)
 
 __all__: lst[str] = [
     "BinderException",
@@ -692,9 +673,6 @@ class DuckDBPyRelation:
     def rank_dense(self, window_spec: str, projected_columns: str = "") -> DuckDBPyRelation: ...
     def row_number(self, window_spec: str, projected_columns: str = "") -> DuckDBPyRelation: ...
     def select(self, *args: IntoExpr, groups: str = "") -> DuckDBPyRelation: ...
-    def select_dtypes(self, types: list[sqltypes.DuckDBPyType | str]) -> DuckDBPyRelation: ...
-    def select_types(self, types: list[sqltypes.DuckDBPyType | str]) -> DuckDBPyRelation: ...
-    def select(self, *args: _ExpressionLike, groups: str = "") -> DuckDBPyRelation: ...
     def select_dtypes(self, types: lst[sqltypes.DuckDBPyType | str]) -> DuckDBPyRelation: ...
     def select_types(self, types: lst[sqltypes.DuckDBPyType | str]) -> DuckDBPyRelation: ...
     def set_alias(self, alias: str) -> DuckDBPyRelation: ...
