@@ -53,7 +53,8 @@ PythonLiteral: TypeAlias = (
 """Python objects that can be converted to a `ConstantExpression`."""
 # the field_ids argument to to_parquet and write_parquet has a recursive structure
 ParquetFieldIdsType: TypeAlias = Mapping[str, int | ParquetFieldIdsType]
-
+IntoValues: TypeAlias = list[PythonLiteral] | tuple[Expression, ...] | Expression
+"""Types that can be converted to a table of values."""
 IntoExprColumn: TypeAlias = Expression | str
 """Types that are, or can be used as a `ColumnExpression`."""
 IntoExpr: TypeAlias = IntoExprColumn | PythonLiteral
