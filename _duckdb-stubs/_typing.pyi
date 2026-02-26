@@ -46,7 +46,7 @@ PythonLiteral: TypeAlias = (
     NonNestedLiteral
     | list[PythonLiteral]
     | tuple[PythonLiteral, ...]
-    | dict[PythonLiteral, PythonLiteral]
+    | dict[NonNestedLiteral, PythonLiteral]
     | NPArrayLike[Any, Any]
     | None
 )
