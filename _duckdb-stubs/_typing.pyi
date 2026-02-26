@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 from typing import TypeAlias, TYPE_CHECKING, Protocol, Any, TypeVar, Generic
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
@@ -7,6 +8,7 @@ from collections.abc import Mapping, Iterator
 
 if TYPE_CHECKING:
     from ._expression import Expression
+    from ._sqltypes import DuckDBPyType
 
 _T_co = TypeVar("_T_co", covariant=True)
 _S_co = TypeVar("_S_co", bound=tuple[Any, ...], covariant=True)
@@ -54,7 +56,17 @@ PythonLiteral: TypeAlias = (
 # the field_ids argument to to_parquet and write_parquet has a recursive structure
 ParquetFieldIdsType: TypeAlias = Mapping[str, int | ParquetFieldIdsType]
 IntoValues: TypeAlias = list[PythonLiteral] | tuple[Expression, ...] | Expression
-"""Types that can be converted to a table of values."""
+"""Types that can be converted to a table."""
+IntoDType: TypeAlias = DuckDBPyType | str
+"""Types that can be converted to a `DuckDBPyType`.
+
+Passing `INTEGER` is equivalent to passing `DuckDBPyType("INTEGER")` or `DuckDBPyType.INTEGER`.
+
+Note:
+    A `StrEnum` will be handled the same way as a `str`.
+"""
+IntoNestedDType: TypeAlias = dict[str, IntoDType] | list[IntoDType]
+"""Types that can be converted to a nested `DuckDBPyType` (e.g. for struct or union types)."""
 IntoExprColumn: TypeAlias = Expression | str
 """Types that are, or can be used as a `ColumnExpression`."""
 IntoExpr: TypeAlias = IntoExprColumn | PythonLiteral
