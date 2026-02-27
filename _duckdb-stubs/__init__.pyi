@@ -214,7 +214,7 @@ class DuckDBPyConnection:
     def create_function(
         self,
         name: str,
-        function: Callable[..., typing.Any],
+        function: Callable[..., PythonLiteral],
         parameters: lst[IntoDType] | None = None,
         return_type: IntoDType | None = None,
         *,
@@ -602,7 +602,7 @@ class DuckDBPyRelation:
         self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
     ) -> DuckDBPyRelation: ...
     def map(
-        self, map_function: Callable[..., typing.Any], *, schema: dict[str, sqltypes.DuckDBPyType] | None = None
+        self, map_function: Callable[..., PythonLiteral], *, schema: dict[str, sqltypes.DuckDBPyType] | None = None
     ) -> DuckDBPyRelation: ...
     def max(
         self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
@@ -1057,7 +1057,7 @@ def connect(
 ) -> DuckDBPyConnection: ...
 def create_function(
     name: str,
-    function: Callable[..., typing.Any],
+    function: Callable[..., PythonLiteral],
     parameters: lst[IntoDType] | None = None,
     return_type: IntoDType | None = None,
     *,
