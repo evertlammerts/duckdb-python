@@ -13,14 +13,22 @@ if typing.TYPE_CHECKING:
     from builtins import list as lst
     from collections.abc import Callable, Iterable, Sequence, Mapping
     from ._typing import (
-        ParquetFieldIdsType,
+        ParquetFieldsOptions,
         IntoExpr,
         IntoExprColumn,
         PythonLiteral,
         IntoValues,
         IntoDType,
         IntoFields,
+        StrIntoDType,
         JoinType,
+        JsonCompression,
+        JsonFormat,
+        JsonRecordOptions,
+        CsvEncoding,
+        CsvCompression,
+        HiveTypes,
+        ColumnsTypes,
     )
     from duckdb import sqltypes, func
 
@@ -227,7 +235,7 @@ class DuckDBPyConnection:
     def cursor(self) -> DuckDBPyConnection: ...
     def decimal_type(self, width: typing.SupportsInt, scale: typing.SupportsInt) -> sqltypes.DuckDBPyType: ...
     def df(self, *, date_as_object: bool = False) -> pandas.DataFrame: ...
-    def dtype(self, type_str: str) -> sqltypes.DuckDBPyType: ...
+    def dtype(self, type_str: StrIntoDType) -> sqltypes.DuckDBPyType: ...
     def duplicate(self) -> DuckDBPyConnection: ...
     def enum_type(self, name: str, type: sqltypes.DuckDBPyType, values: lst[typing.Any]) -> sqltypes.DuckDBPyType: ...
     def execute(self, query: Statement | str, parameters: object = None) -> DuckDBPyConnection: ...
@@ -254,18 +262,18 @@ class DuckDBPyConnection:
         self,
         path_or_buffer: str | bytes | os.PathLike[str] | os.PathLike[bytes] | typing.IO[bytes],
         header: bool | int | None = None,
-        compression: str | None = None,
+        compression: CsvCompression | None = None,
         sep: str | None = None,
         delimiter: str | None = None,
         files_to_sniff: int | None = None,
         comment: str | None = None,
         thousands: str | None = None,
-        dtype: dict[str, str] | lst[str] | None = None,
+        dtype: IntoFields | None = None,
         na_values: str | lst[str] | None = None,
         skiprows: int | None = None,
         quotechar: str | None = None,
         escapechar: str | None = None,
-        encoding: str | None = None,
+        encoding: CsvEncoding | None = None,
         parallel: bool | None = None,
         date_format: str | None = None,
         timestamp_format: str | None = None,
@@ -276,8 +284,8 @@ class DuckDBPyConnection:
         null_padding: bool | None = None,
         names: lst[str] | None = None,
         lineterminator: str | None = None,
-        columns: dict[str, str] | None = None,
-        auto_type_candidates: lst[str] | None = None,
+        columns: ColumnsTypes | None = None,
+        auto_type_candidates: lst[StrIntoDType] | None = None,
         max_line_size: int | None = None,
         ignore_errors: bool | None = None,
         store_rejects: bool | None = None,
@@ -291,7 +299,7 @@ class DuckDBPyConnection:
         filename: bool | str | None = None,
         hive_partitioning: bool | None = None,
         union_by_name: bool | None = None,
-        hive_types: dict[str, str] | None = None,
+        hive_types: HiveTypes | None = None,
         hive_types_autocast: bool | None = None,
         strict_mode: bool | None = None,
     ) -> DuckDBPyRelation: ...
@@ -355,18 +363,18 @@ class DuckDBPyConnection:
         self,
         path_or_buffer: str | bytes | os.PathLike[str] | os.PathLike[bytes] | typing.IO[bytes],
         header: bool | int | None = None,
-        compression: str | None = None,
+        compression: CsvCompression | None = None,
         sep: str | None = None,
         delimiter: str | None = None,
         files_to_sniff: int | None = None,
         comment: str | None = None,
         thousands: str | None = None,
-        dtype: dict[str, str] | lst[str] | None = None,
+        dtype: IntoFields | None = None,
         na_values: str | lst[str] | None = None,
         skiprows: int | None = None,
         quotechar: str | None = None,
         escapechar: str | None = None,
-        encoding: str | None = None,
+        encoding: CsvEncoding | None = None,
         parallel: bool | None = None,
         date_format: str | None = None,
         timestamp_format: str | None = None,
@@ -377,8 +385,8 @@ class DuckDBPyConnection:
         null_padding: bool | None = None,
         names: lst[str] | None = None,
         lineterminator: str | None = None,
-        columns: dict[str, str] | None = None,
-        auto_type_candidates: lst[str] | None = None,
+        columns: ColumnsTypes | None = None,
+        auto_type_candidates: lst[StrIntoDType] | None = None,
         max_line_size: int | None = None,
         ignore_errors: bool | None = None,
         store_rejects: bool | None = None,
@@ -392,7 +400,7 @@ class DuckDBPyConnection:
         filename: bool | str | None = None,
         hive_partitioning: bool | None = None,
         union_by_name: bool | None = None,
-        hive_types: dict[str, str] | None = None,
+        hive_types: HiveTypes | None = None,
         hive_types_autocast: bool | None = None,
         strict_mode: bool | None = None,
     ) -> DuckDBPyRelation: ...
@@ -400,14 +408,14 @@ class DuckDBPyConnection:
         self,
         path_or_buffer: str | bytes | os.PathLike[str],
         *,
-        columns: dict[str, str] | None = None,
+        columns: ColumnsTypes | None = None,
         sample_size: int | None = None,
         maximum_depth: int | None = None,
-        records: str | None = None,
-        format: str | None = None,
+        records: JsonRecordOptions | None = None,
+        format: JsonFormat | None = None,
         date_format: str | None = None,
         timestamp_format: str | None = None,
-        compression: str | None = None,
+        compression: JsonCompression | None = None,
         maximum_object_size: int | None = None,
         ignore_errors: bool | None = None,
         convert_strings_to_integers: bool | None = None,
@@ -417,7 +425,7 @@ class DuckDBPyConnection:
         filename: bool | str | None = None,
         hive_partitioning: bool | None = None,
         union_by_name: bool | None = None,
-        hive_types: dict[str, str] | None = None,
+        hive_types: HiveTypes | None = None,
         hive_types_autocast: bool | None = None,
     ) -> DuckDBPyRelation: ...
     @typing.overload
@@ -671,8 +679,8 @@ class DuckDBPyRelation:
     def rank_dense(self, window_spec: str, projected_columns: str = "") -> DuckDBPyRelation: ...
     def row_number(self, window_spec: str, projected_columns: str = "") -> DuckDBPyRelation: ...
     def select(self, *args: IntoExpr, groups: str = "") -> DuckDBPyRelation: ...
-    def select_dtypes(self, types: lst[sqltypes.DuckDBPyType | str]) -> DuckDBPyRelation: ...
-    def select_types(self, types: lst[sqltypes.DuckDBPyType | str]) -> DuckDBPyRelation: ...
+    def select_dtypes(self, types: lst[sqltypes.DuckDBPyType | StrIntoDType]) -> DuckDBPyRelation: ...
+    def select_types(self, types: lst[sqltypes.DuckDBPyType | StrIntoDType]) -> DuckDBPyRelation: ...
     def set_alias(self, alias: str) -> DuckDBPyRelation: ...
     def show(
         self,
@@ -716,8 +724,8 @@ class DuckDBPyRelation:
         date_format: str | None = None,
         timestamp_format: str | None = None,
         quoting: str | int | None = None,
-        encoding: str | None = None,
-        compression: str | None = None,
+        encoding: CsvEncoding | None = None,
+        compression: CsvCompression | None = None,
         overwrite: bool | None = None,
         per_thread_output: bool | None = None,
         use_tmp_file: bool | None = None,
@@ -730,7 +738,7 @@ class DuckDBPyRelation:
         file_name: str,
         *,
         compression: str | None = None,
-        field_ids: ParquetFieldIdsType | typing.Literal["auto"] | None = None,
+        field_ids: ParquetFieldsOptions | None = None,
         row_group_size_bytes: int | str | None = None,
         row_group_size: int | None = None,
         overwrite: bool | None = None,
@@ -773,8 +781,8 @@ class DuckDBPyRelation:
         date_format: str | None = None,
         timestamp_format: str | None = None,
         quoting: str | int | None = None,
-        encoding: str | None = None,
-        compression: str | None = None,
+        encoding: CsvEncoding | None = None,
+        compression: CsvCompression | None = None,
         overwrite: bool | None = None,
         per_thread_output: bool | None = None,
         use_tmp_file: bool | None = None,
@@ -786,7 +794,7 @@ class DuckDBPyRelation:
         file_name: str,
         *,
         compression: str | None = None,
-        field_ids: ParquetFieldIdsType | typing.Literal["auto"] | None = None,
+        field_ids: ParquetFieldsOptions | None = None,
         row_group_size_bytes: str | int | None = None,
         row_group_size: int | None = None,
         overwrite: bool | None = None,
@@ -1076,7 +1084,7 @@ def df(*, date_as_object: bool = False, connection: DuckDBPyConnection | None = 
 @typing.overload
 def df(df: pandas.DataFrame, *, connection: DuckDBPyConnection | None = None) -> DuckDBPyRelation: ...
 def distinct(df: pandas.DataFrame, *, connection: DuckDBPyConnection | None = None) -> DuckDBPyRelation: ...
-def dtype(type_str: str, *, connection: DuckDBPyConnection | None = None) -> sqltypes.DuckDBPyType: ...
+def dtype(type_str: StrIntoDType, *, connection: DuckDBPyConnection | None = None) -> sqltypes.DuckDBPyType: ...
 def duplicate(*, connection: DuckDBPyConnection | None = None) -> DuckDBPyConnection: ...
 def enum_type(
     name: str,
@@ -1141,18 +1149,18 @@ def from_arrow(
 def from_csv_auto(
     path_or_buffer: str | bytes | os.PathLike[str] | os.PathLike[bytes] | typing.IO[bytes],
     header: bool | int | None = None,
-    compression: str | None = None,
+    compression: CsvCompression | None = None,
     sep: str | None = None,
     delimiter: str | None = None,
     files_to_sniff: int | None = None,
     comment: str | None = None,
     thousands: str | None = None,
-    dtype: dict[str, str] | lst[str] | None = None,
+    dtype: IntoFields | None = None,
     na_values: str | lst[str] | None = None,
     skiprows: int | None = None,
     quotechar: str | None = None,
     escapechar: str | None = None,
-    encoding: str | None = None,
+    encoding: CsvEncoding | None = None,
     parallel: bool | None = None,
     date_format: str | None = None,
     timestamp_format: str | None = None,
@@ -1163,8 +1171,8 @@ def from_csv_auto(
     null_padding: bool | None = None,
     names: lst[str] | None = None,
     lineterminator: str | None = None,
-    columns: dict[str, str] | None = None,
-    auto_type_candidates: lst[str] | None = None,
+    columns: ColumnsTypes | None = None,
+    auto_type_candidates: lst[StrIntoDType] | None = None,
     max_line_size: int | None = None,
     ignore_errors: bool | None = None,
     store_rejects: bool | None = None,
@@ -1178,7 +1186,7 @@ def from_csv_auto(
     filename: bool | str | None = None,
     hive_partitioning: bool | None = None,
     union_by_name: bool | None = None,
-    hive_types: dict[str, str] | None = None,
+    hive_types: HiveTypes | None = None,
     hive_types_autocast: bool | None = None,
     strict_mode: bool | None = None,
 ) -> DuckDBPyRelation: ...
@@ -1288,18 +1296,18 @@ def query_progress(*, connection: DuckDBPyConnection | None = None) -> float: ..
 def read_csv(
     path_or_buffer: str | bytes | os.PathLike[str] | os.PathLike[bytes] | typing.IO[bytes],
     header: bool | int | None = None,
-    compression: str | None = None,
+    compression: CsvCompression | None = None,
     sep: str | None = None,
     delimiter: str | None = None,
     files_to_sniff: int | None = None,
     comment: str | None = None,
     thousands: str | None = None,
-    dtype: dict[str, str] | lst[str] | None = None,
+    dtype: IntoFields | None = None,
     na_values: str | lst[str] | None = None,
     skiprows: int | None = None,
     quotechar: str | None = None,
     escapechar: str | None = None,
-    encoding: str | None = None,
+    encoding: CsvEncoding | None = None,
     parallel: bool | None = None,
     date_format: str | None = None,
     timestamp_format: str | None = None,
@@ -1310,8 +1318,8 @@ def read_csv(
     null_padding: bool | None = None,
     names: lst[str] | None = None,
     lineterminator: str | None = None,
-    columns: dict[str, str] | None = None,
-    auto_type_candidates: lst[str] | None = None,
+    columns: ColumnsTypes | None = None,
+    auto_type_candidates: lst[StrIntoDType] | None = None,
     max_line_size: int | None = None,
     ignore_errors: bool | None = None,
     store_rejects: bool | None = None,
@@ -1325,21 +1333,21 @@ def read_csv(
     filename: bool | str | None = None,
     hive_partitioning: bool | None = None,
     union_by_name: bool | None = None,
-    hive_types: dict[str, str] | None = None,
+    hive_types: HiveTypes | None = None,
     hive_types_autocast: bool | None = None,
     strict_mode: bool | None = None,
 ) -> DuckDBPyRelation: ...
 def read_json(
     path_or_buffer: str | bytes | os.PathLike[str],
     *,
-    columns: dict[str, str] | None = None,
+    columns: ColumnsTypes | None = None,
     sample_size: int | None = None,
     maximum_depth: int | None = None,
-    records: str | None = None,
-    format: str | None = None,
+    records: JsonRecordOptions | None = None,
+    format: JsonFormat | None = None,
     date_format: str | None = None,
     timestamp_format: str | None = None,
-    compression: str | None = None,
+    compression: JsonCompression | None = None,
     maximum_object_size: int | None = None,
     ignore_errors: bool | None = None,
     convert_strings_to_integers: bool | None = None,
@@ -1349,7 +1357,7 @@ def read_json(
     filename: bool | str | None = None,
     hive_partitioning: bool | None = None,
     union_by_name: bool | None = None,
-    hive_types: dict[str, str] | None = None,
+    hive_types: HiveTypes | None = None,
     hive_types_autocast: bool | None = None,
 ) -> DuckDBPyRelation: ...
 @typing.overload
@@ -1428,8 +1436,8 @@ def write_csv(
     date_format: str | None = None,
     timestamp_format: str | None = None,
     quoting: str | int | None = None,
-    encoding: str | None = None,
-    compression: str | None = None,
+    encoding: CsvEncoding | None = None,
+    compression: CsvCompression | None = None,
     overwrite: bool | None = None,
     per_thread_output: bool | None = None,
     use_tmp_file: bool | None = None,
