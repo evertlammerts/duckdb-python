@@ -88,8 +88,6 @@ See Also:
     https://duckdb.org/docs/stable/clients/python/conversion
 """
 
-# the field_ids argument to to_parquet and write_parquet has a recursive structure
-ParquetFieldIdsType: TypeAlias = Mapping[str, int | ParquetFieldIdsType]
 IntoValues: TypeAlias = list[PythonLiteral] | tuple[Expression, ...] | Expression
 """Types that can be converted to a table."""
 # Datatypes conversions
@@ -140,7 +138,7 @@ DTypeIdentifiers: TypeAlias = Builtins | NestedIds
 StrIntoDType = Builtins | Literal["json"] | str
 """Any `str` that can be converted into a `DuckDBPyType`. 
 
-The dtypes not present in the literal values are the composed ones, like `STRUCT` or `DECIMAL`
+The dtypes not present in the literal values are the composed ones, like `STRUCT` or `DECIMAL`.
 
 Note:
     A `StrEnum` will be handled the same way as a `str`."""
@@ -166,7 +164,7 @@ See Also:
 
 # NOTE: here we keep the covariance "hack" and warn the user in the docstring,
 # because otherwise we can just resort to `Any` for the `dict` and `list` types.
-IntoNestedDType: TypeAlias = Mapping[str, IntoDType] | Sequence[IntoDType]
+IntoFields: TypeAlias = Mapping[str, IntoDType] | Sequence[IntoDType]
 """Types that can be converted either into: 
 
 - a nested `DuckDBPyType` (e.g. `STRUCT` or `UNION`)
@@ -176,3 +174,33 @@ Warning:
     Only `dict` and `list` containers are accepted at runtime. 
     We use `Mapping` and `Sequence` here to satisfy the covariance of the element types.
 """
+
+# Files related
+
+# NOTE: ideally HiveTypes should also be accepted as a Mapping[str, StrIntoDType].
+ColumnsTypes: TypeAlias = Mapping[str, StrIntoDType]
+HiveTypes: TypeAlias = dict[str, StrIntoDType]
+ParquetFieldIdsType: TypeAlias = Mapping[str, int | ParquetFieldIdsType]
+
+_Auto: TypeAlias = Literal["auto"]
+ParquetFieldsOptions: TypeAlias = _Auto | ParquetFieldIdsType
+"""Types accepted for the `field_ids` parameter in parquet writing methods."""
+
+_CompressionOptions: TypeAlias = Literal["none", "gzip", "zstd"]
+"""Generally available compression options."""
+
+CsvCompression: TypeAlias = _Auto | _CompressionOptions
+CsvEncoding: TypeAlias = Literal["utf-8", "utf-16", "latin-1"] | str
+"""Encdoding options.
+
+All availables options not in the literal values can be seen here:
+    https://duckdb.org/docs/stable/core_extensions/encodings
+"""
+JsonCompression: TypeAlias = _CompressionOptions | Literal["auto_detect"]
+JsonFormat: TypeAlias = _Auto | Literal["unstructured", "newline_delimited", "array"]
+JsonRecordOptions: TypeAlias = _Auto | Literal["true", "false"]
+
+# Other
+
+JoinType = Literal["inner", "left", "right", "outer", "semi", "anti"]
+"""Types of join accepted by `DuckDBPyRelation.join` method."""
