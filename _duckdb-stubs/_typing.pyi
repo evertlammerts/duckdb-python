@@ -12,7 +12,6 @@ if TYPE_CHECKING:
 
 # Numpy protocols
 
-_T_co = TypeVar("_T_co", covariant=True)
 _S_co = TypeVar("_S_co", bound=tuple[Any, ...], covariant=True)
 _D_co = TypeVar("_D_co", covariant=True)
 
@@ -55,7 +54,7 @@ class NPArrayLike(NPProtocol, Generic[_S_co, _D_co], Protocol):
 # Expression and values conversions
 
 NumericLiteral: TypeAlias = int | float
-"""Python objects that can be converted to a numerical `Expression` or `DuckDBPyType` (integer or floating points numbers.)"""
+"""Python objects that can be converted to a numerical `Expression` or `DuckDBPyType`."""
 TemporalLiteral: TypeAlias = date | datetime | time | timedelta
 BlobLiteral: TypeAlias = bytes | bytearray
 """Python objects that can be converted to a `BLOB` `ConstantExpression` or `DuckDBPyType`.
@@ -136,8 +135,8 @@ NestedIds: TypeAlias = Literal["list", "struct", "array", "enum", "map", "decima
 PyTypeIds: TypeAlias = Builtins | NestedIds
 """All possible identifiers for `DuckDBPyType.id`."""
 
-StrIntoPyType = Builtins | Literal["json"] | str
-"""Any `str` that can be converted into a `DuckDBPyType`. 
+StrIntoPyType: TypeAlias = Builtins | Literal["json"] | str
+"""Any `str` that can be converted into a `DuckDBPyType`.
 
 The pytypes not present in the literal values are the composed ones, like `STRUCT` or `DECIMAL`.
 
@@ -203,5 +202,5 @@ JsonRecordOptions: TypeAlias = _Auto | Literal["true", "false"]
 
 # Other
 
-JoinType = Literal["inner", "left", "right", "outer", "semi", "anti"]
+JoinType: TypeAlias = Literal["inner", "left", "right", "outer", "semi", "anti"]
 """Types of join accepted by `DuckDBPyRelation.join` method."""
