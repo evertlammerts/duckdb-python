@@ -36,7 +36,7 @@ class NPScalarTypeLike(NPProtocol, Protocol):
 class NPArrayLike(NPProtocol, Generic[_S_co, _D_co], Protocol):
     """`numpy.ndarray` Protocol.
 
-    This is needed to accept numpy arrays as literals in expressions, without emitting type checker errors about unknown symbol if the user doesn't have numpy installed.
+    This is needed to accept numpy arrays as literals in expressions, without emitting type checker errors about unknown symbol if the user doesn't have `numpy` installed.
 
     Note:
         Using `np.typing.NDArray` is still the best option for return types.
@@ -73,7 +73,7 @@ NonNestedLiteral: TypeAlias = ScalarLiteral | TemporalLiteral | UUID | Decimal |
 NestedLiteral: TypeAlias = list[Any] | tuple[Any, ...] | dict[Any, Any] | NPArrayLike[Any, Any]
 """Containers types that can be converted to a nested `ConstantExpression` (e.g. to `ARRAY` or `STRUCT`).
 
-Those types can be aribtraly nested, as long as their leaf values are `PythonLiteral`."""
+Those types can be arbitrarily nested, as long as their leaf values are `PythonLiteral`."""
 
 PythonLiteral: TypeAlias = NonNestedLiteral | NestedLiteral | None
 """Python objects that can be converted to a `ConstantExpression`."""
@@ -89,8 +89,9 @@ See Also:
 """
 
 IntoValues: TypeAlias = list[PythonLiteral] | tuple[Expression, ...] | Expression
-"""Types that can be converted to a table."""
-# Datatypes conversions
+"""Types that can be converted to a table of values."""
+
+# PyType conversions
 
 Builtins: TypeAlias = Literal[
     "bigint",
@@ -106,12 +107,12 @@ Builtins: TypeAlias = Literal[
     "interval",
     "smallint",
     "null",
-    "time_tz",
+    "time with time zone",
     "time",
     "timestamp_ms",
     "timestamp_ns",
     "timestamp_s",
-    "timestamp_tz",
+    "timestamp with time zone",
     "timestamp",
     "tinyint",
     "ubigint",
@@ -122,7 +123,7 @@ Builtins: TypeAlias = Literal[
     "uuid",
     "varchar",
 ]
-"""Literals strings convertibles into `DuckDBPyType` instances.
+"""Literals `str` that can be converted into `DuckDBPyType` instances.
 
 Note:
     Passing the same values in uppercase is also accepted. 
@@ -132,22 +133,22 @@ Note:
 NestedIds: TypeAlias = Literal["list", "struct", "array", "enum", "map", "decimal", "union"]
 """Identifiers for nested types in `DuckDBPyType.id`."""
 
-DTypeIdentifiers: TypeAlias = Builtins | NestedIds
+PyTypeIds: TypeAlias = Builtins | NestedIds
 """All possible identifiers for `DuckDBPyType.id`."""
 
-StrIntoDType = Builtins | Literal["json"] | str
+StrIntoPyType = Builtins | Literal["json"] | str
 """Any `str` that can be converted into a `DuckDBPyType`. 
 
-The dtypes not present in the literal values are the composed ones, like `STRUCT` or `DECIMAL`.
+The pytypes not present in the literal values are the composed ones, like `STRUCT` or `DECIMAL`.
 
 Note:
     A `StrEnum` will be handled the same way as a `str`."""
 
 # NOTE:
 # the `dict` and `list` types are `Any` due to the same limitation mentionned in `NestedLiteral`.
-IntoDType: TypeAlias = (
+IntoPyType: TypeAlias = (
     DuckDBPyType
-    | StrIntoDType
+    | StrIntoPyType
     | type[NPScalarTypeLike]
     | type[ScalarLiteral]
     | type[list[Any]]
@@ -164,7 +165,7 @@ See Also:
 
 # NOTE: here we keep the covariance "hack" and warn the user in the docstring,
 # because otherwise we can just resort to `Any` for the `dict` and `list` types.
-IntoFields: TypeAlias = Mapping[str, IntoDType] | Sequence[IntoDType]
+IntoFields: TypeAlias = Mapping[str, IntoPyType] | Sequence[IntoPyType]
 """Types that can be converted either into: 
 
 - a nested `DuckDBPyType` (e.g. `STRUCT` or `UNION`)
@@ -177,9 +178,9 @@ Warning:
 
 # Files related
 
-# NOTE: ideally HiveTypes should also be accepted as a Mapping[str, StrIntoDType].
-ColumnsTypes: TypeAlias = Mapping[str, StrIntoDType]
-HiveTypes: TypeAlias = dict[str, StrIntoDType]
+# NOTE: ideally HiveTypes should also be accepted as a Mapping[str, StrIntoPyType].
+ColumnsTypes: TypeAlias = Mapping[str, StrIntoPyType]
+HiveTypes: TypeAlias = dict[str, StrIntoPyType]
 ParquetFieldIdsType: TypeAlias = Mapping[str, int | ParquetFieldIdsType]
 
 _Auto: TypeAlias = Literal["auto"]
@@ -196,7 +197,7 @@ CsvEncoding: TypeAlias = Literal["utf-8", "utf-16", "latin-1"] | str
 All availables options not in the literal values can be seen here:
     https://duckdb.org/docs/stable/core_extensions/encodings
 """
-JsonCompression: TypeAlias = _CompressionOptions | Literal["auto_detect"]
+JsonCompression: TypeAlias = Literal["auto_detect"] | _CompressionOptions
 JsonFormat: TypeAlias = _Auto | Literal["unstructured", "newline_delimited", "array"]
 JsonRecordOptions: TypeAlias = _Auto | Literal["true", "false"]
 
