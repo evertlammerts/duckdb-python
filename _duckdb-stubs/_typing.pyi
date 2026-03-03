@@ -138,7 +138,7 @@ PyTypeIds: TypeAlias = Builtins | NestedIds
 StrIntoPyType: TypeAlias = Builtins | Literal["json"] | str
 """Any `str` that can be converted into a `DuckDBPyType`.
 
-The pytypes not present in the literal values are the composed ones, like `STRUCT` or `DECIMAL`.
+The `DuckDBPyType` not present in the literal values are the composed ones, like `STRUCT` or `DECIMAL`.
 
 Note:
     A `StrEnum` will be handled the same way as a `str`."""
@@ -186,21 +186,28 @@ _Auto: TypeAlias = Literal["auto"]
 ParquetFieldsOptions: TypeAlias = _Auto | ParquetFieldIdsType
 """Types accepted for the `field_ids` parameter in parquet writing methods."""
 
-_CompressionOptions: TypeAlias = Literal["none", "gzip", "zstd"]
-"""Generally available compression options."""
-
-CsvCompression: TypeAlias = _Auto | _CompressionOptions
 CsvEncoding: TypeAlias = Literal["utf-8", "utf-16", "latin-1"] | str
 """Encdoding options.
 
 All availables options not in the literal values can be seen here:
     https://duckdb.org/docs/stable/core_extensions/encodings
 """
-JsonCompression: TypeAlias = Literal["auto_detect"] | _CompressionOptions
 JsonFormat: TypeAlias = _Auto | Literal["unstructured", "newline_delimited", "array"]
 JsonRecordOptions: TypeAlias = _Auto | Literal["true", "false"]
+
+# compression kinds
+
+_CompressionOptions: TypeAlias = Literal["gzip", "zstd"]
+"""Generally available compression options."""
+_None: TypeAlias = Literal["none"]
+CsvCompression: TypeAlias = _Auto | _None | _CompressionOptions
+JsonCompression: TypeAlias = Literal["auto_detect"] | _None | _CompressionOptions
+ParquetCompression: TypeAlias = Literal["uncompressed", "brotli", "snappy", "lz4", "lz4_raw"] | _CompressionOptions
 
 # Other
 
 JoinType: TypeAlias = Literal["inner", "left", "right", "outer", "semi", "anti"]
 """Types of join accepted by `DuckDBPyRelation.join` method."""
+
+ProfilerFormat: TypeAlias = Literal["json", "query_tree", "query_tree_optimizer", "no_output", "html", "graphviz"]
+"""Formats available in `get_profiling_information` method/function."""

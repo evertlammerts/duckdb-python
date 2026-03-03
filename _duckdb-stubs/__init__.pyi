@@ -38,6 +38,8 @@ if typing.TYPE_CHECKING:
         CsvCompression,
         HiveTypes,
         ColumnsTypes,
+        ProfilerFormat,
+        ParquetCompression,
     )
     from ._enums import ExplainTypeLiteral, CSVLineTerminatorLiteral, RenderModeLiteral
     from duckdb import sqltypes, func
@@ -302,7 +304,7 @@ class DuckDBPyConnection:
         filename: bool = False,
         hive_partitioning: bool = False,
         union_by_name: bool = False,
-        compression: str | None = None,
+        compression: ParquetCompression | None = None,
     ) -> DuckDBPyRelation: ...
     @typing.overload
     def from_parquet(
@@ -314,7 +316,7 @@ class DuckDBPyConnection:
         filename: bool = False,
         hive_partitioning: bool = False,
         union_by_name: bool = False,
-        compression: str | None = None,
+        compression: ParquetCompression | None = None,
     ) -> DuckDBPyRelation: ...
     def from_query(self, query: str, *, alias: str = "", params: object = None) -> DuckDBPyRelation: ...
     def get_table_names(self, query: str, *, qualified: bool = False) -> set[str]: ...
@@ -327,7 +329,7 @@ class DuckDBPyConnection:
         repository_url: str | None = None,
         version: str | None = None,
     ) -> None: ...
-    def get_profiling_information(self, format: str = "json") -> str: ...
+    def get_profiling_information(self, format: ProfilerFormat = "json") -> str: ...
     def enable_profiling(self) -> None: ...
     def disable_profiling(self) -> None: ...
     def interrupt(self) -> None: ...
@@ -426,7 +428,7 @@ class DuckDBPyConnection:
         filename: bool = False,
         hive_partitioning: bool = False,
         union_by_name: bool = False,
-        compression: str | None = None,
+        compression: ParquetCompression | None = None,
     ) -> DuckDBPyRelation: ...
     @typing.overload
     def read_parquet(
@@ -438,7 +440,7 @@ class DuckDBPyConnection:
         filename: bool = False,
         hive_partitioning: bool = False,
         union_by_name: bool = False,
-        compression: typing.Any = None,
+        compression: ParquetCompression | None = None,
     ) -> DuckDBPyRelation: ...
     def register(self, view_name: str, python_object: object) -> DuckDBPyConnection: ...
     def register_filesystem(self, filesystem: fsspec.AbstractFileSystem) -> None: ...
@@ -725,7 +727,7 @@ class DuckDBPyRelation:
         self,
         file_name: str,
         *,
-        compression: str | None = None,
+        compression: ParquetCompression | None = None,
         field_ids: ParquetFieldsOptions | None = None,
         row_group_size_bytes: int | str | None = None,
         row_group_size: int | None = None,
@@ -781,7 +783,7 @@ class DuckDBPyRelation:
         self,
         file_name: str,
         *,
-        compression: str | None = None,
+        compression: ParquetCompression | None = None,
         field_ids: ParquetFieldsOptions | None = None,
         row_group_size_bytes: str | int | None = None,
         row_group_size: int | None = None,
@@ -1039,7 +1041,7 @@ def from_parquet(
     filename: bool = False,
     hive_partitioning: bool = False,
     union_by_name: bool = False,
-    compression: str | None = None,
+    compression: ParquetCompression | None = None,
     connection: DuckDBPyConnection | None = None,
 ) -> DuckDBPyRelation: ...
 @typing.overload
@@ -1051,7 +1053,7 @@ def from_parquet(
     filename: bool = False,
     hive_partitioning: bool = False,
     union_by_name: bool = False,
-    compression: typing.Any = None,
+    compression: ParquetCompression | None = None,
     connection: DuckDBPyConnection | None = None,
 ) -> DuckDBPyRelation: ...
 def from_query(
@@ -1081,7 +1083,9 @@ def limit(
     *,
     connection: DuckDBPyConnection | None = None,
 ) -> DuckDBPyRelation: ...
-def get_profiling_information(*, connection: DuckDBPyConnection | None = None, format: str = "json") -> str: ...
+def get_profiling_information(
+    *, connection: DuckDBPyConnection | None = None, format: ProfilerFormat = "json"
+) -> str: ...
 def enable_profiling(*, connection: DuckDBPyConnection | None = None) -> None: ...
 def disable_profiling(*, connection: DuckDBPyConnection | None = None) -> None: ...
 def list_filesystems(*, connection: DuckDBPyConnection | None = None) -> lst[str]: ...
@@ -1208,7 +1212,7 @@ def read_parquet(
     filename: bool = False,
     hive_partitioning: bool = False,
     union_by_name: bool = False,
-    compression: str | None = None,
+    compression: ParquetCompression | None = None,
     connection: DuckDBPyConnection | None = None,
 ) -> DuckDBPyRelation: ...
 @typing.overload
@@ -1220,7 +1224,7 @@ def read_parquet(
     filename: bool = False,
     hive_partitioning: bool = False,
     union_by_name: bool = False,
-    compression: typing.Any = None,
+    compression: ParquetCompression | None = None,
     connection: DuckDBPyConnection | None = None,
 ) -> DuckDBPyRelation: ...
 def register(
