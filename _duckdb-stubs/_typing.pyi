@@ -87,7 +87,7 @@ See Also:
     https://duckdb.org/docs/stable/clients/python/conversion
 """
 
-IntoValues: TypeAlias = list[PythonLiteral] | tuple[Expression, ...] | Expression
+IntoValues: TypeAlias = list[PythonLiteral] | tuple[Expression, ...] | Expression | NPArrayLike[Any, Any]
 """Types that can be converted to a table of values."""
 
 # PyType conversions
