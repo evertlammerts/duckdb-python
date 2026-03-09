@@ -108,6 +108,7 @@ Builtins: TypeAlias = Literal[
     "null",
     "time with time zone",
     "time",
+    "time_ns",
     "timestamp_ms",
     "timestamp_ns",
     "timestamp_s",
@@ -121,6 +122,7 @@ Builtins: TypeAlias = Literal[
     "utinyint",
     "uuid",
     "varchar",
+    "variant",
 ]
 """Literals `str` that can be converted into `DuckDBPyType` instances.
 
