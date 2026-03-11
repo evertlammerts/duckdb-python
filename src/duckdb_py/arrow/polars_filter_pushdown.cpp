@@ -12,7 +12,7 @@
 
 namespace duckdb {
 
-static py::object TransformFilterRecursive(TableFilter &filter, py::object col_expr,
+static py::object TransformFilterRecursive(const TableFilter &filter, py::object col_expr,
                                            const ClientProperties &client_properties) {
 	auto &import_cache = *DuckDBPyConnection::ImportCache();
 
@@ -137,15 +137,14 @@ py::object PolarsFilterPushdown::TransformFilter(const TableFilterSet &filter_co
                                                  const unordered_map<idx_t, idx_t> &filter_to_col,
                                                  const ClientProperties &client_properties) {
 	auto &import_cache = *DuckDBPyConnection::ImportCache();
-	auto &filters_map = filter_collection.filters;
 
 	py::object expression = py::none();
-	for (auto &it : filters_map) {
-		auto column_idx = it.first;
+	for (auto &entry : filter_collection) {
+		auto column_idx = entry.ColumnIndex();
 		auto &column_name = columns[column_idx];
 		auto col_expr = import_cache.polars.col()(column_name);
 
-		auto child_expression = TransformFilterRecursive(*it.second, col_expr, client_properties);
+		auto child_expression = TransformFilterRecursive(entry.Filter(), col_expr, client_properties);
 		if (child_expression.is(py::none())) {
 			continue;
 		}

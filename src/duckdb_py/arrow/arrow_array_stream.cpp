@@ -43,7 +43,7 @@ py::object PythonTableArrowArrayStreamFactory::ProduceScanner(py::object &arrow_
 	auto &filter_to_col = parameters.projected_columns.filter_to_col;
 	py::list projection_list = py::cast(column_list);
 
-	bool has_filter = filters && !filters->filters.empty();
+	bool has_filter = filters && filters->HasFilters();
 	py::dict kwargs;
 	if (!column_list.empty()) {
 		kwargs["columns"] = projection_list;
@@ -74,7 +74,7 @@ unique_ptr<ArrowArrayStreamWrapper> PythonTableArrowArrayStreamFactory::Produce(
 		bool filters_pushed = false;
 
 		// Translate DuckDB filters to Polars expressions and push into the lazy plan
-		if (filters && !filters->filters.empty()) {
+		if (filters && filters->HasFilters()) {
 			try {
 				auto filter_expr = PolarsFilterPushdown::TransformFilter(
 				    *filters, parameters.projected_columns.projection_map, parameters.projected_columns.filter_to_col,

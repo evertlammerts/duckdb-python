@@ -309,11 +309,10 @@ py::object PyArrowFilterPushdown::TransformFilter(TableFilterSet &filter_collect
                                                   unordered_map<idx_t, string> &columns,
                                                   unordered_map<idx_t, idx_t> filter_to_col,
                                                   const ClientProperties &config, const ArrowTableSchema &arrow_table) {
-	auto &filters_map = filter_collection.filters;
 
 	py::object expression = py::none();
-	for (auto &it : filters_map) {
-		auto column_idx = it.first;
+	for (auto &entry : filter_collection) {
+		auto column_idx = entry.ColumnIndex();
 		auto &column_name = columns[column_idx];
 
 		vector<string> column_ref;
@@ -322,7 +321,8 @@ py::object PyArrowFilterPushdown::TransformFilter(TableFilterSet &filter_collect
 		D_ASSERT(columns.find(column_idx) != columns.end());
 
 		auto &arrow_type = arrow_table.GetColumns().at(filter_to_col.at(column_idx));
-		py::object child_expression = TransformFilterRecursive(*it.second, column_ref, config.time_zone, *arrow_type);
+		py::object child_expression =
+		    TransformFilterRecursive(entry.Filter(), column_ref, config.time_zone, *arrow_type);
 		if (child_expression.is(py::none())) {
 			continue;
 		} else if (expression.is(py::none())) {
