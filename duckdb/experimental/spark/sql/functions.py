@@ -123,7 +123,9 @@ def _inner_expr_or_val(val: Column | str) -> Column | str:
     return val.expr if isinstance(val, Column) else val
 
 
-def struct(*cols: Column) -> Column:  # noqa: D103
+def struct(*cols: Union["ColumnOrName", list["ColumnOrName"], tuple["ColumnOrName", ...]]) -> Column:  # noqa: D103
+    if len(cols) == 1 and isinstance(cols[0], (list, set)):
+        cols = cols[0]
     return Column(FunctionExpression("struct_pack", *[_inner_expr_or_val(x) for x in cols]))
 
 
