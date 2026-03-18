@@ -287,7 +287,11 @@ py::object TransformFilterRecursive(TableFilter &filter, vector<string> column_r
 		if (!optional_filter.child_filter) {
 			return py::none();
 		}
-		return TransformFilterRecursive(*optional_filter.child_filter, column_ref, timezone_config, type);
+		try {
+			return TransformFilterRecursive(*optional_filter.child_filter, column_ref, timezone_config, type);
+		} catch (const NotImplementedException &) {
+			return py::none();
+		}
 	}
 	case TableFilterType::IN_FILTER: {
 		auto &in_filter = filter.Cast<InFilter>();
