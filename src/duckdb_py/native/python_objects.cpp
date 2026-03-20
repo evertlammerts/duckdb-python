@@ -444,6 +444,7 @@ static bool KeyIsHashable(const LogicalType &type) {
 	case LogicalTypeId::DATE:
 	case LogicalTypeId::UUID:
 	case LogicalTypeId::INTERVAL:
+	case LogicalTypeId::GEOMETRY:
 		return true;
 	case LogicalTypeId::LIST:
 	case LogicalTypeId::ARRAY:
@@ -511,6 +512,7 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 	case LogicalTypeId::VARCHAR:
 		return py::cast(StringValue::Get(val));
 	case LogicalTypeId::BLOB:
+	case LogicalTypeId::GEOMETRY:
 		return py::bytes(StringValue::Get(val));
 	case LogicalTypeId::BIT:
 		return py::cast(Bit::ToString(StringValue::Get(val)));
