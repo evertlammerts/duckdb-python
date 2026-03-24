@@ -969,8 +969,7 @@ duckdb::pyarrow::Table DuckDBPyRelation::ToArrowTableInternal(idx_t batch_size, 
 		ScopedConfigSetting scoped_setting(
 		    config,
 		    [&batch_size](ClientConfig &config) {
-			    config.get_result_collector = [&batch_size](ClientContext &context,
-			                                                PreparedStatementData &data) -> PhysicalOperator & {
+			    config.get_result_collector = [&batch_size](ClientContext &context, PreparedStatementData &data) {
 				    return PhysicalArrowCollector::Create(context, data, batch_size);
 			    };
 		    },
@@ -999,8 +998,7 @@ py::object DuckDBPyRelation::ToArrowCapsule(const py::object &requested_schema) 
 		ScopedConfigSetting scoped_setting(
 		    config,
 		    [&batch_size](ClientConfig &config) {
-			    config.get_result_collector = [&batch_size](ClientContext &context,
-			                                                PreparedStatementData &data) -> PhysicalOperator & {
+			    config.get_result_collector = [&batch_size](ClientContext &context, PreparedStatementData &data) {
 				    return PhysicalArrowCollector::Create(context, data, batch_size);
 			    };
 		    },
