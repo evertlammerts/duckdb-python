@@ -40,8 +40,9 @@ if typing.TYPE_CHECKING:
         ColumnsTypes,
         ProfilerFormat,
         ParquetCompression,
+        ArrowUDF,
     )
-    from ._enums import ExplainTypeLiteral, CSVLineTerminatorLiteral, RenderModeLiteral
+    from ._enums import ExplainTypeLiteral, RenderModeLiteral
     from duckdb import sqltypes, func
 
 __all__: lst[str] = [
@@ -210,6 +211,7 @@ class DuckDBPyConnection:
     def checkpoint(self) -> DuckDBPyConnection: ...
     def close(self) -> None: ...
     def commit(self) -> DuckDBPyConnection: ...
+    @typing.overload
     def create_function(
         self,
         name: str,
@@ -217,7 +219,20 @@ class DuckDBPyConnection:
         parameters: lst[IntoPyType] | None = None,
         return_type: IntoPyType | None = None,
         *,
-        type: func.PythonUDFType = ...,
+        type: func.PythonUDFType = func.PythonUDFType.NATIVE,
+        null_handling: func.FunctionNullHandling = ...,
+        exception_handling: PythonExceptionHandling = ...,
+        side_effects: bool = False,
+    ) -> DuckDBPyConnection: ...
+    @typing.overload
+    def create_function(
+        self,
+        name: str,
+        function: ArrowUDF,
+        parameters: lst[IntoPyType] | None = None,
+        return_type: IntoPyType | None = None,
+        *,
+        type: func.PythonUDFType = func.PythonUDFType.ARROW,
         null_handling: func.FunctionNullHandling = ...,
         exception_handling: PythonExceptionHandling = ...,
         side_effects: bool = False,
@@ -273,7 +288,7 @@ class DuckDBPyConnection:
         normalize_names: bool | None = None,
         null_padding: bool | None = None,
         names: lst[str] | None = None,
-        lineterminator: CSVLineTerminator | CSVLineTerminatorLiteral | None = None,
+        lineterminator: CSVLineTerminator | None = None,
         columns: ColumnsTypes | None = None,
         auto_type_candidates: lst[StrIntoPyType] | None = None,
         max_line_size: int | None = None,
@@ -374,7 +389,7 @@ class DuckDBPyConnection:
         normalize_names: bool | None = None,
         null_padding: bool | None = None,
         names: lst[str] | None = None,
-        lineterminator: CSVLineTerminator | CSVLineTerminatorLiteral | None = None,
+        lineterminator: CSVLineTerminator | None = None,
         columns: ColumnsTypes | None = None,
         auto_type_candidates: lst[StrIntoPyType] | None = None,
         max_line_size: int | None = None,
@@ -596,7 +611,7 @@ class DuckDBPyRelation:
         self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
     ) -> DuckDBPyRelation: ...
     def map(
-        self, map_function: Callable[..., PythonLiteral], *, schema: dict[str, sqltypes.DuckDBPyType] | None = None
+        self, map_function: Callable[..., typing.Any], *, schema: dict[str, sqltypes.DuckDBPyType] | None = None
     ) -> DuckDBPyRelation: ...
     def max(
         self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
@@ -900,13 +915,27 @@ def connect(
     read_only: bool = False,
     config: dict[str, str | bool | int | float | lst[str]] | None = None,
 ) -> DuckDBPyConnection: ...
+@typing.overload
 def create_function(
     name: str,
     function: Callable[..., PythonLiteral],
     parameters: lst[IntoPyType] | None = None,
     return_type: IntoPyType | None = None,
     *,
-    type: func.PythonUDFType = ...,
+    type: func.PythonUDFType = func.PythonUDFType.NATIVE,
+    null_handling: func.FunctionNullHandling = ...,
+    exception_handling: PythonExceptionHandling = ...,
+    side_effects: bool = False,
+    connection: DuckDBPyConnection | None = None,
+) -> DuckDBPyConnection: ...
+@typing.overload
+def create_function(
+    name: str,
+    function: ArrowUDF,
+    parameters: lst[IntoPyType] | None = None,
+    return_type: IntoPyType | None = None,
+    *,
+    type: func.PythonUDFType = func.PythonUDFType.ARROW,
     null_handling: func.FunctionNullHandling = ...,
     exception_handling: PythonExceptionHandling = ...,
     side_effects: bool = False,
@@ -1011,7 +1040,7 @@ def from_csv_auto(
     normalize_names: bool | None = None,
     null_padding: bool | None = None,
     names: lst[str] | None = None,
-    lineterminator: CSVLineTerminator | CSVLineTerminatorLiteral | None = None,
+    lineterminator: CSVLineTerminator | None = None,
     columns: ColumnsTypes | None = None,
     auto_type_candidates: lst[StrIntoPyType] | None = None,
     max_line_size: int | None = None,
@@ -1160,7 +1189,7 @@ def read_csv(
     normalize_names: bool | None = None,
     null_padding: bool | None = None,
     names: lst[str] | None = None,
-    lineterminator: CSVLineTerminator | CSVLineTerminatorLiteral | None = None,
+    lineterminator: CSVLineTerminator | None = None,
     columns: ColumnsTypes | None = None,
     auto_type_candidates: lst[StrIntoPyType] | None = None,
     max_line_size: int | None = None,

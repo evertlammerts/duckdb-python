@@ -4,9 +4,10 @@ from typing import TypeAlias, TYPE_CHECKING, Protocol, Any, TypeVar, Generic, Li
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from uuid import UUID
-from collections.abc import Mapping, Iterator, Sequence
+from collections.abc import Mapping, Iterator, Sequence, Callable
 
 if TYPE_CHECKING:
+    import pyarrow as pa
     from ._expression import Expression
     from ._sqltypes import DuckDBPyType
 
@@ -101,6 +102,7 @@ Builtins: TypeAlias = Literal[
     "date",
     "double",
     "float",
+    "geometry",
     "hugeint",
     "integer",
     "interval",
@@ -189,7 +191,7 @@ ParquetFieldsOptions: TypeAlias = _Auto | ParquetFieldIdsType
 """Types accepted for the `field_ids` parameter in parquet writing methods."""
 
 CsvEncoding: TypeAlias = Literal["utf-8", "utf-16", "latin-1"] | str
-"""Encdoding options.
+"""Encoding options.
 
 All availables options not in the literal values can be seen here:
     https://duckdb.org/docs/stable/core_extensions/encodings
@@ -213,3 +215,6 @@ JoinType: TypeAlias = Literal["inner", "left", "right", "outer", "semi", "anti"]
 
 ProfilerFormat: TypeAlias = Literal["json", "query_tree", "query_tree_optimizer", "no_output", "html", "graphviz"]
 """Formats available in `get_profiling_information` method/function."""
+# TODO: this should be a `Protocol` just like `NPArrayLike`.
+ArrowUDF: TypeAlias = Callable[..., pa.Table | pa.Array | pa.ChunkedArray]
+"""Type accepted for Python UDFs that return Arrow data."""
