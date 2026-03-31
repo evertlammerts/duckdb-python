@@ -21,7 +21,7 @@ class FunctionNullHandling:
     @property
     def value(self) -> int: ...
 
-class PythonUDFType:
+class PythonUDFType(CppEnum):
     ARROW: ClassVar[PythonUDFType]  # value = <PythonUDFType.ARROW: 1>
     NATIVE: ClassVar[PythonUDFType]  # value = <PythonUDFType.NATIVE: 0>
     __members__: ClassVar[
