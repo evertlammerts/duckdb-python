@@ -69,7 +69,7 @@ NonNestedLiteral: TypeAlias = ScalarLiteral | TemporalLiteral | UUID | Decimal |
 # NOTE:
 # Using `Sequence` and `Mapping` instead of `list | tuple` and `dict` would make the covariance of the element types work.
 # Thus, this would allow to avoid the use of `Any` for them.
-# However, this would also be incorrect at runtime, since only the 3 aformentioned containers types are accepted.
+# However, this would also be incorrect at runtime, since only the 3 aforementioned containers types are accepted.
 NestedLiteral: TypeAlias = list[Any] | tuple[Any, ...] | dict[Any, Any] | NPArrayLike[Any, Any]
 """Containers types that can be converted to a nested `ConstantExpression` (e.g. to `ARRAY` or `STRUCT`).
 
@@ -148,7 +148,7 @@ Note:
     A `StrEnum` will be handled the same way as a `str`."""
 
 # NOTE:
-# the `dict` and `list` types are `Any` due to the same limitation mentionned in `NestedLiteral`.
+# the `dict` and `list` types are `Any` due to the same limitation mentioned in `NestedLiteral`.
 IntoPyType: TypeAlias = (
     DuckDBPyType
     | StrIntoPyType
@@ -193,7 +193,7 @@ ParquetFieldsOptions: TypeAlias = _Auto | ParquetFieldIdsType
 CsvEncoding: TypeAlias = Literal["utf-8", "utf-16", "latin-1"] | str
 """Encoding options.
 
-All availables options not in the literal values can be seen here:
+All available options not in the literal values can be seen here:
     https://duckdb.org/docs/stable/core_extensions/encodings
 """
 JsonFormat: TypeAlias = _Auto | Literal["unstructured", "newline_delimited", "array"]
