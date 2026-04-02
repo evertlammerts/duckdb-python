@@ -159,7 +159,7 @@ include = [
 
     # Can't avoid including a small subset of ./tools and ./.github
     "external/duckdb/tools/CMakeLists.txt",
-    "external/duckdb/tools/utils/test_platform.cpp",
+    "external/duckdb/tools/utils/**",
     "external/duckdb/.github/config/out_of_tree_extensions.cmake",
     "external/duckdb/.github/config/in_tree_extensions.cmake",
 ]
