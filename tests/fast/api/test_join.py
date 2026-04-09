@@ -45,6 +45,13 @@ class TestJoin:
         res = rel.fetchall()
         assert res == [(1, 2, 1, 3)]
 
+    def test_join_none_raises(self):
+        con = duckdb.connect()
+        rel = con.sql("SELECT 1 AS col1")
+
+        with pytest.raises(duckdb.InvalidInputException, match="No relation provided for join"):
+            rel.join(None, "col1")
+
     @pytest.mark.xfail(condition=True, reason="Selecting from a duplicate binding causes an error")
     def test_deduplicated_bindings(self, duckdb_cursor):
         duckdb_cursor.execute("create table old as select * from (values ('42', 1), ('21', 2)) t(a, b)")
