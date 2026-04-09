@@ -1188,6 +1188,9 @@ static JoinType ParseJoinType(const string &type) {
 
 unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Join(DuckDBPyRelation *other, const py::object &condition,
                                                     const string &type) {
+	if (!other) {
+		throw InvalidInputException("No relation provided for join");
+	}
 
 	JoinType join_type;
 	string type_string = StringUtil::Lower(type);
