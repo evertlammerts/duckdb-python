@@ -265,7 +265,7 @@ class DuckDBPyConnection:
     def from_arrow(self, arrow_object: object) -> DuckDBPyRelation: ...
     def from_csv_auto(
         self,
-        path_or_buffer: str | bytes | os.PathLike[str] | os.PathLike[bytes] | typing.IO[bytes],
+        path_or_buffer: str | bytes | os.PathLike[str] | os.PathLike[bytes] | typing.IO[bytes] | typing.IO[str],
         header: bool | int | None = None,
         compression: CsvCompression | None = None,
         sep: str | None = None,
@@ -366,7 +366,7 @@ class DuckDBPyConnection:
     def query_progress(self) -> float: ...
     def read_csv(
         self,
-        path_or_buffer: str | bytes | os.PathLike[str] | os.PathLike[bytes] | typing.IO[bytes],
+        path_or_buffer: str | bytes | os.PathLike[str] | os.PathLike[bytes] | typing.IO[bytes] | typing.IO[str],
         header: bool | int | None = None,
         compression: CsvCompression | None = None,
         sep: str | None = None,
@@ -411,7 +411,7 @@ class DuckDBPyConnection:
     ) -> DuckDBPyRelation: ...
     def read_json(
         self,
-        path_or_buffer: str | bytes | os.PathLike[str],
+        path_or_buffer: str | bytes | os.PathLike[str] | os.PathLike[bytes] | typing.IO[bytes] | typing.IO[str],
         *,
         columns: ColumnsTypes | None = None,
         sample_size: int | None = None,
@@ -1017,7 +1017,7 @@ def from_arrow(
     connection: DuckDBPyConnection | None = None,
 ) -> DuckDBPyRelation: ...
 def from_csv_auto(
-    path_or_buffer: str | bytes | os.PathLike[str] | os.PathLike[bytes] | typing.IO[bytes],
+    path_or_buffer: str | bytes | os.PathLike[str] | os.PathLike[bytes] | typing.IO[bytes] | typing.IO[str],
     header: bool | int | None = None,
     compression: CsvCompression | None = None,
     sep: str | None = None,
@@ -1166,7 +1166,7 @@ def query_df(
 ) -> DuckDBPyRelation: ...
 def query_progress(*, connection: DuckDBPyConnection | None = None) -> float: ...
 def read_csv(
-    path_or_buffer: str | bytes | os.PathLike[str] | os.PathLike[bytes] | typing.IO[bytes],
+    path_or_buffer: str | bytes | os.PathLike[str] | os.PathLike[bytes] | typing.IO[bytes] | typing.IO[str],
     header: bool | int | None = None,
     compression: CsvCompression | None = None,
     sep: str | None = None,
@@ -1210,7 +1210,7 @@ def read_csv(
     strict_mode: bool | None = None,
 ) -> DuckDBPyRelation: ...
 def read_json(
-    path_or_buffer: str | bytes | os.PathLike[str],
+    path_or_buffer: str | bytes | os.PathLike[str] | os.PathLike[bytes] | typing.IO[bytes] | typing.IO[str],
     *,
     columns: ColumnsTypes | None = None,
     sample_size: int | None = None,
