@@ -10,7 +10,6 @@
 #include "duckdb/common/assert.hpp"
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/limits.hpp"
-#include "duckdb/main/client_config.hpp"
 
 namespace duckdb {
 
@@ -30,13 +29,12 @@ void VerifyArrowDatasetLoaded() {
 
 py::object PythonTableArrowArrayStreamFactory::ProduceScanner(py::object &arrow_scanner, py::handle &arrow_obj_handle,
                                                               ArrowStreamParameters &parameters,
-                                                              const ClientProperties &client_properties) {
+                                                              const shared_ptr<ClientContext> &client_context) {
 	D_ASSERT(!py::isinstance<py::capsule>(arrow_obj_handle));
 	ArrowSchemaWrapper schema;
 	PythonTableArrowArrayStreamFactory::GetSchemaInternal(arrow_obj_handle, schema);
 	ArrowTableSchema arrow_table;
-	ArrowTableFunction::PopulateArrowTableSchema(*client_properties.client_context.get_mutable(), arrow_table,
-	                                             schema.arrow_schema);
+	ArrowTableFunction::PopulateArrowTableSchema(*client_context, arrow_table, schema.arrow_schema);
 
 	auto filters = parameters.filters;
 	auto &column_list = parameters.projected_columns.columns;
@@ -50,8 +48,9 @@ py::object PythonTableArrowArrayStreamFactory::ProduceScanner(py::object &arrow_
 	}
 
 	if (has_filter) {
-		auto filter = PyArrowFilterPushdown::TransformFilter(*filters, parameters.projected_columns.projection_map,
-		                                                     filter_to_col, client_properties, arrow_table);
+		auto filter =
+		    PyArrowFilterPushdown::TransformFilter(*filters, parameters.projected_columns.projection_map, filter_to_col,
+		                                           client_context->GetClientProperties(), arrow_table);
 		if (!filter.is(py::none())) {
 			kwargs["filter"] = filter;
 		}
@@ -78,7 +77,7 @@ unique_ptr<ArrowArrayStreamWrapper> PythonTableArrowArrayStreamFactory::Produce(
 			try {
 				auto filter_expr = PolarsFilterPushdown::TransformFilter(
 				    *filters, parameters.projected_columns.projection_map, parameters.projected_columns.filter_to_col,
-				    factory->client_properties);
+				    factory->client_context->GetClientProperties());
 				if (!filter_expr.is(py::none())) {
 					lf = lf.attr("filter")(filter_expr);
 					filters_pushed = true;
@@ -139,7 +138,7 @@ unique_ptr<ArrowArrayStreamWrapper> PythonTableArrowArrayStreamFactory::Produce(
 			auto &import_cache = *DuckDBPyConnection::ImportCache();
 			py::object arrow_batch_scanner = import_cache.pyarrow.dataset.Scanner().attr("from_batches");
 			py::handle reader_handle = reader;
-			auto scanner = ProduceScanner(arrow_batch_scanner, reader_handle, parameters, factory->client_properties);
+			auto scanner = ProduceScanner(arrow_batch_scanner, reader_handle, parameters, factory->client_context);
 			auto record_batches = scanner.attr("to_reader")();
 			auto res = make_uniq<ArrowArrayStreamWrapper>();
 			auto export_to_c = record_batches.attr("_export_to_c");
@@ -177,12 +176,12 @@ unique_ptr<ArrowArrayStreamWrapper> PythonTableArrowArrayStreamFactory::Produce(
 		// If it's a scanner we have to turn it to a record batch reader, and then a scanner again since we can't stack
 		// scanners on arrow Otherwise pushed-down projections and filters will disappear like tears in the rain
 		auto record_batches = arrow_obj_handle.attr("to_reader")();
-		scanner = ProduceScanner(arrow_batch_scanner, record_batches, parameters, factory->client_properties);
+		scanner = ProduceScanner(arrow_batch_scanner, record_batches, parameters, factory->client_context);
 		break;
 	}
 	case PyArrowObjectType::Dataset: {
 		py::object arrow_scanner = arrow_obj_handle.attr("__class__").attr("scanner");
-		scanner = ProduceScanner(arrow_scanner, arrow_obj_handle, parameters, factory->client_properties);
+		scanner = ProduceScanner(arrow_scanner, arrow_obj_handle, parameters, factory->client_context);
 		break;
 	}
 	default: {

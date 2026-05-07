@@ -8,13 +8,10 @@
 #include "duckdb/common/arrow/arrow_converter.hpp"
 #include "duckdb/common/arrow/arrow_wrapper.hpp"
 #include "duckdb/common/arrow/arrow_appender.hpp"
-#include "duckdb/common/arrow/result_arrow_wrapper.hpp"
 #include "duckdb_python/arrow/arrow_array_stream.hpp"
 #include "duckdb/function/table/arrow.hpp"
 #include "duckdb/function/function.hpp"
-#include "duckdb_python/numpy/numpy_scan.hpp"
 #include "duckdb_python/arrow/arrow_export_utils.hpp"
-#include "duckdb/common/types/arrow_aux_data.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "duckdb/function/table/arrow/arrow_duck_schema.hpp"
 #include "duckdb_python/python_conversion.hpp"
@@ -22,20 +19,20 @@
 namespace duckdb {
 
 static py::list ConvertToSingleBatch(vector<LogicalType> &types, vector<string> &names, DataChunk &input,
-                                     ClientProperties &options, ClientContext &context) {
+                                     ClientContext &client_context) {
 	ArrowSchema schema;
-	ArrowConverter::ToArrowSchema(&schema, types, names, options);
+	ArrowConverter::ToArrowSchema(&schema, types, names, client_context);
 
 	py::list single_batch;
-	ArrowAppender appender(types, STANDARD_VECTOR_SIZE, options,
-	                       ArrowTypeExtensionData::GetExtensionTypes(context, types));
+	ArrowAppender appender(types, STANDARD_VECTOR_SIZE, client_context.shared_from_this(),
+	                       ArrowTypeExtensionData::GetExtensionTypes(client_context, types));
 	appender.Append(input, 0, input.size(), input.size());
 	auto array = appender.Finalize();
 	TransformDuckToArrowChunk(schema, array, single_batch);
 	return single_batch;
 }
 
-static py::object ConvertDataChunkToPyArrowTable(DataChunk &input, ClientProperties &options, ClientContext &context) {
+static py::object ConvertDataChunkToPyArrowTable(DataChunk &input, ClientContext &context) {
 	auto types = input.GetTypes();
 	vector<string> names;
 	names.reserve(types.size());
@@ -43,7 +40,7 @@ static py::object ConvertDataChunkToPyArrowTable(DataChunk &input, ClientPropert
 		names.push_back(StringUtil::Format("c%d", i));
 	}
 
-	return pyarrow::ToArrowTable(types, names, ConvertToSingleBatch(types, names, input, options, context), options);
+	return pyarrow::ToArrowTable(types, names, ConvertToSingleBatch(types, names, input, context), context);
 }
 
 // If these types are arrow canonical extensions, we must check if they are registered.
@@ -75,7 +72,7 @@ static void ConvertArrowTableToVector(const py::object &table, Vector &out, Clie
 	py::gil_scoped_release gil;
 
 	auto stream_factory =
-	    make_uniq<PythonTableArrowArrayStreamFactory>(ptr, context.GetClientProperties(), PyArrowObjectType::Table);
+	    make_uniq<PythonTableArrowArrayStreamFactory>(ptr, context.shared_from_this(), PyArrowObjectType::Table);
 	auto stream_factory_produce = PythonTableArrowArrayStreamFactory::Produce;
 	auto stream_factory_get_schema = PythonTableArrowArrayStreamFactory::GetSchema;
 
@@ -177,13 +174,6 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 
 		// owning references
 		py::object python_object;
-		// Convert the input datachunk to pyarrow
-		//		ClientProperties options;
-
-		//		if (state.HasContext()) {
-		auto &context = state.GetContext();
-		auto options = context.GetClientProperties();
-		//		}
 
 		auto result_validity = FlatVector::Validity(result);
 		SelectionVector selvec(input.size());
@@ -215,7 +205,7 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 			}
 		}
 
-		auto pyarrow_table = ConvertDataChunkToPyArrowTable(input, options, state.GetContext());
+		auto pyarrow_table = ConvertDataChunkToPyArrowTable(input, state.GetContext());
 		py::tuple column_list = pyarrow_table.attr("columns");
 
 		auto count = input.size();
@@ -454,6 +444,7 @@ public:
 		auto python_version = PY_VERSION_HEX;
 
 		auto signature_func = py::module_::import("inspect").attr("signature");
+		// TODO: we dropped support for Python < 3.10 as of DuckDB 1.5
 		if (python_version >= PYTHON_3_10_HEX) {
 			return signature_func(udf, py::arg("eval_str") = true);
 		} else {

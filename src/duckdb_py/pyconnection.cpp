@@ -763,8 +763,7 @@ shared_ptr<DuckDBPyConnection> DuckDBPyConnection::Append(const string &name, co
 shared_ptr<DuckDBPyConnection> DuckDBPyConnection::RegisterPythonObject(const string &name,
                                                                         const py::object &python_object) {
 	auto &connection = con.GetConnection();
-	auto &client = *connection.context;
-	auto object = PythonReplacementScan::ReplacementObject(python_object, name, client);
+	auto object = PythonReplacementScan::ReplacementObject(python_object, name, *connection.context);
 	auto view_rel = make_shared_ptr<ViewRelation>(connection.context, std::move(object), name);
 	bool replace = registered_objects.count(name);
 	view_rel->CreateView(name, replace, true);

@@ -43,8 +43,8 @@ DuckDBPyResult::~DuckDBPyResult() {
 	}
 }
 
-ClientProperties DuckDBPyResult::GetClientProperties() {
-	return result->client_properties;
+shared_ptr<ClientContext> DuckDBPyResult::GetClientContext() const {
+	return result->client_context;
 }
 
 const vector<string> &DuckDBPyResult::GetNames() {
@@ -138,7 +138,8 @@ Optional<py::tuple> DuckDBPyResult::Fetchone() {
 			continue;
 		}
 		auto val = current_chunk->data[col_idx].GetValue(chunk_offset);
-		res[col_idx] = PythonObject::FromValue(val, result->types[col_idx], result->client_properties);
+		res[col_idx] =
+		    PythonObject::FromValue(val, result->types[col_idx], result->client_context->GetClientProperties());
 	}
 	chunk_offset++;
 	return res;
@@ -225,8 +226,8 @@ unique_ptr<NumpyResultConversion> DuckDBPyResult::InitializeNumpyConversion(bool
 		initial_capacity = materialized.RowCount();
 	}
 
-	auto conversion =
-	    make_uniq<NumpyResultConversion>(result->types, initial_capacity, result->client_properties, pandas);
+	auto conversion = make_uniq<NumpyResultConversion>(result->types, initial_capacity,
+	                                                   result->client_context->GetClientProperties(), pandas);
 	return conversion;
 }
 
@@ -297,7 +298,8 @@ void DuckDBPyResult::ConvertDateTimeTypes(PandasDataFrame &df, bool date_as_obje
 		if (result->types[i] == LogicalType::TIMESTAMP_TZ) {
 			// first localize to UTC then convert to timezone_config
 			auto utc_local = df[names[i].c_str()].attr("dt").attr("tz_localize")("UTC");
-			auto new_value = utc_local.attr("dt").attr("tz_convert")(result->client_properties.time_zone);
+			auto new_value =
+			    utc_local.attr("dt").attr("tz_convert")(result->client_context->GetClientProperties().time_zone);
 			// We need to create the column anew because the exact dt changed to a new timezone
 			ReplaceDFColumn(df, names[i].c_str(), i, new_value);
 		} else if (date_as_object && result->types[i] == LogicalType::DATE) {
@@ -440,8 +442,7 @@ duckdb::pyarrow::Table DuckDBPyResult::FetchArrowTable(idx_t rows_per_batch, boo
 			}
 			ArrowArray data = array->arrow_array;
 			array->arrow_array.release = nullptr;
-			ArrowConverter::ToArrowSchema(&arrow_schema, arrow_result.types, result_names,
-			                              arrow_result.client_properties);
+			ArrowConverter::ToArrowSchema(&arrow_schema, arrow_result.types, result_names, *GetClientContext());
 			TransformDuckToArrowChunk(arrow_schema, data, batches);
 		}
 	} else {
@@ -453,9 +454,9 @@ duckdb::pyarrow::Table DuckDBPyResult::FetchArrowTable(idx_t rows_per_batch, boo
 			{
 				D_ASSERT(py::gil_check());
 				py::gil_scoped_release release;
-				count = ArrowUtil::FetchChunk(scan_state, query_result.client_properties, rows_per_batch, &data,
-				                              ArrowTypeExtensionData::GetExtensionTypes(
-				                                  *query_result.client_properties.client_context, query_result.types));
+				auto arrow_type_exts =
+				    ArrowTypeExtensionData::GetExtensionTypes(*GetClientContext(), query_result.types);
+				count = ArrowUtil::FetchChunk(scan_state, *GetClientContext(), rows_per_batch, &data, arrow_type_exts);
 			}
 			if (count == 0) {
 				break;
@@ -465,13 +466,12 @@ duckdb::pyarrow::Table DuckDBPyResult::FetchArrowTable(idx_t rows_per_batch, boo
 			if (to_polars) {
 				QueryResult::DeduplicateColumns(result_names);
 			}
-			ArrowConverter::ToArrowSchema(&arrow_schema, query_result.types, result_names,
-			                              query_result.client_properties);
+			ArrowConverter::ToArrowSchema(&arrow_schema, query_result.types, result_names, *GetClientContext());
 			TransformDuckToArrowChunk(arrow_schema, data, batches);
 		}
 	}
 
-	return pyarrow::ToArrowTable(result->types, names, std::move(batches), result->client_properties);
+	return pyarrow::ToArrowTable(result->types, names, std::move(batches), *GetClientContext());
 }
 
 ArrowArrayStream DuckDBPyResult::FetchArrowArrayStream(idx_t rows_per_batch) {
@@ -623,7 +623,7 @@ struct ArrowQueryResultStreamWrapper {
 		arrays = arrow_result.ConsumeArrays();
 
 		cached_schema.release = nullptr;
-		ArrowConverter::ToArrowSchema(&cached_schema, result->types, result->names, result->client_properties);
+		ArrowConverter::ToArrowSchema(&cached_schema, result->types, result->names, *result->client_context);
 
 		stream.private_data = this;
 		stream.get_schema = GetSchema;

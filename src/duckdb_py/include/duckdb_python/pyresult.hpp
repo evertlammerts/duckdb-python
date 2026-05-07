@@ -59,7 +59,7 @@ public:
 	const vector<string> &GetNames();
 	const vector<LogicalType> &GetTypes();
 
-	ClientProperties GetClientProperties();
+	shared_ptr<ClientContext> GetClientContext() const;
 
 private:
 	void FillNumpy(py::dict &res, idx_t col_idx, NumpyResultConversion &conversion, const char *name);

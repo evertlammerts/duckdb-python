@@ -1024,18 +1024,18 @@ PolarsDataFrame DuckDBPyRelation::ToPolars(idx_t batch_size, bool lazy) {
 	ArrowSchema arrow_schema;
 	auto result_names = names;
 	QueryResult::DeduplicateColumns(result_names);
-	ClientProperties client_properties;
+	shared_ptr<ClientContext> client_context;
 	if (rel) {
-		client_properties = rel->context->GetContext()->GetClientProperties();
+		client_context = rel->context->GetContext();
 	} else if (result) {
-		client_properties = result->GetClientProperties();
+		client_context = result->GetClientContext();
 	} else {
 		throw InternalException("DuckDBPyRelation To Polars must have a valid relation or result");
 	}
-	ArrowConverter::ToArrowSchema(&arrow_schema, types, result_names, client_properties);
+	ArrowConverter::ToArrowSchema(&arrow_schema, types, result_names, *client_context);
 	py::list batches;
 	// Now we create an empty arrow table
-	auto empty_table = pyarrow::ToArrowTable(types, result_names, std::move(batches), client_properties);
+	auto empty_table = pyarrow::ToArrowTable(types, result_names, std::move(batches), *client_context);
 
 	// And we extract the polars schema from the arrow table
 	auto polars_df = py::cast<PolarsDataFrame>(pybind11::module_::import("polars").attr("DataFrame")(empty_table));

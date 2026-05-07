@@ -68,9 +68,9 @@ PyArrowObjectType GetArrowType(const py::handle &obj);
 
 class PythonTableArrowArrayStreamFactory {
 public:
-	explicit PythonTableArrowArrayStreamFactory(PyObject *arrow_table, const ClientProperties &client_properties_p,
+	explicit PythonTableArrowArrayStreamFactory(PyObject *arrow_table, const shared_ptr<ClientContext> &client_context,
 	                                            PyArrowObjectType arrow_type_p)
-	    : arrow_object(arrow_table), client_properties(client_properties_p), cached_arrow_type(arrow_type_p) {
+	    : arrow_object(arrow_table), client_context(client_context), cached_arrow_type(arrow_type_p) {
 		cached_schema.release = nullptr;
 	}
 
@@ -94,7 +94,7 @@ public:
 	//! Arrow Object (i.e., Scanner, Record Batch Reader, Table, Dataset)
 	PyObject *arrow_object;
 
-	const ClientProperties client_properties;
+	const shared_ptr<ClientContext> client_context;
 	const PyArrowObjectType cached_arrow_type;
 
 	//! Cached Arrow table from an unfiltered .collect().to_arrow() on a LazyFrame.
@@ -106,7 +106,8 @@ private:
 	bool schema_cached = false;
 
 	static py::object ProduceScanner(py::object &arrow_scanner, py::handle &arrow_obj_handle,
-	                                 ArrowStreamParameters &parameters, const ClientProperties &client_properties);
+	                                 ArrowStreamParameters &parameters,
+	                                 const shared_ptr<ClientContext> &client_context);
 };
 } // namespace duckdb
 

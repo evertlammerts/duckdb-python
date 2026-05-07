@@ -17,11 +17,12 @@
 namespace duckdb {
 
 static void CreateArrowScan(const string &name, py::object entry, TableFunctionRef &table_function,
-                            vector<unique_ptr<ParsedExpression>> &children, ClientProperties &client_properties,
-                            PyArrowObjectType type, DatabaseInstance &db) {
+                            vector<unique_ptr<ParsedExpression>> &children,
+                            const shared_ptr<ClientContext> &client_context, PyArrowObjectType type) {
+	auto const db = client_context->db;
 	shared_ptr<ExternalDependency> external_dependency = make_shared_ptr<ExternalDependency>();
 	if (type == PyArrowObjectType::MessageReader) {
-		if (!db.ExtensionIsLoaded("nanoarrow")) {
+		if (!db->ExtensionIsLoaded("nanoarrow")) {
 			throw MissingExtensionException(
 			    "The nanoarrow community extension is needed to read the Arrow IPC protocol. \n You can install it "
 			    "with \"INSTALL nanoarrow FROM community;\". \n Then you can load it with \"LOAD nanoarrow;\"");
@@ -51,7 +52,7 @@ static void CreateArrowScan(const string &name, py::object entry, TableFunctionR
 		auto dependency_item = PythonDependencyItem::Create(stream_messages);
 		external_dependency->AddDependency("replacement_cache", std::move(dependency_item));
 	} else {
-		auto stream_factory = make_uniq<PythonTableArrowArrayStreamFactory>(entry.ptr(), client_properties, type);
+		auto stream_factory = make_uniq<PythonTableArrowArrayStreamFactory>(entry.ptr(), client_context, type);
 		auto stream_factory_produce = PythonTableArrowArrayStreamFactory::Produce;
 		auto stream_factory_get_schema = PythonTableArrowArrayStreamFactory::GetSchema;
 
@@ -98,8 +99,8 @@ static void ThrowScanFailureError(const py::object &entry, const string &name, c
 }
 
 unique_ptr<TableRef> PythonReplacementScan::ReplacementObject(const py::object &entry, const string &name,
-                                                              ClientContext &context, bool relation) {
-	auto replacement = TryReplacementObject(entry, name, context, relation);
+                                                              ClientContext &client_context, bool relation) {
+	auto replacement = TryReplacementObject(entry, name, client_context, relation);
 	if (!replacement) {
 		ThrowScanFailureError(entry, name);
 	}
@@ -107,8 +108,8 @@ unique_ptr<TableRef> PythonReplacementScan::ReplacementObject(const py::object &
 }
 
 unique_ptr<TableRef> PythonReplacementScan::TryReplacementObject(const py::object &entry, const string &name,
-                                                                 ClientContext &context, bool relation) {
-	auto client_properties = context.GetClientProperties();
+                                                                 ClientContext &client_context, bool relation) {
+	auto client_properties = client_context.GetClientProperties();
 	auto table_function = make_uniq<TableFunctionRef>();
 	vector<unique_ptr<ParsedExpression>> children;
 	NumpyObjectType numpytype;
@@ -116,9 +117,10 @@ unique_ptr<TableRef> PythonReplacementScan::TryReplacementObject(const py::objec
 	if (DuckDBPyConnection::IsPandasDataframe(entry)) {
 		if (PandasDataFrame::IsPyArrowBacked(entry)) {
 			auto table = PandasDataFrame::ToArrowTable(entry);
-			CreateArrowScan(name, table, *table_function, children, client_properties, PyArrowObjectType::Table,
-			                *context.db);
+			CreateArrowScan(name, table, *table_function, children, client_context.shared_from_this(),
+			                PyArrowObjectType::Table);
 		} else {
+			// TODO: this smells like a bug
 			string name = "df_" + StringUtil::GenerateRandomName();
 			auto new_df = PandasScanFunction::PandasReplaceCopiedNames(entry);
 			children.push_back(make_uniq<ConstantExpression>(Value::POINTER(CastPointerToValue(new_df.ptr()))));
@@ -130,7 +132,7 @@ unique_ptr<TableRef> PythonReplacementScan::TryReplacementObject(const py::objec
 		}
 	} else if (DuckDBPyRelation::IsRelation(entry)) {
 		auto pyrel = py::cast<DuckDBPyRelation *>(entry);
-		if (!pyrel->CanBeRegisteredBy(context)) {
+		if (!pyrel->CanBeRegisteredBy(client_context)) {
 			throw InvalidInputException(
 			    "Python Object \"%s\" of type \"DuckDBPyRelation\" not suitable for replacement scan.\nThe object was "
 			    "created by another Connection and can therefore not be used by this Connection.",
@@ -149,14 +151,14 @@ unique_ptr<TableRef> PythonReplacementScan::TryReplacementObject(const py::objec
 		// Polars's __arrow_c_stream__() serializes from its internal layout on every call,
 		// which is expensive for repeated scans. The .to_arrow() path converts once.
 		auto arrow_dataset = entry.attr("to_arrow")();
-		CreateArrowScan(name, arrow_dataset, *table_function, children, client_properties, PyArrowObjectType::Table,
-		                *context.db);
+		CreateArrowScan(name, arrow_dataset, *table_function, children, client_context.shared_from_this(),
+		                PyArrowObjectType::Table);
 	} else if (PolarsDataFrame::IsLazyFrame(entry)) {
-		CreateArrowScan(name, entry, *table_function, children, client_properties, PyArrowObjectType::PolarsLazyFrame,
-		                *context.db);
+		CreateArrowScan(name, entry, *table_function, children, client_context.shared_from_this(),
+		                PyArrowObjectType::PolarsLazyFrame);
 	} else if ((arrow_type = DuckDBPyConnection::GetArrowType(entry)) != PyArrowObjectType::Invalid &&
 	           !(arrow_type == PyArrowObjectType::MessageReader && !relation)) {
-		CreateArrowScan(name, entry, *table_function, children, client_properties, arrow_type, *context.db);
+		CreateArrowScan(name, entry, *table_function, children, client_context.shared_from_this(), arrow_type);
 	} else if (DuckDBPyConnection::IsAcceptedNumpyObject(entry) != NumpyObjectType::INVALID) {
 		numpytype = DuckDBPyConnection::IsAcceptedNumpyObject(entry);
 		string np_name = "np_" + StringUtil::GenerateRandomName();
@@ -205,7 +207,7 @@ static bool IsBuiltinFunction(const py::object &object) {
 	return py::isinstance(object, import_cache_py.types.BuiltinFunctionType());
 }
 
-static unique_ptr<TableRef> TryReplacement(py::dict &dict, const string &name, ClientContext &context,
+static unique_ptr<TableRef> TryReplacement(py::dict &dict, const string &name, ClientContext &client_context,
                                            py::object &current_frame) {
 	auto table_name = py::str(name);
 	if (!dict.contains(table_name)) {
@@ -218,7 +220,7 @@ static unique_ptr<TableRef> TryReplacement(py::dict &dict, const string &name, C
 		return nullptr;
 	}
 
-	auto result = PythonReplacementScan::TryReplacementObject(entry, name, context);
+	auto result = PythonReplacementScan::TryReplacementObject(entry, name, client_context);
 	if (!result) {
 		std::string location = py::cast<py::str>(current_frame.attr("f_code").attr("co_filename"));
 		location += ":";
@@ -228,9 +230,9 @@ static unique_ptr<TableRef> TryReplacement(py::dict &dict, const string &name, C
 	return result;
 }
 
-static unique_ptr<TableRef> ReplaceInternal(ClientContext &context, const string &table_name) {
+static unique_ptr<TableRef> ReplaceInternal(ClientContext &client_context, const string &table_name) {
 	Value result;
-	auto lookup_result = context.TryGetCurrentSetting("python_enable_replacements", result);
+	auto lookup_result = client_context.TryGetCurrentSetting("python_enable_replacements", result);
 	D_ASSERT((bool)lookup_result);
 	auto enabled = result.GetValue<bool>();
 
@@ -238,7 +240,7 @@ static unique_ptr<TableRef> ReplaceInternal(ClientContext &context, const string
 		return nullptr;
 	}
 
-	lookup_result = context.TryGetCurrentSetting("python_scan_all_frames", result);
+	lookup_result = client_context.TryGetCurrentSetting("python_scan_all_frames", result);
 	D_ASSERT((bool)lookup_result);
 	auto scan_all_frames = result.GetValue<bool>();
 
@@ -268,7 +270,7 @@ static unique_ptr<TableRef> ReplaceInternal(ClientContext &context, const string
 		if (has_locals) {
 			// search local dictionary
 			auto local_dict = py::cast<py::dict>(local_dict_p);
-			auto result = TryReplacement(local_dict, table_name, context, current_frame);
+			auto result = TryReplacement(local_dict, table_name, client_context, current_frame);
 			if (result) {
 				return result;
 			}
@@ -283,7 +285,7 @@ static unique_ptr<TableRef> ReplaceInternal(ClientContext &context, const string
 		if (has_globals) {
 			auto global_dict = py::cast<py::dict>(global_dict_p);
 			// search global dictionary
-			auto result = TryReplacement(global_dict, table_name, context, current_frame);
+			auto result = TryReplacement(global_dict, table_name, client_context, current_frame);
 			if (result) {
 				return result;
 			}
@@ -297,16 +299,16 @@ static unique_ptr<TableRef> ReplaceInternal(ClientContext &context, const string
 	return nullptr;
 }
 
-unique_ptr<TableRef> PythonReplacementScan::Replace(ClientContext &context, ReplacementScanInput &input,
+unique_ptr<TableRef> PythonReplacementScan::Replace(ClientContext &client_context, ReplacementScanInput &input,
                                                     optional_ptr<ReplacementScanData> data) {
 	auto &table_name = input.table_name;
-	auto &config = DBConfig::GetConfig(context);
+	auto &config = DBConfig::GetConfig(client_context);
 	if (!Settings::Get<EnableExternalAccessSetting>(config)) {
 		return nullptr;
 	}
 
 	unique_ptr<TableRef> result;
-	result = ReplaceInternal(context, table_name);
+	result = ReplaceInternal(client_context, table_name);
 	return result;
 }
 
