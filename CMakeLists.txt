@@ -57,6 +57,11 @@ target_include_directories(
   INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/duckdb_py/include>
 )
 
+# We link duckdb_static. Without this define, duckdb.h marks C API symbols
+# __declspec(dllimport) on Windows, producing unresolvable __imp_* references at
+# link time. No-op on non-Windows.
+target_compile_definitions(_duckdb_dependencies INTERFACE DUCKDB_STATIC_BUILD)
+
 # ────────────────────────────────────────────
 # Descend into the real DuckDB‑Python sources
 # ────────────────────────────────────────────
