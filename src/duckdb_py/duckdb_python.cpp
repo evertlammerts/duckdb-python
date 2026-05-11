@@ -1051,22 +1051,16 @@ static void RegisterExpectedResultType(py::handle &m) {
 }
 
 // ######################################################################
-// Symbol exports
+// Force inclusion of symbols that are not referenced by any code in the
+// Python module but must be present in the shared object.
 //
-// We want to limit the symbols we export to only the absolute minimum.
-// This means we compile with -fvisibility=hidden to hide all symbols,
-// and then explicitly export only the symbols we want.
+// duckdb_adbc_init: entrypoint for the ADBC driver. Not called from Python
+//   code, but loaded by adbc_driver_manager via dlsym/GetProcAddress.
 //
-// Right now we export two symbols only:
-// - duckdb_adbc_init: the entrypoint for our ADBC driver
-// - PyInit__duckdb: the entrypoint for the python extension
-//
-// All symbols that need exporting must be added to both the list below
-// AND to CMakeLists.txt.
+// Without this, the linker may strip these as dead code.
 extern "C" {
 PYBIND11_EXPORT void *_force_symbol_inclusion() {
 	static void *symbols[] = {
-	    // Add functions to export here
 	    (void *)&duckdb_adbc_init,
 	};
 	return symbols;
