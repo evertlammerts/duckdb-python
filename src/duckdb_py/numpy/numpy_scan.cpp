@@ -4,6 +4,8 @@
 #include "duckdb_python/python_conversion.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/timestamp.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
+#include "duckdb/common/vector/map_vector.hpp"
 #include "utf8proc_wrapper.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb_python/pandas/pandas_bind.hpp"
@@ -20,7 +22,7 @@ template <class T>
 void ScanNumpyColumn(py::array &numpy_col, idx_t stride, idx_t offset, Vector &out, idx_t count) {
 	auto src_ptr = (T *)numpy_col.data();
 	if (stride == sizeof(T)) {
-		FlatVector::SetData(out, data_ptr_cast(src_ptr + offset));
+		FlatVector::SetData(out, data_ptr_cast(src_ptr + offset), count_t(count));
 	} else {
 		auto tgt_ptr = (T *)FlatVector::GetData(out);
 		for (idx_t i = 0; i < count; i++) {
@@ -33,7 +35,7 @@ template <class T, class V>
 void ScanNumpyCategoryTemplated(py::array &column, idx_t offset, Vector &out, idx_t count) {
 	auto src_ptr = (T *)column.data();
 	auto tgt_ptr = (V *)FlatVector::GetData(out);
-	auto &tgt_mask = FlatVector::Validity(out);
+	auto &tgt_mask = FlatVector::ValidityMutable(out);
 	for (idx_t i = 0; i < count; i++) {
 		if (src_ptr[i + offset] == -1) {
 			// Null value
@@ -76,7 +78,7 @@ void ScanNumpyMasked(PandasColumnBindData &bind_data, idx_t count, idx_t offset,
 	auto &numpy_col = reinterpret_cast<PandasNumpyColumn &>(*bind_data.pandas_col);
 	ScanNumpyColumn<T>(numpy_col.array, numpy_col.stride, offset, out, count);
 	if (bind_data.mask) {
-		auto &result_mask = FlatVector::Validity(out);
+		auto &result_mask = FlatVector::ValidityMutable(out);
 		ApplyMask(bind_data, result_mask, count, offset);
 	}
 }
@@ -84,27 +86,26 @@ void ScanNumpyMasked(PandasColumnBindData &bind_data, idx_t count, idx_t offset,
 template <class T>
 void ScanNumpyFpColumn(PandasColumnBindData &bind_data, const T *src_ptr, idx_t stride, idx_t count, idx_t offset,
                        Vector &out) {
-	auto &mask = FlatVector::Validity(out);
 	if (stride == sizeof(T)) {
-		FlatVector::SetData(out, (data_ptr_t)(src_ptr + offset)); // NOLINT
+		FlatVector::SetData(out, (data_ptr_t)(src_ptr + offset), count_t(count)); // NOLINT
 		// Turn NaN values into NULL
 		auto tgt_ptr = FlatVector::GetData<T>(out);
 		for (idx_t i = 0; i < count; i++) {
 			if (Value::IsNan<T>(tgt_ptr[i])) {
-				mask.SetInvalid(i);
+				FlatVector::ValidityMutable(out).SetInvalid(i);
 			}
 		}
 	} else {
-		auto tgt_ptr = FlatVector::GetData<T>(out);
+		auto tgt_ptr = FlatVector::GetDataMutable<T>(out);
 		for (idx_t i = 0; i < count; i++) {
 			tgt_ptr[i] = src_ptr[stride / sizeof(T) * (i + offset)];
 			if (Value::IsNan<T>(tgt_ptr[i])) {
-				mask.SetInvalid(i);
+				FlatVector::ValidityMutable(out).SetInvalid(i);
 			}
 		}
 	}
 	if (bind_data.mask) {
-		auto &result_mask = FlatVector::Validity(out);
+		auto &result_mask = FlatVector::ValidityMutable(out);
 		ApplyMask(bind_data, result_mask, count, offset);
 	}
 }
@@ -131,12 +132,12 @@ static string_t DecodePythonUnicode(T *codepoints, idx_t codepoint_count, Vector
 }
 
 static void SetInvalidRecursive(Vector &out, idx_t index) {
-	auto &validity = FlatVector::Validity(out);
+	auto &validity = FlatVector::ValidityMutable(out);
 	validity.SetInvalid(index);
 	if (out.GetType().InternalType() == PhysicalType::STRUCT) {
 		auto &children = StructVector::GetEntries(out);
 		for (idx_t i = 0; i < children.size(); i++) {
-			SetInvalidRecursive(*children[i], index);
+			SetInvalidRecursive(children[i], index);
 		}
 	}
 }
@@ -246,8 +247,7 @@ void NumpyScan::Scan(PandasColumnBindData &bind_data, idx_t count, idx_t offset,
 	case NumpyNullableType::DATETIME_US:
 	case NumpyNullableType::DATETIME_S: {
 		auto src_ptr = reinterpret_cast<const int64_t *>(array.data());
-		auto tgt_ptr = FlatVector::GetData<timestamp_t>(out);
-		auto &mask = FlatVector::Validity(out);
+		auto tgt_ptr = FlatVector::GetDataMutable<timestamp_t>(out);
 
 		using timestamp_convert_func = std::function<timestamp_t(int64_t)>;
 		timestamp_convert_func convert_func;
@@ -288,13 +288,13 @@ void NumpyScan::Scan(PandasColumnBindData &bind_data, idx_t count, idx_t offset,
 			auto source_idx = stride / sizeof(int64_t) * (row + offset);
 			if (src_ptr[source_idx] <= NumericLimits<int64_t>::Minimum()) {
 				// pandas Not a Time (NaT)
-				mask.SetInvalid(row);
+				FlatVector::ValidityMutable(out).SetInvalid(row);
 				continue;
 			}
 
 			// Direct conversion, we've already matched the numpy type with the equivalent duckdb type
 			auto input = timestamp_t(src_ptr[source_idx]);
-			if (Timestamp::IsFinite(input)) {
+			if (Value::IsFinite(input)) {
 				tgt_ptr[row] = convert_func(src_ptr[source_idx]);
 			} else {
 				tgt_ptr[row] = input;
@@ -307,8 +307,8 @@ void NumpyScan::Scan(PandasColumnBindData &bind_data, idx_t count, idx_t offset,
 	case NumpyNullableType::TIMEDELTA_MS:
 	case NumpyNullableType::TIMEDELTA_S: {
 		auto src_ptr = reinterpret_cast<const int64_t *>(array.data());
-		auto tgt_ptr = FlatVector::GetData<interval_t>(out);
-		auto &mask = FlatVector::Validity(out);
+		auto tgt_ptr = FlatVector::GetDataMutable<interval_t>(out);
+		auto &mask = FlatVector::ValidityMutable(out);
 
 		for (idx_t row = 0; row < count; row++) {
 			auto source_idx = stride / sizeof(int64_t) * (row + offset);
@@ -359,8 +359,8 @@ void NumpyScan::Scan(PandasColumnBindData &bind_data, idx_t count, idx_t offset,
 		}
 
 		// Get the data pointer and the validity mask of the result vector
-		auto tgt_ptr = FlatVector::GetData<string_t>(out);
-		auto &out_mask = FlatVector::Validity(out);
+		auto tgt_ptr = FlatVector::GetDataMutable<string_t>(out);
+		auto &out_mask = FlatVector::ValidityMutable(out);
 		unique_ptr<PythonGILWrapper> gil;
 		auto &import_cache = *DuckDBPyConnection::ImportCache();
 

@@ -69,7 +69,7 @@ static LogicalType BindColumn(PandasBindColumn &column_p, PandasColumnBindData &
 			vector<string> enum_entries = py::cast<vector<string>>(categories);
 			idx_t size = enum_entries.size();
 			Vector enum_entries_vec(LogicalType::VARCHAR, size);
-			auto enum_entries_ptr = FlatVector::GetData<string_t>(enum_entries_vec);
+			auto enum_entries_ptr = FlatVector::GetDataMutable<string_t>(enum_entries_vec);
 			for (idx_t i = 0; i < size; i++) {
 				enum_entries_ptr[i] = StringVector::AddStringOrBlob(enum_entries_vec, enum_entries[i]);
 			}

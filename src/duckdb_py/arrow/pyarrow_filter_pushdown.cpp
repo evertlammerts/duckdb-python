@@ -32,7 +32,7 @@ string ConvertTimestampUnit(ArrowDateTimeType unit) {
 
 int64_t ConvertTimestampTZValue(int64_t base_value, ArrowDateTimeType datetime_type) {
 	auto input = timestamp_t(base_value);
-	if (!Timestamp::IsFinite(input)) {
+	if (!Value::IsFinite(input)) {
 		return base_value;
 	}
 

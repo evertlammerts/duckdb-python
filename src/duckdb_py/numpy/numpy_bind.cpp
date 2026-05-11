@@ -46,7 +46,7 @@ void NumpyBind::Bind(const ClientContext &context, py::handle df, vector<PandasC
 			vector<string> enum_entries = py::cast<vector<string>>(uniq.attr("__getitem__")(0));
 			idx_t size = enum_entries.size();
 			Vector enum_entries_vec(LogicalType::VARCHAR, size);
-			auto enum_entries_ptr = FlatVector::GetData<string_t>(enum_entries_vec);
+			auto enum_entries_ptr = FlatVector::GetDataMutable<string_t>(enum_entries_vec);
 			for (idx_t i = 0; i < size; i++) {
 				enum_entries_ptr[i] = StringVector::AddStringOrBlob(enum_entries_vec, enum_entries[i]);
 			}
