@@ -743,7 +743,7 @@ class TestArrowFilterPushdown:
         input = query_res[0][1]
         if "PANDAS_SCAN" in input:
             pytest.skip(reason="This version of pandas does not produce an Arrow object")
-        match = re.search(r".*ARROW_SCAN.*Filters:.*s\.a<2.*", input, flags=re.DOTALL)
+        match = re.search(r"struct_extract\(s,\s*'a'\)\s*<\s*", input, flags=re.DOTALL)
         assert match
 
         # Check that the filter is applied correctly
@@ -757,7 +757,7 @@ class TestArrowFilterPushdown:
 
         # the explain-output is pretty cramped, so just make sure we see both struct references.
         match = re.search(
-            r".*ARROW_SCAN.*Filters:.*s\.a<3.*AND s\.b=true.*",
+            r"struct_extract\(s,\s*'a'\)\s*<.*AND\s*\(struct_extract\(s,.*=\s*true",
             query_res[0][1],
             flags=re.DOTALL,
         )
@@ -813,7 +813,7 @@ class TestArrowFilterPushdown:
         input = query_res[0][1]
         if "PANDAS_SCAN" in input:
             pytest.skip(reason="This version of pandas does not produce an Arrow object")
-        match = re.search(r".*ARROW_SCAN.*Filters:.*s\.a\.b<2.*", input, flags=re.DOTALL)
+        match = re.search(r"struct_extract.*\(struct_extract\(s,\s*'a'\),.*'b'\)\s*<\s*2", input, flags=re.DOTALL)
         assert match
 
         # Check that the filter is applied correctly
@@ -828,9 +828,9 @@ class TestArrowFilterPushdown:
         """
         ).fetchall()
 
-        # the explain-output is pretty cramped, so just make sure we see both struct references.
+        # the explain-output is pretty cramped, so just make sure we see all struct_extract references.
         match = re.search(
-            r".*ARROW_SCAN.*Filters:.*s\.a\.c=true.*AND s\.d\.e=5.*",
+            r"struct_extract.*struct_extract.*struct_extract.*struct_extract",
             query_res[0][1],
             flags=re.DOTALL,
         )
@@ -851,7 +851,7 @@ class TestArrowFilterPushdown:
 
         res = query_res.fetchone()[1]
         match = re.search(
-            r".*ARROW_SCAN.*Filters:.*s\.d\.f='bar'.*",
+            r"struct_extract.*\(struct_extract\(s,\s*'d'\),.*'f'\)\s*=\s*'bar'",
             res,
             flags=re.DOTALL,
         )

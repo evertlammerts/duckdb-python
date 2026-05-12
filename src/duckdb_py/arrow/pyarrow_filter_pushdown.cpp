@@ -1,6 +1,6 @@
 #include "duckdb_python/arrow/pyarrow_filter_pushdown.hpp"
 
-#include "duckdb/common/types/value_map.hpp"
+#include "duckdb/function/scalar/struct_utils.hpp"
 #include "duckdb/planner/filter/in_filter.hpp"
 #include "duckdb/planner/filter/optional_filter.hpp"
 #include "duckdb/planner/filter/conjunction_filter.hpp"
@@ -10,8 +10,9 @@
 
 #include "duckdb_python/pyconnection/pyconnection.hpp"
 #include "duckdb_python/pyrelation.hpp"
-#include "duckdb_python/pyresult.hpp"
 #include "duckdb/function/table/arrow.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
+#include "duckdb/planner/filter/expression_filter.hpp"
 
 namespace duckdb {
 
@@ -26,7 +27,8 @@ string ConvertTimestampUnit(ArrowDateTimeType unit) {
 	case ArrowDateTimeType::SECONDS:
 		return "s";
 	default:
-		throw NotImplementedException("DatetimeType not recognized in ConvertTimestampUnit: %d", (int)unit);
+		throw NotImplementedException("DatetimeType not recognized in ConvertTimestampUnit: %d",
+		                              static_cast<int>(unit));
 	}
 }
 
@@ -50,7 +52,7 @@ int64_t ConvertTimestampTZValue(int64_t base_value, ArrowDateTimeType datetime_t
 	}
 }
 
-py::object GetScalar(Value &constant, const string &timezone_config, const ArrowType &type) {
+py::object GetScalar(const Value &constant, const string &timezone_config, const ArrowType &type) {
 	auto &import_cache = *DuckDBPyConnection::ImportCache();
 	auto scalar = import_cache.pyarrow.scalar();
 	py::handle dataset_scalar = import_cache.pyarrow.dataset().attr("scalar");
@@ -169,8 +171,180 @@ static py::list TransformInList(const InFilter &in) {
 	return res;
 }
 
+struct ResolvedColumn {
+	vector<string> path;
+	reference<const ArrowType> leaf_type;
+};
+
+// Resolves a column-side expression to (full path, leaf ArrowType). Handles bare BoundReferenceExpression and (nested)
+// struct_extract chains. Throws NotImplementedException for any other input.
+ResolvedColumn ResolveColumn(const Expression &expr, const vector<string> &root_path, const ArrowType &root_type) {
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_REF) {
+		return {root_path, root_type};
+	}
+	if (expr.GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
+		throw NotImplementedException("Cannot push down arrow scan filter on column-side expression: %s",
+		                              ExpressionClassToString(expr.GetExpressionClass()));
+	}
+	auto &func = expr.Cast<BoundFunctionExpression>();
+	idx_t child_idx;
+	if (!TryGetStructExtractChildIndex(func, child_idx)) {
+		throw InternalException("Cannot push down arrow scan filter on column-side function: %s\n",
+		                        ExpressionTypeToString(expr.GetExpressionType()));
+	}
+	// Recurse innermost-first so names accumulate root -> leaf.
+	auto inner = ResolveColumn(*func.children[0], root_path, root_type);
+	inner.path.push_back(StructType::GetChildName(func.children[0]->GetReturnType(), child_idx));
+	inner.leaf_type = inner.leaf_type.get().GetTypeInfo<ArrowStructInfo>().GetChild(child_idx);
+	return inner;
+}
+
+py::object TransformExpressionRecursive(const Expression &expression, const vector<string> &column_ref,
+                                        const string &timezone_config, const ArrowType &type) {
+	fprintf(stderr, "!!!! EXPRESSION CLASS = %s\n", ExpressionClassToString(expression.GetExpressionClass()).c_str());
+	fprintf(stderr, "!!!! EXPRESSION TYPE = %s\n", ExpressionTypeToString(expression.GetExpressionType()).c_str());
+
+	auto &import_cache = *DuckDBPyConnection::ImportCache();
+	const py::object field = import_cache.pyarrow.dataset().attr("field");
+	auto expression_type = expression.GetExpressionType();
+
+	if (expression.GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
+		auto &bound_function_expression = expression.Cast<BoundFunctionExpression>();
+
+		// ExpressionType::COMPARE_*
+		if (BoundComparisonExpression::IsComparison(expression_type)) {
+			// Comparisons have a column-side and a constant-side. We first resolve them.
+			auto &left = BoundComparisonExpression::Left(bound_function_expression);
+			auto &right = BoundComparisonExpression::Right(bound_function_expression);
+
+			optional_ptr<const Expression> column_side;
+			optional_ptr<const BoundConstantExpression> constant_side;
+
+			if (right.GetExpressionType() == ExpressionType::VALUE_CONSTANT) {
+				column_side = &left;
+				constant_side = &right.Cast<BoundConstantExpression>();
+			} else if (left.GetExpressionType() == ExpressionType::VALUE_CONSTANT) {
+				column_side = &right;
+				constant_side = &left.Cast<BoundConstantExpression>();
+				expression_type = FlipComparisonExpression(expression_type);
+			} else {
+				fprintf(stderr, "!!!! NOT A CONSTANT COMPARISON\n");
+				throw NotImplementedException("Can only push down constant comparisons.");
+			}
+
+			// Get the column-side path and arrow type and the matching reference field and constant value
+			auto [path, leaf_type] = ResolveColumn(*column_side, column_ref, type);
+			const auto reference_field = field(py::tuple(py::cast(path)));
+			const auto constant_py_value = GetScalar(constant_side->value, timezone_config, leaf_type);
+
+			// And finally, apply the comparison:
+			// 1. Special handling for NaN comparisons (to explicitly violate IEEE-754)
+			auto is_nan = false;
+			if (constant_side->value.type() == LogicalTypeId::FLOAT) {
+				is_nan = Value::IsNan(constant_side->value.GetValue<float>());
+			} else if (constant_side->value.type() == LogicalTypeId::DOUBLE) {
+				is_nan = Value::IsNan(constant_side->value.GetValue<double>());
+			}
+			if (is_nan) {
+				switch (expression_type) {
+				case ExpressionType::COMPARE_EQUAL:
+				case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
+					return reference_field.attr("is_nan")();
+				case ExpressionType::COMPARE_LESSTHAN:
+				case ExpressionType::COMPARE_NOTEQUAL:
+					return reference_field.attr("is_nan")().attr("__invert__")();
+				case ExpressionType::COMPARE_GREATERTHAN:
+					// Nothing is greater than NaN
+					return import_cache.pyarrow.dataset().attr("scalar")(false);
+				case ExpressionType::COMPARE_LESSTHANOREQUALTO:
+					// Everything is less than or equal to NaN
+					return import_cache.pyarrow.dataset().attr("scalar")(true);
+				default:
+					throw NotImplementedException("Unsupported comparison type (%s) for NaN values",
+					                              ExpressionTypeToString(expression_type));
+				}
+			}
+			// 2. Regular handling for non-NaN comparisons
+			switch (expression_type) {
+			case ExpressionType::COMPARE_EQUAL:
+				return reference_field.attr("__eq__")(constant_py_value);
+			case ExpressionType::COMPARE_NOTEQUAL:
+				return reference_field.attr("__ne__")(constant_py_value);
+			case ExpressionType::COMPARE_LESSTHAN:
+				return reference_field.attr("__lt__")(constant_py_value);
+			case ExpressionType::COMPARE_GREATERTHAN:
+				return reference_field.attr("__gt__")(constant_py_value);
+			case ExpressionType::COMPARE_LESSTHANOREQUALTO:
+				return reference_field.attr("__le__")(constant_py_value);
+			case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
+				return reference_field.attr("__ge__")(constant_py_value);
+			default:
+				throw NotImplementedException("Comparison Type %s can't be an Arrow Scan Pushdown Filter",
+				                              ExpressionTypeToString(expression_type));
+			}
+		}
+	}
+	if (expression.GetExpressionClass() == ExpressionClass::BOUND_OPERATOR) {
+		// ExpressionType::OPERATOR_IS_NULL
+		if (expression_type == ExpressionType::OPERATOR_IS_NULL) {
+			auto &column_side = expression.Cast<BoundOperatorExpression>().children[0];
+			auto [path, leaf_type] = ResolveColumn(*column_side, column_ref, type);
+			const auto reference_field = field(py::tuple(py::cast(path)));
+			return reference_field.attr("is_null")();
+		}
+		// ExpressionType::OPERATOR_IS_NOT_NULL
+		if (expression_type == ExpressionType::OPERATOR_IS_NOT_NULL) {
+			auto &column_side = expression.Cast<BoundOperatorExpression>().children[0];
+			auto [path, leaf_type] = ResolveColumn(*column_side, column_ref, type);
+			const auto reference_field = field(py::tuple(py::cast(path)));
+			return reference_field.attr("is_valid")();
+		}
+		// ExpressionType::COMPARE_IN
+		if (expression_type == ExpressionType::COMPARE_IN) {
+			auto &op_expr = expression.Cast<BoundOperatorExpression>();
+			auto &column_side = op_expr.children[0];
+			auto [path, leaf_type] = ResolveColumn(*column_side, column_ref, type);
+			const auto duck_type = leaf_type.get().GetDuckType();
+			const auto reference_field = field(py::tuple(py::cast(path)));
+			py::list in_list;
+			for (idx_t i = 1; i < op_expr.children.size(); i++) {
+				ClientProperties default_properties;
+				auto &const_expr = op_expr.children[i]->Cast<BoundConstantExpression>();
+				in_list.append(PythonObject::FromValue(const_expr.value, duck_type, default_properties));
+			}
+			return reference_field.attr("isin")(std::move(in_list));
+		}
+	}
+	if (expression.GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION) {
+		// ExpressionType::CONJUNCTION_OR || ExpressionType::CONJUNCTION_AND
+		if (expression_type == ExpressionType::CONJUNCTION_OR || expression_type == ExpressionType::CONJUNCTION_AND) {
+			const auto pyarrow_function = expression_type == ExpressionType::CONJUNCTION_OR ? "__or__" : "__and__";
+			auto &or_expr = expression.Cast<BoundConjunctionExpression>();
+			py::object pyarrow_expression = py::none();
+			for (idx_t i = 0; i < or_expr.children.size(); i++) {
+				const auto &child_expr = or_expr.children[i];
+				py::object pyarrow_child_expression =
+				    TransformExpressionRecursive(*child_expr, column_ref, timezone_config, type);
+				if (pyarrow_child_expression.is(py::none())) {
+					continue;
+				}
+				if (pyarrow_expression.is(py::none())) {
+					pyarrow_expression = std::move(pyarrow_child_expression);
+				} else {
+					pyarrow_expression = pyarrow_expression.attr(pyarrow_function)(pyarrow_child_expression);
+				}
+			}
+			return pyarrow_expression;
+		}
+	}
+	fprintf(stderr, "!!!! EXPRESSION NOT PUSHED DOWN!\n");
+	throw NotImplementedException("Pushdown Filter Type %s is not currently supported in PyArrow Scans",
+	                              ExpressionClassToString(expression.GetExpressionClass()));
+}
+
 py::object TransformFilterRecursive(TableFilter &filter, vector<string> column_ref, const string &timezone_config,
                                     const ArrowType &type) {
+	fprintf(stderr, "!!!! FILTER TYPE = %s\n", EnumUtil::ToString(filter.filter_type).c_str());
 	auto &import_cache = *DuckDBPyConnection::ImportCache();
 	py::object field = import_cache.pyarrow.dataset().attr("field");
 	switch (filter.filter_type) {
@@ -302,6 +476,10 @@ py::object TransformFilterRecursive(TableFilter &filter, vector<string> column_r
 	case TableFilterType::DYNAMIC_FILTER: {
 		//! Ignore dynamic filters for now, not necessary for correctness
 		return py::none();
+	}
+	case TableFilterType::EXPRESSION_FILTER: {
+		auto &expression_filter = filter.Cast<ExpressionFilter>();
+		return TransformExpressionRecursive(*expression_filter.expr, column_ref, timezone_config, type);
 	}
 	default:
 		throw NotImplementedException("Pushdown Filter Type %s is not currently supported in PyArrow Scans",

@@ -269,7 +269,7 @@ struct ArrayConvert {
 		auto array_size = ArrayType::GetSize(array_type);
 		auto array_offset = array_index * array_size;
 		auto child_size = ArrayVector::GetTotalSize(input);
-		auto &child_vector = ArrayVector::GetEntry(input);
+		auto &child_vector = ArrayVector::GetChildMutable(input);
 
 		return InternalCreateList(child_vector, child_size, array_offset, array_size, append_data);
 	}
