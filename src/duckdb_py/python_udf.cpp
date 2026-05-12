@@ -203,7 +203,6 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 					}
 				}
 				if (any_null) {
-					FlatVector::ValidityMutable(result).SetInvalid(i);
 					continue;
 				}
 				selvec.set_index(index++, i);
@@ -261,13 +260,14 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 			}
 			if (count) {
 				SelectionVector inverted(input_size);
-				// Create a SelVec that inverts the filtering
-				// example: count: 6, null_indices: 1,3
-				// input selvec: [0, 2, 4, 5]
-				// inverted selvec: [0, 0, 1, 1, 2, 3]
+				// Map each target row back to a source row in temp. Non-null target rows map to
+				// their UDF output; null target rows point at the next non-null source row (their
+				// data is later masked out by SetNull).
+				// example: input_size: 6, null_indices: 1,3
+				// selvec (non-null indices): [0, 2, 4, 5]
+				// inverted selvec:           [0, 1, 1, 2, 2, 3]
 				idx_t src_index = 0;
 				for (idx_t i = 0; i < input_size; i++) {
-					// Fill the gaps with the previous index
 					inverted.set_index(i, src_index);
 					if (src_index + 1 < count && selvec.get_index(src_index) == i) {
 						src_index++;
@@ -275,8 +275,16 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 				}
 				VectorOperations::Copy(temp, result, inverted, count, 0, 0, input_size);
 			}
+			// Apply the null mask: any position not present in selvec was a null input row.
+			// VectorOperations::Copy unconditionally overwrites the result's validity from
+			// the source's, so we must do this after the Copy.
+			idx_t sel_idx = 0;
 			for (idx_t i = 0; i < input_size; i++) {
-				FlatVector::SetNull(result, i, !FlatVector::Validity(result).RowIsValid(i));
+				if (sel_idx < count && selvec.get_index(sel_idx) == i) {
+					sel_idx++;
+				} else {
+					FlatVector::SetNull(result, i, true);
+				}
 			}
 			result.Verify();
 		} else {
