@@ -129,8 +129,8 @@ static void ConvertArrowTableToVector(const py::object &table, Vector &out, Clie
 	}
 
 	VectorOperations::Cast(context, result.data[0], out, count);
-	out.Flatten(count);
-	out.Verify(count);
+	out.Flatten();
+	out.Verify();
 }
 
 static string NullHandlingError() {
@@ -149,7 +149,7 @@ static ValidityMask &GetResultValidity(Vector &result) {
 	if (vector_type == VectorType::CONSTANT_VECTOR) {
 		return ConstantVector::Validity(result);
 	} else if (vector_type == VectorType::FLAT_VECTOR) {
-		return FlatVector::Validity(result);
+		return FlatVector::ValidityMutable(result);
 	} else {
 		throw InternalException("VectorType %s was not expected here (GetResultValidity)",
 		                        EnumUtil::ToString(vector_type));
@@ -157,9 +157,8 @@ static ValidityMask &GetResultValidity(Vector &result) {
 }
 
 static void VerifyVectorizedNullHandling(Vector &result, idx_t count) {
-	auto &validity = GetResultValidity(result);
 
-	if (validity.AllValid()) {
+	if (const auto &validity = GetResultValidity(result); validity.CannotHaveNull()) {
 		return;
 	}
 
@@ -185,13 +184,12 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 		auto options = context.GetClientProperties();
 		//		}
 
-		auto result_validity = FlatVector::Validity(result);
 		SelectionVector selvec(input.size());
 		idx_t input_size = input.size();
 		if (default_null_handling) {
 			vector<UnifiedVectorFormat> vec_data(input.ColumnCount());
 			for (idx_t i = 0; i < input.ColumnCount(); i++) {
-				input.data[i].ToUnifiedFormat(input.size(), vec_data[i]);
+				input.data[i].ToUnifiedFormat(vec_data[i]);
 			}
 
 			idx_t index = 0;
@@ -205,7 +203,7 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 					}
 				}
 				if (any_null) {
-					result_validity.SetInvalid(i);
+					FlatVector::ValidityMutable(result).SetInvalid(i);
 					continue;
 				}
 				selvec.set_index(index++, i);
@@ -278,9 +276,9 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 				VectorOperations::Copy(temp, result, inverted, count, 0, 0, input_size);
 			}
 			for (idx_t i = 0; i < input_size; i++) {
-				FlatVector::SetNull(result, i, !result_validity.RowIsValid(i));
+				FlatVector::SetNull(result, i, !FlatVector::Validity(result).RowIsValid(i));
 			}
-			result.Verify(input_size);
+			result.Verify();
 		} else {
 			ConvertArrowTableToVector(python_object, result, state.GetContext(), count);
 			if (default_null_handling && !exception_occurred) {
@@ -519,7 +517,7 @@ public:
 		FunctionStability function_side_effects =
 		    side_effects ? FunctionStability::VOLATILE : FunctionStability::CONSISTENT;
 		ScalarFunction scalar_function(name, std::move(parameters), return_type, func, nullptr, nullptr, nullptr,
-		                               nullptr, varargs, function_side_effects, null_handling);
+		                               varargs, function_side_effects, null_handling);
 		return scalar_function;
 	}
 };

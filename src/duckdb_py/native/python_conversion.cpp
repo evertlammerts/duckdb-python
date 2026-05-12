@@ -5,6 +5,10 @@
 #include "duckdb_python/pyconnection/pyconnection.hpp"
 #include "duckdb_python/pyresult.hpp"
 #include "duckdb/common/types.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
+#include "duckdb/common/vector/array_vector.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
 #include "duckdb/common/exception/conversion_exception.hpp"
 
 #include "datetime.h" //From Python
@@ -612,16 +616,16 @@ struct PythonVectorConversion {
 			    LogicalType::BOOLEAN, result.GetType(),
 			    "Python Conversion Failure: Expected a value of type %s, but got a value of type boolean");
 		}
-		FlatVector::GetData<bool>(result)[result_offset] = val;
+		FlatVector::GetDataMutable<bool>(result)[result_offset] = val;
 	}
 	static void HandleDouble(Vector &result, const idx_t &result_offset, double val) {
 		switch (result.GetType().id()) {
 		case LogicalTypeId::DOUBLE: {
-			FlatVector::GetData<double>(result)[result_offset] = val;
+			FlatVector::GetDataMutable<double>(result)[result_offset] = val;
 			break;
 		}
 		case LogicalTypeId::FLOAT: {
-			FlatVector::GetData<float>(result)[result_offset] = static_cast<float>(val);
+			FlatVector::GetDataMutable<float>(result)[result_offset] = static_cast<float>(val);
 			break;
 		}
 		default:
@@ -637,13 +641,13 @@ struct PythonVectorConversion {
 		// this code path is only called for values in the range of [INT64_MAX...UINT64_MAX]
 		switch (result.GetType().id()) {
 		case LogicalTypeId::HUGEINT:
-			FlatVector::GetData<hugeint_t>(result)[result_offset] = Hugeint::Convert(value);
+			FlatVector::GetDataMutable<hugeint_t>(result)[result_offset] = Hugeint::Convert(value);
 			break;
 		case LogicalTypeId::UHUGEINT:
-			FlatVector::GetData<uhugeint_t>(result)[result_offset] = Uhugeint::Convert(value);
+			FlatVector::GetDataMutable<uhugeint_t>(result)[result_offset] = Uhugeint::Convert(value);
 			break;
 		case LogicalTypeId::UBIGINT:
-			FlatVector::GetData<uint64_t>(result)[result_offset] = value;
+			FlatVector::GetDataMutable<uint64_t>(result)[result_offset] = value;
 			break;
 		default:
 			FallbackValueConversion(result, result_offset, CastToTarget(Value::UBIGINT(value), result.GetType()));
@@ -653,67 +657,67 @@ struct PythonVectorConversion {
 	static void HandleBigint(Vector &result, const idx_t &result_offset, int64_t value) {
 		switch (result.GetType().id()) {
 		case LogicalTypeId::HUGEINT: {
-			FlatVector::GetData<hugeint_t>(result)[result_offset] = Hugeint::Convert(value);
+			FlatVector::GetDataMutable<hugeint_t>(result)[result_offset] = Hugeint::Convert(value);
 			break;
 		}
 		case LogicalTypeId::UHUGEINT: {
 			if (value < 0) {
 				throw InvalidInputException("Python Conversion Failure: Value out of range for type UHUGEINT");
 			}
-			FlatVector::GetData<uhugeint_t>(result)[result_offset] = Uhugeint::Convert(value);
+			FlatVector::GetDataMutable<uhugeint_t>(result)[result_offset] = Uhugeint::Convert(value);
 			break;
 		}
 		case LogicalTypeId::BIGINT: {
-			FlatVector::GetData<int64_t>(result)[result_offset] = value;
+			FlatVector::GetDataMutable<int64_t>(result)[result_offset] = value;
 			break;
 		}
 		case LogicalTypeId::INTEGER: {
 			if (value < NumericLimits<int32_t>::Minimum() || value > NumericLimits<int32_t>::Maximum()) {
 				throw InvalidInputException("Python Conversion Failure: Value out of range for type INT");
 			}
-			FlatVector::GetData<int32_t>(result)[result_offset] = static_cast<int32_t>(value);
+			FlatVector::GetDataMutable<int32_t>(result)[result_offset] = static_cast<int32_t>(value);
 			break;
 		}
 		case LogicalTypeId::SMALLINT: {
 			if (value < NumericLimits<int16_t>::Minimum() || value > NumericLimits<int16_t>::Maximum()) {
 				throw InvalidInputException("Python Conversion Failure: Value out of range for type SMALLINT");
 			}
-			FlatVector::GetData<int16_t>(result)[result_offset] = static_cast<int16_t>(value);
+			FlatVector::GetDataMutable<int16_t>(result)[result_offset] = static_cast<int16_t>(value);
 			break;
 		}
 		case LogicalTypeId::TINYINT: {
 			if (value < NumericLimits<int8_t>::Minimum() || value > NumericLimits<int8_t>::Maximum()) {
 				throw InvalidInputException("Python Conversion Failure: Value out of range for type TINYINT");
 			}
-			FlatVector::GetData<int8_t>(result)[result_offset] = static_cast<int8_t>(value);
+			FlatVector::GetDataMutable<int8_t>(result)[result_offset] = static_cast<int8_t>(value);
 			break;
 		}
 		case LogicalTypeId::UBIGINT: {
 			if (value < 0) {
 				throw InvalidInputException("Python Conversion Failure: Value out of range for type UBIGINT");
 			}
-			FlatVector::GetData<uint64_t>(result)[result_offset] = static_cast<uint64_t>(value);
+			FlatVector::GetDataMutable<uint64_t>(result)[result_offset] = static_cast<uint64_t>(value);
 			break;
 		}
 		case LogicalTypeId::UINTEGER: {
 			if (value < 0 || value > (int64_t)NumericLimits<uint32_t>::Maximum()) {
 				throw InvalidInputException("Python Conversion Failure: Value out of range for type UINTEGER");
 			}
-			FlatVector::GetData<uint32_t>(result)[result_offset] = static_cast<uint32_t>(value);
+			FlatVector::GetDataMutable<uint32_t>(result)[result_offset] = static_cast<uint32_t>(value);
 			break;
 		}
 		case LogicalTypeId::USMALLINT: {
 			if (value < 0 || value > (int64_t)NumericLimits<uint16_t>::Maximum()) {
 				throw InvalidInputException("Python Conversion Failure: Value out of range for type USMALLINT");
 			}
-			FlatVector::GetData<uint16_t>(result)[result_offset] = static_cast<uint16_t>(value);
+			FlatVector::GetDataMutable<uint16_t>(result)[result_offset] = static_cast<uint16_t>(value);
 			break;
 		}
 		case LogicalTypeId::UTINYINT: {
 			if (value < 0 || value > (int64_t)NumericLimits<uint8_t>::Maximum()) {
 				throw InvalidInputException("Python Conversion Failure: Value out of range for type UTINYINT");
 			}
-			FlatVector::GetData<uint8_t>(result)[result_offset] = static_cast<uint8_t>(value);
+			FlatVector::GetDataMutable<uint8_t>(result)[result_offset] = static_cast<uint8_t>(value);
 			break;
 		}
 		default:
@@ -725,7 +729,7 @@ struct PythonVectorConversion {
 	static void HandleString(Vector &result, const idx_t &result_offset, const string &value) {
 		auto &result_type = result.GetType();
 		if (result_type.id() == LogicalTypeId::VARCHAR) {
-			FlatVector::GetData<string_t>(result)[result_offset] = StringVector::AddString(result, value);
+			FlatVector::GetDataMutable<string_t>(result)[result_offset] = StringVector::AddString(result, value);
 			return;
 		}
 		Value result_val;
@@ -737,7 +741,7 @@ struct PythonVectorConversion {
 		auto &result_type = result.GetType();
 		switch (result_type.id()) {
 		case LogicalTypeId::DATE:
-			FlatVector::GetData<date_t>(result)[result_offset] = date.ToDate();
+			FlatVector::GetDataMutable<date_t>(result)[result_offset] = date.ToDate();
 			break;
 		default: {
 			auto value = date.ToDuckValue();
@@ -751,7 +755,7 @@ struct PythonVectorConversion {
 		auto &result_type = result.GetType();
 		switch (result_type.id()) {
 		case LogicalTypeId::TIME:
-			FlatVector::GetData<dtime_t>(result)[result_offset] = time.ToDuckTime();
+			FlatVector::GetDataMutable<dtime_t>(result)[result_offset] = time.ToDuckTime();
 			break;
 		default: {
 			auto value = time.ToDuckValue();
@@ -765,7 +769,7 @@ struct PythonVectorConversion {
 		auto &result_type = result.GetType();
 		switch (result_type.id()) {
 		case LogicalTypeId::BLOB:
-			FlatVector::GetData<string_t>(result)[result_offset] =
+			FlatVector::GetDataMutable<string_t>(result)[result_offset] =
 			    StringVector::AddStringOrBlob(result, const_char_ptr_cast(blob), blob_size);
 			break;
 		default: {
@@ -780,13 +784,13 @@ struct PythonVectorConversion {
 		auto &result_type = result.GetType();
 		switch (result_type.id()) {
 		case LogicalTypeId::TIMESTAMP:
-			FlatVector::GetData<timestamp_t>(result)[result_offset] = datetime.ToTimestamp();
+			FlatVector::GetDataMutable<timestamp_t>(result)[result_offset] = datetime.ToTimestamp();
 			break;
 		case LogicalTypeId::TIME:
-			FlatVector::GetData<dtime_t>(result)[result_offset] = datetime.ToDuckTime();
+			FlatVector::GetDataMutable<dtime_t>(result)[result_offset] = datetime.ToDuckTime();
 			break;
 		case LogicalTypeId::DATE:
-			FlatVector::GetData<date_t>(result)[result_offset] = datetime.ToDate();
+			FlatVector::GetDataMutable<date_t>(result)[result_offset] = datetime.ToDate();
 			break;
 		default: {
 			auto value = datetime.ToDuckValue(result_type);
@@ -806,7 +810,7 @@ struct PythonVectorConversion {
 				                            "size %d, but got a list of size %d",
 				                            array_size, list_size);
 			}
-			auto &child_array = ArrayVector::GetEntry(result);
+			auto &child_array = ArrayVector::GetChildMutable(result);
 			idx_t start_offset = result_offset * array_size;
 			for (idx_t i = 0; i < list_size; i++) {
 				auto child_ele = IS_LIST ? PyList_GetItem(ele.ptr(), i) : PyTuple_GetItem(ele.ptr(), i);
@@ -820,12 +824,12 @@ struct PythonVectorConversion {
 			ListVector::Reserve(result, start_offset + list_size);
 
 			// set up the list entry
-			auto &list_entry = FlatVector::GetData<list_entry_t>(result)[result_offset];
+			auto &list_entry = FlatVector::GetDataMutable<list_entry_t>(result)[result_offset];
 			list_entry.offset = start_offset;
 			list_entry.length = list_size;
 
 			// convert the child elements
-			auto &child_vector = ListVector::GetEntry(result);
+			auto &child_vector = ListVector::GetChildMutable(result);
 			for (idx_t i = 0; i < list_size; i++) {
 				auto child_ele = IS_LIST ? PyList_GetItem(ele.ptr(), i) : PyTuple_GetItem(ele.ptr(), i);
 				TransformPythonObject(child_ele, child_vector, start_offset + i);
@@ -860,7 +864,7 @@ struct PythonVectorConversion {
 		auto &struct_children = StructVector::GetEntries(result);
 		for (idx_t i = 0; i < child_count; i++) {
 			auto child_ele = PyTuple_GetItem(ele.ptr(), i);
-			TransformPythonObject(child_ele, *struct_children[i], result_offset);
+			TransformPythonObject(child_ele, struct_children[i], result_offset);
 		}
 	}
 

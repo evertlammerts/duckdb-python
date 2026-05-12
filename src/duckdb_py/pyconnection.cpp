@@ -1,10 +1,7 @@
 #include "duckdb_python/pyconnection/pyconnection.hpp"
 
-#include "duckdb/catalog/default/default_types.hpp"
 #include "duckdb/common/arrow/arrow.hpp"
-#include "duckdb/common/enums/file_compression_type.hpp"
 #include "duckdb/common/enums/profiler_format.hpp"
-#include "duckdb/common/printer.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/function/table/read_csv.hpp"
@@ -18,12 +15,9 @@
 #include "duckdb/main/relation/read_json_relation.hpp"
 #include "duckdb/main/relation/value_relation.hpp"
 #include "duckdb/main/relation/view_relation.hpp"
-#include "duckdb/parser/expression/constant_expression.hpp"
-#include "duckdb/parser/expression/function_expression.hpp"
 #include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
-#include "duckdb/parser/tableref/subqueryref.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "duckdb_python/arrow/arrow_array_stream.hpp"
 #include "duckdb_python/map.hpp"
@@ -33,37 +27,22 @@
 #include "duckdb_python/pyresult.hpp"
 #include "duckdb_python/python_conversion.hpp"
 #include "duckdb_python/numpy/numpy_type.hpp"
-#include "duckdb/main/prepared_statement.hpp"
 #include "duckdb_python/jupyter_progress_bar_display.hpp"
 #include "duckdb_python/pyfilesystem.hpp"
-#include "duckdb/main/client_config.hpp"
-#include "duckdb/function/table/read_csv.hpp"
-#include "duckdb/common/enums/file_compression_type.hpp"
-#include "duckdb/catalog/default/default_types.hpp"
-#include "duckdb/main/relation/value_relation.hpp"
-#include "duckdb_python/filesystem_object.hpp"
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include "duckdb/function/scalar_function.hpp"
-#include "duckdb_python/pandas/pandas_scan.hpp"
 #include "duckdb_python/python_objects.hpp"
 #include "duckdb/function/function.hpp"
 #include "duckdb_python/pybind11/conversions/exception_handling_enum.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
-#include "duckdb/catalog/catalog_entry/scalar_function_catalog_entry.hpp"
 #include "duckdb/main/pending_query_result.hpp"
-#include "duckdb/parser/keyword_helper.hpp"
 #include "duckdb_python/python_replacement_scan.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/main/materialized_query_result.hpp"
 #include "duckdb/main/stream_query_result.hpp"
 #include "duckdb/main/relation/materialized_relation.hpp"
-#include "duckdb/main/relation/query_relation.hpp"
 #include "duckdb/parser/statement/load_statement.hpp"
 #include "duckdb_python/expression/pyexpression.hpp"
-
-#include <random>
-
-#include "duckdb/common/printer.hpp"
 
 namespace duckdb {
 
@@ -1669,7 +1648,7 @@ unique_ptr<DuckDBPyRelation> DuckDBPyConnection::Table(const string &tname) {
 	} catch (const CatalogException &) {
 		// CatalogException will be of the type '... is not a table'
 		// Not a table in the database, make a query relation that can perform replacement scans
-		auto sql_query = StringUtil::Format("from %s", KeywordHelper::WriteOptionallyQuoted(tname));
+		auto sql_query = StringUtil::Format("from %s", SQLIdentifier::ToString(tname));
 		return RunQuery(py::str(sql_query), tname);
 	}
 }
@@ -1848,7 +1827,7 @@ shared_ptr<DuckDBPyConnection> DuckDBPyConnection::UnregisterPythonObject(const 
 	D_ASSERT(py::gil_check());
 	py::gil_scoped_release release;
 	// FIXME: DROP TEMPORARY VIEW? doesn't exist?
-	const auto quoted_name = KeywordHelper::WriteOptionallyQuoted(name, '\"');
+	const auto quoted_name = SQLQuotedIdentifier::ToString(name);
 	connection.Query("DROP VIEW " + quoted_name + "");
 	registered_objects.erase(name);
 	return shared_from_this();
@@ -2350,8 +2329,8 @@ NumpyObjectType DuckDBPyConnection::IsAcceptedNumpyObject(const py::object &obje
 	if (!ModuleIsLoaded<NumpyCacheItem>()) {
 		return NumpyObjectType::INVALID;
 	}
-	auto &import_cache = *DuckDBPyConnection::ImportCache();
-	if (py::isinstance(object, import_cache.numpy.ndarray())) {
+	auto import_cache_ = ImportCache();
+	if (py::isinstance(object, import_cache_->numpy.ndarray())) {
 		auto len = py::len((py::cast<py::array>(object)).attr("shape"));
 		switch (len) {
 		case 1:
@@ -2397,17 +2376,17 @@ PyArrowObjectType DuckDBPyConnection::GetArrowType(const py::handle &obj) {
 	}
 
 	if (ModuleIsLoaded<PyarrowCacheItem>()) {
-		auto &import_cache = *DuckDBPyConnection::ImportCache();
+		auto import_cache_ = ImportCache();
 		// MessageReader requires nanoarrow, separate scan function
-		if (py::isinstance(obj, import_cache.pyarrow.ipc.MessageReader())) {
+		if (py::isinstance(obj, import_cache_->pyarrow.ipc.MessageReader())) {
 			return PyArrowObjectType::MessageReader;
 		}
 
 		if (ModuleIsLoaded<PyarrowDatasetCacheItem>()) {
 			// Scanner/Dataset don't have __arrow_c_stream__, need dedicated handling
-			if (py::isinstance(obj, import_cache.pyarrow.dataset.Scanner())) {
+			if (py::isinstance(obj, import_cache_->pyarrow.dataset.Scanner())) {
 				return PyArrowObjectType::Scanner;
-			} else if (py::isinstance(obj, import_cache.pyarrow.dataset.Dataset())) {
+			} else if (py::isinstance(obj, import_cache_->pyarrow.dataset.Dataset())) {
 				return PyArrowObjectType::Dataset;
 			}
 		}

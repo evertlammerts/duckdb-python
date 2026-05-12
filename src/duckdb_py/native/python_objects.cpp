@@ -4,7 +4,6 @@
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/common/types/decimal.hpp"
 #include "duckdb/common/types/bit.hpp"
-#include "duckdb/common/types/cast_helpers.hpp"
 #include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb_python/pyconnection/pyconnection.hpp"
 #include "duckdb/common/operator/add.hpp"
@@ -108,7 +107,6 @@ bool PyDecimal::TryGetType(LogicalType &type) {
 		throw NotImplementedException("case not implemented for type PyDecimalExponentType");
 	} // LCOV_EXCL_STOP
 	}
-	return true;
 }
 // LCOV_EXCL_START
 static void ExponentNotRecognized() {
@@ -444,6 +442,7 @@ static bool KeyIsHashable(const LogicalType &type) {
 	case LogicalTypeId::DATE:
 	case LogicalTypeId::UUID:
 	case LogicalTypeId::INTERVAL:
+	case LogicalTypeId::GEOMETRY:
 		return true;
 	case LogicalTypeId::LIST:
 	case LogicalTypeId::ARRAY:
@@ -511,6 +510,7 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 	case LogicalTypeId::VARCHAR:
 		return py::cast(StringValue::Get(val));
 	case LogicalTypeId::BLOB:
+	case LogicalTypeId::GEOMETRY:
 		return py::bytes(StringValue::Get(val));
 	case LogicalTypeId::BIT:
 		return py::cast(Bit::ToString(StringValue::Get(val)));
@@ -615,7 +615,7 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 		D_ASSERT(type.InternalType() == PhysicalType::INT32);
 		auto date = val.GetValueUnsafe<date_t>();
 		int32_t year, month, day;
-		if (!duckdb::Date::IsFinite(date)) {
+		if (!Value::IsFinite(date)) {
 			if (date == date_t::infinity()) {
 				return py::reinterpret_borrow<py::object>(import_cache.datetime.date.max());
 			}
@@ -705,9 +705,9 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 		                                         py::arg("microseconds") = interval_value.micros);
 	}
 	case LogicalTypeId::VARIANT: {
-		Vector tmp(val);
+		Vector tmp(val, count_t(1));
 		RecursiveUnifiedVectorFormat format;
-		Vector::RecursiveToUnifiedFormat(tmp, 1, format);
+		Vector::RecursiveToUnifiedFormat(tmp, format);
 		UnifiedVariantVectorData vector_data(format);
 		auto variant_val = VariantUtils::ConvertVariantToValue(vector_data, 0, 0);
 		return FromValue(variant_val, variant_val.type(), client_properties);

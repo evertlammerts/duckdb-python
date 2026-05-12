@@ -5,11 +5,9 @@
 #include "duckdb_python/pyresult.hpp"
 #include "duckdb/parser/qualified_name.hpp"
 #include "duckdb/main/client_context.hpp"
-#include "duckdb_python/numpy/numpy_type.hpp"
 #include "duckdb/main/relation/query_relation.hpp"
 #include "duckdb/main/relation/join_relation.hpp"
 #include "duckdb/parser/parser.hpp"
-#include "duckdb/main/relation/view_relation.hpp"
 #include "duckdb/function/pragma/pragma_functions.hpp"
 #include "duckdb/parser/statement/pragma_statement.hpp"
 #include "duckdb/common/box_renderer.hpp"
@@ -18,7 +16,6 @@
 #include "duckdb/parser/statement/explain_statement.hpp"
 #include "duckdb/catalog/default/default_types.hpp"
 #include "duckdb/main/relation/value_relation.hpp"
-#include "duckdb/main/relation/filter_relation.hpp"
 #include "duckdb_python/expression/pyexpression.hpp"
 #include "duckdb/common/arrow/physical_arrow_collector.hpp"
 #include "duckdb_python/arrow/arrow_export_utils.hpp"
@@ -154,7 +151,7 @@ unique_ptr<DuckDBPyRelation> DuckDBPyRelation::ProjectFromTypes(const py::object
 			if (!projection.empty()) {
 				projection += ", ";
 			}
-			projection += KeywordHelper::WriteOptionallyQuoted(names[i]);
+			projection += SQLQuotedIdentifier::ToString(names[i]);
 		}
 	}
 	if (projection.empty()) {
@@ -240,8 +237,8 @@ vector<unique_ptr<ParsedExpression>> GetExpressions(ClientContext &context, cons
 			if (!py::try_cast<shared_ptr<DuckDBPyExpression>>(item, py_expr)) {
 				throw InvalidInputException("Please provide arguments of type Expression!");
 			}
-			auto expr = py_expr->GetExpression().Copy();
-			expressions.push_back(std::move(expr));
+			auto expr_ = py_expr->GetExpression().Copy();
+			expressions.push_back(std::move(expr_));
 		}
 		return expressions;
 	} else if (py::isinstance<py::str>(expr)) {
@@ -332,7 +329,7 @@ vector<string> CreateExpressionList(const vector<ColumnDefinition> &columns,
 			}
 			expr += aggregates[i].name;
 			expr += "(";
-			expr += KeywordHelper::WriteOptionallyQuoted(col.GetName());
+			expr += SQLQuotedIdentifier::ToString(col.GetName());
 			expr += ")";
 			if (col.GetType().IsNumeric()) {
 				expr += "::DOUBLE";
@@ -341,7 +338,7 @@ vector<string> CreateExpressionList(const vector<ColumnDefinition> &columns,
 			}
 		}
 		expr += "])";
-		expr += " AS " + KeywordHelper::WriteOptionallyQuoted(col.GetName());
+		expr += " AS " + SQLQuotedIdentifier::ToString(col.GetName());
 		expressions.push_back(expr);
 	}
 	return expressions;
@@ -409,7 +406,7 @@ string DuckDBPyRelation::GenerateExpressionList(const string &function_name, vec
 			}
 		} catch (const ParserException &) {
 			// First attempt at parsing failed, the input might be a column name that needs quoting.
-			auto quoted_input = KeywordHelper::WriteQuoted(trimmed_input, '"');
+			auto quoted_input = SQLQuotedIdentifier::ToString(trimmed_input);
 			auto expressions = Parser::ParseExpressionList(quoted_input);
 			if (expressions.size() == 1 && expressions[0]->GetExpressionClass() == ExpressionClass::COLUMN_REF) {
 				expression = std::move(expressions[0]);
@@ -615,7 +612,7 @@ unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Product(const std::string &column
 unique_ptr<DuckDBPyRelation> DuckDBPyRelation::StringAgg(const std::string &column, const std::string &sep,
                                                          const std::string &groups, const std::string &window_spec,
                                                          const std::string &projected_columns) {
-	auto string_agg_params = KeywordHelper::WriteOptionallyQuoted(sep, '\'');
+	auto string_agg_params = SQLString::ToString(sep);
 	return ApplyAggOrWin("string_agg", column, string_agg_params, groups, window_spec, projected_columns);
 }
 
@@ -969,8 +966,7 @@ duckdb::pyarrow::Table DuckDBPyRelation::ToArrowTableInternal(idx_t batch_size, 
 		ScopedConfigSetting scoped_setting(
 		    config,
 		    [&batch_size](ClientConfig &config) {
-			    config.get_result_collector =
-			        [&batch_size](ClientContext &context, PreparedStatementData &data) -> unique_ptr<PhysicalOperator> {
+			    config.get_result_collector = [&batch_size](ClientContext &context, PreparedStatementData &data) {
 				    return PhysicalArrowCollector::Create(context, data, batch_size);
 			    };
 		    },
@@ -999,8 +995,7 @@ py::object DuckDBPyRelation::ToArrowCapsule(const py::object &requested_schema) 
 		ScopedConfigSetting scoped_setting(
 		    config,
 		    [&batch_size](ClientConfig &config) {
-			    config.get_result_collector =
-			        [&batch_size](ClientContext &context, PreparedStatementData &data) -> unique_ptr<PhysicalOperator> {
+			    config.get_result_collector = [&batch_size](ClientContext &context, PreparedStatementData &data) {
 				    return PhysicalArrowCollector::Create(context, data, batch_size);
 			    };
 		    },
@@ -1037,7 +1032,7 @@ PolarsDataFrame DuckDBPyRelation::ToPolars(idx_t batch_size, bool lazy) {
 	ArrowConverter::ToArrowSchema(&arrow_schema, types, result_names, client_properties);
 	py::list batches;
 	// Now we create an empty arrow table
-	auto empty_table = pyarrow::ToArrowTable(types, result_names, std::move(batches), client_properties);
+	auto empty_table = pyarrow::ToArrowTable(types, result_names, batches, client_properties);
 
 	// And we extract the polars schema from the arrow table
 	auto polars_df = py::cast<PolarsDataFrame>(pybind11::module_::import("polars").attr("DataFrame")(empty_table));
@@ -1083,15 +1078,15 @@ void DuckDBPyRelation::SetConnectionOwner(py::object owner) {
 }
 
 unique_ptr<DuckDBPyRelation> DuckDBPyRelation::DeriveRelation(shared_ptr<Relation> new_rel) {
-	auto result = make_uniq<DuckDBPyRelation>(std::move(new_rel));
-	result->connection_owner = connection_owner;
-	return result;
+	auto result_ = make_uniq<DuckDBPyRelation>(std::move(new_rel));
+	result_->connection_owner = connection_owner;
+	return result_;
 }
 
 unique_ptr<DuckDBPyRelation> DuckDBPyRelation::DeriveRelation(shared_ptr<DuckDBPyResult> result_p) {
-	auto result = make_uniq<DuckDBPyRelation>(std::move(result_p));
-	result->connection_owner = connection_owner;
-	return result;
+	auto result_ = make_uniq<DuckDBPyRelation>(std::move(result_p));
+	result_->connection_owner = connection_owner;
+	return result_;
 }
 
 static bool ContainsStructFieldByName(LogicalType &type, const string &name) {
@@ -1190,6 +1185,9 @@ static JoinType ParseJoinType(const string &type) {
 
 unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Join(DuckDBPyRelation *other, const py::object &condition,
                                                     const string &type) {
+	if (!other) {
+		throw InvalidInputException("No relation provided for join");
+	}
 
 	JoinType join_type;
 	string type_string = StringUtil::Lower(type);
@@ -1323,7 +1321,7 @@ void DuckDBPyRelation::ToParquet(const string &filename, const py::object &compr
 			if (!py::isinstance<py::str>(field)) {
 				throw InvalidInputException("to_parquet only accepts 'partition_by' as a list of strings");
 			}
-			partition_by_values.emplace_back(Value(py::str(field)));
+			partition_by_values.emplace_back(py::str(field));
 		}
 		options["partition_by"] = {partition_by_values};
 	}
@@ -1513,7 +1511,7 @@ void DuckDBPyRelation::ToCSV(const string &filename, const py::object &sep, cons
 			if (!py::isinstance<py::str>(field)) {
 				throw InvalidInputException("to_csv only accepts 'partition_by' as a list of strings");
 			}
-			partition_by_values.emplace_back(Value(py::str(field)));
+			partition_by_values.emplace_back(py::str(field));
 		}
 		options["partition_by"] = {partition_by_values};
 	}
@@ -1607,7 +1605,7 @@ void DuckDBPyRelation::Update(const py::object &set_p, const py::object &where) 
 		throw InvalidInputException("Please provide 'set' as a dictionary of column name to Expression");
 	}
 
-	vector<string> names;
+	vector<string> names_;
 	vector<unique_ptr<ParsedExpression>> expressions;
 
 	py::dict set = py::dict(set_p);
@@ -1629,11 +1627,11 @@ void DuckDBPyRelation::Update(const py::object &set_p, const py::object &where) 
 			throw InvalidInputException("Please provide an object of type Expression as the value, not %s",
 			                            actual_type);
 		}
-		names.push_back(std::string(py::str(item_key)));
+		names_.push_back(std::string(py::str(item_key)));
 		expressions.push_back(py_expr->GetExpression().Copy());
 	}
 
-	return rel->Update(std::move(names), std::move(expressions), std::move(condition));
+	return rel->Update(std::move(names_), std::move(expressions), std::move(condition));
 }
 
 void DuckDBPyRelation::Insert(const py::object &params) const {
@@ -1674,9 +1672,8 @@ string DuckDBPyRelation::ToStringInternal(const BoxRendererConfig &config, bool 
 		BoxRenderer renderer;
 		auto limit = Limit(config.limit, 0);
 		auto res = limit->ExecuteInternal();
-
-		auto context = rel->context->GetContext();
-		rendered_result = res->ToBox(*context, config);
+		auto context = ClientBoxRendererContext(*rel->context->GetContext());
+		rendered_result = res->ToBox(context, config);
 	}
 	return rendered_result;
 }
@@ -1759,19 +1756,19 @@ string DuckDBPyRelation::Explain(ExplainType type) {
 	auto &materialized = res->Cast<MaterializedQueryResult>();
 	auto &coll = materialized.Collection();
 	if (explain_format != ExplainFormat::HTML || !DuckDBPyConnection::IsJupyter()) {
-		string result;
+		string result_;
 		for (auto &row : coll.Rows()) {
 			// Skip the first column because it just contains 'physical plan'
 			for (idx_t col_idx = 1; col_idx < coll.ColumnCount(); col_idx++) {
 				if (col_idx > 1) {
-					result += "\t";
+					result_ += "\t";
 				}
 				auto val = row.GetValue(col_idx);
-				result += val.IsNull() ? "NULL" : StringUtil::Replace(val.ToString(), string("\0", 1), "\\0");
+				result_ += val.IsNull() ? "NULL" : StringUtil::Replace(val.ToString(), string("\0", 1), "\\0");
 			}
-			result += "\n";
+			result_ += "\n";
 		}
-		return result;
+		return result_;
 	}
 
 	auto chunk = materialized.Fetch();

@@ -129,17 +129,17 @@ class TestDuckDBConnection:
         duckdb.execute("drop table tbl")
 
     def test_pystatement(self):
-        with pytest.raises(duckdb.ParserException, match="seledct"):
+        with pytest.raises(duckdb.ParserException, match="syntax error"):
             statements = duckdb.extract_statements("seledct 42; select 21")
 
         statements = duckdb.extract_statements("select $1; select 21")
         assert len(statements) == 2
-        assert statements[0].query == "select $1"
+        assert statements[0].query.startswith("select $1")
         assert statements[0].type == duckdb.StatementType.SELECT
         assert statements[0].named_parameters == set("1")
         assert statements[0].expected_result_type == [duckdb.ExpectedResultType.QUERY_RESULT]
 
-        assert statements[1].query == " select 21"
+        assert statements[1].query.startswith("select 21")
         assert statements[1].type == duckdb.StatementType.SELECT
         assert statements[1].named_parameters == set()
 

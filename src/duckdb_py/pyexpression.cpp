@@ -24,7 +24,7 @@ DuckDBPyExpression::DuckDBPyExpression(unique_ptr<ParsedExpression> expr_p, Orde
 }
 
 string DuckDBPyExpression::Type() const {
-	return ExpressionTypeToString(expression->type);
+	return ExpressionTypeToString(expression->GetExpressionType());
 }
 
 string DuckDBPyExpression::ToString() const {
@@ -50,7 +50,7 @@ shared_ptr<DuckDBPyExpression> DuckDBPyExpression::Copy() const {
 
 shared_ptr<DuckDBPyExpression> DuckDBPyExpression::SetAlias(const string &name) const {
 	auto copied_expression = GetExpression().Copy();
-	copied_expression->alias = name;
+	copied_expression->SetAlias(name);
 	return make_shared_ptr<DuckDBPyExpression>(std::move(copied_expression));
 }
 
