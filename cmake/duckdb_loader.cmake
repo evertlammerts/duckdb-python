@@ -3,8 +3,7 @@
 # Simple DuckDB Build Configuration Module
 #
 # Sets sensible defaults for DuckDB Python extension builds and provides a clean
-# interface for adding DuckDB as a library target. Adds jemalloc option for
-# debugging but will never allow jemalloc in a release build if not on Linux.
+# interface for adding DuckDB as a library target.
 #
 # Usage: include(cmake/duckdb_loader.cmake) # Optionally load extensions
 # set(BUILD_EXTENSIONS "json;parquet;icu")
@@ -108,37 +107,6 @@ set(DEBUG_STACKTRACE
 # Internal Functions
 # ════════════════════════════════════════════════════════════════════════════════
 
-function(_duckdb_validate_jemalloc_config)
-  # Check if jemalloc is in the extension list
-  if(NOT BUILD_EXTENSIONS MATCHES "jemalloc")
-    return()
-  endif()
-
-  # jemalloc is only enabled on 64bit x86 linux builds
-  if(CMAKE_SIZEOF_VOID_P EQUAL 8
-     AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
-     AND NOT BSD)
-    set(jemalloc_allowed TRUE)
-  else()
-    set(jemalloc_allowed FALSE)
-  endif()
-
-  if(NOT jemalloc_allowed)
-    message(WARNING "jemalloc extension is only supported on Linux.\n"
-                    "Removing jemalloc from extension list.")
-    # Remove jemalloc from the extension list
-    string(REPLACE "jemalloc" "" BUILD_EXTENSIONS_FILTERED
-                   "${BUILD_EXTENSIONS}")
-    string(REGEX REPLACE ";+" ";" BUILD_EXTENSIONS_FILTERED
-                         "${BUILD_EXTENSIONS_FILTERED}")
-    string(REGEX REPLACE "^;|;$" "" BUILD_EXTENSIONS_FILTERED
-                         "${BUILD_EXTENSIONS_FILTERED}")
-    set(BUILD_EXTENSIONS
-        "${BUILD_EXTENSIONS_FILTERED}"
-        PARENT_SCOPE)
-  endif()
-endfunction()
-
 function(_duckdb_validate_source_path)
   if(NOT EXISTS "${DUCKDB_SOURCE_PATH}")
     message(
@@ -234,7 +202,6 @@ endfunction()
 
 function(duckdb_add_library target_name)
   _duckdb_validate_source_path()
-  _duckdb_validate_jemalloc_config()
   _duckdb_print_summary()
 
   # Add DuckDB subdirectory - it will use our variables
@@ -242,11 +209,6 @@ function(duckdb_add_library target_name)
 
   # Create clean interface target
   _duckdb_create_interface_target(${target_name})
-
-  # Propagate BUILD_EXTENSIONS back to caller scope in case it was modified
-  set(BUILD_EXTENSIONS
-      "${BUILD_EXTENSIONS}"
-      PARENT_SCOPE)
 endfunction()
 
 function(duckdb_link_extensions target_name)
