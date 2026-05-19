@@ -75,10 +75,18 @@ std::string DuckDBPyConnection::formatted_python_version = "";
 
 DuckDBPyConnection::~DuckDBPyConnection() {
 	try {
-		py::gil_scoped_release gil;
-		// Release any structures that do not need to hold the GIL here
-		con.SetDatabase(nullptr);
-		con.SetConnection(nullptr);
+		// The native Connection / DuckDB teardown is pure C++ work — release
+		// the GIL for it so other Python threads can run. The implicit member
+		// destructors that fire after this scope (notably
+		// `registered_functions`, a `case_insensitive_map_t<unique_ptr<ExternalDependency>>`
+		// whose entries transitively own pybind-managed Python references)
+		// run with the GIL reacquired because `gil` is destroyed at the end
+		// of the inner block.
+		{
+			py::gil_scoped_release gil;
+			con.SetDatabase(nullptr);
+			con.SetConnection(nullptr);
+		}
 	} catch (...) { // NOLINT
 	}
 }
@@ -492,6 +500,7 @@ void DuckDBPyConnection::Initialize(py::handle &m) {
 
 shared_ptr<DuckDBPyConnection> DuckDBPyConnection::ExecuteMany(const py::object &query, py::object params_p) {
 	py::gil_scoped_acquire gil;
+	ConnectionLockGuard conn_lock(*this);
 	con.SetResult(nullptr);
 	if (params_p.is_none()) {
 		params_p = py::list();
@@ -623,7 +632,7 @@ unique_ptr<PreparedStatement> DuckDBPyConnection::PrepareQuery(unique_ptr<SQLSta
 	{
 		D_ASSERT(py::gil_check());
 		py::gil_scoped_release release;
-		unique_lock<mutex> lock(py_connection_lock);
+		unique_lock<std::recursive_mutex> lock(py_connection_lock);
 
 		prep = connection.Prepare(std::move(statement));
 		if (prep->HasError()) {
@@ -644,7 +653,7 @@ unique_ptr<QueryResult> DuckDBPyConnection::ExecuteInternal(PreparedStatement &p
 	{
 		D_ASSERT(py::gil_check());
 		py::gil_scoped_release release;
-		unique_lock<std::mutex> lock(py_connection_lock);
+		unique_lock<std::recursive_mutex> lock(py_connection_lock);
 
 		auto pending_query = prep.PendingQuery(named_values);
 		if (pending_query->HasError()) {
@@ -671,7 +680,7 @@ unique_ptr<QueryResult> DuckDBPyConnection::PrepareAndExecuteInternal(unique_ptr
 	{
 		D_ASSERT(py::gil_check());
 		py::gil_scoped_release release;
-		unique_lock<std::mutex> lock(py_connection_lock);
+		unique_lock<std::recursive_mutex> lock(py_connection_lock);
 
 		auto pending_query = con.GetConnection().PendingQuery(std::move(statement), named_values, true);
 
@@ -710,6 +719,7 @@ shared_ptr<DuckDBPyConnection> DuckDBPyConnection::ExecuteFromString(const strin
 
 shared_ptr<DuckDBPyConnection> DuckDBPyConnection::Execute(const py::object &query, py::object params) {
 	py::gil_scoped_acquire gil;
+	ConnectionLockGuard conn_lock(*this);
 	con.SetResult(nullptr);
 
 	auto statements = GetStatements(query);
@@ -1879,6 +1889,7 @@ shared_ptr<DuckDBPyConnection> DuckDBPyConnection::Checkpoint() {
 }
 
 Optional<py::list> DuckDBPyConnection::GetDescription() {
+	ConnectionLockGuard conn_lock(*this);
 	if (!con.HasResult()) {
 		return py::none();
 	}
@@ -1891,11 +1902,22 @@ int DuckDBPyConnection::GetRowcount() {
 }
 
 void DuckDBPyConnection::Close() {
+	ConnectionLockGuard conn_lock(*this);
 	con.SetResult(nullptr);
 	D_ASSERT(py::gil_check());
-	py::gil_scoped_release release;
-	con.SetConnection(nullptr);
-	con.SetDatabase(nullptr);
+	// Release the GIL only for the native Connection / DuckDB teardown, which
+	// is pure C++ work and can take noticeable time. Hold the GIL back for
+	// `registered_functions.clear()` because the
+	// `case_insensitive_map_t<unique_ptr<ExternalDependency>>` it destroys
+	// transitively owns pybind-managed Python references (Python UDF
+	// callables, registered Python objects, …). Decrementing those
+	// references with the GIL released is undefined behaviour — see
+	// duckdb-python#456.
+	{
+		py::gil_scoped_release release;
+		con.SetConnection(nullptr);
+		con.SetDatabase(nullptr);
+	}
 	// https://peps.python.org/pep-0249/#Connection.close
 	cursors.ClearCursors();
 	registered_functions.clear();
@@ -2025,7 +2047,13 @@ shared_ptr<DuckDBPyConnection> DuckDBPyConnection::Cursor() {
 }
 
 // these should be functions on the result but well
+//
+// All of the connection-level fetch methods below take `py_connection_lock`
+// before touching `con.GetResult()`, so that another thread cannot replace
+// or destroy the connection's current result while we are mid-fetch — see
+// duckdb-python#435.
 Optional<py::tuple> DuckDBPyConnection::FetchOne() {
+	ConnectionLockGuard conn_lock(*this);
 	if (!con.HasResult()) {
 		throw InvalidInputException("No open result set");
 	}
@@ -2034,6 +2062,7 @@ Optional<py::tuple> DuckDBPyConnection::FetchOne() {
 }
 
 py::list DuckDBPyConnection::FetchMany(idx_t size) {
+	ConnectionLockGuard conn_lock(*this);
 	if (!con.HasResult()) {
 		throw InvalidInputException("No open result set");
 	}
@@ -2042,6 +2071,7 @@ py::list DuckDBPyConnection::FetchMany(idx_t size) {
 }
 
 py::list DuckDBPyConnection::FetchAll() {
+	ConnectionLockGuard conn_lock(*this);
 	if (!con.HasResult()) {
 		throw InvalidInputException("No open result set");
 	}
@@ -2050,6 +2080,7 @@ py::list DuckDBPyConnection::FetchAll() {
 }
 
 py::dict DuckDBPyConnection::FetchNumpy() {
+	ConnectionLockGuard conn_lock(*this);
 	if (!con.HasResult()) {
 		throw InvalidInputException("No open result set");
 	}
@@ -2058,6 +2089,7 @@ py::dict DuckDBPyConnection::FetchNumpy() {
 }
 
 PandasDataFrame DuckDBPyConnection::FetchDF(bool date_as_object) {
+	ConnectionLockGuard conn_lock(*this);
 	if (!con.HasResult()) {
 		throw InvalidInputException("No open result set");
 	}
@@ -2066,6 +2098,7 @@ PandasDataFrame DuckDBPyConnection::FetchDF(bool date_as_object) {
 }
 
 PandasDataFrame DuckDBPyConnection::FetchDFChunk(const idx_t vectors_per_chunk, bool date_as_object) {
+	ConnectionLockGuard conn_lock(*this);
 	if (!con.HasResult()) {
 		throw InvalidInputException("No open result set");
 	}
@@ -2074,6 +2107,7 @@ PandasDataFrame DuckDBPyConnection::FetchDFChunk(const idx_t vectors_per_chunk, 
 }
 
 duckdb::pyarrow::Table DuckDBPyConnection::FetchArrow(idx_t rows_per_batch) {
+	ConnectionLockGuard conn_lock(*this);
 	if (!con.HasResult()) {
 		throw InvalidInputException("No open result set");
 	}
@@ -2082,6 +2116,7 @@ duckdb::pyarrow::Table DuckDBPyConnection::FetchArrow(idx_t rows_per_batch) {
 }
 
 py::dict DuckDBPyConnection::FetchPyTorch() {
+	ConnectionLockGuard conn_lock(*this);
 	if (!con.HasResult()) {
 		throw InvalidInputException("No open result set");
 	}
@@ -2090,6 +2125,7 @@ py::dict DuckDBPyConnection::FetchPyTorch() {
 }
 
 py::dict DuckDBPyConnection::FetchTF() {
+	ConnectionLockGuard conn_lock(*this);
 	if (!con.HasResult()) {
 		throw InvalidInputException("No open result set");
 	}
@@ -2098,6 +2134,7 @@ py::dict DuckDBPyConnection::FetchTF() {
 }
 
 PolarsDataFrame DuckDBPyConnection::FetchPolars(idx_t rows_per_batch, bool lazy) {
+	ConnectionLockGuard conn_lock(*this);
 	if (!con.HasResult()) {
 		throw InvalidInputException("No open result set");
 	}
@@ -2106,6 +2143,7 @@ PolarsDataFrame DuckDBPyConnection::FetchPolars(idx_t rows_per_batch, bool lazy)
 }
 
 duckdb::pyarrow::RecordBatchReader DuckDBPyConnection::FetchRecordBatchReader(const idx_t rows_per_batch) {
+	ConnectionLockGuard conn_lock(*this);
 	if (!con.HasResult()) {
 		throw InvalidInputException("No open result set");
 	}
@@ -2185,7 +2223,7 @@ static shared_ptr<DuckDBPyConnection> FetchOrCreateInstance(const string &databa
 	{
 		D_ASSERT(py::gil_check());
 		py::gil_scoped_release release;
-		unique_lock<mutex> lock(res->py_connection_lock);
+		unique_lock<std::recursive_mutex> lock(res->py_connection_lock);
 		auto database =
 		    instance_cache.GetOrCreateInstance(database_path, config, cache_instance, InstantiateNewInstance);
 		res->con.SetDatabase(std::move(database));

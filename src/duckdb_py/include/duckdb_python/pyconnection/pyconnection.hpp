@@ -163,9 +163,35 @@ private:
 	};
 
 public:
+	// RAII guard for the connection mutex (see py_connection_lock below). Constructing
+	// one releases the GIL while waiting for the mutex and reacquires it before
+	// returning, so callers always come out of the constructor with the GIL held
+	// and the mutex locked. The mutex is released when the guard goes out of scope.
+	// Holding the GIL while blocked on this mutex would deadlock against a thread
+	// that holds the mutex and is mid-way through a GIL-releasing native call —
+	// see duckdb-python#435.
+	class ConnectionLockGuard {
+	public:
+		explicit ConnectionLockGuard(DuckDBPyConnection &conn) : lock_(conn.py_connection_lock, std::defer_lock) {
+			D_ASSERT(py::gil_check());
+			py::gil_scoped_release release;
+			lock_.lock();
+		}
+
+	private:
+		std::unique_lock<std::recursive_mutex> lock_;
+	};
+
 	ConnectionGuard con;
 	Cursors cursors;
-	std::mutex py_connection_lock;
+	// Recursive so that the outer lock taken at the top of execute/fetch
+	// methods (while still holding the GIL) does not deadlock against the
+	// inner lock taken by PrepareQuery / ExecuteInternal /
+	// PrepareAndExecuteInternal (after releasing the GIL). Serialises every
+	// path that touches `con.result` so concurrent calls on a single
+	// DuckDBPyConnection cannot dereference an already-freed result — see
+	// duckdb-python#435.
+	std::recursive_mutex py_connection_lock;
 	//! MemoryFileSystem used to temporarily store file-like objects for reading
 	shared_ptr<ModifiedMemoryFileSystem> internal_object_filesystem;
 	case_insensitive_map_t<unique_ptr<ExternalDependency>> registered_functions;
