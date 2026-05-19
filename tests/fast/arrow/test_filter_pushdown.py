@@ -1020,6 +1020,26 @@ class TestArrowFilterPushdown:
         res = duckdb_cursor.sql("SELECT a FROM t ORDER BY a LIMIT 11").fetchall()
         assert len(res) == 11
 
+    def test_dynamic_filter_nulls_first_pyarrow(self, duckdb_cursor):
+        # Regression for #460(a): TOP_N with ASC NULLS FIRST pushes an
+        # OPTIONAL(x IS NULL OR DYNAMIC_FILTER(x)) into the arrow scan. The
+        # pyarrow translation must NOT collapse the OR by dropping the
+        # untranslatable DYNAMIC_FILTER branch — doing so produces a
+        # stricter (`field("x").is_null()`) predicate that drops every row.
+        t = pa.Table.from_pydict({"x": pa.array([3, 1, 2], type=pa.int32())})
+        duckdb_cursor.register("src", t)
+        res = duckdb_cursor.sql("SELECT * FROM src ORDER BY x ASC NULLS FIRST LIMIT 1").fetchall()
+        assert res == [(1,)]
+
+    def test_dynamic_filter_nulls_first_polars_dataframe(self, duckdb_cursor):
+        # pl.DataFrame is materialized to a pyarrow.Table before scanning,
+        # so it exercises PyarrowFilterPushdown the same way pa.Table does.
+        pl = pytest.importorskip("polars")
+        df = pl.DataFrame({"x": [3, 1, 2]})
+        duckdb_cursor.register("src", df)
+        res = duckdb_cursor.sql("SELECT * FROM src ORDER BY x ASC NULLS FIRST LIMIT 1").fetchall()
+        assert res == [(1,)]
+
     def test_binary_view_filter(self, duckdb_cursor):
         """Filters on a view column work (without pushdown because pyarrow does not support view filters yet)."""
         table = pa.table({"col": pa.array([b"abc", b"efg"], type=pa.binary_view())})
