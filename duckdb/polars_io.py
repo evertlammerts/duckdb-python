@@ -308,4 +308,4 @@ def duckdb_source(relation: duckdb.DuckDBPyRelation, schema: pl.schema.Schema) -
             else:
                 yield pl.from_arrow(record_batch)  # type: ignore[misc,unused-ignore]
 
-    return register_io_source(source_generator, schema=schema)
+    return register_io_source(source_generator, schema=schema, is_pure=True)
