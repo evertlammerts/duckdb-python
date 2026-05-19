@@ -147,6 +147,20 @@ class TestPolarsLazyFrameFilterPushdown:
         result = duckdb.sql("SELECT * FROM lf WHERE a = 1 OR a = 3").fetchall()
         assert sorted(result) == [(1,), (3,)]
 
+    ##### DYNAMIC_FILTER via TOP_N (issue #460(a))
+
+    def test_top_n_nulls_first_includes_min(self):
+        """ORDER BY x ASC NULLS FIRST LIMIT 1 pushes OPTIONAL(IS_NULL OR DYNAMIC_FILTER) into the scan.
+
+        The OR branch must not be partially translated: dropping the
+        untranslatable DYNAMIC_FILTER child would leave just IS_NULL and
+        silently discard every non-null row. See pyarrow_filter_pushdown
+        sibling regression test in test_filter_pushdown.py.
+        """
+        lf = pl.LazyFrame({"x": [3, 1, 2]})
+        result = duckdb.sql("SELECT * FROM lf ORDER BY x ASC NULLS FIRST LIMIT 1").fetchall()
+        assert result == [(1,)]
+
     ##### Produce path, no filters
 
     def test_unfiltered_scan(self):

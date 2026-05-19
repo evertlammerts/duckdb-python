@@ -236,7 +236,6 @@ py::object TransformFilterRecursive(TableFilter &filter, vector<string> column_r
 		auto constant_field = field(py::tuple(py::cast(column_ref)));
 		return constant_field.attr("is_valid")();
 	}
-	//! We do not pushdown or conjunctions yet
 	case TableFilterType::CONJUNCTION_OR: {
 		auto &or_filter = filter.Cast<ConjunctionOrFilter>();
 		py::object expression = py::none();
@@ -244,7 +243,9 @@ py::object TransformFilterRecursive(TableFilter &filter, vector<string> column_r
 			auto &child_filter = *or_filter.child_filters[i];
 			py::object child_expression = TransformFilterRecursive(child_filter, column_ref, timezone_config, type);
 			if (child_expression.is(py::none())) {
-				continue;
+				// An OR branch that can't be translated (e.g. DYNAMIC_FILTER) means the pushed-down
+				// predicate would be stricter than the engine intends — fall back to no pushdown.
+				return py::none();
 			}
 			if (expression.is(py::none())) {
 				expression = std::move(child_expression);
