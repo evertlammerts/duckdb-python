@@ -1548,7 +1548,7 @@ static bool IsDescribeStatement(SQLStatement &statement) {
 }
 
 unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Query(const string &view_name, const string &sql_query) {
-	auto view_relation = CreateView(view_name);
+	rel->CreateView(view_name, /*replace=*/true, /*temporary=*/true);
 	auto all_dependencies = rel->GetAllDependencies();
 
 	Parser parser(rel->context->GetContext()->GetParserOptions());
