@@ -941,11 +941,11 @@
 			"read_parquet"
 		],
 		"function": "FromParquet",
-		"docs": "Create a relation object from the Parquet files in file_glob",
+		"docs": "Create a relation object from the Parquet path(s) or file-like object(s) in 'path_or_buffer'",
 		"args": [
 			{
-				"name": "file_glob",
-				"type": "str"
+				"name": "path_or_buffer",
+				"type": "Union[str, bytes, os.PathLike, IO[bytes], IO[str], Sequence[Union[str, bytes, os.PathLike, IO[bytes], IO[str]]]]"
 			},
 			{
 				"name": "binary_as_string",
@@ -978,53 +978,6 @@
 				"name": "compression",
 				"default": "None",
 				"type": "Optional[str]"
-			}
-		],
-		"return": "DuckDBPyRelation"
-	},
-	{
-		"name": [
-			"from_parquet",
-			"read_parquet"
-		],
-		"function": "FromParquets",
-		"docs": "Create a relation object from the Parquet files in file_globs",
-		"args": [
-			{
-				"name": "file_globs",
-				"type": "List[str]"
-			},
-			{
-				"name": "binary_as_string",
-				"default": "False",
-				"type": "bool"
-			}
-		],
-		"kwargs": [
-			{
-				"name": "file_row_number",
-				"default": "False",
-				"type": "bool"
-			},
-			{
-				"name": "filename",
-				"default": "False",
-				"type": "bool"
-			},
-			{
-				"name": "hive_partitioning",
-				"default": "False",
-				"type": "bool"
-			},
-			{
-				"name": "union_by_name",
-				"default": "False",
-				"type": "bool"
-			},
-			{
-				"name": "compression",
-				"default": "None",
-				"type": "str"
 			}
 		],
 		"return": "DuckDBPyRelation"

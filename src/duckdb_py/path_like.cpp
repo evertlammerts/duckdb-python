@@ -10,8 +10,7 @@ namespace duckdb {
 
 struct PathLikeProcessor {
 public:
-	PathLikeProcessor(DuckDBPyConnection &connection, PythonImportCache &import_cache)
-	    : connection(connection), import_cache(import_cache) {
+	explicit PathLikeProcessor(DuckDBPyConnection &connection) : connection(connection) {
 	}
 
 public:
@@ -29,7 +28,6 @@ protected:
 public:
 	DuckDBPyConnection &connection;
 	optional_ptr<ModifiedMemoryFileSystem> object_store;
-	PythonImportCache &import_cache;
 	// The list containing every file
 	vector<string> all_files;
 	// The list of files that are registered in the object_store;
@@ -41,8 +39,10 @@ void PathLikeProcessor::AddFile(const py::object &object) {
 		all_files.push_back(std::string(py::str(object)));
 		return;
 	}
-	if (py::isinstance(object, import_cache.pathlib.Path())) {
-		all_files.push_back(std::string(py::str(object)));
+	if (py::isinstance<py::bytes>(object) || py::hasattr(object, "__fspath__")) {
+		// A bytes path or an os.PathLike object (e.g. pathlib.Path) - decode it to a string
+		auto fsdecode = py::module_::import("os").attr("fsdecode");
+		all_files.push_back(std::string(py::str(fsdecode(object))));
 		return;
 	}
 	// This is (assumed to be) a file-like object
@@ -79,9 +79,7 @@ PathLike PathLikeProcessor::Finalize() {
 }
 
 PathLike PathLike::Create(const py::object &object, DuckDBPyConnection &connection) {
-	auto &import_cache = *DuckDBPyConnection::ImportCache();
-
-	PathLikeProcessor processor(connection, import_cache);
+	PathLikeProcessor processor(connection);
 	if (py::isinstance<py::list>(object)) {
 		auto list = py::list(object);
 		for (auto &item : list) {

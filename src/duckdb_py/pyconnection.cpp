@@ -299,25 +299,15 @@ static void InitializeConnectionMethods(py::class_<DuckDBPyConnection, shared_pt
 	m.def("from_arrow", &DuckDBPyConnection::FromArrow, "Create a relation object from an Arrow object",
 	      py::arg("arrow_object"));
 	m.def("from_parquet", &DuckDBPyConnection::FromParquet,
-	      "Create a relation object from the Parquet files in file_glob", py::arg("file_glob"),
-	      py::arg("binary_as_string") = false, py::kw_only(), py::arg("file_row_number") = false,
-	      py::arg("filename") = false, py::arg("hive_partitioning") = false, py::arg("union_by_name") = false,
-	      py::arg("compression") = py::none());
+	      "Create a relation object from the Parquet path(s) or file-like object(s) in 'path_or_buffer'",
+	      py::arg("path_or_buffer"), py::arg("binary_as_string") = false, py::kw_only(),
+	      py::arg("file_row_number") = false, py::arg("filename") = false, py::arg("hive_partitioning") = false,
+	      py::arg("union_by_name") = false, py::arg("compression") = py::none());
 	m.def("read_parquet", &DuckDBPyConnection::FromParquet,
-	      "Create a relation object from the Parquet files in file_glob", py::arg("file_glob"),
-	      py::arg("binary_as_string") = false, py::kw_only(), py::arg("file_row_number") = false,
-	      py::arg("filename") = false, py::arg("hive_partitioning") = false, py::arg("union_by_name") = false,
-	      py::arg("compression") = py::none());
-	m.def("from_parquet", &DuckDBPyConnection::FromParquets,
-	      "Create a relation object from the Parquet files in file_globs", py::arg("file_globs"),
-	      py::arg("binary_as_string") = false, py::kw_only(), py::arg("file_row_number") = false,
-	      py::arg("filename") = false, py::arg("hive_partitioning") = false, py::arg("union_by_name") = false,
-	      py::arg("compression") = py::none());
-	m.def("read_parquet", &DuckDBPyConnection::FromParquets,
-	      "Create a relation object from the Parquet files in file_globs", py::arg("file_globs"),
-	      py::arg("binary_as_string") = false, py::kw_only(), py::arg("file_row_number") = false,
-	      py::arg("filename") = false, py::arg("hive_partitioning") = false, py::arg("union_by_name") = false,
-	      py::arg("compression") = py::none());
+	      "Create a relation object from the Parquet path(s) or file-like object(s) in 'path_or_buffer'",
+	      py::arg("path_or_buffer"), py::arg("binary_as_string") = false, py::kw_only(),
+	      py::arg("file_row_number") = false, py::arg("filename") = false, py::arg("hive_partitioning") = false,
+	      py::arg("union_by_name") = false, py::arg("compression") = py::none());
 	m.def("get_table_names", &DuckDBPyConnection::GetTableNames, "Extract the required table names from a query",
 	      py::arg("query"), py::kw_only(), py::arg("qualified") = false);
 	m.def("install_extension", &DuckDBPyConnection::InstallExtension,
@@ -1784,14 +1774,21 @@ unique_ptr<DuckDBPyRelation> DuckDBPyConnection::FromDF(const PandasDataFrame &v
 	return CreateRelation(std::move(rel));
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyConnection::FromParquetInternal(Value &&file_param, bool binary_as_string,
-                                                                     bool file_row_number, bool filename,
-                                                                     bool hive_partitioning, bool union_by_name,
-                                                                     const py::object &compression) {
+unique_ptr<DuckDBPyRelation> DuckDBPyConnection::FromParquet(const py::object &path_or_buffer, bool binary_as_string,
+                                                             bool file_row_number, bool filename,
+                                                             bool hive_partitioning, bool union_by_name,
+                                                             const py::object &compression) {
 	auto &connection = con.GetConnection();
+	auto path_like = GetPathLike(path_or_buffer);
+	auto file_like_object_wrapper = std::move(path_like.dependency);
+
 	string name = "parquet_" + StringUtil::GenerateRandomName();
+	vector<Value> file_values;
+	for (auto &file : path_like.files) {
+		file_values.emplace_back(std::move(file));
+	}
 	vector<Value> params;
-	params.emplace_back(std::move(file_param));
+	params.emplace_back(Value::LIST(LogicalType::VARCHAR, std::move(file_values)));
 	named_parameter_map_t named_parameters({{"binary_as_string", Value::BOOLEAN(binary_as_string)},
 	                                        {"file_row_number", Value::BOOLEAN(file_row_number)},
 	                                        {"filename", Value::BOOLEAN(filename)},
@@ -1806,30 +1803,11 @@ unique_ptr<DuckDBPyRelation> DuckDBPyConnection::FromParquetInternal(Value &&fil
 	}
 	D_ASSERT(py::gil_check());
 	py::gil_scoped_release gil;
-	return CreateRelation(connection.TableFunction("parquet_scan", params, named_parameters)->Alias(name));
-}
-
-unique_ptr<DuckDBPyRelation> DuckDBPyConnection::FromParquet(const string &file_glob, bool binary_as_string,
-                                                             bool file_row_number, bool filename,
-                                                             bool hive_partitioning, bool union_by_name,
-                                                             const py::object &compression) {
-	auto file_param = Value(file_glob);
-	return FromParquetInternal(std::move(file_param), binary_as_string, file_row_number, filename, hive_partitioning,
-	                           union_by_name, compression);
-}
-
-unique_ptr<DuckDBPyRelation> DuckDBPyConnection::FromParquets(const vector<string> &file_globs, bool binary_as_string,
-                                                              bool file_row_number, bool filename,
-                                                              bool hive_partitioning, bool union_by_name,
-                                                              const py::object &compression) {
-	vector<Value> params;
-	auto file_globs_as_value = vector<Value>();
-	for (const auto &file : file_globs) {
-		file_globs_as_value.emplace_back(file);
+	auto parquet_relation = connection.TableFunction("parquet_scan", params, named_parameters);
+	if (file_like_object_wrapper) {
+		parquet_relation->AddExternalDependency(std::move(file_like_object_wrapper));
 	}
-	auto file_param = Value::LIST(file_globs_as_value);
-	return FromParquetInternal(std::move(file_param), binary_as_string, file_row_number, filename, hive_partitioning,
-	                           union_by_name, compression);
+	return CreateRelation(parquet_relation->Alias(name));
 }
 
 unique_ptr<DuckDBPyRelation> DuckDBPyConnection::FromArrow(py::object &arrow_object) {
