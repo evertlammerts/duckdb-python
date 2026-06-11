@@ -136,7 +136,9 @@ py::object TransformExpression(const Expression &expression, const vector<string
 				py::object child_expression =
 				    TransformExpression(*conj_expr.children[i], column_path, backend, arrow_type, timezone_config);
 				if (child_expression.is(py::none())) {
-					continue;
+					// An OR branch that can't be translated (e.g. DYNAMIC_FILTER) means the pushed-down
+					// predicate would be stricter than the engine intends — fall back to no pushdown.
+					return py::none();
 				}
 				if (result.is(py::none())) {
 					result = std::move(child_expression);

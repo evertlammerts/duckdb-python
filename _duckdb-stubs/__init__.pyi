@@ -309,22 +309,15 @@ class DuckDBPyConnection:
         strict_mode: bool | None = None,
     ) -> DuckDBPyRelation: ...
     def from_df(self, df: pandas.DataFrame) -> DuckDBPyRelation: ...
-    @typing.overload
     def from_parquet(
         self,
-        file_glob: str,
-        binary_as_string: bool = False,
-        *,
-        file_row_number: bool = False,
-        filename: bool = False,
-        hive_partitioning: bool = False,
-        union_by_name: bool = False,
-        compression: ParquetCompression | None = None,
-    ) -> DuckDBPyRelation: ...
-    @typing.overload
-    def from_parquet(
-        self,
-        file_globs: Sequence[str],
+        path_or_buffer: str
+        | bytes
+        | os.PathLike[str]
+        | os.PathLike[bytes]
+        | typing.IO[bytes]
+        | typing.IO[str]
+        | Sequence[str | bytes | os.PathLike[str] | os.PathLike[bytes] | typing.IO[bytes] | typing.IO[str]],
         binary_as_string: bool = False,
         *,
         file_row_number: bool = False,
@@ -433,22 +426,15 @@ class DuckDBPyConnection:
         hive_types: HiveTypes | None = None,
         hive_types_autocast: bool | None = None,
     ) -> DuckDBPyRelation: ...
-    @typing.overload
     def read_parquet(
         self,
-        file_glob: str,
-        binary_as_string: bool = False,
-        *,
-        file_row_number: bool = False,
-        filename: bool = False,
-        hive_partitioning: bool = False,
-        union_by_name: bool = False,
-        compression: ParquetCompression | None = None,
-    ) -> DuckDBPyRelation: ...
-    @typing.overload
-    def read_parquet(
-        self,
-        file_globs: Sequence[str],
+        path_or_buffer: str
+        | bytes
+        | os.PathLike[str]
+        | os.PathLike[bytes]
+        | typing.IO[bytes]
+        | typing.IO[str]
+        | Sequence[str | bytes | os.PathLike[str] | os.PathLike[bytes] | typing.IO[bytes] | typing.IO[str]],
         binary_as_string: bool = False,
         *,
         file_row_number: bool = False,
@@ -1061,21 +1047,14 @@ def from_csv_auto(
     strict_mode: bool | None = None,
 ) -> DuckDBPyRelation: ...
 def from_df(df: pandas.DataFrame, *, connection: DuckDBPyConnection | None = None) -> DuckDBPyRelation: ...
-@typing.overload
 def from_parquet(
-    file_glob: str,
-    binary_as_string: bool = False,
-    *,
-    file_row_number: bool = False,
-    filename: bool = False,
-    hive_partitioning: bool = False,
-    union_by_name: bool = False,
-    compression: ParquetCompression | None = None,
-    connection: DuckDBPyConnection | None = None,
-) -> DuckDBPyRelation: ...
-@typing.overload
-def from_parquet(
-    file_globs: Sequence[str],
+    path_or_buffer: str
+    | bytes
+    | os.PathLike[str]
+    | os.PathLike[bytes]
+    | typing.IO[bytes]
+    | typing.IO[str]
+    | Sequence[str | bytes | os.PathLike[str] | os.PathLike[bytes] | typing.IO[bytes] | typing.IO[str]],
     binary_as_string: bool = False,
     *,
     file_row_number: bool = False,
@@ -1232,21 +1211,14 @@ def read_json(
     hive_types: HiveTypes | None = None,
     hive_types_autocast: bool | None = None,
 ) -> DuckDBPyRelation: ...
-@typing.overload
 def read_parquet(
-    file_glob: str,
-    binary_as_string: bool = False,
-    *,
-    file_row_number: bool = False,
-    filename: bool = False,
-    hive_partitioning: bool = False,
-    union_by_name: bool = False,
-    compression: ParquetCompression | None = None,
-    connection: DuckDBPyConnection | None = None,
-) -> DuckDBPyRelation: ...
-@typing.overload
-def read_parquet(
-    file_globs: Sequence[str],
+    path_or_buffer: str
+    | bytes
+    | os.PathLike[str]
+    | os.PathLike[bytes]
+    | typing.IO[bytes]
+    | typing.IO[str]
+    | Sequence[str | bytes | os.PathLike[str] | os.PathLike[bytes] | typing.IO[bytes] | typing.IO[str]],
     binary_as_string: bool = False,
     *,
     file_row_number: bool = False,

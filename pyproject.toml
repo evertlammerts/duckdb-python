@@ -81,7 +81,7 @@ packages.adbc_driver_duckdb = "adbc_driver_duckdb"
 packages._duckdb-stubs = "_duckdb-stubs"
 
 [tool.scikit-build.cmake.define]
-BUILD_EXTENSIONS = "core_functions;json;parquet;icu;jemalloc"
+BUILD_EXTENSIONS = "core_functions;json;parquet;icu"
 
 [tool.setuptools_scm]
 version_scheme = "duckdb_packaging.setuptools_scm_version:version_scheme"
@@ -229,7 +229,7 @@ stubdeps = [ # dependencies used for typehints in the stubs
     "mypy",
     "fsspec",
     "pandas",
-    "polars",
+    "polars>=1.33.0",
     "pyarrow; sys_platform != 'win32' or platform_machine != 'ARM64'",
     "typing-extensions",
 ]
@@ -241,10 +241,10 @@ test = [ # dependencies used for running tests
     "pytest-timeout",
     "pytest-timestamper",
     "coverage",
-    "gcovr",
+    "gcovr; sys_platform != 'win32' or platform_machine != 'ARM64'",
     "gcsfs; sys_platform != 'win32' or platform_machine != 'ARM64'",
     "packaging",
-    "polars",
+    "polars>=1.33.0",
     "psutil",
     "py4j",
     "pyotp",
@@ -276,7 +276,7 @@ scripts = [ # dependencies used for running scripts
     "numpy",
     "pandas",
     "pcpp",
-    "polars",
+    "polars>=1.33.0",
     "pyarrow; sys_platform != 'win32' or platform_machine != 'ARM64'",
     "pytz"
 ]
