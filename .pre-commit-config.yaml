@@ -29,6 +29,12 @@ repos:
     rev: v0.6.13
     hooks:
       - id: cmake-format
+        # cmakelang is unmaintained and crashes under Python 3.14
+        # ("Cannot use capturing groups in re.Scanner"). Pin this hook's
+        # environment to 3.13 so it never picks up a 3.14 interpreter. The
+        # code_quality CI job provisions Python 3.13 to match, so the hook
+        # resolves to the running interpreter there.
+        language_version: python3.13
 
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v1.18.2

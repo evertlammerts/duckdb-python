@@ -35,6 +35,8 @@
 #include "duckdb_python/numpy/numpy_type.hpp"
 #include "duckdb/main/prepared_statement.hpp"
 #include "duckdb_python/jupyter_progress_bar_display.hpp"
+#include "duckdb_python/python_log_storage.hpp"
+#include "duckdb/logging/log_manager.hpp"
 #include "duckdb_python/pyfilesystem.hpp"
 #include "duckdb/main/client_config.hpp"
 #include "duckdb/function/table/read_csv.hpp"
@@ -2283,6 +2285,22 @@ shared_ptr<DuckDBPyConnection> DuckDBPyConnection::Connect(const py::object &dat
 	auto res = FetchOrCreateInstance(database, config);
 	auto &client_context = *res->con.GetConnection().context;
 	SetDefaultConfigArguments(client_context);
+	{
+		auto &db_instance = *res->con.GetDatabase().instance;
+		auto &log_manager = db_instance.GetLogManager();
+		auto storage = make_shared_ptr<PythonLogStorage>();
+		shared_ptr<LogStorage> storage_base = storage;
+		// RegisterLogStorage returns false if the name is already registered on this
+		// DatabaseInstance. Instances are cached and shared across connections/cursors, so
+		// only configure logging on the first registration. SetLogStorage/SetEnableLogging/
+		// SetLogLevel are NOT idempotent — re-running them on every Connect() would silently
+		// stomp a user's explicit `SET enable_logging` / `SET logging_level` / storage choice.
+		if (log_manager.RegisterLogStorage("python_log_storage", storage_base)) {
+			log_manager.SetLogStorage(db_instance, "python_log_storage");
+			log_manager.SetEnableLogging(true);
+			log_manager.SetLogLevel(LogLevel::LOG_WARNING);
+		}
+	}
 	return res;
 }
 
