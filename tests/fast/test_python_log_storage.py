@@ -3,24 +3,42 @@
 PythonLogStorage forwards engine log entries to Python's `logging` module AND keeps them
 queryable via `SELECT * FROM duckdb_logs`. It is registered on the first connection to each
 DatabaseInstance and routes WARNING+ entries to logging.getLogger("duckdb").
+
+Forwarding to `logging` is ASYNCHRONOUS (a background thread drains a queue), because the engine
+calls the log-write path while holding LogManager::lock and acquiring the GIL there would
+deadlock. So any assertion about the `logging` channel must first call `_drain()` to wait for the
+forwarder to catch up. The `duckdb_logs` table channel is synchronous and needs no drain.
 """
 
 import logging
+
+import _duckdb
+import pytest
 
 import duckdb
 
 DEPRECATION_FRAGMENT = "Deprecated lambda arrow"
 
 
+def _drain():
+    """Block until the async forwarder has delivered every queued entry to `logging`."""
+    _duckdb._drain_log_forwarding()
+
+
 def _trigger_deprecation_warning(con):
-    """Run a query that reliably emits a single engine DUCKDB_LOG_WARNING.
+    """Run a query that reliably emits a single engine DUCKDB_LOG_WARNING, then drain.
 
     The deprecated arrow (->) lambda form warns only when lambda_syntax is DEFAULT. DEFAULT
     is the current engine default but is slated to change, so we pin it to keep this exercising
     the warning path across submodule bumps.
+
+    We drain the async forwarder before returning so the entry is delivered to `logging` while
+    the caller's caplog handler is still attached — callers may read records after their
+    `with caplog` block exits.
     """
     con.execute("SET lambda_syntax='DEFAULT'")
     con.execute("SELECT list_transform([1, 2, 3], x -> x + 1)").fetchall()
+    _drain()
 
 
 def _deprecation_records(caplog):
@@ -62,6 +80,7 @@ def test_module_level_default_connection_forwards(caplog):
     with caplog.at_level(logging.WARNING, logger="duckdb"):
         duckdb.execute("SET lambda_syntax='DEFAULT'")
         duckdb.sql("SELECT list_transform([1, 2, 3], x -> x + 1)").fetchall()
+        _drain()  # this test triggers directly rather than via _trigger_deprecation_warning
     assert _deprecation_records(caplog), "default connection should route warnings to logging"
 
 
@@ -142,13 +161,14 @@ def test_repeated_warnings_accumulate_in_both_channels(caplog):
 
 
 def test_raising_handler_does_not_fail_query_and_row_persists():
-    # A user logging handler that raises must not fail the query (the engine has no try/catch
-    # around the log write path), and because the entry is stored BEFORE forwarding, the
-    # duckdb_logs row must still be present.
+    # A user logging handler that raises must not disrupt anything. Forwarding runs on a
+    # background thread (decoupled from the query path), so the exception is swallowed there by
+    # the forwarder's catch(...) — the query can never see it. The entry is also stored BEFORE
+    # being queued, so the duckdb_logs row must still be present. We drain while the handler is
+    # attached so it actually fires and exercises the C++ exception safety net.
     class BoomHandler(logging.Handler):
         def emit(self, record):
-            # Intentionally raise to exercise the C++ exception safety net (bare raise keeps
-            # ruff's EM101/TRY003 happy).
+            # Intentionally raise (bare raise keeps ruff's EM101/TRY003 happy).
             raise RuntimeError
 
     logger = logging.getLogger("duckdb")
@@ -160,11 +180,35 @@ def test_raising_handler_does_not_fail_query_and_row_persists():
         con = duckdb.connect()
         con.execute("SET lambda_syntax='DEFAULT'")
         result = con.execute("SELECT list_transform([1, 2, 3], x -> x + 1)").fetchall()
+        _drain()  # force the raising handler to fire on the forwarder thread
         assert result == [([2, 3, 4],)]
         assert _duckdb_logs_deprecation_count(con) >= 1
     finally:
         logger.removeHandler(handler)
         logger.setLevel(previous_level)
+
+
+@pytest.mark.timeout(60)
+def test_concurrent_warning_queries_do_not_deadlock():
+    # Regression guard. Forwarding used to acquire the GIL from inside FlushChunk, which runs
+    # under LogManager::lock. With two threads each running a warning-emitting query, one thread
+    # would hold that lock and block on the GIL while another held the GIL and blocked on the
+    # lock (via LogManager::CreateLogger) — a hard deadlock. Forwarding is now async, so this
+    # must complete quickly. pytest-timeout (configured for the suite) fails the test if it hangs.
+    from concurrent.futures import ThreadPoolExecutor
+
+    def hammer(con):
+        cur = con.cursor()
+        cur.execute("SET lambda_syntax='DEFAULT'")
+        for _ in range(20):
+            cur.execute("SELECT list_transform([1, 2, 3], x -> x + 1)").fetchall()
+
+    con = duckdb.connect()
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(hammer, con) for _ in range(4)]
+        for future in futures:
+            future.result()
+    _drain()
 
 
 def test_default_storage_configuration():

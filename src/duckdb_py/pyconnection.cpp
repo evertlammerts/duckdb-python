@@ -2299,6 +2299,10 @@ shared_ptr<DuckDBPyConnection> DuckDBPyConnection::Connect(const py::object &dat
 			log_manager.SetLogStorage(db_instance, "python_log_storage");
 			log_manager.SetEnableLogging(true);
 			log_manager.SetLogLevel(LogLevel::LOG_WARNING);
+			// Start the background thread that forwards queued entries to Python's logging
+			// module. We're here with the GIL held and no engine lock taken — the only safe
+			// place to do it (the engine log-write path holds LogManager::lock).
+			PythonLogStorage::EnsureForwarderStarted();
 		}
 	}
 	return res;

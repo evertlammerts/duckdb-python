@@ -5,6 +5,7 @@
 #include "duckdb/parser/parser.hpp"
 
 #include "duckdb_python/python_objects.hpp"
+#include "duckdb_python/python_log_storage.hpp"
 #include "duckdb_python/pyconnection/pyconnection.hpp"
 #include "duckdb_python/pystatement.hpp"
 #include "duckdb_python/pyrelation.hpp"
@@ -1135,6 +1136,9 @@ PYBIND11_MODULE(DUCKDB_PYTHON_LIB_NAME, m) { // NOLINT
 	      "Tokenizes a SQL string, returning a list of (position, type) tuples that can be "
 	      "used for e.g., syntax highlighting",
 	      py::arg("query"));
+	m.def("_drain_log_forwarding", &PythonLogStorage::DrainForwarder,
+	      "Block until all engine log entries queued for Python's logging module have been "
+	      "forwarded. Forwarding is asynchronous; this is a test/synchronization aid.");
 	py::enum_<PySQLTokenType>(m, "token_type", py::module_local())
 	    .value("identifier", PySQLTokenType::PY_SQL_TOKEN_IDENTIFIER)
 	    .value("numeric_const", PySQLTokenType::PY_SQL_TOKEN_NUMERIC_CONSTANT)
