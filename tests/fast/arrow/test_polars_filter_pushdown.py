@@ -513,7 +513,7 @@ class TestOptionalFilter:
             ("price", 100),
         ]
 
-    def test_top_n_nulls_first_includes_min(self):
+    def test_top_n_nulls_first_includes_min(self, factory):
         """ORDER BY x ASC NULLS FIRST LIMIT 1 pushes OPTIONAL(IS_NULL OR DYNAMIC_FILTER) into the scan.
 
         The OR branch must not be partially translated: dropping the

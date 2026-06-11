@@ -1937,7 +1937,8 @@ void DuckDBPyConnection::InstallExtension(const string &extension, bool force_in
 
 void DuckDBPyConnection::LoadExtension(const string &extension) {
 	auto &connection = con.GetConnection();
-	ExtensionHelper::LoadExternalExtension(*connection.context, extension);
+	const ExtensionLoadOptions extension_opts = {extension};
+	ExtensionHelper::LoadExternalExtension(*connection.context, extension_opts);
 }
 
 shared_ptr<DuckDBPyConnection> DefaultConnectionHolder::Get() {
