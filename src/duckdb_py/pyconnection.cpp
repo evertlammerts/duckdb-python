@@ -2288,7 +2288,7 @@ shared_ptr<DuckDBPyConnection> DuckDBPyConnection::Connect(const py::object &dat
 	{
 		auto &db_instance = *res->con.GetDatabase().instance;
 		auto &log_manager = db_instance.GetLogManager();
-		auto storage = make_shared_ptr<PythonLogStorage>();
+		auto storage = make_shared_ptr<PythonLogStorage>(db_instance);
 		shared_ptr<LogStorage> storage_base = storage;
 		// RegisterLogStorage returns false if the name is already registered on this
 		// DatabaseInstance. Instances are cached and shared across connections/cursors, so
