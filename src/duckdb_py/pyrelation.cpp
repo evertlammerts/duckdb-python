@@ -801,6 +801,8 @@ unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Distinct() {
 
 duckdb::pyarrow::RecordBatchReader DuckDBPyRelation::FetchRecordBatchReader(idx_t rows_per_batch) {
 	AssertResult();
+	// FetchRecordBatchReader routes by the stored result's type: a con.execute() stream is
+	// wrapped directly; a pre-executed relation's MaterializedQueryResult is re-fed.
 	return result->FetchRecordBatchReader(rows_per_batch);
 }
 
@@ -991,20 +993,15 @@ py::object DuckDBPyRelation::ToArrowCapsule(const py::object &requested_schema) 
 		if (!rel) {
 			return py::none();
 		}
-		// The PyCapsule protocol doesn't allow custom parameters, so we use the same
-		// default batch size as fetch_arrow_table / fetch_record_batch.
-		idx_t batch_size = 1000000;
-		auto &config = ClientConfig::GetConfig(*rel->context->GetContext());
-		ScopedConfigSetting scoped_setting(
-		    config,
-		    [&batch_size](ClientConfig &config) {
-			    config.get_result_collector = [&batch_size](ClientContext &context, PreparedStatementData &data) {
-				    return PhysicalArrowCollector::Create(context, data, batch_size);
-			    };
-		    },
-		    [](ClientConfig &config) { config.get_result_collector = nullptr; });
-		ExecuteOrThrow();
+		// Fresh relation: execute lazily as a stream on the user's own context. The
+		// resulting StreamQueryResult owns that context, so the capsule survives a
+		// later `del conn` (natively fixing #492); it shares the connection's single
+		// active-stream slot, so it must be consumed before reusing the connection.
+		ExecuteOrThrow(true);
 	}
+	// FetchArrowCapsule routes by the result's type: a StreamQueryResult (fresh or a
+	// con.execute() cursor) is wrapped directly; a pre-executed relation's
+	// MaterializedQueryResult is re-fed through the engine as a stream.
 	AssertResultOpen();
 	auto res = result->FetchArrowCapsule();
 	result = nullptr;
@@ -1049,8 +1046,10 @@ duckdb::pyarrow::RecordBatchReader DuckDBPyRelation::ToRecordBatch(idx_t batch_s
 		if (!rel) {
 			return py::none();
 		}
+		// Fresh relation: stream lazily on the user's own context (survives `del conn`).
 		ExecuteOrThrow(true);
 	}
+	// FetchRecordBatchReader routes by type (stream wrapped directly, materialized re-fed).
 	AssertResultOpen();
 	auto res = result->FetchRecordBatchReader(batch_size);
 	result = nullptr;

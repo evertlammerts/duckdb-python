@@ -20,8 +20,16 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/enums/stream_execution_result.hpp"
 #include "duckdb_python/arrow/arrow_export_utils.hpp"
-#include "duckdb/main/chunk_scan_state/query_result.hpp"
 #include "duckdb/common/arrow/arrow_query_result.hpp"
+#include "duckdb/common/arrow/physical_arrow_collector.hpp"
+#include "duckdb/main/chunk_scan_state/query_result.hpp"
+#include "duckdb/main/client_config.hpp"
+#include "duckdb/main/materialized_query_result.hpp"
+#include "duckdb/main/stream_query_result.hpp"
+#include "duckdb/parser/expression/star_expression.hpp"
+#include "duckdb/parser/query_node/select_node.hpp"
+#include "duckdb/parser/statement/select_statement.hpp"
+#include "duckdb/parser/tableref/column_data_ref.hpp"
 
 using namespace pybind11::literals;
 
@@ -419,19 +427,129 @@ py::dict DuckDBPyResult::FetchTF() {
 	return result_dict;
 }
 
+// Build a `SELECT * FROM <column data>` statement that scans `collection` in place, to be
+// executed directly via ClientContext::PendingQuery(statement, ...).
+//
+// This deliberately avoids ClientContext::PendingQuery(relation, ...), whose
+// RelationStatement constructor eagerly calls relation->GetQuery() and stringifies the
+// ENTIRE ColumnDataCollection (formatting every value - an O(rows) pathology that costs
+// >8s / 10M rows). The query string is never used for binding (Binder::Bind just calls
+// relation->Bind), so executing the SelectStatement skips it entirely while keeping the
+// zero-copy, parallel ColumnDataScan. The ColumnDataRef owns the collection (and the bound
+// LogicalColumnDataGet takes it over), so the data stays alive for the result - important
+// for the lazy StreamQueryResult path.
+static unique_ptr<SelectStatement> MakeColumnDataScanStatement(unique_ptr<ColumnDataCollection> collection,
+                                                               const vector<string> &names) {
+	// The binder rejects a ColumnDataRef with duplicate column names, so de-duplicate
+	// them (a, a -> a, a_1); callers restore the original output names on the result.
+	auto deduplicated_names = names;
+	QueryResult::DeduplicateColumns(deduplicated_names);
+	auto table_ref = make_uniq<ColumnDataRef>(std::move(collection), std::move(deduplicated_names));
+	// Binding requires a set alias (BindingAlias::GetAlias asserts otherwise).
+	table_ref->alias = "materialized";
+	auto select_node = make_uniq<SelectNode>();
+	select_node->select_list.push_back(make_uniq<StarExpression>());
+	select_node->from_table = std::move(table_ref);
+	auto select = make_uniq<SelectStatement>();
+	select->node = std::move(select_node);
+	return select;
+}
+
+void DuckDBPyResult::PromoteMaterializedToArrow(idx_t batch_size) {
+	// Only an already-materialized result (a ColumnDataCollection in memory) is pulled
+	// back through the engine. A lazy StreamQueryResult is converted directly instead -
+	// see FetchArrowTable - so we never materialize a lazy result just to re-feed it.
+	D_ASSERT(result->type == QueryResultType::MATERIALIZED_RESULT);
+	auto client_context = result->client_properties.client_context;
+	if (!client_context) {
+		throw InternalException("Cannot promote result to Arrow: the originating client context is gone");
+	}
+	// Re-run the in-memory result through the engine with a PhysicalArrowCollector on
+	// the user's own context. The ColumnDataScan over the collection is parallel, so the
+	// Arrow conversion runs in parallel, just like the fresh relational to_arrow_table
+	// path. Running on the user's context means the result carries the user's Arrow
+	// output settings automatically (no need to replicate them).
+	auto context = client_context->shared_from_this();
+	auto &materialized = result->Cast<MaterializedQueryResult>();
+	auto names = result->names;
+	auto select = MakeColumnDataScanStatement(materialized.TakeCollection(), names);
+
+	auto &config = ClientConfig::GetConfig(*context);
+	ScopedConfigSetting scoped_setting(
+	    config,
+	    [batch_size](ClientConfig &config) {
+		    config.get_result_collector = [batch_size](ClientContext &context, PreparedStatementData &data) {
+			    return PhysicalArrowCollector::Create(context, data, batch_size);
+		    };
+	    },
+	    [](ClientConfig &config) { config.get_result_collector = nullptr; });
+
+	unique_ptr<QueryResult> new_result;
+	{
+		D_ASSERT(py::gil_check());
+		py::gil_scoped_release release;
+		auto pending_query = context->PendingQuery(std::move(select), QueryParameters(false));
+		new_result = DuckDBPyConnection::CompletePendingQuery(*pending_query);
+	}
+	if (new_result->HasError()) {
+		new_result->ThrowError();
+	}
+	// Re-binding the ColumnDataRef de-duplicates duplicate output column names
+	// (a, a -> a, a_1). Restore the originals so the Arrow output is unchanged.
+	new_result->names = std::move(names);
+	result = std::move(new_result);
+}
+
+void DuckDBPyResult::PromoteMaterializedToStream() {
+	// As above, only an already-materialized result is re-fed; a lazy StreamQueryResult
+	// is wrapped directly (it already has a live context).
+	D_ASSERT(result->type == QueryResultType::MATERIALIZED_RESULT);
+	auto client_context = result->client_properties.client_context;
+	if (!client_context) {
+		throw InternalException("Cannot promote result to an Arrow stream: the originating client context is gone");
+	}
+	// Re-run the materialized result as a lazy stream on the user's own context. The
+	// resulting StreamQueryResult co-owns that ClientContext (shared_ptr), so the stream
+	// - and the Arrow conversion it drives - survives `del conn` and runs under a live
+	// transaction (the geometry/extension correctness win, native #492 fix). The
+	// ColumnDataRef owns the collection, so the data outlives the temporary relation.
+	auto context = client_context->shared_from_this();
+	auto &materialized = result->Cast<MaterializedQueryResult>();
+	auto names = result->names;
+	auto select = MakeColumnDataScanStatement(materialized.TakeCollection(), names);
+
+	unique_ptr<QueryResult> new_result;
+	{
+		D_ASSERT(py::gil_check());
+		py::gil_scoped_release release;
+		auto pending_query = context->PendingQuery(std::move(select), QueryParameters(true));
+		new_result = DuckDBPyConnection::CompletePendingQuery(*pending_query);
+	}
+	if (new_result->HasError()) {
+		new_result->ThrowError();
+	}
+	new_result->names = std::move(names);
+	result = std::move(new_result);
+}
+
 duckdb::pyarrow::Table DuckDBPyResult::FetchArrowTable(idx_t rows_per_batch, bool to_polars) {
 	if (!result) {
 		throw InvalidInputException("There is no query result");
 	}
+	// Route by result type:
+	//  - ARROW_RESULT: fresh to_arrow_table already ran a PhysicalArrowCollector.
+	//  - MATERIALIZED_RESULT (rel.execute()): a CDC in memory - re-feed it through a
+	//    PhysicalArrowCollector for parallel conversion (-> ARROW_RESULT below).
+	//  - STREAM_RESULT (con.execute()): a lazy result with a live context - convert it
+	//    directly, batch by batch. We never materialize a lazy result just to re-feed it.
+	if (result->type == QueryResultType::MATERIALIZED_RESULT) {
+		PromoteMaterializedToArrow(rows_per_batch);
+	}
+
 	auto names = result->names;
 	if (to_polars) {
 		QueryResult::DeduplicateColumns(names);
 	}
-
-	if (!result) {
-		throw InvalidInputException("result closed");
-	}
-	auto pyarrow_lib_module = py::module::import("pyarrow").attr("lib");
 
 	py::list batches;
 	if (result->type == QueryResultType::ARROW_RESULT) {
@@ -450,28 +568,27 @@ duckdb::pyarrow::Table DuckDBPyResult::FetchArrowTable(idx_t rows_per_batch, boo
 			TransformDuckToArrowChunk(arrow_schema, data, batches);
 		}
 	} else {
-		QueryResultChunkScanState scan_state(*result.get());
+		// STREAM_RESULT: pull the live stream directly into Arrow batches.
+		QueryResultChunkScanState scan_state(*result);
 		while (true) {
 			ArrowArray data;
 			idx_t count;
-			auto &query_result = *result.get();
 			{
 				D_ASSERT(py::gil_check());
 				py::gil_scoped_release release;
-				count = ArrowUtil::FetchChunk(scan_state, query_result.client_properties, rows_per_batch, &data,
+				count = ArrowUtil::FetchChunk(scan_state, result->client_properties, rows_per_batch, &data,
 				                              ArrowTypeExtensionData::GetExtensionTypes(
-				                                  *query_result.client_properties.client_context, query_result.types));
+				                                  *result->client_properties.client_context, result->types));
 			}
 			if (count == 0) {
 				break;
 			}
 			ArrowSchema arrow_schema;
-			auto result_names = query_result.names;
+			auto result_names = result->names;
 			if (to_polars) {
 				QueryResult::DeduplicateColumns(result_names);
 			}
-			ArrowConverter::ToArrowSchema(&arrow_schema, query_result.types, result_names,
-			                              query_result.client_properties);
+			ArrowConverter::ToArrowSchema(&arrow_schema, result->types, result_names, result->client_properties);
 			TransformDuckToArrowChunk(arrow_schema, data, batches);
 		}
 	}
@@ -482,6 +599,15 @@ duckdb::pyarrow::Table DuckDBPyResult::FetchArrowTable(idx_t rows_per_batch, boo
 ArrowArrayStream DuckDBPyResult::FetchArrowArrayStream(idx_t rows_per_batch) {
 	if (!result) {
 		throw InvalidInputException("There is no query result");
+	}
+	// The lazy Arrow surfaces (capsule, reader) need a context-owning StreamQueryResult.
+	// A pre-executed relation hands us a MaterializedQueryResult (a CDC) - re-feed it as a
+	// stream so the conversion gets a live, owned context (survives `del conn`, runs under
+	// a live txn). A StreamQueryResult (con.execute(), or a fresh streaming relation)
+	// already has a live context, so we wrap it directly - never materializing a lazy
+	// result.
+	if (result->type == QueryResultType::MATERIALIZED_RESULT) {
+		PromoteMaterializedToStream();
 	}
 	ResultArrowArrayStreamWrapper *result_stream = new ResultArrowArrayStreamWrapper(std::move(result), rows_per_batch);
 	// The 'result_stream' is part of the 'private_data' of the ArrowArrayStream and its lifetime is bound to that of
@@ -501,273 +627,6 @@ duckdb::pyarrow::RecordBatchReader DuckDBPyResult::FetchRecordBatchReader(idx_t 
 	return py::cast<duckdb::pyarrow::RecordBatchReader>(record_batch_reader);
 }
 
-// Holds owned copies of the string data for a deep-copied ArrowSchema node.
-struct ArrowSchemaCopyData {
-	string format;
-	string name;
-	string metadata;
-};
-
-static void ReleaseCopiedArrowSchema(ArrowSchema *schema) {
-	if (!schema || !schema->release) {
-		return;
-	}
-	for (int64_t i = 0; i < schema->n_children; i++) {
-		if (schema->children[i]->release) {
-			schema->children[i]->release(schema->children[i]);
-		}
-		delete schema->children[i];
-	}
-	delete[] schema->children;
-	if (schema->dictionary) {
-		if (schema->dictionary->release) {
-			schema->dictionary->release(schema->dictionary);
-		}
-		delete schema->dictionary;
-	}
-	delete reinterpret_cast<ArrowSchemaCopyData *>(schema->private_data);
-	schema->release = nullptr;
-}
-
-static idx_t ArrowMetadataSize(const char *metadata) {
-	if (!metadata) {
-		return 0;
-	}
-	// Arrow metadata format: int32 num_entries, then for each entry:
-	// int32 key_len, key_bytes, int32 value_len, value_bytes
-	auto ptr = metadata;
-	int32_t num_entries;
-	memcpy(&num_entries, ptr, sizeof(int32_t));
-	ptr += sizeof(int32_t);
-	for (int32_t i = 0; i < num_entries; i++) {
-		int32_t len;
-		memcpy(&len, ptr, sizeof(int32_t));
-		ptr += sizeof(int32_t) + len;
-		memcpy(&len, ptr, sizeof(int32_t));
-		ptr += sizeof(int32_t) + len;
-	}
-	return ptr - metadata;
-}
-
-// Deep-copy an ArrowSchema. The Arrow C Data Interface specifies that get_schema
-// transfers ownership to the caller, so each call must produce an independent copy.
-// Each node owns its string data via an ArrowSchemaCopyData in private_data.
-static int ArrowSchemaDeepCopy(const ArrowSchema &source, ArrowSchema *out, string &error) {
-	out->release = nullptr;
-	try {
-		auto data = new ArrowSchemaCopyData();
-		data->format = source.format ? source.format : "";
-		data->name = source.name ? source.name : "";
-		if (source.metadata) {
-			auto metadata_size = ArrowMetadataSize(source.metadata);
-			data->metadata.assign(source.metadata, metadata_size);
-		}
-
-		out->format = data->format.c_str();
-		out->name = data->name.c_str();
-		out->metadata = source.metadata ? data->metadata.data() : nullptr;
-		out->flags = source.flags;
-		out->n_children = source.n_children;
-		out->dictionary = nullptr;
-		out->private_data = data;
-		out->release = ReleaseCopiedArrowSchema;
-
-		if (source.n_children > 0) {
-			out->children = new ArrowSchema *[source.n_children];
-			for (int64_t i = 0; i < source.n_children; i++) {
-				out->children[i] = new ArrowSchema();
-				auto rc = ArrowSchemaDeepCopy(*source.children[i], out->children[i], error);
-				if (rc != 0) {
-					for (int64_t j = 0; j <= i; j++) {
-						if (out->children[j]->release) {
-							out->children[j]->release(out->children[j]);
-						}
-						delete out->children[j];
-					}
-					delete[] out->children;
-					out->children = nullptr;
-					out->n_children = 0;
-					// Release the partially constructed node
-					delete data;
-					out->private_data = nullptr;
-					out->release = nullptr;
-					return rc;
-				}
-			}
-		} else {
-			out->children = nullptr;
-		}
-
-		if (source.dictionary) {
-			out->dictionary = new ArrowSchema();
-			auto rc = ArrowSchemaDeepCopy(*source.dictionary, out->dictionary, error);
-			if (rc != 0) {
-				delete out->dictionary;
-				out->dictionary = nullptr;
-				return rc;
-			}
-		}
-	} catch (std::exception &e) {
-		error = e.what();
-		return -1;
-	}
-	return 0;
-}
-
-// Wraps pre-built Arrow arrays from an ArrowQueryResult into an ArrowArrayStream.
-// This avoids the double-materialization that happens when using ResultArrowArrayStreamWrapper
-// with an ArrowQueryResult (which throws NotImplementedException from FetchInternal).
-//
-// The schema is cached eagerly in the constructor (while the ClientContext is still alive)
-// so that get_schema can be called after the originating connection has been destroyed.
-// ToArrowSchema needs a live ClientContext for transaction access and catalog lookups
-// (e.g. CRS conversion for GEOMETRY types).
-struct ArrowQueryResultStreamWrapper {
-	ArrowQueryResultStreamWrapper(unique_ptr<QueryResult> result_p) : result(std::move(result_p)), index(0) {
-		auto &arrow_result = result->Cast<ArrowQueryResult>();
-		arrays = arrow_result.ConsumeArrays();
-
-		cached_schema.release = nullptr;
-		ArrowConverter::ToArrowSchema(&cached_schema, result->types, result->names, result->client_properties);
-
-		stream.private_data = this;
-		stream.get_schema = GetSchema;
-		stream.get_next = GetNext;
-		stream.release = Release;
-		stream.get_last_error = GetLastError;
-	}
-
-	~ArrowQueryResultStreamWrapper() {
-		if (cached_schema.release) {
-			cached_schema.release(&cached_schema);
-		}
-	}
-
-	static int GetSchema(ArrowArrayStream *stream, ArrowSchema *out) {
-		if (!stream->release) {
-			return -1;
-		}
-		auto self = reinterpret_cast<ArrowQueryResultStreamWrapper *>(stream->private_data);
-		return ArrowSchemaDeepCopy(self->cached_schema, out, self->last_error);
-	}
-
-	static int GetNext(ArrowArrayStream *stream, ArrowArray *out) {
-		if (!stream->release) {
-			return -1;
-		}
-		auto self = reinterpret_cast<ArrowQueryResultStreamWrapper *>(stream->private_data);
-		if (self->index >= self->arrays.size()) {
-			out->release = nullptr;
-			return 0;
-		}
-		*out = self->arrays[self->index]->arrow_array;
-		self->arrays[self->index]->arrow_array.release = nullptr;
-		self->index++;
-		return 0;
-	}
-
-	static void Release(ArrowArrayStream *stream) {
-		if (!stream || !stream->release) {
-			return;
-		}
-		stream->release = nullptr;
-		delete reinterpret_cast<ArrowQueryResultStreamWrapper *>(stream->private_data);
-	}
-
-	static const char *GetLastError(ArrowArrayStream *stream) {
-		if (!stream->release) {
-			return "stream was released";
-		}
-		auto self = reinterpret_cast<ArrowQueryResultStreamWrapper *>(stream->private_data);
-		return self->last_error.c_str();
-	}
-
-	ArrowArrayStream stream;
-	unique_ptr<QueryResult> result;
-	vector<unique_ptr<ArrowArrayWrapper>> arrays;
-	ArrowSchema cached_schema;
-	idx_t index;
-	string last_error;
-};
-
-// Wraps an ArrowArrayStream and caches its schema eagerly.
-// Used for the slow path (MaterializedQueryResult / StreamQueryResult) where the
-// inner stream is a ResultArrowArrayStreamWrapper from DuckDB core. That wrapper's
-// get_schema calls ToArrowSchema which needs a live ClientContext, so we fetch it
-// once at construction time and return copies from cache afterwards.
-struct SchemaCachingStreamWrapper {
-	SchemaCachingStreamWrapper(ArrowArrayStream inner_p) : inner(inner_p) {
-		inner_p.release = nullptr;
-
-		cached_schema.release = nullptr;
-		if (inner.get_schema(&inner, &cached_schema)) {
-			schema_error = inner.get_last_error(&inner);
-			schema_ok = false;
-		} else {
-			schema_ok = true;
-		}
-
-		stream.private_data = this;
-		stream.get_schema = GetSchema;
-		stream.get_next = GetNext;
-		stream.release = Release;
-		stream.get_last_error = GetLastError;
-	}
-
-	~SchemaCachingStreamWrapper() {
-		if (cached_schema.release) {
-			cached_schema.release(&cached_schema);
-		}
-		if (inner.release) {
-			inner.release(&inner);
-		}
-	}
-
-	static int GetSchema(ArrowArrayStream *stream, ArrowSchema *out) {
-		if (!stream->release) {
-			return -1;
-		}
-		auto self = reinterpret_cast<SchemaCachingStreamWrapper *>(stream->private_data);
-		if (!self->schema_ok) {
-			return -1;
-		}
-		return ArrowSchemaDeepCopy(self->cached_schema, out, self->schema_error);
-	}
-
-	static int GetNext(ArrowArrayStream *stream, ArrowArray *out) {
-		if (!stream->release) {
-			return -1;
-		}
-		auto self = reinterpret_cast<SchemaCachingStreamWrapper *>(stream->private_data);
-		return self->inner.get_next(&self->inner, out);
-	}
-
-	static void Release(ArrowArrayStream *stream) {
-		if (!stream || !stream->release) {
-			return;
-		}
-		stream->release = nullptr;
-		delete reinterpret_cast<SchemaCachingStreamWrapper *>(stream->private_data);
-	}
-
-	static const char *GetLastError(ArrowArrayStream *stream) {
-		if (!stream->release) {
-			return "stream was released";
-		}
-		auto self = reinterpret_cast<SchemaCachingStreamWrapper *>(stream->private_data);
-		if (!self->schema_error.empty()) {
-			return self->schema_error.c_str();
-		}
-		return self->inner.get_last_error(&self->inner);
-	}
-
-	ArrowArrayStream stream;
-	ArrowArrayStream inner;
-	ArrowSchema cached_schema;
-	bool schema_ok;
-	string schema_error;
-};
-
 static void ArrowArrayStreamPyCapsuleDestructor(PyObject *object) {
 	auto data = PyCapsule_GetPointer(object, "arrow_array_stream");
 	if (!data) {
@@ -781,21 +640,19 @@ static void ArrowArrayStreamPyCapsuleDestructor(PyObject *object) {
 }
 
 py::object DuckDBPyResult::FetchArrowCapsule(idx_t rows_per_batch) {
-	if (result && result->type == QueryResultType::ARROW_RESULT) {
-		// Fast path: yield pre-built Arrow arrays directly.
-		auto wrapper = new ArrowQueryResultStreamWrapper(std::move(result));
-		auto stream = new ArrowArrayStream();
-		*stream = wrapper->stream;
-		wrapper->stream.release = nullptr;
-		return py::capsule(stream, "arrow_array_stream", ArrowArrayStreamPyCapsuleDestructor);
+	if (!result) {
+		throw InvalidInputException("There is no query result");
 	}
-	// Slow path: wrap in SchemaCachingStreamWrapper so the schema is fetched
-	// eagerly while the ClientContext is still alive.
+	// The capsule is a lazy streaming object backed by a StreamQueryResult, which
+	// owns its own ClientContext. The caller (DuckDBPyRelation) ensures `result` is
+	// a stream: a fresh relation streams on the user's connection; an already-
+	// executed result is re-fed via PromoteToDedicatedStream(). Because the stream
+	// owns its context, core's ResultArrowArrayStreamWrapper can lazily compute the
+	// schema and convert (incl. extension/geometry types under a live transaction)
+	// after the originating connection is gone - no eager schema caching needed.
 	auto inner_stream = FetchArrowArrayStream(rows_per_batch);
-	auto wrapper = new SchemaCachingStreamWrapper(inner_stream);
 	auto stream = new ArrowArrayStream();
-	*stream = wrapper->stream;
-	wrapper->stream.release = nullptr;
+	*stream = inner_stream;
 	return py::capsule(stream, "arrow_array_stream", ArrowArrayStreamPyCapsuleDestructor);
 }
 

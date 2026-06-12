@@ -71,6 +71,15 @@ private:
 	unique_ptr<DataChunk> FetchNextRaw(QueryResult &result);
 	unique_ptr<NumpyResultConversion> InitializeNumpyConversion(bool pandas = false);
 
+	//! Re-feed an already-MATERIALIZED result (a ColumnDataCollection, e.g. from
+	//! rel.execute()) back through the engine on the user's own context. The eager
+	//! variant installs a PhysicalArrowCollector to produce an ArrowQueryResult
+	//! (parallel); the stream variant produces a lazy StreamQueryResult that co-owns
+	//! the context (so it survives `del conn`). Never call these on a StreamQueryResult:
+	//! a lazy result already has a live context and is converted/wrapped directly.
+	void PromoteMaterializedToArrow(idx_t batch_size);
+	void PromoteMaterializedToStream();
+
 private:
 	idx_t chunk_offset = 0;
 
