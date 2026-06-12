@@ -8,6 +8,7 @@ on:
         required: true
         type: choice
         options:
+          - 'windows-2022'
           - 'windows-2025'
           - 'windows-11-arm'
           - 'ubuntu-24.04'
