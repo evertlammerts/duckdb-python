@@ -112,6 +112,11 @@ py::object MakePyArrowScalar(const Value &constant, const string &timezone_confi
 		py::handle date_type = import_cache.pyarrow.timestamp();
 		return dataset_scalar(scalar(converted_value, date_type(time_unit_string, py::arg("tz") = timezone_config)));
 	}
+	case LogicalTypeId::TIMESTAMP_TZ_NS: {
+		py::handle date_type = import_cache.pyarrow.timestamp();
+		auto converted_value = Timestamp::GetEpochNanoSeconds(timestamp_t(constant.GetValue<int64_t>()));
+		return dataset_scalar(scalar(converted_value, date_type("ns", py::arg("tz") = timezone_config)));
+	}
 	case LogicalTypeId::UTINYINT: {
 		py::handle integer_type = import_cache.pyarrow.uint8();
 		return dataset_scalar(scalar(constant.GetValue<uint8_t>(), integer_type()));
