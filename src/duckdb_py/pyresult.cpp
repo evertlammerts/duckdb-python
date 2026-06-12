@@ -427,26 +427,17 @@ py::dict DuckDBPyResult::FetchTF() {
 	return result_dict;
 }
 
-// Build a `SELECT * FROM <column data>` statement that scans `collection` in place, to be
-// executed directly via ClientContext::PendingQuery(statement, ...).
-//
-// This deliberately avoids ClientContext::PendingQuery(relation, ...), whose
-// RelationStatement constructor eagerly calls relation->GetQuery() and stringifies the
-// ENTIRE ColumnDataCollection (formatting every value - an O(rows) pathology that costs
-// >8s / 10M rows). The query string is never used for binding (Binder::Bind just calls
-// relation->Bind), so executing the SelectStatement skips it entirely while keeping the
-// zero-copy, parallel ColumnDataScan. The ColumnDataRef owns the collection (and the bound
-// LogicalColumnDataGet takes it over), so the data stays alive for the result - important
-// for the lazy StreamQueryResult path.
+// `SELECT * FROM <column data>` over `collection`, executed as a SelectStatement rather
+// than via PendingQuery(relation) - the latter's RelationStatement stringifies the whole
+// collection (O(rows)). The ColumnDataRef owns the collection, so it outlives the result
+// (needed by the lazy stream path).
 static unique_ptr<SelectStatement> MakeColumnDataScanStatement(unique_ptr<ColumnDataCollection> collection,
                                                                const vector<string> &names) {
-	// The binder rejects a ColumnDataRef with duplicate column names, so de-duplicate
-	// them (a, a -> a, a_1); callers restore the original output names on the result.
+	// The binder rejects duplicate column names; callers restore the originals afterwards.
 	auto deduplicated_names = names;
 	QueryResult::DeduplicateColumns(deduplicated_names);
 	auto table_ref = make_uniq<ColumnDataRef>(std::move(collection), std::move(deduplicated_names));
-	// Binding requires a set alias (BindingAlias::GetAlias asserts otherwise).
-	table_ref->alias = "materialized";
+	table_ref->alias = "materialized"; // binding asserts on an unset alias
 	auto select_node = make_uniq<SelectNode>();
 	select_node->select_list.push_back(make_uniq<StarExpression>());
 	select_node->from_table = std::move(table_ref);
@@ -455,20 +446,14 @@ static unique_ptr<SelectStatement> MakeColumnDataScanStatement(unique_ptr<Column
 	return select;
 }
 
+// Re-feed a materialized result through a PhysicalArrowCollector on the user's own context
+// (parallel conversion, correct Arrow settings) -> ArrowQueryResult.
 void DuckDBPyResult::PromoteMaterializedToArrow(idx_t batch_size) {
-	// Only an already-materialized result (a ColumnDataCollection in memory) is pulled
-	// back through the engine. A lazy StreamQueryResult is converted directly instead -
-	// see FetchArrowTable - so we never materialize a lazy result just to re-feed it.
 	D_ASSERT(result->type == QueryResultType::MATERIALIZED_RESULT);
 	auto client_context = result->client_properties.client_context;
 	if (!client_context) {
 		throw InternalException("Cannot promote result to Arrow: the originating client context is gone");
 	}
-	// Re-run the in-memory result through the engine with a PhysicalArrowCollector on
-	// the user's own context. The ColumnDataScan over the collection is parallel, so the
-	// Arrow conversion runs in parallel, just like the fresh relational to_arrow_table
-	// path. Running on the user's context means the result carries the user's Arrow
-	// output settings automatically (no need to replicate them).
 	auto context = client_context->shared_from_this();
 	auto &materialized = result->Cast<MaterializedQueryResult>();
 	auto names = result->names;
@@ -494,25 +479,19 @@ void DuckDBPyResult::PromoteMaterializedToArrow(idx_t batch_size) {
 	if (new_result->HasError()) {
 		new_result->ThrowError();
 	}
-	// Re-binding the ColumnDataRef de-duplicates duplicate output column names
-	// (a, a -> a, a_1). Restore the originals so the Arrow output is unchanged.
-	new_result->names = std::move(names);
+	new_result->names = std::move(names); // restore names de-duplicated by re-binding
 	result = std::move(new_result);
 }
 
+// Re-feed a materialized result as a lazy stream on the user's own context. The
+// StreamQueryResult co-owns the context, so conversion survives `del conn` and runs under a
+// live transaction (geometry/extension correctness, #492).
 void DuckDBPyResult::PromoteMaterializedToStream() {
-	// As above, only an already-materialized result is re-fed; a lazy StreamQueryResult
-	// is wrapped directly (it already has a live context).
 	D_ASSERT(result->type == QueryResultType::MATERIALIZED_RESULT);
 	auto client_context = result->client_properties.client_context;
 	if (!client_context) {
 		throw InternalException("Cannot promote result to an Arrow stream: the originating client context is gone");
 	}
-	// Re-run the materialized result as a lazy stream on the user's own context. The
-	// resulting StreamQueryResult co-owns that ClientContext (shared_ptr), so the stream
-	// - and the Arrow conversion it drives - survives `del conn` and runs under a live
-	// transaction (the geometry/extension correctness win, native #492 fix). The
-	// ColumnDataRef owns the collection, so the data outlives the temporary relation.
 	auto context = client_context->shared_from_this();
 	auto &materialized = result->Cast<MaterializedQueryResult>();
 	auto names = result->names;
@@ -536,12 +515,8 @@ duckdb::pyarrow::Table DuckDBPyResult::FetchArrowTable(idx_t rows_per_batch, boo
 	if (!result) {
 		throw InvalidInputException("There is no query result");
 	}
-	// Route by result type:
-	//  - ARROW_RESULT: fresh to_arrow_table already ran a PhysicalArrowCollector.
-	//  - MATERIALIZED_RESULT (rel.execute()): a CDC in memory - re-feed it through a
-	//    PhysicalArrowCollector for parallel conversion (-> ARROW_RESULT below).
-	//  - STREAM_RESULT (con.execute()): a lazy result with a live context - convert it
-	//    directly, batch by batch. We never materialize a lazy result just to re-feed it.
+	// ARROW_RESULT: fresh collector output. MATERIALIZED: re-feed for parallel conversion.
+	// STREAM: a live result, converted directly below (never materialized to re-feed).
 	if (result->type == QueryResultType::MATERIALIZED_RESULT) {
 		PromoteMaterializedToArrow(rows_per_batch);
 	}
@@ -600,18 +575,13 @@ ArrowArrayStream DuckDBPyResult::FetchArrowArrayStream(idx_t rows_per_batch) {
 	if (!result) {
 		throw InvalidInputException("There is no query result");
 	}
-	// The lazy Arrow surfaces (capsule, reader) need a context-owning StreamQueryResult.
-	// A pre-executed relation hands us a MaterializedQueryResult (a CDC) - re-feed it as a
-	// stream so the conversion gets a live, owned context (survives `del conn`, runs under
-	// a live txn). A StreamQueryResult (con.execute(), or a fresh streaming relation)
-	// already has a live context, so we wrap it directly - never materializing a lazy
-	// result.
+	// Re-feed a materialized result to get a context-owning stream; a StreamQueryResult is
+	// wrapped directly (already has a live context).
 	if (result->type == QueryResultType::MATERIALIZED_RESULT) {
 		PromoteMaterializedToStream();
 	}
+	// The wrapper is owned by the ArrowArrayStream's private_data (released with the stream).
 	ResultArrowArrayStreamWrapper *result_stream = new ResultArrowArrayStreamWrapper(std::move(result), rows_per_batch);
-	// The 'result_stream' is part of the 'private_data' of the ArrowArrayStream and its lifetime is bound to that of
-	// the ArrowArrayStream.
 	return result_stream->stream;
 }
 
@@ -643,13 +613,7 @@ py::object DuckDBPyResult::FetchArrowCapsule(idx_t rows_per_batch) {
 	if (!result) {
 		throw InvalidInputException("There is no query result");
 	}
-	// The capsule is a lazy streaming object backed by a StreamQueryResult, which
-	// owns its own ClientContext. The caller (DuckDBPyRelation) ensures `result` is
-	// a stream: a fresh relation streams on the user's connection; an already-
-	// executed result is re-fed via PromoteToDedicatedStream(). Because the stream
-	// owns its context, core's ResultArrowArrayStreamWrapper can lazily compute the
-	// schema and convert (incl. extension/geometry types under a live transaction)
-	// after the originating connection is gone - no eager schema caching needed.
+	// Lazy streaming capsule backed by a context-owning stream (see FetchArrowArrayStream).
 	auto inner_stream = FetchArrowArrayStream(rows_per_batch);
 	auto stream = new ArrowArrayStream();
 	*stream = inner_stream;
