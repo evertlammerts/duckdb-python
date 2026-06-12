@@ -190,7 +190,12 @@ class TestStringOrSpecifics:
 
 
 class TestInPushdown:
-    """IN (...) reaches the walker as ``BOUND_OPERATOR`` with ``COMPARE_IN``."""
+    """IN (...) pushdown test.
+
+    IN (...) reaches the walker as a ``COMPARE_IN`` ``BOUND_OPERATOR``, wrapped in an
+    ``__internal_tablefilter_optional`` function that the walker must unwrap before it
+    sees the operator.
+    """
 
     def test_basic(self, duckdb_cursor):
         duckdb_cursor.execute("CREATE TABLE _t AS SELECT range a FROM range(1000)")

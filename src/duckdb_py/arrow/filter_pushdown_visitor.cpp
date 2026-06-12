@@ -6,13 +6,8 @@
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_operator_expression.hpp"
-#include "duckdb/planner/expression/bound_reference_expression.hpp"
-#include "duckdb/planner/filter/conjunction_filter.hpp"
-#include "duckdb/planner/filter/constant_filter.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
-#include "duckdb/planner/filter/in_filter.hpp"
-#include "duckdb/planner/filter/optional_filter.hpp"
-#include "duckdb/planner/filter/struct_filter.hpp"
+#include "duckdb/planner/filter/table_filter_functions.hpp"
 
 namespace duckdb {
 
@@ -101,6 +96,45 @@ py::object TransformExpression(const Expression &expression, const vector<string
 			return EmitCompare(backend, expression_type, std::move(col), constant_side->value, resolved.leaf_type,
 			                   timezone_config);
 		}
+
+		// Internal table-filter functions. Since the table-filter -> expression-filter
+		// migration in core, optional / dynamic / bloom / perfect-hash-join / prefix-range
+		// filters no longer have dedicated TableFilter subtypes. They arrive as scalar
+		// function wrappers inside the ExpressionFilter expression tree (see
+		// table_filter_functions.hpp).
+		const auto &func_name = bound_function_expression.function.GetName();
+
+		// OPTIONAL / SELECTIVITY_OPTIONAL wrap a child predicate that lives in `bind_info`
+		// (their `children` hold only a placeholder column ref). An optional filter is never
+		// required for correctness, so if its child can't be translated we push nothing for
+		// it rather than failing the whole scan.
+		if (func_name == OptionalFilterScalarFun::NAME || func_name == SelectivityOptionalFilterScalarFun::NAME) {
+			optional_ptr<const Expression> child;
+			if (bound_function_expression.bind_info) {
+				if (func_name == OptionalFilterScalarFun::NAME) {
+					child =
+					    bound_function_expression.bind_info->Cast<OptionalFilterFunctionData>().child_filter_expr.get();
+				} else {
+					child = bound_function_expression.bind_info->Cast<SelectivityOptionalFilterFunctionData>()
+					            .child_filter_expr.get();
+				}
+			}
+			if (!child) {
+				return py::none();
+			}
+			try {
+				return TransformExpression(*child, column_path, backend, arrow_type, timezone_config);
+			} catch (const NotImplementedException &) {
+				return py::none();
+			}
+		}
+
+		// DYNAMIC / BLOOM / PERFECT_HASH_JOIN / PREFIX_RANGE are runtime filters with no
+		// static pyarrow/polars equivalent. They are not required for correctness (the
+		// engine applies them above the scan), so skip them.
+		if (TableFilterFunctions::IsTableFilterFunction(func_name)) {
+			return py::none();
+		}
 	}
 
 	if (expression_class == ExpressionClass::BOUND_OPERATOR) {
@@ -130,19 +164,27 @@ py::object TransformExpression(const Expression &expression, const vector<string
 
 	if (expression_class == ExpressionClass::BOUND_CONJUNCTION) {
 		if (expression_type == ExpressionType::CONJUNCTION_OR || expression_type == ExpressionType::CONJUNCTION_AND) {
+			const bool is_and = expression_type == ExpressionType::CONJUNCTION_AND;
 			auto &conj_expr = expression.Cast<BoundConjunctionExpression>();
 			py::object result = py::none();
 			for (idx_t i = 0; i < conj_expr.children.size(); i++) {
 				py::object child_expression =
 				    TransformExpression(*conj_expr.children[i], column_path, backend, arrow_type, timezone_config);
 				if (child_expression.is(py::none())) {
-					// An OR branch that can't be translated (e.g. DYNAMIC_FILTER) means the pushed-down
-					// predicate would be stricter than the engine intends — fall back to no pushdown.
+					if (is_and) {
+						// A conjunct we can't push can simply be dropped: the remaining AND
+						// terms still form a correct (if weaker) filter, and the engine
+						// re-applies the rest above the scan.
+						continue;
+					}
+					// An OR branch that can't be translated (e.g. a dynamic filter) would
+					// make the pushed-down predicate stricter than the engine intends —
+					// fall back to no pushdown for the whole disjunction.
 					return py::none();
 				}
 				if (result.is(py::none())) {
 					result = std::move(child_expression);
-				} else if (expression_type == ExpressionType::CONJUNCTION_AND) {
+				} else if (is_and) {
 					result = backend.And(std::move(result), std::move(child_expression));
 				} else {
 					result = backend.Or(std::move(result), std::move(child_expression));
