@@ -397,6 +397,9 @@ string DuckDBPyRelation::GenerateExpressionList(const string &function_name, vec
 		// We parse the input as an expression to validate it.
 		auto trimmed_input = input[i];
 		StringUtil::Trim(trimmed_input);
+		if (trimmed_input.empty()) {
+			throw ParserException("Invalid column expression: '%s'", input[i]);
+		}
 
 		unique_ptr<ParsedExpression> expression;
 		try {
