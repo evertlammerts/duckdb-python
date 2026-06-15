@@ -526,21 +526,19 @@ duckdb::pyarrow::Table DuckDBPyResult::FetchArrowTable(idx_t rows_per_batch, boo
 		QueryResult::DeduplicateColumns(names);
 	}
 
+	// Fetch the schema once
+	ArrowSchema arrow_schema;
+	ArrowConverter::ToArrowSchema(&arrow_schema, result->types, names, result->client_properties);
+	auto pyarrow_schema = pyarrow::ToPyArrowSchema(arrow_schema);
+
 	py::list batches;
 	if (result->type == QueryResultType::ARROW_RESULT) {
 		auto &arrow_result = result->Cast<ArrowQueryResult>();
 		auto arrays = arrow_result.ConsumeArrays();
 		for (auto &array : arrays) {
-			ArrowSchema arrow_schema;
-			auto result_names = arrow_result.names;
-			if (to_polars) {
-				QueryResult::DeduplicateColumns(result_names);
-			}
 			ArrowArray data = array->arrow_array;
 			array->arrow_array.release = nullptr;
-			ArrowConverter::ToArrowSchema(&arrow_schema, arrow_result.types, result_names,
-			                              arrow_result.client_properties);
-			TransformDuckToArrowChunk(arrow_schema, data, batches);
+			TransformDuckToArrowChunk(pyarrow_schema, data, batches);
 		}
 	} else {
 		// STREAM_RESULT: pull the live stream directly into Arrow batches.
@@ -558,17 +556,11 @@ duckdb::pyarrow::Table DuckDBPyResult::FetchArrowTable(idx_t rows_per_batch, boo
 			if (count == 0) {
 				break;
 			}
-			ArrowSchema arrow_schema;
-			auto result_names = result->names;
-			if (to_polars) {
-				QueryResult::DeduplicateColumns(result_names);
-			}
-			ArrowConverter::ToArrowSchema(&arrow_schema, result->types, result_names, result->client_properties);
-			TransformDuckToArrowChunk(arrow_schema, data, batches);
+			TransformDuckToArrowChunk(pyarrow_schema, data, batches);
 		}
 	}
 
-	return pyarrow::ToArrowTable(result->types, names, std::move(batches), result->client_properties);
+	return pyarrow::ToArrowTable(std::move(batches), pyarrow_schema);
 }
 
 ArrowArrayStream DuckDBPyResult::FetchArrowArrayStream(idx_t rows_per_batch) {

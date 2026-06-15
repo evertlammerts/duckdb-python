@@ -23,6 +23,59 @@
 #include "duckdb/common/arrow/physical_arrow_collector.hpp"
 #include "duckdb_python/arrow/arrow_export_utils.hpp"
 
+namespace {
+
+// A helper for arrow conversion. We want to be able to fetch a result's schema in the same transaction that
+// creates the result, so we have to wrap both calls in the same transaction. This helper always reverts the
+// transaction if we haven't committed it explicitly. Note that this is not the same as RunFunctionInTransaction:
+// we run _queries_ in a transaction (where each query acquires the context lock) while RFIT runs a function
+// while holding the context lock for that duration.
+// Note: this is a workaround that is intended to be temporary. We should really just cache the schema in the
+// ArrowQueryResult.
+
+void RunOrThrow(duckdb::ClientContext &context, const char *sql) {
+	auto result = context.Query(sql, duckdb::QueryParameters(false));
+	if (result->HasError()) {
+		result->ThrowError();
+	}
+}
+
+class ArrowConversionTransaction {
+public:
+	explicit ArrowConversionTransaction(duckdb::ClientContext &context_p) : context(context_p), owns(false) {
+		auto &txn = context.transaction;
+		if (txn.IsAutoCommit() && !txn.HasActiveTransaction()) {
+			RunOrThrow(context, "BEGIN TRANSACTION");
+			owns = true;
+		}
+	}
+
+	~ArrowConversionTransaction() {
+		if (owns) {
+			try {
+				RunOrThrow(context, "ROLLBACK");
+			} catch (...) { // NOLINT
+			}
+		}
+	}
+
+	void Commit() {
+		if (owns) {
+			RunOrThrow(context, "COMMIT");
+			owns = false;
+		}
+	}
+
+	ArrowConversionTransaction(const ArrowConversionTransaction &) = delete;
+	ArrowConversionTransaction &operator=(const ArrowConversionTransaction &) = delete;
+
+private:
+	duckdb::ClientContext &context;
+	bool owns;
+};
+
+} // namespace
+
 namespace duckdb {
 
 DuckDBPyRelation::DuckDBPyRelation(shared_ptr<Relation> rel_p) : rel(std::move(rel_p)) {
@@ -961,10 +1014,22 @@ PandasDataFrame DuckDBPyRelation::FetchDFChunk(idx_t vectors_per_chunk, bool dat
 }
 
 duckdb::pyarrow::Table DuckDBPyRelation::ToArrowTableInternal(idx_t batch_size, bool to_polars) {
+	if (!result && !rel) {
+		return py::none();
+	}
+	// Make sure we have a valid client context
+	shared_ptr<ClientContext> context;
+	if (rel) {
+		context = rel->context->GetContext();
+	} else if (auto cc = result->GetClientProperties().client_context) {
+		context = cc->shared_from_this();
+	} else {
+		throw ConnectionException("Cannot fetch an arrow table without a valid connection");
+	}
+	// Start (or piggyback on) a transaction for the conversion
+	ArrowConversionTransaction conversion_txn(*context);
+
 	if (!result) {
-		if (!rel) {
-			return py::none();
-		}
 		auto &config = ClientConfig::GetConfig(*rel->context->GetContext());
 		ScopedConfigSetting scoped_setting(
 		    config,
@@ -979,6 +1044,8 @@ duckdb::pyarrow::Table DuckDBPyRelation::ToArrowTableInternal(idx_t batch_size, 
 	AssertResultOpen();
 	auto res = result->FetchArrowTable(batch_size, to_polars);
 	result = nullptr;
+	// We must commit the transaction before returning
+	conversion_txn.Commit();
 	return res;
 }
 
