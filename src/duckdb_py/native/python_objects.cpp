@@ -462,6 +462,9 @@ static bool KeyIsHashable(const LogicalType &type) {
 	}
 	case LogicalTypeId::STRUCT:
 		return false;
+	case LogicalTypeId::SQLNULL:
+		// A SQLNULL key is always NULL, and Python's None is hashable.
+		return true;
 	default:
 		throw NotImplementedException("Unsupported type: \"%s\"", type.ToString());
 	}

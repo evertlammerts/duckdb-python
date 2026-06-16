@@ -33,34 +33,18 @@ static ExplainType ExplainTypeFromInteger(int64_t value) {
 	}
 }
 
-namespace PYBIND11_NAMESPACE {
-namespace detail {
-
-template <>
-struct type_caster<ExplainType> : public type_caster_base<ExplainType> {
-	using base = type_caster_base<ExplainType>;
-	ExplainType tmp;
-
-public:
-	bool load(handle src, bool convert) {
-		if (base::load(src, convert)) {
-			return true;
-		} else if (py::isinstance<py::str>(src)) {
-			tmp = ExplainTypeFromString(py::str(src));
-			value = &tmp;
-			return true;
-		} else if (py::isinstance<py::int_>(src)) {
-			tmp = ExplainTypeFromInteger(src.cast<int64_t>());
-			value = &tmp;
-			return true;
-		}
-		return false;
+//! Resolve a Python explain-type argument (ExplainType enum, str, or int) to an ExplainType.
+//! NOTE: deliberately NOT a pybind type_caster. A custom caster inheriting type_caster_base shadows the
+//! registered py::enum_ inconsistently across translation units - it ends up accepting str/int XOR the enum
+//! instance, never both, depending on which TU sees the specialization. Explicit dispatch at the call site is
+//! robust regardless of include order.
+static ExplainType ExplainTypeFromPython(const py::object &obj) {
+	if (py::isinstance<py::str>(obj)) {
+		return ExplainTypeFromString(py::str(obj));
 	}
-
-	static handle cast(ExplainType src, return_value_policy policy, handle parent) {
-		return base::cast(src, policy, parent);
+	if (py::isinstance<py::int_>(obj)) {
+		return ExplainTypeFromInteger(obj.cast<int64_t>());
 	}
-};
-
-} // namespace detail
-} // namespace PYBIND11_NAMESPACE
+	// Fall through to the registered py::enum_ caster (handles an actual ExplainType, throws otherwise).
+	return obj.cast<ExplainType>();
+}

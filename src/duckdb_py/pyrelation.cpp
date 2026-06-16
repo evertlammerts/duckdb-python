@@ -1749,17 +1749,22 @@ static void DisplayHTML(const string &html) {
 	display_attr(html_object);
 }
 
-string DuckDBPyRelation::Explain(ExplainType type) {
+string DuckDBPyRelation::Explain(ExplainType type, const string &format) {
 	AssertRelation();
 	D_ASSERT(py::gil_check());
 	py::gil_scoped_release release;
 
-	auto explain_format = GetExplainFormat(type);
+	// An empty format means "auto": the default format, or HTML when running under Jupyter.
+	const bool auto_format = format.empty();
+	auto explain_format = auto_format ? GetExplainFormat(type) : ProfilerPrintFormat::FromString(format);
 	auto res = rel->Explain(type, explain_format);
 	D_ASSERT(res->type == duckdb::QueryResultType::MATERIALIZED_RESULT);
 	auto &materialized = res->Cast<MaterializedQueryResult>();
 	auto &coll = materialized.Collection();
-	if (explain_format != ProfilerPrintFormat::HTML() || !DuckDBPyConnection::IsJupyter()) {
+	// Only the implicit Jupyter path renders HTML inline; an explicitly requested format always returns a string.
+	const bool jupyter_html =
+	    auto_format && explain_format == ProfilerPrintFormat::HTML() && DuckDBPyConnection::IsJupyter();
+	if (!jupyter_html) {
 		string result_;
 		for (auto &row : coll.Rows()) {
 			// Skip the first column because it just contains 'physical plan'

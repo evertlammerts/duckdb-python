@@ -244,7 +244,7 @@ public:
 	           const Optional<py::int_> &max_col_width, const Optional<py::str> &null_value,
 	           const py::object &render_mode);
 
-	string Explain(ExplainType type);
+	string Explain(ExplainType type, const string &format = "");
 
 	static bool IsRelation(const py::object &object);
 

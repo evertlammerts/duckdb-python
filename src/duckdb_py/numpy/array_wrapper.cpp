@@ -180,6 +180,25 @@ struct StringConvert {
 	}
 };
 
+struct NullConvert {
+	template <class DUCKDB_T, class NUMPY_T>
+	static PyObject *ConvertValue(DUCKDB_T val, NumpyAppendData &append_data) {
+		// A SQLNULL column contains only NULLs, so ConvertValue is never reached; every row takes NullValue.
+		(void)val;
+		(void)append_data;
+		Py_RETURN_NONE;
+	}
+	template <class NUMPY_T, bool PANDAS>
+	static NUMPY_T NullValue(bool &set_mask) {
+		if (PANDAS) {
+			set_mask = false;
+			Py_RETURN_NONE;
+		}
+		set_mask = true;
+		return nullptr;
+	}
+};
+
 struct BlobConvert {
 	template <class DUCKDB_T, class NUMPY_T>
 	static PyObject *ConvertValue(string_t val, NumpyAppendData &append_data) {
@@ -702,6 +721,11 @@ void ArrayWrapper::Append(idx_t current_offset, Vector &input, idx_t source_size
 		break;
 	case LogicalTypeId::UUID:
 		may_have_null = ConvertColumn<hugeint_t, PyObject *, duckdb_py_convert::UUIDConvert>(append_data);
+		break;
+	case LogicalTypeId::SQLNULL:
+		// An all-NULL column (e.g. an untyped NULL literal): emit an object column of None. SQLNULL's physical
+		// type is INT32, but its data is never read since every row is NULL.
+		may_have_null = ConvertColumn<int32_t, PyObject *, duckdb_py_convert::NullConvert>(append_data);
 		break;
 
 	default:
