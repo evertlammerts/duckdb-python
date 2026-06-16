@@ -409,6 +409,10 @@ shared_ptr<DuckDBPyExpression> DuckDBPyExpression::LambdaExpression(const py::ob
 		throw py::value_error("Please provide 'lhs' as either a tuple containing strings, or a single string");
 	}
 	auto lambda_expression = make_uniq<duckdb::LambdaExpression>(std::move(lhs), rhs.GetExpression().Copy());
+	// Use the modern `lambda x, y: ...` syntax. The lhs we built (a column ref, or a `row` function for multiple
+	// parameters) is identical to what the named-parameter constructor produces; only the syntax type differs, and
+	// the single-arrow form is now deprecated and errors by default.
+	lambda_expression->GetLambdaSyntaxTypeMutable() = LambdaSyntaxType::LAMBDA_KEYWORD;
 	return make_shared_ptr<DuckDBPyExpression>(std::move(lambda_expression));
 }
 
