@@ -189,7 +189,7 @@ struct PyArrowBackend : public FilterBackend {
 
 	py::object MakeColumnRef(const vector<Identifier> &path) override {
 		vector<string> str_path;
-		std::transform(path.begin(), path.end(), str_path.begin(),
+		std::transform(path.begin(), path.end(), std::back_inserter(str_path),
 		               [](const Identifier &segment) { return segment.GetIdentifierName(); });
 		return field_factory(py::tuple(py::cast(str_path)));
 	}

@@ -289,7 +289,7 @@ private:
 	bool executed;
 	shared_ptr<Relation> rel;
 	vector<LogicalType> types;
-	vector<Identifier> names;
+	vector<string> names;
 	shared_ptr<DuckDBPyResult> result;
 	std::string rendered_result;
 };

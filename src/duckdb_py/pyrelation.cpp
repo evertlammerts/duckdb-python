@@ -29,7 +29,7 @@ DuckDBPyRelation::DuckDBPyRelation(shared_ptr<Relation> rel_p) : rel(std::move(r
 	this->executed = false;
 	auto &columns = rel->Columns();
 	for (auto &col : columns) {
-		names.push_back(col.GetName());
+		names.push_back(col.Name().GetIdentifierName());
 		types.push_back(col.GetType());
 	}
 }
@@ -69,9 +69,7 @@ DuckDBPyRelation::DuckDBPyRelation(shared_ptr<DuckDBPyResult> result_p) : rel(nu
 	}
 	this->executed = true;
 	this->types = result->GetTypes();
-	auto names_str = result->GetNames();
-	std::transform(names_str.begin(), names_str.end(), this->names.begin(),
-	               [](const std::string &name) { return Identifier(name); });
+	this->names = result->GetNames();
 }
 
 unique_ptr<DuckDBPyRelation> DuckDBPyRelation::ProjectFromExpression(const string &expression) {
@@ -1026,9 +1024,6 @@ PolarsDataFrame DuckDBPyRelation::ToPolars(idx_t batch_size, bool lazy) {
 	ArrowSchema arrow_schema;
 	auto result_names = names;
 	QueryResult::DeduplicateColumns(result_names);
-	vector<std::string> string_names(result_names.size());
-	std::transform(result_names.begin(), result_names.end(), string_names.begin(),
-	               [](const Identifier &name) { return name.GetIdentifierName(); });
 	ClientProperties client_properties;
 	if (rel) {
 		client_properties = rel->context->GetContext()->GetClientProperties();
@@ -1037,10 +1032,10 @@ PolarsDataFrame DuckDBPyRelation::ToPolars(idx_t batch_size, bool lazy) {
 	} else {
 		throw InternalException("DuckDBPyRelation To Polars must have a valid relation or result");
 	}
-	ArrowConverter::ToArrowSchema(&arrow_schema, types, string_names, client_properties);
+	ArrowConverter::ToArrowSchema(&arrow_schema, types, result_names, client_properties);
 	py::list batches;
 	// Now we create an empty arrow table
-	auto empty_table = pyarrow::ToArrowTable(types, string_names, batches, client_properties);
+	auto empty_table = pyarrow::ToArrowTable(types, result_names, batches, client_properties);
 
 	// And we extract the polars schema from the arrow table
 	auto polars_df = py::cast<PolarsDataFrame>(pybind11::module_::import("polars").attr("DataFrame")(empty_table));
@@ -1077,8 +1072,8 @@ void DuckDBPyRelation::Close() {
 }
 
 bool DuckDBPyRelation::ContainsColumnByName(const string &name) const {
-	return std::find_if(names.begin(), names.end(), [&](const Identifier &item) { return name == item; }) !=
-	       names.end();
+	return std::find_if(names.begin(), names.end(),
+	                    [&](const string &item) { return StringUtil::CIEquals(name, item); }) != names.end();
 }
 
 void DuckDBPyRelation::SetConnectionOwner(py::object owner) {
@@ -1122,7 +1117,7 @@ unique_ptr<DuckDBPyRelation> DuckDBPyRelation::GetAttribute(const string &name) 
 		// e.g 'rel['my_struct']['my_field']:
 		// first 'my_struct' is selected by the bottom condition
 		// then 'my_field' is accessed on the result of this
-		column_names.push_back(names[0]);
+		column_names.push_back(Identifier(names[0]));
 		column_names.push_back(Identifier(name));
 	} else if (ContainsColumnByName(name)) {
 		column_names.push_back(Identifier(name));

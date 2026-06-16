@@ -37,7 +37,7 @@ py::set DuckDBPyStatement::NamedParameters() const {
 	py::set result;
 	auto &named_parameters = statement->named_param_map;
 	for (auto &param : named_parameters) {
-		result.add(param.first);
+		result.add(param.first.GetIdentifierName());
 	}
 	return result;
 }

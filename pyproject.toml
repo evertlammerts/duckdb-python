@@ -122,7 +122,7 @@ cmake.build-type = "Debug"
 [[tool.scikit-build.overrides]]
 if.state = "editable"
 if.env.COVERAGE = false
-if.platform-system = "Darwin"
+if.platform-system = "(?i)darwin"
 inherit.cmake.define = "append"
 cmake.define.DISABLE_UNITY = "1"
 

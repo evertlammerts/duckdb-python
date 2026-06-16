@@ -793,11 +793,11 @@ py::object DuckDBPyResult::FetchArrowCapsule(idx_t rows_per_batch) {
 	return py::capsule(stream, "arrow_array_stream", ArrowArrayStreamPyCapsuleDestructor);
 }
 
-py::list DuckDBPyResult::GetDescription(const vector<Identifier> &names, const vector<LogicalType> &types) {
+py::list DuckDBPyResult::GetDescription(const vector<string> &names, const vector<LogicalType> &types) {
 	py::list desc;
 
 	for (idx_t col_idx = 0; col_idx < names.size(); col_idx++) {
-		auto py_name = py::str(names[col_idx].GetIdentifierName());
+		auto py_name = py::str(names[col_idx]);
 		auto py_type = DuckDBPyType(types[col_idx]);
 		desc.append(py::make_tuple(py_name, py_type, py::none(), py::none(), py::none(), py::none(), py::none()));
 	}
