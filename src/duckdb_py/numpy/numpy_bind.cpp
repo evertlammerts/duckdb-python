@@ -8,7 +8,7 @@
 
 namespace duckdb {
 
-void NumpyBind::Bind(const ClientContext &context, py::handle df, vector<PandasColumnBindData> &bind_columns,
+void NumpyBind::Bind(ClientContext &context, py::handle df, vector<PandasColumnBindData> &bind_columns,
                      vector<LogicalType> &return_types, vector<string> &names) {
 
 	auto df_columns = py::list(df.attr("keys")());

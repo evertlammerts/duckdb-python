@@ -187,8 +187,11 @@ struct PyArrowBackend : public FilterBackend {
 		dataset_scalar = import_cache.pyarrow.dataset().attr("scalar");
 	}
 
-	py::object MakeColumnRef(const vector<string> &path) override {
-		return field_factory(py::tuple(py::cast(path)));
+	py::object MakeColumnRef(const vector<Identifier> &path) override {
+		vector<string> str_path;
+		std::transform(path.begin(), path.end(), str_path.begin(),
+		               [](const Identifier &segment) { return segment.GetIdentifierName(); });
+		return field_factory(py::tuple(py::cast(str_path)));
 	}
 
 	py::object MakeScalar(const Value &v, const ArrowType *arrow_type, const string &timezone_config) override {
@@ -283,7 +286,7 @@ py::object PyArrowFilterPushdown::TransformFilter(TableFilterSet &filter_collect
 		auto &column_name = columns[column_idx];
 		D_ASSERT(columns.find(column_idx) != columns.end());
 
-		vector<string> column_path = {column_name};
+		vector<Identifier> column_path = {Identifier(column_name)};
 		auto &arrow_type = arrow_table.GetColumns().at(filter_to_col.at(column_idx));
 		py::object child_expression = duckdb::TransformFilter(entry.Filter(), std::move(column_path), backend,
 		                                                      arrow_type.get(), config.time_zone);

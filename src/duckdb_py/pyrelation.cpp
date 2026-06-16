@@ -69,7 +69,9 @@ DuckDBPyRelation::DuckDBPyRelation(shared_ptr<DuckDBPyResult> result_p) : rel(nu
 	}
 	this->executed = true;
 	this->types = result->GetTypes();
-	this->names = result->GetNames();
+	auto names_str = result->GetNames();
+	std::transform(names_str.begin(), names_str.end(), this->names.begin(),
+	               [](const std::string &name) { return Identifier(name); });
 }
 
 unique_ptr<DuckDBPyRelation> DuckDBPyRelation::ProjectFromExpression(const string &expression) {
@@ -151,7 +153,7 @@ unique_ptr<DuckDBPyRelation> DuckDBPyRelation::ProjectFromTypes(const py::object
 			if (!projection.empty()) {
 				projection += ", ";
 			}
-			projection += SQLQuotedIdentifier::ToString(names[i]);
+			projection += SQLIdentifier(names[i]);
 		}
 	}
 	if (projection.empty()) {
@@ -329,7 +331,7 @@ vector<string> CreateExpressionList(const vector<ColumnDefinition> &columns,
 			}
 			expr += aggregates[i].name;
 			expr += "(";
-			expr += SQLQuotedIdentifier::ToString(col.GetName());
+			expr += SQLIdentifier(col.GetName());
 			expr += ")";
 			if (col.GetType().IsNumeric()) {
 				expr += "::DOUBLE";
@@ -338,7 +340,7 @@ vector<string> CreateExpressionList(const vector<ColumnDefinition> &columns,
 			}
 		}
 		expr += "])";
-		expr += " AS " + SQLQuotedIdentifier::ToString(col.GetName());
+		expr += " AS " + SQLIdentifier(col.GetName());
 		expressions.push_back(expr);
 	}
 	return expressions;
@@ -1024,6 +1026,9 @@ PolarsDataFrame DuckDBPyRelation::ToPolars(idx_t batch_size, bool lazy) {
 	ArrowSchema arrow_schema;
 	auto result_names = names;
 	QueryResult::DeduplicateColumns(result_names);
+	vector<std::string> string_names(result_names.size());
+	std::transform(result_names.begin(), result_names.end(), string_names.begin(),
+	               [](const Identifier &name) { return name.GetIdentifierName(); });
 	ClientProperties client_properties;
 	if (rel) {
 		client_properties = rel->context->GetContext()->GetClientProperties();
@@ -1032,10 +1037,10 @@ PolarsDataFrame DuckDBPyRelation::ToPolars(idx_t batch_size, bool lazy) {
 	} else {
 		throw InternalException("DuckDBPyRelation To Polars must have a valid relation or result");
 	}
-	ArrowConverter::ToArrowSchema(&arrow_schema, types, result_names, client_properties);
+	ArrowConverter::ToArrowSchema(&arrow_schema, types, string_names, client_properties);
 	py::list batches;
 	// Now we create an empty arrow table
-	auto empty_table = pyarrow::ToArrowTable(types, result_names, batches, client_properties);
+	auto empty_table = pyarrow::ToArrowTable(types, string_names, batches, client_properties);
 
 	// And we extract the polars schema from the arrow table
 	auto polars_df = py::cast<PolarsDataFrame>(pybind11::module_::import("polars").attr("DataFrame")(empty_table));
@@ -1072,8 +1077,8 @@ void DuckDBPyRelation::Close() {
 }
 
 bool DuckDBPyRelation::ContainsColumnByName(const string &name) const {
-	return std::find_if(names.begin(), names.end(),
-	                    [&](const string &item) { return StringUtil::CIEquals(name, item); }) != names.end();
+	return std::find_if(names.begin(), names.end(), [&](const Identifier &item) { return name == item; }) !=
+	       names.end();
 }
 
 void DuckDBPyRelation::SetConnectionOwner(py::object owner) {
@@ -1096,10 +1101,10 @@ static bool ContainsStructFieldByName(LogicalType &type, const string &name) {
 	if (type.id() != LogicalTypeId::STRUCT) {
 		return false;
 	}
-	auto count = StructType::GetChildCount(type);
+	const auto name_identifier = Identifier(name);
+	const auto count = StructType::GetChildCount(type);
 	for (idx_t i = 0; i < count; i++) {
-		auto &field_name = StructType::GetChildName(type, i);
-		if (StringUtil::CIEquals(name, field_name)) {
+		if (StructType::GetChildName(type, i) == name) {
 			return true;
 		}
 	}
@@ -1112,15 +1117,15 @@ unique_ptr<DuckDBPyRelation> DuckDBPyRelation::GetAttribute(const string &name) 
 		throw py::attribute_error(
 		    StringUtil::Format("This relation does not contain a column by the name of '%s'", name));
 	}
-	vector<string> column_names;
+	vector<Identifier> column_names;
 	if (names.size() == 1 && ContainsStructFieldByName(types[0], name)) {
 		// e.g 'rel['my_struct']['my_field']:
 		// first 'my_struct' is selected by the bottom condition
 		// then 'my_field' is accessed on the result of this
 		column_names.push_back(names[0]);
-		column_names.push_back(name);
+		column_names.push_back(Identifier(name));
 	} else if (ContainsColumnByName(name)) {
-		column_names.push_back(name);
+		column_names.push_back(Identifier(name));
 	}
 
 	if (column_names.empty()) {
@@ -1210,15 +1215,14 @@ unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Join(DuckDBPyRelation *other, con
 		auto condition_string = std::string(py::cast<py::str>(condition));
 		return DeriveRelation(rel->Join(other->rel, condition_string, join_type));
 	}
-	vector<string> using_list;
+	vector<Identifier> using_list;
 	if (py::is_list_like(condition)) {
-		auto using_list_p = py::list(condition);
-		for (auto &item : using_list_p) {
+		for (auto &item : py::list(condition)) {
 			if (!py::isinstance<py::str>(item)) {
 				string actual_type = py::str(py::type::of(item));
 				throw InvalidInputException("Using clause should be a list of strings, not %s", actual_type);
 			}
-			using_list.push_back(std::string(py::str(item)));
+			using_list.push_back(Identifier(std::string(py::str(item))));
 		}
 		if (using_list.empty()) {
 			throw InvalidInputException("Please provide at least one string in the condition to create a USING clause");
@@ -1255,11 +1259,13 @@ static Value NestedDictToStruct(const py::object &dictionary) {
 			throw InvalidInputException("NestedDictToStruct only accepts a dictionary with string keys");
 		}
 
+		auto item_key_str = string(py::str(item_key));
+
 		if (py::isinstance<py::int_>(item_value)) {
 			int32_t item_value_int = py::int_(item_value);
-			children.push_back(std::make_pair(py::str(item_key), Value(item_value_int)));
+			children.push_back(std::make_pair(Identifier(item_key_str), Value(item_value_int)));
 		} else if (py::isinstance<py::dict>(item_value)) {
-			children.push_back(std::make_pair(py::str(item_key), NestedDictToStruct(item_value)));
+			children.push_back(std::make_pair(Identifier(item_key_str), NestedDictToStruct(item_value)));
 		} else {
 			throw InvalidInputException(
 			    "NestedDictToStruct only accepts a dictionary with integer values or nested dictionaries");
@@ -1532,7 +1538,7 @@ void DuckDBPyRelation::ToCSV(const string &filename, const py::object &sep, cons
 
 // should this return a rel with the new view?
 unique_ptr<DuckDBPyRelation> DuckDBPyRelation::CreateView(const string &view_name, bool replace) {
-	rel->CreateView(view_name, replace);
+	rel->CreateView(Identifier(view_name), replace);
 	return DeriveRelation(rel);
 }
 
@@ -1548,7 +1554,7 @@ static bool IsDescribeStatement(SQLStatement &statement) {
 }
 
 unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Query(const string &view_name, const string &sql_query) {
-	rel->CreateView(view_name, /*replace=*/true, /*temporary=*/true);
+	rel->CreateView(Identifier(view_name), /*replace=*/true, /*temporary=*/true);
 	auto all_dependencies = rel->GetAllDependencies();
 
 	Parser parser(rel->context->GetContext()->GetParserOptions());
@@ -1642,7 +1648,8 @@ void DuckDBPyRelation::Insert(const py::object &params) const {
 	if (this->rel->type != RelationType::TABLE_RELATION) {
 		throw InvalidInputException("'DuckDBPyRelation.insert' can only be used on a table relation");
 	}
-	vector<vector<Value>> values {DuckDBPyConnection::TransformPythonParamList(params)};
+	vector<vector<Value>> values {
+	    DuckDBPyConnection::TransformPythonParamList(*this->rel->context->GetContext(), params)};
 
 	D_ASSERT(py::gil_check());
 	py::gil_scoped_release release;
@@ -1731,12 +1738,11 @@ void DuckDBPyRelation::Print(const Optional<py::int_> &max_width, const Optional
 	py::print(py::str(ToStringInternal(config, invalidate_cache)));
 }
 
-static ExplainFormat GetExplainFormat(ExplainType type) {
+static ProfilerPrintFormat GetExplainFormat(ExplainType type) {
 	if (DuckDBPyConnection::IsJupyter() && type != ExplainType::EXPLAIN_ANALYZE) {
-		return ExplainFormat::HTML;
-	} else {
-		return ExplainFormat::DEFAULT;
+		return ProfilerPrintFormat::HTML();
 	}
+	return ProfilerPrintFormat::Default();
 }
 
 static void DisplayHTML(const string &html) {
@@ -1758,7 +1764,7 @@ string DuckDBPyRelation::Explain(ExplainType type) {
 	D_ASSERT(res->type == duckdb::QueryResultType::MATERIALIZED_RESULT);
 	auto &materialized = res->Cast<MaterializedQueryResult>();
 	auto &coll = materialized.Collection();
-	if (explain_format != ExplainFormat::HTML || !DuckDBPyConnection::IsJupyter()) {
+	if (explain_format != ProfilerPrintFormat::HTML() || !DuckDBPyConnection::IsJupyter()) {
 		string result_;
 		for (auto &row : coll.Rows()) {
 			// Skip the first column because it just contains 'physical plan'

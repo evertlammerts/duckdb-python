@@ -11,17 +11,11 @@
 #include "duckdb_python/pybind11/pybind_wrapper.hpp"
 #include "duckdb.hpp"
 #include "duckdb_python/arrow/arrow_array_stream.hpp"
-#include "duckdb/main/external_dependencies.hpp"
 #include "duckdb_python/numpy/numpy_type.hpp"
-#include "duckdb_python/pybind11/registered_py_object.hpp"
 #include "duckdb_python/pyresult.hpp"
-#include "duckdb/parser/statement/explain_statement.hpp"
-#include "duckdb_python/pybind11/conversions/explain_enum.hpp"
 #include "duckdb_python/pybind11/conversions/render_mode_enum.hpp"
-#include "duckdb_python/pybind11/conversions/null_handling_enum.hpp"
 #include "duckdb_python/pybind11/dataframe.hpp"
 #include "duckdb_python/python_objects.hpp"
-#include "duckdb/common/box_renderer.hpp"
 
 namespace duckdb {
 
@@ -295,7 +289,7 @@ private:
 	bool executed;
 	shared_ptr<Relation> rel;
 	vector<LogicalType> types;
-	vector<string> names;
+	vector<Identifier> names;
 	shared_ptr<DuckDBPyResult> result;
 	std::string rendered_result;
 };

@@ -10,13 +10,7 @@
 #include "duckdb/common/arrow/arrow_converter.hpp"
 #include "duckdb/common/arrow/arrow_wrapper.hpp"
 #include "duckdb/common/arrow/result_arrow_wrapper.hpp"
-#include "duckdb/common/types/date.hpp"
-#include "duckdb/common/types/hugeint.hpp"
-#include "duckdb/common/types/uhugeint.hpp"
-#include "duckdb/common/types/time.hpp"
-#include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/types/uuid.hpp"
-#include "duckdb_python/numpy/array_wrapper.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/enums/stream_execution_result.hpp"
 #include "duckdb_python/arrow/arrow_export_utils.hpp"
@@ -799,11 +793,11 @@ py::object DuckDBPyResult::FetchArrowCapsule(idx_t rows_per_batch) {
 	return py::capsule(stream, "arrow_array_stream", ArrowArrayStreamPyCapsuleDestructor);
 }
 
-py::list DuckDBPyResult::GetDescription(const vector<string> &names, const vector<LogicalType> &types) {
+py::list DuckDBPyResult::GetDescription(const vector<Identifier> &names, const vector<LogicalType> &types) {
 	py::list desc;
 
 	for (idx_t col_idx = 0; col_idx < names.size(); col_idx++) {
-		auto py_name = py::str(names[col_idx]);
+		auto py_name = py::str(names[col_idx].GetIdentifierName());
 		auto py_type = DuckDBPyType(types[col_idx]);
 		desc.append(py::make_tuple(py_name, py_type, py::none(), py::none(), py::none(), py::none(), py::none()));
 	}

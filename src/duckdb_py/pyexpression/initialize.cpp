@@ -293,7 +293,7 @@ static void InitializeImplicitConversion(py::class_<DuckDBPyExpression, shared_p
 		return DuckDBPyExpression::ColumnExpression(names);
 	}));
 	m.def(py::init<>([](const py::object &obj) {
-		auto val = TransformPythonValue(obj);
+		auto val = TransformPythonValue(nullptr, obj);
 		return DuckDBPyExpression::InternalConstantExpression(std::move(val));
 	}));
 	py::implicitly_convertible<py::str, DuckDBPyExpression>();

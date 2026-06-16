@@ -38,7 +38,7 @@ struct FilterBackend {
 	// Build a column expression from an accumulated path. `path` always has
 	// at least one element (the top-level column). For nested struct
 	// references the path accumulates one entry per `struct_extract`.
-	virtual py::object MakeColumnRef(const vector<string> &path) = 0;
+	virtual py::object MakeColumnRef(const vector<Identifier> &path) = 0;
 
 	// Convert a DuckDB Value to a backend-native Python scalar. `arrow_type`
 	// may be nullptr for backends that don't need Arrow type information
@@ -77,7 +77,7 @@ struct FilterBackend {
 // - `arrow_type` is the ArrowType for the current path leaf (nullable for
 //    backends that don't track Arrow types).
 // - Returns `py::none()` if no part of the filter could be pushed.
-py::object TransformFilter(const TableFilter &filter, vector<string> column_path, FilterBackend &backend,
+py::object TransformFilter(const TableFilter &filter, const vector<Identifier> &column_path, FilterBackend &backend,
                            const ArrowType *arrow_type, const string &timezone_config);
 
 // Walk a bound Expression tree (the contents of an `ExpressionFilter`) and emit
@@ -88,7 +88,7 @@ py::object TransformFilter(const TableFilter &filter, vector<string> column_path
 // and the internal runtime filter functions (dynamic / bloom / perfect-hash-join
 // / prefix-range, which are skipped). Returns `py::none()` for an optional or
 // runtime filter that can't be pushed.
-py::object TransformExpression(const Expression &expression, const vector<string> &column_path, FilterBackend &backend,
-                               const ArrowType *arrow_type, const string &timezone_config);
+py::object TransformExpression(const Expression &expression, const vector<Identifier> &column_path,
+                               FilterBackend &backend, const ArrowType *arrow_type, const string &timezone_config);
 
 } // namespace duckdb

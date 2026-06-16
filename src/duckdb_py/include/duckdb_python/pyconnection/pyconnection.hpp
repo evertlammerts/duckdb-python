@@ -10,7 +10,6 @@
 #include "duckdb_python/arrow/arrow_array_stream.hpp"
 #include "duckdb.hpp"
 #include "duckdb_python/pybind11/pybind_wrapper.hpp"
-#include "duckdb/common/unordered_map.hpp"
 #include "duckdb_python/import_cache/python_import_cache.hpp"
 #include "duckdb_python/numpy/numpy_type.hpp"
 #include "duckdb_python/pyrelation.hpp"
@@ -23,7 +22,6 @@
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb_python/pybind11/conversions/exception_handling_enum.hpp"
 #include "duckdb_python/pybind11/conversions/python_udf_type_enum.hpp"
-#include "duckdb_python/pybind11/conversions/python_csv_line_terminator_enum.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 
 namespace duckdb {
@@ -348,8 +346,9 @@ public:
 
 	static shared_ptr<DuckDBPyConnection> Connect(const py::object &database, bool read_only, const py::dict &config);
 
-	static vector<Value> TransformPythonParamList(const py::handle &params);
-	static case_insensitive_map_t<BoundParameterData> TransformPythonParamDict(const py::dict &params);
+	static vector<Value> TransformPythonParamList(ClientContext &context, const py::handle &params);
+	static identifier_map_t<BoundParameterData> TransformPythonParamDict(ClientContext &context,
+	                                                                     const py::dict &params);
 
 	void RegisterFilesystem(AbstractFileSystem filesystem);
 	void UnregisterFilesystem(const py::str &name);
@@ -357,7 +356,7 @@ public:
 	bool FileSystemIsRegistered(const string &name);
 
 	// Profiling info
-	py::str GetProfilingInformation(const py::str &format = "json");
+	py::str GetProfilingInformation(const string &format = "json");
 	void EnableProfiling();
 	void DisableProfiling();
 
@@ -381,7 +380,6 @@ private:
 	                               const shared_ptr<DuckDBPyType> &return_type, bool vectorized,
 	                               FunctionNullHandling null_handling, PythonExceptionHandling exception_handling,
 	                               bool side_effects);
-	void RegisterArrowObject(const py::object &arrow_object, const string &name);
 	vector<unique_ptr<SQLStatement>> GetStatements(const py::object &query);
 
 	static PythonEnvironmentType environment;

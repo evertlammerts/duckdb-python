@@ -14,12 +14,12 @@ struct PolarsBackend : public FilterBackend {
 	    : client_properties(client_properties_p), import_cache(*DuckDBPyConnection::ImportCache()) {
 	}
 
-	py::object MakeColumnRef(const vector<string> &path) override {
+	py::object MakeColumnRef(const vector<Identifier> &path) override {
 		// pl.col(path[0]).struct.field(path[1]).struct.field(...) — polars supports arbitrary
 		// chaining for nested struct access, verified empirically up to 3 levels.
 		py::object col = import_cache.polars.col()(path[0]);
 		for (idx_t i = 1; i < path.size(); i++) {
-			col = col.attr("struct").attr("field")(path[i]);
+			col = col.attr("struct").attr("field")(path[i].GetIdentifierName());
 		}
 		return col;
 	}
@@ -131,7 +131,7 @@ py::object PolarsFilterPushdown::TransformFilter(const TableFilterSet &filter_co
 		auto &column_name = columns[column_idx];
 		D_ASSERT(columns.find(column_idx) != columns.end());
 
-		vector<string> column_path = {column_name};
+		vector<Identifier> column_path = {Identifier(column_name)};
 		// Polars does not need ArrowType information — `nullptr` here propagates through the
 		// shared walker; the PolarsBackend ignores the parameter in MakeScalar.
 		py::object child_expression = duckdb::TransformFilter(entry.Filter(), std::move(column_path), backend, nullptr,

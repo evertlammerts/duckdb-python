@@ -50,11 +50,12 @@ bool DuckDBPyType::EqualsString(const string &type_str) const {
 }
 
 shared_ptr<DuckDBPyType> DuckDBPyType::GetAttribute(const string &name) const {
+	auto name_identifier = Identifier(name);
 	if (type.id() == LogicalTypeId::STRUCT || type.id() == LogicalTypeId::UNION) {
 		auto &children = StructType::GetChildTypes(type);
 		for (idx_t i = 0; i < children.size(); i++) {
 			auto &child = children[i];
-			if (StringUtil::CIEquals(child.first, name)) {
+			if (child.first == name) {
 				return make_shared_ptr<DuckDBPyType>(StructType::GetChildType(type, i));
 			}
 		}
@@ -228,7 +229,7 @@ static LogicalType FromUnionTypeInternal(const py::tuple &args) {
 	child_list_t<LogicalType> members;
 
 	for (const auto &arg : args) {
-		auto name = StringUtil::Format("u%d", index++);
+		auto name = Identifier(StringUtil::Format("u%d", index++));
 		py::object object = py::reinterpret_borrow<py::object>(arg);
 		members.push_back(make_pair(name, FromObject(object)));
 	}
@@ -284,7 +285,7 @@ static LogicalType FromDictionary(const py::object &obj) {
 	for (auto &item : dict) {
 		auto &name_p = item.first;
 		auto type_p = py::reinterpret_borrow<py::object>(item.second);
-		string name = py::str(name_p);
+		auto name = Identifier(py::str(name_p));
 		auto type = FromObject(type_p);
 		children.push_back(std::make_pair(name, std::move(type)));
 	}

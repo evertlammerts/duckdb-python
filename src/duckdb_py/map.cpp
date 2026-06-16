@@ -23,10 +23,10 @@ struct MapFunctionData : public TableFunctionData {
 	}
 	PyObject *function;
 	vector<LogicalType> in_types, out_types;
-	vector<string> in_names, out_names;
+	vector<Identifier> in_names, out_names;
 };
 
-static py::object FunctionCall(NumpyResultConversion &conversion, const vector<string> &names, PyObject *function) {
+static py::object FunctionCall(NumpyResultConversion &conversion, const vector<Identifier> &names, PyObject *function) {
 	py::dict in_numpy_dict;
 	for (idx_t col_idx = 0; col_idx < names.size(); col_idx++) {
 		in_numpy_dict[names[col_idx].c_str()] = conversion.ToArray(col_idx);
@@ -71,8 +71,8 @@ static bool ContainsNullType(const vector<LogicalType> &types) {
 	return false;
 }
 
-static void OverrideNullType(vector<LogicalType> &return_types, const vector<string> &return_names,
-                             const vector<LogicalType> &original_types, const vector<string> &original_names) {
+static void OverrideNullType(vector<LogicalType> &return_types, const vector<Identifier> &return_names,
+                             const vector<LogicalType> &original_types, const vector<Identifier> &original_names) {
 	if (!ContainsNullType(return_types)) {
 		// Nothing to override, none of the returned types are NULL
 		return;
@@ -99,7 +99,7 @@ static void OverrideNullType(vector<LogicalType> &return_types, const vector<str
 }
 
 unique_ptr<FunctionData> BindExplicitSchema(unique_ptr<MapFunctionData> function_data, PyObject *schema_p,
-                                            vector<LogicalType> &types, vector<string> &names) {
+                                            vector<LogicalType> &types, vector<Identifier> &names) {
 	D_ASSERT(schema_p != Py_None);
 
 	auto schema_object = py::reinterpret_borrow<py::dict>(schema_p);
@@ -115,7 +115,7 @@ unique_ptr<FunctionData> BindExplicitSchema(unique_ptr<MapFunctionData> function
 	for (auto &item : schema) {
 		auto name = item.first;
 		auto type_p = item.second;
-		names.push_back(std::string(py::str(name)));
+		names.push_back(Identifier(py::str(name)));
 		// TODO: replace with py::try_cast so we can catch the error and throw a better exception
 		auto type = py::cast<shared_ptr<DuckDBPyType>>(type_p);
 		types.push_back(type->Type());
@@ -141,8 +141,12 @@ unique_ptr<FunctionData> MapFunction::MapFunctionBind(ClientContext &context, Ta
 	data.in_names = input.input_table_names;
 	data.in_types = input.input_table_types;
 
+	vector<Identifier> name_identifiers(names.size());
+	std::transform(names.begin(), names.end(), name_identifiers.begin(),
+	               [](const string &name) { return Identifier(name); });
+
 	if (explicit_schema != Py_None) {
-		return BindExplicitSchema(std::move(data_uptr), explicit_schema, return_types, names);
+		return BindExplicitSchema(std::move(data_uptr), explicit_schema, return_types, name_identifiers);
 	}
 	NumpyResultConversion conversion(data.in_types, 0, context.GetClientProperties());
 	auto df = FunctionCall(conversion, data.in_names, data.function);
@@ -150,9 +154,9 @@ unique_ptr<FunctionData> MapFunction::MapFunctionBind(ClientContext &context, Ta
 	Pandas::Bind(context, df, pandas_bind_data, return_types, names);
 
 	// output types are potentially NULL, this happens for types that map to 'object' dtype
-	OverrideNullType(return_types, names, data.in_types, data.in_names);
+	OverrideNullType(return_types, name_identifiers, data.in_types, data.in_names);
 
-	data.out_names = names;
+	data.out_names = name_identifiers;
 	data.out_types = return_types;
 	return std::move(data_uptr);
 }
@@ -191,7 +195,10 @@ OperatorResultType MapFunction::MapFunctionExec(ExecutionContext &context, Table
 		throw InvalidInputException("UDF column type mismatch, expected [%s], got [%s]",
 		                            TypeVectorToString(data.out_types), TypeVectorToString(pandas_return_types));
 	}
-	if (pandas_names != data.out_names) {
+	vector<Identifier> pandas_name_identifiers(pandas_names.size());
+	std::transform(pandas_names.begin(), pandas_names.end(), pandas_name_identifiers.begin(),
+	               [](const string &name) { return Identifier(name); });
+	if (pandas_name_identifiers != data.out_names) {
 		throw InvalidInputException("UDF column name mismatch, expected [%s], got [%s]",
 		                            StringUtil::Join(data.out_names, ", "), StringUtil::Join(pandas_names, ", "));
 	}
@@ -206,9 +213,9 @@ OperatorResultType MapFunction::MapFunctionExec(ExecutionContext &context, Table
 
 	for (idx_t col_idx = 0; col_idx < output.ColumnCount(); col_idx++) {
 		auto &bind_data = pandas_bind_data[col_idx];
-		PandasScanFunction::PandasBackendScanSwitch(bind_data, row_count, 0, output.data[col_idx]);
+		PandasScanFunction::PandasBackendScanSwitch(context.client, bind_data, row_count, 0, output.data[col_idx]);
 	}
-	output.SetCardinality(row_count);
+	output.SetChildCardinality(row_count);
 	return OperatorResultType::NEED_MORE_INPUT;
 }
 
