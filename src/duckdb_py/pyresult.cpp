@@ -483,103 +483,111 @@ void DuckDBPyResult::PromoteMaterializedToArrow(idx_t batch_size) {
 	result = std::move(new_result);
 }
 
-// Re-feed a materialized result as a lazy stream on the user's own context. The
-// StreamQueryResult co-owns the context, so conversion survives `del conn` and runs under a
-// live transaction (geometry/extension correctness, #492).
-void DuckDBPyResult::PromoteMaterializedToStream() {
-	D_ASSERT(result->type == QueryResultType::MATERIALIZED_RESULT);
-	auto client_context = result->client_properties.client_context;
-	if (!client_context) {
-		throw InternalException("Cannot promote result to an Arrow stream: the originating client context is gone");
+template <typename T>
+T DuckDBPyResult::RunWithArrowSchema(const std::function<T(const ArrowSchema &)> &fun, bool dedup_col_names) {
+	D_ASSERT(result);
+	if (!result->client_properties.client_context) {
+		throw ConnectionException("Cannot fetch arrow schema without a valid connection");
 	}
-	auto context = client_context->shared_from_this();
-	auto &materialized = result->Cast<MaterializedQueryResult>();
-	auto names = result->names;
-	auto select = MakeColumnDataScanStatement(materialized.TakeCollection(), names);
-
-	unique_ptr<QueryResult> new_result;
-	{
-		D_ASSERT(py::gil_check());
-		py::gil_scoped_release release;
-		auto pending_query = context->PendingQuery(std::move(select), QueryParameters(true));
-		new_result = DuckDBPyConnection::CompletePendingQuery(*pending_query);
-	}
-	if (new_result->HasError()) {
-		new_result->ThrowError();
-	}
-	new_result->names = std::move(names);
-	result = std::move(new_result);
-}
-
-duckdb::pyarrow::Table DuckDBPyResult::FetchArrowTable(idx_t rows_per_batch, bool to_polars) {
-	if (!result) {
-		throw InvalidInputException("There is no query result");
-	}
-	// ARROW_RESULT: fresh collector output. MATERIALIZED: re-feed for parallel conversion.
-	// STREAM: a live result, converted directly below (never materialized to re-feed).
-	if (result->type == QueryResultType::MATERIALIZED_RESULT) {
-		PromoteMaterializedToArrow(rows_per_batch);
-	}
+	auto ctx = result->client_properties.client_context->shared_from_this();
 
 	auto names = result->names;
-	if (to_polars) {
+	if (dedup_col_names) {
 		QueryResult::DeduplicateColumns(names);
 	}
 
-	// Fetch the schema once
 	ArrowSchema arrow_schema;
-	ArrowConverter::ToArrowSchema(&arrow_schema, result->types, names, result->client_properties);
-	auto pyarrow_schema = pyarrow::ToPyArrowSchema(arrow_schema);
+	ctx->RunFunctionInTransaction(
+	    [&] { ArrowConverter::ToArrowSchema(&arrow_schema, result->types, names, result->client_properties); });
 
+	return fun(arrow_schema);
+}
+
+duckdb::pyarrow::Table DuckDBPyResult::MaterializedResultToArrowTable(const ArrowSchema &arrow_schema,
+                                                                      const idx_t rows_per_batch) {
+	D_ASSERT(result);
+	D_ASSERT(result->type == QueryResultType::MATERIALIZED_RESULT || result->type == QueryResultType::ARROW_RESULT);
+
+	auto pyarrow_schema = pyarrow::ToPyArrowSchema(arrow_schema);
+	if (result->type == QueryResultType::MATERIALIZED_RESULT) {
+		PromoteMaterializedToArrow(rows_per_batch);
+	}
 	py::list batches;
-	if (result->type == QueryResultType::ARROW_RESULT) {
-		auto &arrow_result = result->Cast<ArrowQueryResult>();
-		auto arrays = arrow_result.ConsumeArrays();
-		for (auto &array : arrays) {
-			ArrowArray data = array->arrow_array;
-			array->arrow_array.release = nullptr;
-			TransformDuckToArrowChunk(pyarrow_schema, data, batches);
-		}
-	} else {
-		// STREAM_RESULT: pull the live stream directly into Arrow batches.
-		QueryResultChunkScanState scan_state(*result);
-		while (true) {
-			ArrowArray data;
-			idx_t count;
-			{
-				D_ASSERT(py::gil_check());
-				py::gil_scoped_release release;
-				count = ArrowUtil::FetchChunk(scan_state, result->client_properties, rows_per_batch, &data,
-				                              ArrowTypeExtensionData::GetExtensionTypes(
-				                                  *result->client_properties.client_context, result->types));
-			}
-			if (count == 0) {
-				break;
-			}
-			TransformDuckToArrowChunk(pyarrow_schema, data, batches);
-		}
+	auto &arrow_result = result->Cast<ArrowQueryResult>();
+	auto arrays = arrow_result.ConsumeArrays();
+	for (auto &array : arrays) {
+		ArrowArray data = array->arrow_array;
+		array->arrow_array.release = nullptr;
+		TransformDuckToArrowChunk(pyarrow_schema, data, batches);
+	}
+	return pyarrow::ToArrowTable(std::move(batches), pyarrow_schema);
+}
+
+duckdb::pyarrow::Table DuckDBPyResult::FetchArrowTable(const idx_t rows_per_batch, const bool to_polars) {
+	if (!result) {
+		throw InvalidInputException("There is no query result");
 	}
 
-	return pyarrow::ToArrowTable(std::move(batches), pyarrow_schema);
+	return RunWithArrowSchema<duckdb::pyarrow::Table>(
+	    [&](const ArrowSchema &schema) -> duckdb::pyarrow::Table {
+		    if (result->type == QueryResultType::MATERIALIZED_RESULT || result->type == QueryResultType::ARROW_RESULT) {
+			    return MaterializedResultToArrowTable(schema, rows_per_batch);
+		    }
+		    if (result->type != QueryResultType::STREAM_RESULT) {
+			    throw InternalException("FetchArrowTable called with unsupported query result: %d", result->type);
+		    }
+		    auto pyarrow_schema = pyarrow::ToPyArrowSchema(schema);
+		    py::list batches;
+		    QueryResultChunkScanState scan_state(*result);
+		    while (true) {
+			    ArrowArray data;
+			    idx_t count;
+			    {
+				    D_ASSERT(py::gil_check());
+				    py::gil_scoped_release release;
+				    count = ArrowUtil::FetchChunk(scan_state, result->client_properties, rows_per_batch, &data,
+				                                  ArrowTypeExtensionData::GetExtensionTypes(
+				                                      *result->client_properties.client_context, result->types));
+			    }
+			    if (count == 0) {
+				    break;
+			    }
+			    TransformDuckToArrowChunk(pyarrow_schema, data, batches);
+		    }
+		    return pyarrow::ToArrowTable(std::move(batches), pyarrow_schema);
+	    },
+	    to_polars);
 }
 
 ArrowArrayStream DuckDBPyResult::FetchArrowArrayStream(idx_t rows_per_batch) {
 	if (!result) {
 		throw InvalidInputException("There is no query result");
 	}
-	// Re-feed a materialized result to get a context-owning stream; a StreamQueryResult is
-	// wrapped directly (already has a live context).
-	if (result->type == QueryResultType::MATERIALIZED_RESULT) {
-		PromoteMaterializedToStream();
+	if (result->type != QueryResultType::STREAM_RESULT) {
+		throw InternalException("FetchArrowArrayStream called with unsupported query result: %d", result->type);
 	}
 	// The wrapper is owned by the ArrowArrayStream's private_data (released with the stream).
-	ResultArrowArrayStreamWrapper *result_stream = new ResultArrowArrayStreamWrapper(std::move(result), rows_per_batch);
+	const auto result_stream = new ResultArrowArrayStreamWrapper(std::move(result), rows_per_batch);
 	return result_stream->stream;
 }
 
 duckdb::pyarrow::RecordBatchReader DuckDBPyResult::FetchRecordBatchReader(idx_t rows_per_batch) {
 	if (!result) {
 		throw InvalidInputException("There is no query result");
+	}
+
+	if (result->type == QueryResultType::MATERIALIZED_RESULT || result->type == QueryResultType::ARROW_RESULT) {
+		constexpr bool dedup_column_names = false;
+		return RunWithArrowSchema<duckdb::pyarrow::RecordBatchReader>(
+		    [&](const ArrowSchema &schema) -> duckdb::pyarrow::RecordBatchReader {
+			    const auto table = MaterializedResultToArrowTable(schema, rows_per_batch);
+			    return py::cast<duckdb::pyarrow::RecordBatchReader>(
+			        table.attr("to_reader")(py::arg("max_chunksize") = rows_per_batch));
+		    },
+		    dedup_column_names);
+	}
+	if (result->type != QueryResultType::STREAM_RESULT) {
+		throw InternalException("FetchRecordBatchReader called with unsupported query result: %d", result->type);
 	}
 	py::gil_scoped_acquire acquire;
 	auto pyarrow_lib_module = py::module::import("pyarrow").attr("lib");
@@ -601,11 +609,23 @@ static void ArrowArrayStreamPyCapsuleDestructor(PyObject *object) {
 	delete stream;
 }
 
-py::object DuckDBPyResult::FetchArrowCapsule(idx_t rows_per_batch) {
+py::object DuckDBPyResult::FetchArrowCapsule(const idx_t rows_per_batch) {
 	if (!result) {
 		throw InvalidInputException("There is no query result");
 	}
-	// Lazy streaming capsule backed by a context-owning stream (see FetchArrowArrayStream).
+
+	constexpr bool dedup_column_names = false;
+	if (result->type == QueryResultType::MATERIALIZED_RESULT || result->type == QueryResultType::ARROW_RESULT) {
+		return RunWithArrowSchema<py::object>(
+		    [&](const ArrowSchema &schema) -> py::object {
+			    const auto table = MaterializedResultToArrowTable(schema, rows_per_batch);
+			    return table.attr("__arrow_c_stream__")();
+		    },
+		    dedup_column_names);
+	}
+	if (result->type != QueryResultType::STREAM_RESULT) {
+		throw InternalException("FetchArrowCapsule called with unsupported query result: %d", result->type);
+	}
 	auto inner_stream = FetchArrowArrayStream(rows_per_batch);
 	auto stream = new ArrowArrayStream();
 	*stream = inner_stream;

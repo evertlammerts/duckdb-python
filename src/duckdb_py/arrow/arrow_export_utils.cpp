@@ -17,7 +17,7 @@ namespace duckdb {
 
 namespace pyarrow {
 
-py::object ToPyArrowSchema(ArrowSchema &schema) {
+py::object ToPyArrowSchema(const ArrowSchema &schema) {
 	py::gil_scoped_acquire acquire;
 
 	auto pyarrow_lib_module = py::module::import("pyarrow").attr("lib");

@@ -6,7 +6,7 @@ namespace duckdb {
 
 namespace pyarrow {
 
-py::object ToPyArrowSchema(ArrowSchema &schema);
+py::object ToPyArrowSchema(const ArrowSchema &schema);
 
 py::object ToArrowTable(const vector<LogicalType> &types, const vector<string> &names, const py::list &batches,
                         ClientProperties &options);
