@@ -16,28 +16,29 @@
 
 namespace duckdb {
 
-// A FilterBackend abstracts the Python side of a `TableFilter` → expression
-// translation. The shared walker in this file handles the structural
-// recursion (CONJUNCTION_AND/OR, STRUCT_EXTRACT, OPTIONAL_FILTER, the
-// ExpressionFilter sub-walker) and dispatches leaf operations to the backend.
+// A FilterBackend abstracts the Python side of an `ExpressionFilter` →
+// expression translation. The shared walker in this file handles the
+// structural recursion (CONJUNCTION_AND/OR, struct_extract column paths, the
+// optional / selectivity-optional filter wrappers, and the internal runtime
+// filter functions) and dispatches leaf operations to the backend.
 //
 // Two backends exist today: PyArrowBackend (emits pyarrow.dataset.Expression)
 // and PolarsBackend (emits polars.Expr). Adding a new backend is purely a
 // matter of implementing this interface; the walker itself is reused.
 //
 // Convention: a backend method that cannot push the given filter must throw
-// `NotImplementedException`. The walker catches it at `OPTIONAL_FILTER`
-// boundaries (silently swallow) and at the top-level entry points (returning
-// `py::none()` for the affected column). Throwing keeps the "I can't push
-// this" path uniform across backends, replacing the old polars walker's ad
-// hoc `return py::none()` style.
+// `NotImplementedException`. The walker swallows it at optional-filter
+// boundaries (an optional filter is not required for correctness) and the
+// top-level entry points catch it too, returning `py::none()` for the affected
+// column. Throwing keeps the "I can't push this" path uniform across backends,
+// replacing the old polars walker's ad hoc `return py::none()` style.
 struct FilterBackend {
 	virtual ~FilterBackend() = default;
 
 	// Build a column expression from an accumulated path. `path` always has
 	// at least one element (the top-level column). For nested struct
 	// references the path accumulates one entry per `struct_extract`.
-	virtual py::object MakeColumnRef(const vector<string> &path) = 0;
+	virtual py::object MakeColumnRef(const vector<Identifier> &path) = 0;
 
 	// Convert a DuckDB Value to a backend-native Python scalar. `arrow_type`
 	// may be nullptr for backends that don't need Arrow type information
@@ -68,20 +69,26 @@ struct FilterBackend {
 	virtual py::object Or(py::object a, py::object b) = 0;
 };
 
-// Walk a TableFilter and emit a backend-specific expression.
-// - `column_path` is the path accumulated through STRUCT_EXTRACT.
+// Walk a TableFilter and emit a backend-specific expression. Since the
+// table-filter -> expression-filter migration in core, the only runtime filter
+// type is `EXPRESSION_FILTER`; this unwraps it and walks the expression tree.
+// - `column_path` is the top-level column name; struct paths are accumulated
+//    inside the expression walk via struct_extract.
 // - `arrow_type` is the ArrowType for the current path leaf (nullable for
 //    backends that don't track Arrow types).
 // - Returns `py::none()` if no part of the filter could be pushed.
-py::object TransformFilter(const TableFilter &filter, vector<string> column_path, FilterBackend &backend,
+py::object TransformFilter(const TableFilter &filter, const vector<Identifier> &column_path, FilterBackend &backend,
                            const ArrowType *arrow_type, const string &timezone_config);
 
-// Walk a bound Expression tree (the contents of an `ExpressionFilter`) and
-// emit a backend-specific expression. Handles BOUND_FUNCTION (comparisons),
+// Walk a bound Expression tree (the contents of an `ExpressionFilter`) and emit
+// a backend-specific expression. Handles BOUND_FUNCTION comparisons,
 // BOUND_OPERATOR (IS_NULL / IS_NOT_NULL / COMPARE_IN), BOUND_CONJUNCTION
-// (AND/OR), and recurses through struct_extract chains to build the column
-// path before invoking the backend.
-py::object TransformExpression(const Expression &expression, const vector<string> &column_path, FilterBackend &backend,
-                               const ArrowType *arrow_type, const string &timezone_config);
+// (AND/OR), struct_extract column chains, the optional / selectivity-optional
+// wrappers (unwrapped from `bind_info`; an untranslatable child is swallowed),
+// and the internal runtime filter functions (dynamic / bloom / perfect-hash-join
+// / prefix-range, which are skipped). Returns `py::none()` for an optional or
+// runtime filter that can't be pushed.
+py::object TransformExpression(const Expression &expression, const vector<Identifier> &column_path,
+                               FilterBackend &backend, const ArrowType *arrow_type, const string &timezone_config);
 
 } // namespace duckdb

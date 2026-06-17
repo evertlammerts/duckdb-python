@@ -513,6 +513,18 @@ class TestOptionalFilter:
             ("price", 100),
         ]
 
+    def test_top_n_nulls_first_includes_min(self, factory):
+        """ORDER BY x ASC NULLS FIRST LIMIT 1 pushes OPTIONAL(IS_NULL OR DYNAMIC_FILTER) into the scan.
+
+        The OR branch must not be partially translated: dropping the
+        untranslatable DYNAMIC_FILTER child would leave just IS_NULL and
+        silently discard every non-null row. See pyarrow_filter_pushdown
+        sibling regression test in test_filter_pushdown.py.
+        """
+        lf = pl.LazyFrame({"x": [3, 1, 2]})
+        result = duckdb.sql("SELECT * FROM lf ORDER BY x ASC NULLS FIRST LIMIT 1").fetchall()
+        assert result == [(1,)]
+
 
 @pytest.mark.parametrize("factory", POLARS_FACTORIES)
 class TestDynamicFilter:

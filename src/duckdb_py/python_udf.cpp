@@ -93,7 +93,7 @@ static void ConvertArrowTableToVector(const py::object &table, Vector &out, Clie
 	children.push_back(Value::POINTER(CastPointerToValue(stream_factory_get_schema)));
 	named_parameter_map_t named_params;
 	vector<LogicalType> input_types;
-	vector<string> input_names;
+	vector<Identifier> input_names;
 
 	TableFunctionRef empty;
 	TableFunction dummy_table_function;
@@ -356,7 +356,7 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 					throw InvalidInputException(NullHandlingError());
 				}
 			}
-			TransformPythonObject(ret, result, row);
+			TransformPythonObject(state.GetContext(), ret, result, row);
 		}
 
 		if (input.size() == 1) {
@@ -524,8 +524,8 @@ public:
 		}
 		FunctionStability function_side_effects =
 		    side_effects ? FunctionStability::VOLATILE : FunctionStability::CONSISTENT;
-		ScalarFunction scalar_function(name, std::move(parameters), return_type, func, nullptr, nullptr, nullptr,
-		                               varargs, function_side_effects, null_handling);
+		ScalarFunction scalar_function(Identifier(name), std::move(parameters), return_type, func, nullptr, nullptr,
+		                               nullptr, varargs, function_side_effects, null_handling);
 		return scalar_function;
 	}
 };

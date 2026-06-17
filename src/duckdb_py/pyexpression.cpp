@@ -32,7 +32,7 @@ string DuckDBPyExpression::ToString() const {
 }
 
 string DuckDBPyExpression::GetName() const {
-	return expression->GetName();
+	return expression->GetName().GetIdentifierName();
 }
 
 void DuckDBPyExpression::Print() const {
@@ -50,7 +50,7 @@ shared_ptr<DuckDBPyExpression> DuckDBPyExpression::Copy() const {
 
 shared_ptr<DuckDBPyExpression> DuckDBPyExpression::SetAlias(const string &name) const {
 	auto copied_expression = GetExpression().Copy();
-	copied_expression->SetAlias(name);
+	copied_expression->SetAlias(Identifier(name));
 	return make_shared_ptr<DuckDBPyExpression>(std::move(copied_expression));
 }
 
@@ -88,7 +88,7 @@ shared_ptr<DuckDBPyExpression> DuckDBPyExpression::InternalWhen(unique_ptr<duckd
 	CaseCheck check;
 	check.when_expr = condition.GetExpression().Copy();
 	check.then_expr = value.GetExpression().Copy();
-	expr->case_checks.push_back(std::move(check));
+	expr->CaseChecksMutable().push_back(std::move(check));
 	return make_shared_ptr<DuckDBPyExpression>(std::move(expr));
 }
 
@@ -106,7 +106,7 @@ shared_ptr<DuckDBPyExpression> DuckDBPyExpression::Else(const DuckDBPyExpression
 	auto expr_p = expression->Copy();
 	auto expr = unique_ptr_cast<ParsedExpression, duckdb::CaseExpression>(std::move(expr_p));
 
-	expr->else_expr = value.GetExpression().Copy();
+	expr->ElseMutable() = value.GetExpression().Copy();
 	return make_shared_ptr<DuckDBPyExpression>(std::move(expr));
 }
 
@@ -312,12 +312,12 @@ static void PopulateExcludeList(qualified_column_set_t &exclude, py::object list
 shared_ptr<DuckDBPyExpression> DuckDBPyExpression::StarExpression(py::object exclude_list) {
 	case_insensitive_set_t exclude;
 	auto star = make_uniq<duckdb::StarExpression>();
-	PopulateExcludeList(star->exclude_list, std::move(exclude_list));
+	PopulateExcludeList(star->ExcludeListMutable(), std::move(exclude_list));
 	return make_shared_ptr<DuckDBPyExpression>(std::move(star));
 }
 
 shared_ptr<DuckDBPyExpression> DuckDBPyExpression::ColumnExpression(const py::args &names) {
-	vector<string> column_names;
+	vector<Identifier> column_names;
 	if (names.size() == 1) {
 		string column_name = std::string(py::str(names[0]));
 		if (column_name == "*") {
@@ -334,7 +334,7 @@ shared_ptr<DuckDBPyExpression> DuckDBPyExpression::ColumnExpression(const py::ar
 		column_names.push_back(qualified_name.name);
 	} else {
 		for (auto &part : names) {
-			column_names.push_back(std::string(py::str(part)));
+			column_names.push_back(Identifier(py::str(part)));
 		}
 	}
 	auto column_ref = make_uniq<duckdb::ColumnRefExpression>(std::move(column_names));
@@ -346,7 +346,7 @@ shared_ptr<DuckDBPyExpression> DuckDBPyExpression::DefaultExpression() {
 }
 
 shared_ptr<DuckDBPyExpression> DuckDBPyExpression::ConstantExpression(const py::object &value) {
-	auto val = TransformPythonValue(value);
+	auto val = TransformPythonValue(nullptr, value);
 	return InternalConstantExpression(std::move(val));
 }
 
@@ -409,6 +409,10 @@ shared_ptr<DuckDBPyExpression> DuckDBPyExpression::LambdaExpression(const py::ob
 		throw py::value_error("Please provide 'lhs' as either a tuple containing strings, or a single string");
 	}
 	auto lambda_expression = make_uniq<duckdb::LambdaExpression>(std::move(lhs), rhs.GetExpression().Copy());
+	// Use the modern `lambda x, y: ...` syntax. The lhs we built (a column ref, or a `row` function for multiple
+	// parameters) is identical to what the named-parameter constructor produces; only the syntax type differs, and
+	// the single-arrow form is now deprecated and errors by default.
+	lambda_expression->GetLambdaSyntaxTypeMutable() = LambdaSyntaxType::LAMBDA_KEYWORD;
 	return make_shared_ptr<DuckDBPyExpression>(std::move(lambda_expression));
 }
 
@@ -446,8 +450,8 @@ shared_ptr<DuckDBPyExpression> DuckDBPyExpression::BinaryOperator(const string &
 shared_ptr<DuckDBPyExpression>
 DuckDBPyExpression::InternalFunctionExpression(const string &function_name,
                                                vector<unique_ptr<ParsedExpression>> children, bool is_operator) {
-	auto function_expression =
-	    make_uniq<duckdb::FunctionExpression>(function_name, std::move(children), nullptr, nullptr, false, is_operator);
+	auto function_expression = make_uniq<duckdb::FunctionExpression>(Identifier(function_name), std::move(children),
+	                                                                 nullptr, nullptr, false, is_operator);
 	return make_shared_ptr<DuckDBPyExpression>(std::move(function_expression));
 }
 
@@ -490,7 +494,7 @@ shared_ptr<DuckDBPyExpression> DuckDBPyExpression::CaseExpression(const DuckDBPy
 
 	// Add NULL as default Else expression
 	auto &internal_expression = reinterpret_cast<duckdb::CaseExpression &>(*case_expr->expression);
-	internal_expression.else_expr = make_uniq<duckdb::ConstantExpression>(Value(LogicalTypeId::SQLNULL));
+	internal_expression.ElseMutable() = make_uniq<duckdb::ConstantExpression>(Value(LogicalTypeId::SQLNULL));
 	return case_expr;
 }
 

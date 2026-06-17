@@ -44,8 +44,7 @@ private:
 
 }; // namespace
 
-static LogicalType BindColumn(PandasBindColumn &column_p, PandasColumnBindData &bind_data,
-                              const ClientContext &context) {
+static LogicalType BindColumn(ClientContext &context, PandasBindColumn &column_p, PandasColumnBindData &bind_data) {
 	LogicalType column_type;
 	auto &column = column_p.handle;
 
@@ -115,7 +114,7 @@ static LogicalType BindColumn(PandasBindColumn &column_p, PandasColumnBindData &
 	return column_type;
 }
 
-void Pandas::Bind(const ClientContext &context, py::handle df_p, vector<PandasColumnBindData> &bind_columns,
+void Pandas::Bind(ClientContext &context, py::handle df_p, vector<PandasColumnBindData> &bind_columns,
                   vector<LogicalType> &return_types, vector<string> &names) {
 
 	PandasDataFrameBind df(df_p);
@@ -140,7 +139,7 @@ void Pandas::Bind(const ClientContext &context, py::handle df_p, vector<PandasCo
 
 		names.emplace_back(py::str(df.names[col_idx]));
 		auto column = df[col_idx];
-		auto column_type = BindColumn(column, bind_data, context);
+		auto column_type = BindColumn(context, column, bind_data);
 
 		return_types.push_back(column_type);
 		bind_columns.push_back(std::move(bind_data));

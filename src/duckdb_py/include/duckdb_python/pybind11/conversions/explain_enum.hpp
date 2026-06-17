@@ -5,60 +5,58 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 
-using duckdb::ExplainType;
-using duckdb::InvalidInputException;
-using duckdb::string;
-using duckdb::StringUtil;
+namespace duckdb {
 
-namespace py = pybind11;
-
-static ExplainType ExplainTypeFromString(const string &type) {
+inline ExplainType ExplainTypeFromString(const string &type) {
 	auto ltype = StringUtil::Lower(type);
 	if (ltype.empty() || ltype == "standard") {
 		return ExplainType::EXPLAIN_STANDARD;
-	} else if (ltype == "analyze") {
-		return ExplainType::EXPLAIN_ANALYZE;
-	} else {
-		throw InvalidInputException("Unrecognized type for 'explain'");
 	}
+	if (ltype == "analyze") {
+		return ExplainType::EXPLAIN_ANALYZE;
+	}
+	throw InvalidInputException("Unrecognized type for 'explain'");
 }
 
-static ExplainType ExplainTypeFromInteger(int64_t value) {
+inline ExplainType ExplainTypeFromInteger(int64_t value) {
 	if (value == 0) {
 		return ExplainType::EXPLAIN_STANDARD;
-	} else if (value == 1) {
-		return ExplainType::EXPLAIN_ANALYZE;
-	} else {
-		throw InvalidInputException("Unrecognized type for 'explain'");
 	}
+	if (value == 1) {
+		return ExplainType::EXPLAIN_ANALYZE;
+	}
+	throw InvalidInputException("Unrecognized type for 'explain'");
 }
+
+} // namespace duckdb
 
 namespace PYBIND11_NAMESPACE {
 namespace detail {
 
+//! See python_udf_type_enum.hpp for the rationale (composition over inheritance, umbrella visibility).
 template <>
-struct type_caster<ExplainType> : public type_caster_base<ExplainType> {
-	using base = type_caster_base<ExplainType>;
-	ExplainType tmp;
+struct type_caster<duckdb::ExplainType> {
+	PYBIND11_TYPE_CASTER(duckdb::ExplainType, const_name("ExplainType"));
 
-public:
 	bool load(handle src, bool convert) {
-		if (base::load(src, convert)) {
-			return true;
-		} else if (py::isinstance<py::str>(src)) {
-			tmp = ExplainTypeFromString(py::str(src));
-			value = &tmp;
-			return true;
-		} else if (py::isinstance<py::int_>(src)) {
-			tmp = ExplainTypeFromInteger(src.cast<int64_t>());
-			value = &tmp;
+		if (isinstance<str>(src)) {
+			value = duckdb::ExplainTypeFromString(src.cast<std::string>());
 			return true;
 		}
-		return false;
+		if (isinstance<int_>(src)) {
+			value = duckdb::ExplainTypeFromInteger(src.cast<int64_t>());
+			return true;
+		}
+		type_caster_base<duckdb::ExplainType> base;
+		if (!base.load(src, convert)) {
+			return false;
+		}
+		value = *static_cast<duckdb::ExplainType *>(base);
+		return true;
 	}
 
-	static handle cast(ExplainType src, return_value_policy policy, handle parent) {
-		return base::cast(src, policy, parent);
+	static handle cast(duckdb::ExplainType src, return_value_policy policy, handle parent) {
+		return type_caster_base<duckdb::ExplainType>::cast(src, policy, parent);
 	}
 };
 

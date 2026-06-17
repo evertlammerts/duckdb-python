@@ -27,7 +27,7 @@ struct PandasColumnBindData {
 };
 
 struct Pandas {
-	static void Bind(const ClientContext &config, py::handle df, vector<PandasColumnBindData> &out,
+	static void Bind(ClientContext &config, py::handle df, vector<PandasColumnBindData> &out,
 	                 vector<LogicalType> &return_types, vector<string> &names);
 };
 

@@ -10,7 +10,6 @@
 #include "duckdb_python/arrow/arrow_array_stream.hpp"
 #include "duckdb.hpp"
 #include "duckdb_python/pybind11/pybind_wrapper.hpp"
-#include "duckdb/common/unordered_map.hpp"
 #include "duckdb_python/import_cache/python_import_cache.hpp"
 #include "duckdb_python/numpy/numpy_type.hpp"
 #include "duckdb_python/pyrelation.hpp"
@@ -23,7 +22,6 @@
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb_python/pybind11/conversions/exception_handling_enum.hpp"
 #include "duckdb_python/pybind11/conversions/python_udf_type_enum.hpp"
-#include "duckdb_python/pybind11/conversions/python_csv_line_terminator_enum.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 
 namespace duckdb {
@@ -163,9 +161,35 @@ private:
 	};
 
 public:
+	// RAII guard for the connection mutex (see py_connection_lock below). Constructing
+	// one releases the GIL while waiting for the mutex and reacquires it before
+	// returning, so callers always come out of the constructor with the GIL held
+	// and the mutex locked. The mutex is released when the guard goes out of scope.
+	// Holding the GIL while blocked on this mutex would deadlock against a thread
+	// that holds the mutex and is mid-way through a GIL-releasing native call —
+	// see duckdb-python#435.
+	class ConnectionLockGuard {
+	public:
+		explicit ConnectionLockGuard(DuckDBPyConnection &conn) : lock_(conn.py_connection_lock, std::defer_lock) {
+			D_ASSERT(py::gil_check());
+			py::gil_scoped_release release;
+			lock_.lock();
+		}
+
+	private:
+		std::unique_lock<std::recursive_mutex> lock_;
+	};
+
 	ConnectionGuard con;
 	Cursors cursors;
-	std::mutex py_connection_lock;
+	// Recursive so that the outer lock taken at the top of execute/fetch
+	// methods (while still holding the GIL) does not deadlock against the
+	// inner lock taken by PrepareQuery / ExecuteInternal /
+	// PrepareAndExecuteInternal (after releasing the GIL). Serialises every
+	// path that touches `con.result` so concurrent calls on a single
+	// DuckDBPyConnection cannot dereference an already-freed result — see
+	// duckdb-python#435.
+	std::recursive_mutex py_connection_lock;
 	//! MemoryFileSystem used to temporarily store file-like objects for reading
 	shared_ptr<ModifiedMemoryFileSystem> internal_object_filesystem;
 	case_insensitive_map_t<unique_ptr<ExternalDependency>> registered_functions;
@@ -267,16 +291,9 @@ public:
 
 	unique_ptr<DuckDBPyRelation> FromDF(const PandasDataFrame &value);
 
-	unique_ptr<DuckDBPyRelation> FromParquet(const string &file_glob, bool binary_as_string, bool file_row_number,
-	                                         bool filename, bool hive_partitioning, bool union_by_name,
-	                                         const py::object &compression = py::none());
-	unique_ptr<DuckDBPyRelation> FromParquets(const vector<string> &file_globs, bool binary_as_string,
-	                                          bool file_row_number, bool filename, bool hive_partitioning,
-	                                          bool union_by_name, const py::object &compression = py::none());
-
-	unique_ptr<DuckDBPyRelation> FromParquetInternal(Value &&file_param, bool binary_as_string, bool file_row_number,
-	                                                 bool filename, bool hive_partitioning, bool union_by_name,
-	                                                 const py::object &compression = py::none());
+	unique_ptr<DuckDBPyRelation> FromParquet(const py::object &path_or_buffer, bool binary_as_string,
+	                                         bool file_row_number, bool filename, bool hive_partitioning,
+	                                         bool union_by_name, const py::object &compression = py::none());
 
 	unique_ptr<DuckDBPyRelation> FromArrow(py::object &arrow_object);
 
@@ -329,8 +346,9 @@ public:
 
 	static shared_ptr<DuckDBPyConnection> Connect(const py::object &database, bool read_only, const py::dict &config);
 
-	static vector<Value> TransformPythonParamList(const py::handle &params);
-	static case_insensitive_map_t<BoundParameterData> TransformPythonParamDict(const py::dict &params);
+	static vector<Value> TransformPythonParamList(ClientContext &context, const py::handle &params);
+	static identifier_map_t<BoundParameterData> TransformPythonParamDict(ClientContext &context,
+	                                                                     const py::dict &params);
 
 	void RegisterFilesystem(AbstractFileSystem filesystem);
 	void UnregisterFilesystem(const py::str &name);
@@ -338,7 +356,7 @@ public:
 	bool FileSystemIsRegistered(const string &name);
 
 	// Profiling info
-	py::str GetProfilingInformation(const py::str &format = "json");
+	py::str GetProfilingInformation(const string &format = "json");
 	void EnableProfiling();
 	void DisableProfiling();
 
@@ -362,7 +380,6 @@ private:
 	                               const shared_ptr<DuckDBPyType> &return_type, bool vectorized,
 	                               FunctionNullHandling null_handling, PythonExceptionHandling exception_handling,
 	                               bool side_effects);
-	void RegisterArrowObject(const py::object &arrow_object, const string &name);
 	vector<unique_ptr<SQLStatement>> GetStatements(const py::object &query);
 
 	static PythonEnvironmentType environment;

@@ -144,14 +144,14 @@ static void SetInvalidRecursive(Vector &out, idx_t index) {
 
 //! 'count' is the amount of rows in the 'out' vector
 //! 'offset' is the current row number within this vector
-void ScanNumpyObject(PyObject *object, idx_t offset, Vector &out) {
+void ScanNumpyObject(optional_ptr<ClientContext> context, PyObject *object, idx_t offset, Vector &out) {
 	// handle None
 	if (object == Py_None) {
 		SetInvalidRecursive(out, offset);
 		return;
 	}
 
-	TransformPythonObject(object, out, offset);
+	TransformPythonObject(context, object, out, offset);
 }
 
 static void VerifyMapConstraints(Vector &vec, idx_t count) {
@@ -179,7 +179,8 @@ void VerifyTypeConstraints(Vector &vec, idx_t count) {
 	}
 }
 
-void NumpyScan::ScanObjectColumn(PyObject **col, idx_t stride, idx_t count, idx_t offset, Vector &out) {
+void NumpyScan::ScanObjectColumn(ClientContext &context, PyObject **col, idx_t stride, idx_t count, idx_t offset,
+                                 Vector &out) {
 	// numpy_col is a sequential list of objects, that make up one "column" (Vector)
 	out.SetVectorType(VectorType::FLAT_VECTOR);
 	PythonGILWrapper gil; // We're creating python objects here, so we need the GIL
@@ -187,12 +188,12 @@ void NumpyScan::ScanObjectColumn(PyObject **col, idx_t stride, idx_t count, idx_
 	if (stride == sizeof(PyObject *)) {
 		auto src_ptr = col + offset;
 		for (idx_t i = 0; i < count; i++) {
-			ScanNumpyObject(src_ptr[i], i, out);
+			ScanNumpyObject(context, src_ptr[i], i, out);
 		}
 	} else {
 		for (idx_t i = 0; i < count; i++) {
 			auto src_ptr = col[stride / sizeof(PyObject *) * (i + offset)];
-			ScanNumpyObject(src_ptr, i, out);
+			ScanNumpyObject(context, src_ptr, i, out);
 		}
 	}
 	VerifyTypeConstraints(out, count);
@@ -200,7 +201,7 @@ void NumpyScan::ScanObjectColumn(PyObject **col, idx_t stride, idx_t count, idx_
 
 //! 'offset' is the offset within the column
 //! 'count' is the amount of values we will convert in this batch
-void NumpyScan::Scan(PandasColumnBindData &bind_data, idx_t count, idx_t offset, Vector &out) {
+void NumpyScan::Scan(ClientContext &context, PandasColumnBindData &bind_data, idx_t count, idx_t offset, Vector &out) {
 	D_ASSERT(bind_data.pandas_col->Backend() == PandasColumnBackend::NUMPY);
 	auto &numpy_col = reinterpret_cast<PandasNumpyColumn &>(*bind_data.pandas_col);
 	auto &array = numpy_col.array;
@@ -355,7 +356,7 @@ void NumpyScan::Scan(PandasColumnBindData &bind_data, idx_t count, idx_t offset,
 		const bool is_object_col = bind_data.numpy_type.type == NumpyNullableType::OBJECT;
 		if (is_object_col && out.GetType().id() != LogicalTypeId::VARCHAR) {
 			//! We have determined the underlying logical type of this object column
-			return NumpyScan::ScanObjectColumn(src_ptr, numpy_col.stride, count, offset, out);
+			return NumpyScan::ScanObjectColumn(context, src_ptr, numpy_col.stride, count, offset, out);
 		}
 
 		// Get the data pointer and the validity mask of the result vector

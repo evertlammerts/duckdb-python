@@ -9,7 +9,6 @@
 #include "duckdb_python/pystatement.hpp"
 #include "duckdb_python/pyrelation.hpp"
 #include "duckdb_python/expression/pyexpression.hpp"
-#include "duckdb_python/pyresult.hpp"
 #include "duckdb_python/pybind11/exceptions.hpp"
 #include "duckdb_python/typing.hpp"
 #include "duckdb_python/functional.hpp"
@@ -21,8 +20,6 @@
 #include "duckdb_python/pybind11/conversions/python_csv_line_terminator_enum.hpp"
 #include "duckdb/common/enums/statement_type.hpp"
 #include "duckdb/common/adbc/adbc-init.hpp"
-
-#include "duckdb.hpp"
 
 #ifndef DUCKDB_PYTHON_LIB_NAME
 #define DUCKDB_PYTHON_LIB_NAME _duckdb
@@ -126,7 +123,7 @@ static void InitializeConnectionMethods(py::module_ &m) {
 	    py::arg("connection") = py::none());
 	m.def(
 	    "get_profiling_information",
-	    [](const py::str &format, shared_ptr<DuckDBPyConnection> conn = nullptr) {
+	    [](const std::string &format, shared_ptr<DuckDBPyConnection> conn = nullptr) {
 		    if (!conn) {
 			    conn = DuckDBPyConnection::DefaultConnection();
 		    }
@@ -748,64 +745,34 @@ static void InitializeConnectionMethods(py::module_ &m) {
 	    py::arg("connection") = py::none());
 	m.def(
 	    "from_parquet",
-	    [](const string &file_glob, bool binary_as_string, bool file_row_number, bool filename, bool hive_partitioning,
-	       bool union_by_name, const py::object &compression = py::none(),
-	       shared_ptr<DuckDBPyConnection> conn = nullptr) {
-		    if (!conn) {
-			    conn = DuckDBPyConnection::DefaultConnection();
-		    }
-		    return conn->FromParquet(file_glob, binary_as_string, file_row_number, filename, hive_partitioning,
-		                             union_by_name, compression);
-	    },
-	    "Create a relation object from the Parquet files in file_glob", py::arg("file_glob"),
-	    py::arg("binary_as_string") = false, py::kw_only(), py::arg("file_row_number") = false,
-	    py::arg("filename") = false, py::arg("hive_partitioning") = false, py::arg("union_by_name") = false,
-	    py::arg("compression") = py::none(), py::arg("connection") = py::none());
-	m.def(
-	    "read_parquet",
-	    [](const string &file_glob, bool binary_as_string, bool file_row_number, bool filename, bool hive_partitioning,
-	       bool union_by_name, const py::object &compression = py::none(),
-	       shared_ptr<DuckDBPyConnection> conn = nullptr) {
-		    if (!conn) {
-			    conn = DuckDBPyConnection::DefaultConnection();
-		    }
-		    return conn->FromParquet(file_glob, binary_as_string, file_row_number, filename, hive_partitioning,
-		                             union_by_name, compression);
-	    },
-	    "Create a relation object from the Parquet files in file_glob", py::arg("file_glob"),
-	    py::arg("binary_as_string") = false, py::kw_only(), py::arg("file_row_number") = false,
-	    py::arg("filename") = false, py::arg("hive_partitioning") = false, py::arg("union_by_name") = false,
-	    py::arg("compression") = py::none(), py::arg("connection") = py::none());
-	m.def(
-	    "from_parquet",
-	    [](const vector<string> &file_globs, bool binary_as_string, bool file_row_number, bool filename,
+	    [](const py::object &path_or_buffer, bool binary_as_string, bool file_row_number, bool filename,
 	       bool hive_partitioning, bool union_by_name, const py::object &compression = py::none(),
 	       shared_ptr<DuckDBPyConnection> conn = nullptr) {
 		    if (!conn) {
 			    conn = DuckDBPyConnection::DefaultConnection();
 		    }
-		    return conn->FromParquets(file_globs, binary_as_string, file_row_number, filename, hive_partitioning,
-		                              union_by_name, compression);
+		    return conn->FromParquet(path_or_buffer, binary_as_string, file_row_number, filename, hive_partitioning,
+		                             union_by_name, compression);
 	    },
-	    "Create a relation object from the Parquet files in file_globs", py::arg("file_globs"),
-	    py::arg("binary_as_string") = false, py::kw_only(), py::arg("file_row_number") = false,
-	    py::arg("filename") = false, py::arg("hive_partitioning") = false, py::arg("union_by_name") = false,
-	    py::arg("compression") = py::none(), py::arg("connection") = py::none());
+	    "Create a relation object from the Parquet path(s) or file-like object(s) in 'path_or_buffer'",
+	    py::arg("path_or_buffer"), py::arg("binary_as_string") = false, py::kw_only(),
+	    py::arg("file_row_number") = false, py::arg("filename") = false, py::arg("hive_partitioning") = false,
+	    py::arg("union_by_name") = false, py::arg("compression") = py::none(), py::arg("connection") = py::none());
 	m.def(
 	    "read_parquet",
-	    [](const vector<string> &file_globs, bool binary_as_string, bool file_row_number, bool filename,
+	    [](const py::object &path_or_buffer, bool binary_as_string, bool file_row_number, bool filename,
 	       bool hive_partitioning, bool union_by_name, const py::object &compression = py::none(),
 	       shared_ptr<DuckDBPyConnection> conn = nullptr) {
 		    if (!conn) {
 			    conn = DuckDBPyConnection::DefaultConnection();
 		    }
-		    return conn->FromParquets(file_globs, binary_as_string, file_row_number, filename, hive_partitioning,
-		                              union_by_name, compression);
+		    return conn->FromParquet(path_or_buffer, binary_as_string, file_row_number, filename, hive_partitioning,
+		                             union_by_name, compression);
 	    },
-	    "Create a relation object from the Parquet files in file_globs", py::arg("file_globs"),
-	    py::arg("binary_as_string") = false, py::kw_only(), py::arg("file_row_number") = false,
-	    py::arg("filename") = false, py::arg("hive_partitioning") = false, py::arg("union_by_name") = false,
-	    py::arg("compression") = py::none(), py::arg("connection") = py::none());
+	    "Create a relation object from the Parquet path(s) or file-like object(s) in 'path_or_buffer'",
+	    py::arg("path_or_buffer"), py::arg("binary_as_string") = false, py::kw_only(),
+	    py::arg("file_row_number") = false, py::arg("filename") = false, py::arg("hive_partitioning") = false,
+	    py::arg("union_by_name") = false, py::arg("compression") = py::none(), py::arg("connection") = py::none());
 	m.def(
 	    "get_table_names",
 	    [](const string &query, bool qualified, shared_ptr<DuckDBPyConnection> conn = nullptr) {

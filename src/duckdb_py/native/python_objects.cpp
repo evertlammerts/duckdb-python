@@ -437,6 +437,7 @@ static bool KeyIsHashable(const LogicalType &type) {
 	case LogicalTypeId::TIMESTAMP_NS:
 	case LogicalTypeId::TIMESTAMP_SEC:
 	case LogicalTypeId::TIMESTAMP_TZ:
+	case LogicalTypeId::TIMESTAMP_TZ_NS:
 	case LogicalTypeId::TIME_TZ:
 	case LogicalTypeId::TIME:
 	case LogicalTypeId::DATE:
@@ -461,6 +462,9 @@ static bool KeyIsHashable(const LogicalType &type) {
 	}
 	case LogicalTypeId::STRUCT:
 		return false;
+	case LogicalTypeId::SQLNULL:
+		// A SQLNULL key is always NULL, and Python's None is hashable.
+		return true;
 	default:
 		throw NotImplementedException("Unsupported type: \"%s\"", type.ToString());
 	}
@@ -518,7 +522,8 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 	case LogicalTypeId::TIMESTAMP_MS:
 	case LogicalTypeId::TIMESTAMP_NS:
 	case LogicalTypeId::TIMESTAMP_SEC:
-	case LogicalTypeId::TIMESTAMP_TZ: {
+	case LogicalTypeId::TIMESTAMP_TZ:
+	case LogicalTypeId::TIMESTAMP_TZ_NS: {
 		D_ASSERT(type.InternalType() == PhysicalType::INT64);
 		auto timestamp = val.GetValueUnsafe<timestamp_t>();
 
@@ -532,7 +537,7 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 
 		if (type.id() == LogicalTypeId::TIMESTAMP_MS) {
 			timestamp = Timestamp::FromEpochMs(timestamp.value);
-		} else if (type.id() == LogicalTypeId::TIMESTAMP_NS) {
+		} else if (type.id() == LogicalTypeId::TIMESTAMP_NS || type.id() == LogicalTypeId::TIMESTAMP_TZ_NS) {
 			timestamp = Timestamp::FromEpochNanoSeconds(timestamp.value);
 		} else if (type.id() == LogicalTypeId::TIMESTAMP_SEC) {
 			timestamp = Timestamp::FromEpochSeconds(timestamp.value);
@@ -555,7 +560,7 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 			// Failed to convert, fall back to str
 			return py::str(val.ToString());
 		}
-		if (type.id() == LogicalTypeId::TIMESTAMP_TZ) {
+		if (type.id() == LogicalTypeId::TIMESTAMP_TZ || type.id() == LogicalTypeId::TIMESTAMP_TZ_NS) {
 			// We have to add the timezone info
 			auto tz_utc = import_cache.pytz.timezone()("UTC");
 			auto timestamp_utc = tz_utc.attr("localize")(py_timestamp);

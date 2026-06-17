@@ -11,17 +11,11 @@
 #include "duckdb_python/pybind11/pybind_wrapper.hpp"
 #include "duckdb.hpp"
 #include "duckdb_python/arrow/arrow_array_stream.hpp"
-#include "duckdb/main/external_dependencies.hpp"
 #include "duckdb_python/numpy/numpy_type.hpp"
-#include "duckdb_python/pybind11/registered_py_object.hpp"
 #include "duckdb_python/pyresult.hpp"
-#include "duckdb/parser/statement/explain_statement.hpp"
-#include "duckdb_python/pybind11/conversions/explain_enum.hpp"
 #include "duckdb_python/pybind11/conversions/render_mode_enum.hpp"
-#include "duckdb_python/pybind11/conversions/null_handling_enum.hpp"
 #include "duckdb_python/pybind11/dataframe.hpp"
 #include "duckdb_python/python_objects.hpp"
-#include "duckdb/common/box_renderer.hpp"
 
 namespace duckdb {
 
@@ -250,7 +244,7 @@ public:
 	           const Optional<py::int_> &max_col_width, const Optional<py::str> &null_value,
 	           const py::object &render_mode);
 
-	string Explain(ExplainType type);
+	string Explain(ExplainType type, const string &format = "");
 
 	static bool IsRelation(const py::object &object);
 

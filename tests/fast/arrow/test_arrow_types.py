@@ -13,11 +13,7 @@ class TestArrowTypes:
         arrow_table = pa.Table.from_arrays(inputs, schema=schema)
         duckdb_cursor.register("testarrow", arrow_table)
         rel = duckdb.from_arrow(arrow_table).to_arrow_table()
-        # We turn it to an array of int32 nulls
-        schema = pa.schema([("data", pa.int32())])
-        inputs = [pa.array([None, None, None], type=pa.null())]
-        arrow_table = pa.Table.from_arrays(inputs, schema=schema)
-
+        # NULL type now round-trips faithfully (previously it was coerced to int32)
         assert rel["data"] == arrow_table["data"]
 
     def test_invalid_struct(self, duckdb_cursor):

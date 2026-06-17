@@ -10,13 +10,7 @@
 #include "duckdb/common/arrow/arrow_converter.hpp"
 #include "duckdb/common/arrow/arrow_wrapper.hpp"
 #include "duckdb/common/arrow/result_arrow_wrapper.hpp"
-#include "duckdb/common/types/date.hpp"
-#include "duckdb/common/types/hugeint.hpp"
-#include "duckdb/common/types/uhugeint.hpp"
-#include "duckdb/common/types/time.hpp"
-#include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/types/uuid.hpp"
-#include "duckdb_python/numpy/array_wrapper.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/enums/stream_execution_result.hpp"
 #include "duckdb_python/arrow/arrow_export_utils.hpp"
@@ -34,9 +28,14 @@ DuckDBPyResult::DuckDBPyResult(unique_ptr<QueryResult> result_p) : result(std::m
 }
 
 DuckDBPyResult::~DuckDBPyResult() {
+	// The destructor must run with the GIL held: `result` and `current_chunk`
+	// can transitively own pybind-managed Python references (registered
+	// objects, arrow release callbacks, PYTHON_OBJECT vector values, etc.),
+	// whose teardown calls into the Python C API. Releasing the GIL here
+	// (as the previous implementation did) causes Py_DECREF / PyObject_Free
+	// to run without a valid PyThreadState — see duckdb-python#456.
 	try {
 		D_ASSERT(py::gil_check());
-		py::gil_scoped_release gil;
 		result.reset();
 		current_chunk.reset();
 	} catch (...) { // NOLINT

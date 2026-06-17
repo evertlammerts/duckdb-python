@@ -51,7 +51,7 @@ class TestReadParquet:
         fs = fsspec.filesystem("deadlock")
         duckdb_cursor.register_filesystem(fs)
 
-        result = duckdb_cursor.read_parquet(file_globs=["deadlock://a", "deadlock://b"], union_by_name=True)
+        result = duckdb_cursor.read_parquet(["deadlock://a", "deadlock://b"], union_by_name=True)
         assert len(result.fetchall()) == 100_000
 
     def test_fsspec_seek_read_atomicity(self, duckdb_cursor, tmp_path):

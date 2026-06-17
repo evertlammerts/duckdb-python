@@ -121,7 +121,7 @@ Supported: `3.10`, `3.11`, `3.12`, `3.13`, `3.14`. Do **not** use free-threaded 
 
 Key `pyproject.toml` settings:
 
-- `BUILD_EXTENSIONS = "core_functions;json;parquet;icu;jemalloc"` — extensions built into the wheel.
+- `BUILD_EXTENSIONS = "core_functions;json;parquet;icu"` — extensions built into the wheel. (jemalloc is part of DuckDB core and is auto-enabled on supported platforms — 64-bit Linux, non-musl, non-BSD.)
 - Editable overrides: `build-dir = "build/debug/"`, `editable.rebuild = true`, `editable.mode = "redirect"`, `cmake.build-type = "Debug"`, `DISABLE_UNITY = "1"` (unity disabled for better debugging).
 - Coverage overrides: `build-dir = "build/coverage/"`, `RelWithDebInfo`, `--coverage` flags. Activate with `COVERAGE=true uv sync ...`.
 

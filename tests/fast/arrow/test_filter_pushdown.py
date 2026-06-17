@@ -190,7 +190,12 @@ class TestStringOrSpecifics:
 
 
 class TestInPushdown:
-    """IN (...) reaches the walker as ``BOUND_OPERATOR`` with ``COMPARE_IN``."""
+    """IN (...) pushdown test.
+
+    IN (...) reaches the walker as a ``COMPARE_IN`` ``BOUND_OPERATOR``, wrapped in an
+    ``__internal_tablefilter_optional`` function that the walker must unwrap before it
+    sees the operator.
+    """
 
     def test_basic(self, duckdb_cursor):
         duckdb_cursor.execute("CREATE TABLE _t AS SELECT range a FROM range(1000)")
@@ -539,6 +544,26 @@ class TestUnsupportedTypes:
         arrow_tbl = to_arrow_table(con.table("t"))
         con.register("arrow_tbl", arrow_tbl)
         assert con.execute("FROM arrow_tbl WHERE c = 3").fetchall() == [(3, "3", 3, 3)]
+
+    def test_dynamic_filter_nulls_first_pyarrow(self, duckdb_cursor):
+        # Regression for #460(a): TOP_N with ASC NULLS FIRST pushes an
+        # OPTIONAL(x IS NULL OR DYNAMIC_FILTER(x)) into the arrow scan. The
+        # pyarrow translation must NOT collapse the OR by dropping the
+        # untranslatable DYNAMIC_FILTER branch — doing so produces a
+        # stricter (`field("x").is_null()`) predicate that drops every row.
+        t = pa.Table.from_pydict({"x": pa.array([3, 1, 2], type=pa.int32())})
+        duckdb_cursor.register("src", t)
+        res = duckdb_cursor.sql("SELECT * FROM src ORDER BY x ASC NULLS FIRST LIMIT 1").fetchall()
+        assert res == [(1,)]
+
+    def test_dynamic_filter_nulls_first_polars_dataframe(self, duckdb_cursor):
+        # pl.DataFrame is materialized to a pyarrow.Table before scanning,
+        # so it exercises PyarrowFilterPushdown the same way pa.Table does.
+        pl = pytest.importorskip("polars")
+        df = pl.DataFrame({"x": [3, 1, 2]})
+        duckdb_cursor.register("src", df)
+        res = duckdb_cursor.sql("SELECT * FROM src ORDER BY x ASC NULLS FIRST LIMIT 1").fetchall()
+        assert res == [(1,)]
 
     def test_uhugeint_mixed_with_supported(self):
         con = duckdb.connect()
