@@ -1413,7 +1413,7 @@ unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadCSV(const py::object &name_
 	}
 
 	if (!py::none().is(lineterminator)) {
-		::PythonCSVLineTerminator::Type new_line_type;
+		PythonCSVLineTerminator::Type new_line_type;
 		if (!py::try_cast<PythonCSVLineTerminator::Type>(lineterminator, new_line_type)) {
 			string actual_type = py::str(py::type::of(lineterminator));
 			throw BinderException("read_csv only accepts 'lineterminator' as a string or CSVLineTerminator, not '%s'",

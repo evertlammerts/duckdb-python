@@ -5,60 +5,60 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 
-using duckdb::FunctionNullHandling;
-using duckdb::InvalidInputException;
-using duckdb::string;
-using duckdb::StringUtil;
+namespace duckdb {
 
-namespace py = pybind11;
-
-static FunctionNullHandling FunctionNullHandlingFromString(const string &type) {
+inline FunctionNullHandling FunctionNullHandlingFromString(const string &type) {
 	auto ltype = StringUtil::Lower(type);
 	if (ltype.empty() || ltype == "default") {
 		return FunctionNullHandling::DEFAULT_NULL_HANDLING;
-	} else if (ltype == "special") {
-		return FunctionNullHandling::SPECIAL_HANDLING;
-	} else {
-		throw InvalidInputException("'%s' is not a recognized type for 'null_handling'", type);
 	}
+	if (ltype == "special") {
+		return FunctionNullHandling::SPECIAL_HANDLING;
+	}
+	throw InvalidInputException("'%s' is not a recognized type for 'null_handling'", type);
 }
 
-static FunctionNullHandling FunctionNullHandlingFromInteger(int64_t value) {
+inline FunctionNullHandling FunctionNullHandlingFromInteger(int64_t value) {
 	if (value == 0) {
 		return FunctionNullHandling::DEFAULT_NULL_HANDLING;
-	} else if (value == 1) {
-		return FunctionNullHandling::SPECIAL_HANDLING;
-	} else {
-		throw InvalidInputException("'%d' is not a recognized type for 'null_handling'", value);
 	}
+	if (value == 1) {
+		return FunctionNullHandling::SPECIAL_HANDLING;
+	}
+	throw InvalidInputException("'%d' is not a recognized type for 'null_handling'", value);
 }
+
+} // namespace duckdb
 
 namespace PYBIND11_NAMESPACE {
 namespace detail {
 
+//! See python_udf_type_enum.hpp for why this owns its value and delegates the enum case to a local base
+//! caster instead of inheriting type_caster_base. Must stay visible in every TU (included from
+//! pybind_wrapper.hpp).
 template <>
-struct type_caster<FunctionNullHandling> : public type_caster_base<FunctionNullHandling> {
-	using base = type_caster_base<FunctionNullHandling>;
-	FunctionNullHandling tmp;
+struct type_caster<duckdb::FunctionNullHandling> {
+	PYBIND11_TYPE_CASTER(duckdb::FunctionNullHandling, const_name("FunctionNullHandling"));
 
-public:
 	bool load(handle src, bool convert) {
-		if (base::load(src, convert)) {
-			return true;
-		} else if (py::isinstance<py::str>(src)) {
-			tmp = FunctionNullHandlingFromString(py::str(src));
-			value = &tmp;
-			return true;
-		} else if (py::isinstance<py::int_>(src)) {
-			tmp = FunctionNullHandlingFromInteger(src.cast<int64_t>());
-			value = &tmp;
+		if (isinstance<str>(src)) {
+			value = duckdb::FunctionNullHandlingFromString(src.cast<std::string>());
 			return true;
 		}
-		return false;
+		if (isinstance<int_>(src)) {
+			value = duckdb::FunctionNullHandlingFromInteger(src.cast<int64_t>());
+			return true;
+		}
+		type_caster_base<duckdb::FunctionNullHandling> base;
+		if (!base.load(src, convert)) {
+			return false;
+		}
+		value = *static_cast<duckdb::FunctionNullHandling *>(base);
+		return true;
 	}
 
-	static handle cast(FunctionNullHandling src, return_value_policy policy, handle parent) {
-		return base::cast(src, policy, parent);
+	static handle cast(duckdb::FunctionNullHandling src, return_value_policy policy, handle parent) {
+		return type_caster_base<duckdb::FunctionNullHandling>::cast(src, policy, parent);
 	}
 };
 

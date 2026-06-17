@@ -6,51 +6,51 @@
 #include "duckdb/common/box_renderer.hpp"
 #include "duckdb/common/enum_util.hpp"
 
-using duckdb::InvalidInputException;
-using duckdb::RenderMode;
-using duckdb::string;
-using duckdb::StringUtil;
+namespace duckdb {
 
-namespace py = pybind11;
+inline RenderMode RenderModeFromString(const string &value) {
+	return EnumUtil::FromString<RenderMode>(value.empty() ? "ROWS" : value);
+}
 
-static RenderMode RenderModeFromInteger(int64_t value) {
+inline RenderMode RenderModeFromInteger(int64_t value) {
 	if (value == 0) {
 		return RenderMode::ROWS;
-	} else if (value == 1) {
-		return RenderMode::COLUMNS;
-	} else {
-		throw InvalidInputException("Unrecognized type for 'render_mode'");
 	}
+	if (value == 1) {
+		return RenderMode::COLUMNS;
+	}
+	throw InvalidInputException("Unrecognized type for 'render_mode'");
 }
+
+} // namespace duckdb
 
 namespace PYBIND11_NAMESPACE {
 namespace detail {
 
+//! See python_udf_type_enum.hpp for the rationale (composition over inheritance, umbrella visibility).
 template <>
-struct type_caster<RenderMode> : public type_caster_base<RenderMode> {
-	using base = type_caster_base<RenderMode>;
-	RenderMode tmp;
+struct type_caster<duckdb::RenderMode> {
+	PYBIND11_TYPE_CASTER(duckdb::RenderMode, const_name("RenderMode"));
 
-public:
 	bool load(handle src, bool convert) {
-		if (base::load(src, convert)) {
-			return true;
-		} else if (py::isinstance<py::str>(src)) {
-			string render_mode_str = py::str(src);
-			auto render_mode =
-			    duckdb::EnumUtil::FromString<RenderMode>(render_mode_str.empty() ? "ROWS" : render_mode_str);
-			value = &render_mode;
-			return true;
-		} else if (py::isinstance<py::int_>(src)) {
-			tmp = RenderModeFromInteger(src.cast<int64_t>());
-			value = &tmp;
+		if (isinstance<str>(src)) {
+			value = duckdb::RenderModeFromString(src.cast<std::string>());
 			return true;
 		}
-		return false;
+		if (isinstance<int_>(src)) {
+			value = duckdb::RenderModeFromInteger(src.cast<int64_t>());
+			return true;
+		}
+		type_caster_base<duckdb::RenderMode> base;
+		if (!base.load(src, convert)) {
+			return false;
+		}
+		value = *static_cast<duckdb::RenderMode *>(base);
+		return true;
 	}
 
-	static handle cast(RenderMode src, return_value_policy policy, handle parent) {
-		return base::cast(src, policy, parent);
+	static handle cast(duckdb::RenderMode src, return_value_policy policy, handle parent) {
+		return type_caster_base<duckdb::RenderMode>::cast(src, policy, parent);
 	}
 };
 

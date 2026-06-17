@@ -265,12 +265,12 @@ static void InitializeMetaQueries(py::class_<DuckDBPyRelation> &m) {
 	      "Gives basic statistics (e.g., min, max) and if NULL exists for each column of the relation.")
 	    .def(
 	        "explain",
-	        [](DuckDBPyRelation &self, const py::object &type, const py::object &format) {
+	        [](DuckDBPyRelation &self, ExplainType type, const py::object &format) {
 		        // An omitted format (None) maps to "" = auto-select (default, or HTML under Jupyter).
 		        string format_str = format.is_none() ? string() : string(py::str(format));
-		        return self.Explain(ExplainTypeFromPython(type), format_str);
+		        return self.Explain(type, format_str);
 	        },
-	        py::arg("type") = "standard", py::arg("format") = py::none());
+	        py::arg("type") = ExplainType::EXPLAIN_STANDARD, py::arg("format") = py::none());
 }
 
 void DuckDBPyRelation::Initialize(py::handle &m) {

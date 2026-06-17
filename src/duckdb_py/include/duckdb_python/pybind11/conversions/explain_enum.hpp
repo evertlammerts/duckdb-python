@@ -5,46 +5,60 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 
-using duckdb::ExplainType;
-using duckdb::InvalidInputException;
-using duckdb::string;
-using duckdb::StringUtil;
+namespace duckdb {
 
-namespace py = pybind11;
-
-static ExplainType ExplainTypeFromString(const string &type) {
+inline ExplainType ExplainTypeFromString(const string &type) {
 	auto ltype = StringUtil::Lower(type);
 	if (ltype.empty() || ltype == "standard") {
 		return ExplainType::EXPLAIN_STANDARD;
-	} else if (ltype == "analyze") {
-		return ExplainType::EXPLAIN_ANALYZE;
-	} else {
-		throw InvalidInputException("Unrecognized type for 'explain'");
 	}
+	if (ltype == "analyze") {
+		return ExplainType::EXPLAIN_ANALYZE;
+	}
+	throw InvalidInputException("Unrecognized type for 'explain'");
 }
 
-static ExplainType ExplainTypeFromInteger(int64_t value) {
+inline ExplainType ExplainTypeFromInteger(int64_t value) {
 	if (value == 0) {
 		return ExplainType::EXPLAIN_STANDARD;
-	} else if (value == 1) {
-		return ExplainType::EXPLAIN_ANALYZE;
-	} else {
-		throw InvalidInputException("Unrecognized type for 'explain'");
 	}
+	if (value == 1) {
+		return ExplainType::EXPLAIN_ANALYZE;
+	}
+	throw InvalidInputException("Unrecognized type for 'explain'");
 }
 
-//! Resolve a Python explain-type argument (ExplainType enum, str, or int) to an ExplainType.
-//! NOTE: deliberately NOT a pybind type_caster. A custom caster inheriting type_caster_base shadows the
-//! registered py::enum_ inconsistently across translation units - it ends up accepting str/int XOR the enum
-//! instance, never both, depending on which TU sees the specialization. Explicit dispatch at the call site is
-//! robust regardless of include order.
-static ExplainType ExplainTypeFromPython(const py::object &obj) {
-	if (py::isinstance<py::str>(obj)) {
-		return ExplainTypeFromString(py::str(obj));
+} // namespace duckdb
+
+namespace PYBIND11_NAMESPACE {
+namespace detail {
+
+//! See python_udf_type_enum.hpp for the rationale (composition over inheritance, umbrella visibility).
+template <>
+struct type_caster<duckdb::ExplainType> {
+	PYBIND11_TYPE_CASTER(duckdb::ExplainType, const_name("ExplainType"));
+
+	bool load(handle src, bool convert) {
+		if (isinstance<str>(src)) {
+			value = duckdb::ExplainTypeFromString(src.cast<std::string>());
+			return true;
+		}
+		if (isinstance<int_>(src)) {
+			value = duckdb::ExplainTypeFromInteger(src.cast<int64_t>());
+			return true;
+		}
+		type_caster_base<duckdb::ExplainType> base;
+		if (!base.load(src, convert)) {
+			return false;
+		}
+		value = *static_cast<duckdb::ExplainType *>(base);
+		return true;
 	}
-	if (py::isinstance<py::int_>(obj)) {
-		return ExplainTypeFromInteger(obj.cast<int64_t>());
+
+	static handle cast(duckdb::ExplainType src, return_value_policy policy, handle parent) {
+		return type_caster_base<duckdb::ExplainType>::cast(src, policy, parent);
 	}
-	// Fall through to the registered py::enum_ caster (handles an actual ExplainType, throws otherwise).
-	return obj.cast<ExplainType>();
-}
+};
+
+} // namespace detail
+} // namespace PYBIND11_NAMESPACE
