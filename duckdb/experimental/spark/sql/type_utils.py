@@ -19,6 +19,7 @@ from .types import (
     IntegerType,
     LongType,
     MapType,
+    NullType,
     ShortType,
     StringType,
     StructField,
@@ -42,6 +43,7 @@ from .types import (
 )
 
 _sqltype_to_spark_class = {
+    "null": NullType,
     "boolean": BooleanType,
     "utinyint": UnsignedByteType,
     "tinyint": ByteType,
