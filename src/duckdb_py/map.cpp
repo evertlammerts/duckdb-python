@@ -99,7 +99,7 @@ static void OverrideNullType(vector<LogicalType> &return_types, const vector<Ide
 }
 
 unique_ptr<FunctionData> BindExplicitSchema(unique_ptr<MapFunctionData> function_data, PyObject *schema_p,
-                                            vector<LogicalType> &types, vector<Identifier> &names) {
+                                            vector<LogicalType> &types, vector<string> &names) {
 	D_ASSERT(schema_p != Py_None);
 
 	auto schema_object = py::reinterpret_borrow<py::dict>(schema_p);
@@ -115,13 +115,15 @@ unique_ptr<FunctionData> BindExplicitSchema(unique_ptr<MapFunctionData> function
 	for (auto &item : schema) {
 		auto name = item.first;
 		auto type_p = item.second;
-		names.push_back(Identifier(py::str(name)));
+		names.push_back(string(py::str(name)));
 		// TODO: replace with py::try_cast so we can catch the error and throw a better exception
 		auto type = py::cast<shared_ptr<DuckDBPyType>>(type_p);
 		types.push_back(type->Type());
 	}
 
-	function_data->out_names = names;
+	for (auto &name : names) {
+		function_data->out_names.push_back(Identifier(name));
+	}
 	function_data->out_types = types;
 
 	return std::move(function_data);
@@ -141,17 +143,18 @@ unique_ptr<FunctionData> MapFunction::MapFunctionBind(ClientContext &context, Ta
 	data.in_names = input.input_table_names;
 	data.in_types = input.input_table_types;
 
-	vector<Identifier> name_identifiers(names.size());
-	std::transform(names.begin(), names.end(), name_identifiers.begin(),
-	               [](const string &name) { return Identifier(name); });
-
 	if (explicit_schema != Py_None) {
-		return BindExplicitSchema(std::move(data_uptr), explicit_schema, return_types, name_identifiers);
+		return BindExplicitSchema(std::move(data_uptr), explicit_schema, return_types, names);
 	}
 	NumpyResultConversion conversion(data.in_types, 0, context.GetClientProperties());
 	auto df = FunctionCall(conversion, data.in_names, data.function);
 	vector<PandasColumnBindData> pandas_bind_data; // unused
 	Pandas::Bind(context, df, pandas_bind_data, return_types, names);
+
+	// Build the Identifier names only after Pandas::Bind has populated 'names'.
+	vector<Identifier> name_identifiers(names.size());
+	std::transform(names.begin(), names.end(), name_identifiers.begin(),
+	               [](const string &name) { return Identifier(name); });
 
 	// output types are potentially NULL, this happens for types that map to 'object' dtype
 	OverrideNullType(return_types, name_identifiers, data.in_types, data.in_names);
