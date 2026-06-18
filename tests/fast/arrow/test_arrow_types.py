@@ -16,17 +16,18 @@ class TestArrowTypes:
         # NULL type now round-trips faithfully (previously it was coerced to int32)
         assert rel["data"] == arrow_table["data"]
 
-    def test_invalid_struct(self, duckdb_cursor):
+    def test_empty_struct(self, duckdb_cursor):
+        # Empty structs are now supported by DuckDB core. This previously raised
+        # "Attempted to convert a STRUCT with no fields to DuckDB which is not supported";
+        # the core check was removed and empty structs now round-trip faithfully.
         empty_struct_type = pa.struct([])
-
-        # Create an empty array with the defined struct type
-        empty_array = pa.array([], type=empty_struct_type)
-        arrow_table = pa.Table.from_arrays([empty_array], schema=pa.schema([("data", empty_struct_type)]))  # noqa: F841
-        with pytest.raises(
-            duckdb.InvalidInputException,
-            match="Attempted to convert a STRUCT with no fields to DuckDB which is not supported",
-        ):
-            duckdb_cursor.sql("select * from arrow_table").fetchall()
+        arrow_table = pa.Table.from_arrays(  # noqa: F841
+            [pa.array([None, None], type=empty_struct_type)],
+            schema=pa.schema([("data", empty_struct_type)]),
+        )
+        result = duckdb_cursor.sql("select * from arrow_table").to_arrow_table()
+        assert result["data"].type == empty_struct_type
+        assert result["data"].to_pylist() == [None, None]
 
     def test_invalid_union(self, duckdb_cursor):
         # Create a sparse union array from dense arrays

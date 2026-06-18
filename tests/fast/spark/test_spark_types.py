@@ -56,6 +56,7 @@ class TestTypes:
 				medium_enum,
 				large_enum,
 				'union',
+				empty_struct,
 				fixed_int_array,
 				fixed_varchar_array,
 				fixed_nested_int_array,
