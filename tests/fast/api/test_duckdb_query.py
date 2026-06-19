@@ -91,11 +91,12 @@ class TestDuckDBQuery:
     def test_named_param_not_dict(self):
         con = duckdb.connect()
 
-        # The missing-parameter names come from an unordered set, so their order is not stable; match all three
-        # regardless of order.
+        # Passing a list binds positionally as $1, $2, $3, which are excess against the named parameters in the
+        # query. The excess-parameter names come from an unordered set, so their order is not stable; match all
+        # three regardless of order.
         with pytest.raises(
             duckdb.InvalidInputException,
-            match=r"prepared statement parameters: (?=.*\bname1\b)(?=.*\bname2\b)(?=.*\bname3\b)",
+            match=r"excess parameters: (?=.*\b1\b)(?=.*\b2\b)(?=.*\b3\b)",
         ):
             con.execute("select $name1, $name2, $name3", ["name1", "name2", "name3"])
 
@@ -112,7 +113,7 @@ class TestDuckDBQuery:
 
         with pytest.raises(
             duckdb.InvalidInputException,
-            match="Invalid Input Error: Values were not provided for the following prepared statement parameters: name3",  # noqa: E501
+            match="Invalid Input Error: Values were not provided for the following parameters: name3",
         ):
             con.execute("select $name1, $name2, $name3", {"name1": 5, "name2": 3})
 
@@ -121,17 +122,18 @@ class TestDuckDBQuery:
 
         with pytest.raises(
             duckdb.InvalidInputException,
-            match="Values were not provided for the following prepared statement parameters: name3",
+            match="Parameter argument/count mismatch, identifiers of the excess parameters: not_a_named_param",
         ):
             con.execute("select $name1, $name2, $name3", {"name1": 5, "name2": 3, "not_a_named_param": 5})
 
     def test_named_param_not_named(self):
         con = duckdb.connect()
 
-        # Unordered set: match both missing parameters regardless of order.
+        # Passing a dict for positional parameters makes name1/name2 excess. Unordered set: match both excess
+        # parameters regardless of order.
         with pytest.raises(
             duckdb.InvalidInputException,
-            match=r"prepared statement parameters: (?=.*\b1\b)(?=.*\b2\b)",
+            match=r"excess parameters: (?=.*\bname1\b)(?=.*\bname2\b)",
         ):
             con.execute("select $1, $1, $2", {"name1": 5, "name2": 3})
 
