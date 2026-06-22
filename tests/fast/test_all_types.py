@@ -377,9 +377,9 @@ class TestAllTypes:
             ),
             "interval": np.ma.array(
                 [
-                    np.timedelta64(0),
-                    np.timedelta64(2675722599999999000),
-                    np.timedelta64(42),
+                    np.timedelta64(0, "ns"),
+                    np.timedelta64(2675722599999999000, "ns"),
+                    np.timedelta64(42, "ns"),
                 ],
                 mask=[0, 0, 1],
             ),
