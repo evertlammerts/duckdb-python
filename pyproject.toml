@@ -333,7 +333,7 @@ packages = ["duckdb", "_duckdb"]
 strict = true
 warn_unreachable = true
 pretty = true
-python_version = "3.10"
+python_version = "3.12"
 exclude = [
     "duckdb/experimental/", # not checking the pyspark API
     "duckdb/query_graph/",  # old and unmaintained (should probably remove)
