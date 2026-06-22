@@ -387,7 +387,7 @@ class TestAllTypes:
             # such that the conversion yields "Not a Time"
             "timestamp_ns": np.ma.array(
                 [
-                    np.datetime64("NaT"),
+                    np.datetime64("NaT", "ns"),
                     np.datetime64(9223372036854775806, "ns"),
                     np.datetime64("1990-01-01T00:42"),
                 ],
