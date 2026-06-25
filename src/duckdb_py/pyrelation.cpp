@@ -960,11 +960,11 @@ PandasDataFrame DuckDBPyRelation::FetchDFChunk(idx_t vectors_per_chunk, bool dat
 	return result->FetchDFChunk(vectors_per_chunk, date_as_object);
 }
 
-duckdb::pyarrow::Table DuckDBPyRelation::ToArrowTableInternal(idx_t batch_size, bool to_polars) {
+pyarrow::Table DuckDBPyRelation::ToArrowTableInternal(idx_t batch_size, bool to_polars) {
+	if (!result && !rel) {
+		return py::none();
+	}
 	if (!result) {
-		if (!rel) {
-			return py::none();
-		}
 		auto &config = ClientConfig::GetConfig(*rel->context->GetContext());
 		ScopedConfigSetting scoped_setting(
 		    config,
@@ -991,19 +991,9 @@ py::object DuckDBPyRelation::ToArrowCapsule(const py::object &requested_schema) 
 		if (!rel) {
 			return py::none();
 		}
-		// The PyCapsule protocol doesn't allow custom parameters, so we use the same
-		// default batch size as fetch_arrow_table / fetch_record_batch.
-		idx_t batch_size = 1000000;
-		auto &config = ClientConfig::GetConfig(*rel->context->GetContext());
-		ScopedConfigSetting scoped_setting(
-		    config,
-		    [&batch_size](ClientConfig &config) {
-			    config.get_result_collector = [&batch_size](ClientContext &context, PreparedStatementData &data) {
-				    return PhysicalArrowCollector::Create(context, data, batch_size);
-			    };
-		    },
-		    [](ClientConfig &config) { config.get_result_collector = nullptr; });
-		ExecuteOrThrow();
+		// Fresh relation: stream lazily on the user's context (capsule survives `del conn`,
+		// but shares the single active-stream slot - consume before reusing the connection).
+		ExecuteOrThrow(true);
 	}
 	AssertResultOpen();
 	auto res = result->FetchArrowCapsule();
@@ -1049,6 +1039,7 @@ duckdb::pyarrow::RecordBatchReader DuckDBPyRelation::ToRecordBatch(idx_t batch_s
 		if (!rel) {
 			return py::none();
 		}
+		// Fresh relation: stream lazily on the user's own context (survives `del conn`).
 		ExecuteOrThrow(true);
 	}
 	AssertResultOpen();
