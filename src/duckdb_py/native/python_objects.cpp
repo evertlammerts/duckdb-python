@@ -12,7 +12,7 @@
 
 #include "datetime.h" // Python datetime initialize #1
 
-#include <duckdb/common/types/variant_value.hpp>
+#include <duckdb/common/types/variant.hpp>
 #include <duckdb/function/scalar/variant_utils.hpp>
 
 namespace duckdb {
