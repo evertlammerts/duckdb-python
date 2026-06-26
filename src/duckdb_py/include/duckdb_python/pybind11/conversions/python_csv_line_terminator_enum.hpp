@@ -3,6 +3,7 @@
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb_python/pybind11/conversions/enum_string_caster.hpp"
 
 namespace duckdb {
 
@@ -41,32 +42,7 @@ public:
 
 } // namespace duckdb
 
-namespace PYBIND11_NAMESPACE {
-namespace detail {
-
-//! See python_udf_type_enum.hpp for the rationale (composition over inheritance, umbrella visibility).
+//! See enum_string_caster.hpp for the rationale (composition over inheritance, umbrella visibility).
 //! Only a string or the enum itself are accepted (no integer form).
-template <>
-struct type_caster<duckdb::PythonCSVLineTerminator::Type> {
-	PYBIND11_TYPE_CASTER(duckdb::PythonCSVLineTerminator::Type, const_name("CSVLineTerminator"));
-
-	bool load(handle src, bool convert) {
-		if (isinstance<str>(src)) {
-			value = duckdb::PythonCSVLineTerminator::FromString(src.cast<std::string>());
-			return true;
-		}
-		type_caster_base<duckdb::PythonCSVLineTerminator::Type> base;
-		if (!base.load(src, convert)) {
-			return false;
-		}
-		value = *static_cast<duckdb::PythonCSVLineTerminator::Type *>(base);
-		return true;
-	}
-
-	static handle cast(duckdb::PythonCSVLineTerminator::Type src, return_value_policy policy, handle parent) {
-		return type_caster_base<duckdb::PythonCSVLineTerminator::Type>::cast(src, policy, parent);
-	}
-};
-
-} // namespace detail
-} // namespace PYBIND11_NAMESPACE
+DUCKDB_PY_ENUM_STRING_CASTER(duckdb::PythonCSVLineTerminator::Type, duckdb::PythonCSVLineTerminator::FromString,
+                             "CSVLineTerminator")

@@ -4,6 +4,7 @@
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb_python/pybind11/conversions/enum_string_caster.hpp"
 
 namespace duckdb {
 
@@ -30,37 +31,7 @@ inline FunctionNullHandling FunctionNullHandlingFromInteger(int64_t value) {
 
 } // namespace duckdb
 
-namespace PYBIND11_NAMESPACE {
-namespace detail {
-
-//! See python_udf_type_enum.hpp for why this owns its value and delegates the enum case to a local base
-//! caster instead of inheriting type_caster_base. Must stay visible in every TU (included from
-//! pybind_wrapper.hpp).
-template <>
-struct type_caster<duckdb::FunctionNullHandling> {
-	PYBIND11_TYPE_CASTER(duckdb::FunctionNullHandling, const_name("FunctionNullHandling"));
-
-	bool load(handle src, bool convert) {
-		if (isinstance<str>(src)) {
-			value = duckdb::FunctionNullHandlingFromString(src.cast<std::string>());
-			return true;
-		}
-		if (isinstance<int_>(src)) {
-			value = duckdb::FunctionNullHandlingFromInteger(src.cast<int64_t>());
-			return true;
-		}
-		type_caster_base<duckdb::FunctionNullHandling> base;
-		if (!base.load(src, convert)) {
-			return false;
-		}
-		value = *static_cast<duckdb::FunctionNullHandling *>(base);
-		return true;
-	}
-
-	static handle cast(duckdb::FunctionNullHandling src, return_value_policy policy, handle parent) {
-		return type_caster_base<duckdb::FunctionNullHandling>::cast(src, policy, parent);
-	}
-};
-
-} // namespace detail
-} // namespace PYBIND11_NAMESPACE
+//! See enum_string_caster.hpp for why this owns its value and delegates the enum case to a local base caster
+//! instead of inheriting type_caster_base. Must stay visible in every TU (included from pybind_wrapper.hpp).
+DUCKDB_PY_ENUM_STRING_INT_CASTER(duckdb::FunctionNullHandling, duckdb::FunctionNullHandlingFromString,
+                                 duckdb::FunctionNullHandlingFromInteger, "FunctionNullHandling")
