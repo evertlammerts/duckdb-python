@@ -483,7 +483,7 @@ public:
 		auto empty = py::module_::import_("inspect").attr("Signature").attr("empty");
 		if (!py::none().is(return_annotation) && !empty.is(return_annotation)) {
 			std::shared_ptr<DuckDBPyType> pytype;
-			if (py::try_cast<std::shared_ptr<DuckDBPyType>>(return_annotation, pytype)) {
+			if (DuckDBPyType::TryConvert(py::borrow<py::object>(return_annotation), pytype)) {
 				return_type = pytype->Type();
 			}
 		}
@@ -493,7 +493,7 @@ public:
 		for (auto item : params) {
 			auto value = item.second;
 			std::shared_ptr<DuckDBPyType> pytype;
-			if (py::try_cast<std::shared_ptr<DuckDBPyType>>(value.attr("annotation"), pytype)) {
+			if (DuckDBPyType::TryConvert(py::borrow<py::object>(value.attr("annotation")), pytype)) {
 				parameters.push_back(pytype->Type());
 			} else {
 				std::string kind = py::cast<std::string>(py::str(value.attr("kind")));

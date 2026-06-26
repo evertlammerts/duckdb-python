@@ -328,6 +328,22 @@ static LogicalType FromObject(const py::object &object) {
 	}
 }
 
+bool DuckDBPyType::TryConvert(const py::object &object, std::shared_ptr<DuckDBPyType> &result) {
+	if (py::isinstance<DuckDBPyType>(object)) {
+		result = py::cast<std::shared_ptr<DuckDBPyType>>(object);
+		return true;
+	}
+	try {
+		// Construct via the registered DuckDBPyType type (DuckDBPyType(object)); this hits the same factories
+		// that drive the implicit conversion, which nanobind's shared_ptr caster otherwise bypasses.
+		py::object converted = py::type<DuckDBPyType>()(object);
+		result = py::cast<std::shared_ptr<DuckDBPyType>>(converted);
+		return true;
+	} catch (...) {
+		return false;
+	}
+}
+
 void DuckDBPyType::Initialize(py::handle &m) {
 	auto type_module = py::class_<DuckDBPyType>(m, "DuckDBPyType");
 

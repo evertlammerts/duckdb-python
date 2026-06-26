@@ -1241,12 +1241,19 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadCSV(const py::object &
 			child_list_t<Value> struct_fields;
 			py::dict dtype_dict = py::cast<py::dict>(dtype);
 			for (auto kv : dtype_dict) { // nanobind dict iteration yields std::pair<handle,handle> by value
-				std::shared_ptr<DuckDBPyType> sql_type;
-				if (!py::try_cast(kv.second, sql_type)) {
-					struct_fields.emplace_back(py::cast<std::string>(py::str(kv.first)),
-					                           Value(py::cast<std::string>(py::str(kv.second))));
+				auto key = py::cast<std::string>(py::str(kv.first));
+				auto value_obj = py::borrow<py::object>(kv.second);
+				if (py::isinstance<py::str>(value_obj)) {
+					// A type string -- pass through for DuckDB to parse.
+					struct_fields.emplace_back(key, Value(py::cast<std::string>(value_obj)));
 				} else {
-					struct_fields.emplace_back(py::cast<std::string>(py::str(kv.first)), Value(sql_type->ToString()));
+					// A DuckDBPyType instance, or a Python type object (int/str/...). nanobind's shared_ptr caster
+					// strips the implicit-convert flag, so build the DuckDBPyType via its registered constructor.
+					if (!py::isinstance<DuckDBPyType>(value_obj)) {
+						value_obj = py::type<DuckDBPyType>()(value_obj);
+					}
+					auto sql_type = py::cast<std::shared_ptr<DuckDBPyType>>(value_obj);
+					struct_fields.emplace_back(key, Value(sql_type->ToString()));
 				}
 			}
 			auto dtype_struct = Value::STRUCT(std::move(struct_fields));
@@ -1255,11 +1262,12 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadCSV(const py::object &
 			vector<Value> list_values;
 			py::list dtype_list = py::cast<py::list>(dtype);
 			for (auto child : dtype_list) {
+				auto child_obj = py::borrow<py::object>(child);
 				std::shared_ptr<DuckDBPyType> sql_type;
-				if (!py::try_cast(child, sql_type)) {
-					list_values.push_back(Value(py::cast<std::string>(child)));
-				} else {
+				if (!py::isinstance<py::str>(child_obj) && DuckDBPyType::TryConvert(child_obj, sql_type)) {
 					list_values.push_back(sql_type->ToString());
+				} else {
+					list_values.push_back(Value(py::cast<std::string>(py::str(child_obj))));
 				}
 			}
 			bind_parameters["dtypes"] = Value::LIST(LogicalType::VARCHAR, std::move(list_values));

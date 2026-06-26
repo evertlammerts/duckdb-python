@@ -1,5 +1,6 @@
 #include "duckdb_python/python_conversion.hpp"
 #include "duckdb_python/pybind11/pybind_wrapper.hpp"
+#include "duckdb_python/pytype.hpp"
 
 #include "duckdb_python/pyrelation.hpp"
 #include "duckdb_python/pyconnection/pyconnection.hpp"
@@ -594,9 +595,9 @@ struct PythonValueConversion {
 		case PythonObjectType::Value: {
 			// Extract the internal object and the type from the Value instance
 			auto object = ele.attr("object");
-			auto type = ele.attr("type");
+			py::object type = ele.attr("type");
 			std::shared_ptr<DuckDBPyType> internal_type;
-			if (!py::try_cast<std::shared_ptr<DuckDBPyType>>(type, internal_type)) {
+			if (!DuckDBPyType::TryConvert(type, internal_type)) {
 				string actual_type = py::cast<std::string>(py::str((type).type()));
 				throw InvalidInputException("The 'type' of a Value should be of type DuckDBPyType, not '%s'",
 				                            actual_type);
