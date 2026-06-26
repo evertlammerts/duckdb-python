@@ -79,7 +79,8 @@ std::shared_ptr<DuckDBPyType> DuckDBPyType::GetAttribute(const string &name) con
 	throw py::attribute_error(
 	    StringUtil::Format("Tried to get child type by the name of '%s', but this type either isn't nested, "
 	                       "or it doesn't have a child by that name",
-	                       name));
+	                       name)
+	        .c_str());
 }
 
 static LogicalType FromObject(const py::object &object);
@@ -337,19 +338,20 @@ void DuckDBPyType::Initialize(py::handle &m) {
 	type_module.def("__hash__", [](const DuckDBPyType &type) { return py::hash(py::str(type.ToString())); });
 	type_module.def_prop_ro("id", &DuckDBPyType::GetId);
 	type_module.def_prop_ro("children", &DuckDBPyType::Children);
-	type_module.def(py::init<>([](const string &type_str, std::shared_ptr<DuckDBPyConnection> connection = nullptr) {
-		auto ltype = FromString(type_str, std::move(connection));
-		return std::make_shared<DuckDBPyType>(ltype);
-	}));
-	type_module.def(py::init<>([](const PyGenericAlias &obj) {
+	type_module.def(py::new_([](const string &type_str, std::shared_ptr<DuckDBPyConnection> connection) {
+		            auto ltype = FromString(type_str, std::move(connection));
+		            return std::make_shared<DuckDBPyType>(ltype);
+	            }),
+	                py::arg("type_str"), py::arg("connection").none() = py::none());
+	type_module.def(py::new_([](const PyGenericAlias &obj) {
 		auto ltype = FromGenericAlias(obj);
 		return std::make_shared<DuckDBPyType>(ltype);
 	}));
-	type_module.def(py::init<>([](const PyUnionType &obj) {
+	type_module.def(py::new_([](const PyUnionType &obj) {
 		auto ltype = FromUnionType(obj);
 		return std::make_shared<DuckDBPyType>(ltype);
 	}));
-	type_module.def(py::init<>([](const py::object &obj) {
+	type_module.def(py::new_([](const py::object &obj) {
 		auto ltype = FromObject(obj);
 		return std::make_shared<DuckDBPyType>(ltype);
 	}));

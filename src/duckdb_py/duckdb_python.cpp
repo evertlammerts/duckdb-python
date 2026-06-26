@@ -42,31 +42,31 @@ static py::list PyTokenize(const string &query) {
 	auto tokens = Parser::Tokenize(query);
 	py::list result;
 	for (auto &token : tokens) {
-		auto tuple = py::tuple(2);
-		tuple[0] = token.start;
+		// nanobind tuples are immutable; compute the token type then build the 2-tuple with make_tuple
+		PySQLTokenType token_type = PY_SQL_TOKEN_IDENTIFIER;
 		switch (token.type) {
 		case SimplifiedTokenType::SIMPLIFIED_TOKEN_IDENTIFIER:
-			tuple[1] = PY_SQL_TOKEN_IDENTIFIER;
+			token_type = PY_SQL_TOKEN_IDENTIFIER;
 			break;
 		case SimplifiedTokenType::SIMPLIFIED_TOKEN_NUMERIC_CONSTANT:
-			tuple[1] = PY_SQL_TOKEN_NUMERIC_CONSTANT;
+			token_type = PY_SQL_TOKEN_NUMERIC_CONSTANT;
 			break;
 		case SimplifiedTokenType::SIMPLIFIED_TOKEN_STRING_CONSTANT:
-			tuple[1] = PY_SQL_TOKEN_STRING_CONSTANT;
+			token_type = PY_SQL_TOKEN_STRING_CONSTANT;
 			break;
 		case SimplifiedTokenType::SIMPLIFIED_TOKEN_OPERATOR:
-			tuple[1] = PY_SQL_TOKEN_OPERATOR;
+			token_type = PY_SQL_TOKEN_OPERATOR;
 			break;
 		case SimplifiedTokenType::SIMPLIFIED_TOKEN_KEYWORD:
-			tuple[1] = PY_SQL_TOKEN_KEYWORD;
+			token_type = PY_SQL_TOKEN_KEYWORD;
 			break;
 		case SimplifiedTokenType::SIMPLIFIED_TOKEN_COMMENT:
-			tuple[1] = PY_SQL_TOKEN_COMMENT;
+			token_type = PY_SQL_TOKEN_COMMENT;
 			break;
 		default:
 			break;
 		}
-		result.append(tuple);
+		result.append(py::make_tuple(token.start, token_type));
 	}
 	return result;
 }
@@ -597,13 +597,19 @@ static void InitializeConnectionMethods(py::module_ &m) {
 	    py::arg("connection") = py::none());
 	m.def(
 	    "values",
-	    [](const py::args &params, std::shared_ptr<DuckDBPyConnection> conn = nullptr) {
+	    // nanobind forbids a named typed parameter after py::args; the keyword-only `connection` is therefore
+	    // taken from **kwargs (a None/absent value falls back to the default connection, as before).
+	    [](const py::args &params, const py::kwargs &kwargs) {
+		    std::shared_ptr<DuckDBPyConnection> conn;
+		    if (kwargs.contains("connection") && !kwargs["connection"].is_none()) {
+			    conn = py::cast<std::shared_ptr<DuckDBPyConnection>>(kwargs["connection"]);
+		    }
 		    if (!conn) {
 			    conn = DuckDBPyConnection::DefaultConnection();
 		    }
 		    return conn->Values(params);
 	    },
-	    "Create a relation object from the passed values", py::kw_only(), py::arg("connection") = py::none());
+	    "Create a relation object from the passed values");
 	m.def(
 	    "table_function",
 	    [](const string &fname, py::object params = py::list(), std::shared_ptr<DuckDBPyConnection> conn = nullptr) {
@@ -703,28 +709,31 @@ static void InitializeConnectionMethods(py::module_ &m) {
 	    py::arg("connection") = py::none());
 	m.def(
 	    "read_csv",
+	    // py::arg + py::kwargs can't coexist under nanobind's annotation rules; drop the annotations.
 	    [](const py::object &name, py::kwargs &kwargs) {
-		    auto connection_arg = kwargs.contains("conn") ? kwargs["conn"] : py::none();
-		    auto conn = py::cast<std::shared_ptr<DuckDBPyConnection>>(connection_arg);
-
+		    std::shared_ptr<DuckDBPyConnection> conn;
+		    if (kwargs.contains("conn") && !kwargs["conn"].is_none()) {
+			    conn = py::cast<std::shared_ptr<DuckDBPyConnection>>(kwargs["conn"]);
+		    }
 		    if (!conn) {
 			    conn = DuckDBPyConnection::DefaultConnection();
 		    }
 		    return conn->ReadCSV(name, kwargs);
 	    },
-	    "Create a relation object from the CSV file in 'name'", py::arg("path_or_buffer"), py::kw_only());
+	    "Create a relation object from the CSV file in 'name'");
 	m.def(
 	    "from_csv_auto",
 	    [](const py::object &name, py::kwargs &kwargs) {
-		    auto connection_arg = kwargs.contains("conn") ? kwargs["conn"] : py::none();
-		    auto conn = py::cast<std::shared_ptr<DuckDBPyConnection>>(connection_arg);
-
+		    std::shared_ptr<DuckDBPyConnection> conn;
+		    if (kwargs.contains("conn") && !kwargs["conn"].is_none()) {
+			    conn = py::cast<std::shared_ptr<DuckDBPyConnection>>(kwargs["conn"]);
+		    }
 		    if (!conn) {
 			    conn = DuckDBPyConnection::DefaultConnection();
 		    }
 		    return conn->ReadCSV(name, kwargs);
 	    },
-	    "Create a relation object from the CSV file in 'name'", py::arg("path_or_buffer"), py::kw_only());
+	    "Create a relation object from the CSV file in 'name'");
 	m.def(
 	    "from_df",
 	    [](const PandasDataFrame &value, std::shared_ptr<DuckDBPyConnection> conn = nullptr) {
@@ -809,15 +818,23 @@ static void InitializeConnectionMethods(py::module_ &m) {
 	    "Load an installed extension", py::arg("extension"), py::kw_only(), py::arg("connection") = py::none());
 	m.def(
 	    "project",
-	    [](const PandasDataFrame &df, const py::args &args, const string &groups = "",
-	       std::shared_ptr<DuckDBPyConnection> conn = nullptr) {
+	    // nanobind forbids named typed parameters after py::args; the keyword-only `groups` and `connection`
+	    // are therefore taken from **kwargs (preserving the previous defaults/None-handling).
+	    [](const PandasDataFrame &df, const py::args &args, const py::kwargs &kwargs) {
+		    string groups = "";
+		    if (kwargs.contains("groups") && !kwargs["groups"].is_none()) {
+			    groups = py::cast<std::string>(kwargs["groups"]);
+		    }
+		    std::shared_ptr<DuckDBPyConnection> conn;
+		    if (kwargs.contains("connection") && !kwargs["connection"].is_none()) {
+			    conn = py::cast<std::shared_ptr<DuckDBPyConnection>>(kwargs["connection"]);
+		    }
 		    if (!conn) {
 			    conn = DuckDBPyConnection::DefaultConnection();
 		    }
 		    return conn->FromDF(df)->Project(args, groups);
 	    },
-	    "Project the relation object by the projection in project_expr", py::arg("df"), py::kw_only(),
-	    py::arg("groups") = "", py::arg("connection") = py::none());
+	    "Project the relation object by the projection in project_expr");
 	m.def(
 	    "distinct",
 	    [](const PandasDataFrame &df, std::shared_ptr<DuckDBPyConnection> conn = nullptr) {
@@ -1030,11 +1047,11 @@ static void RegisterExpectedResultType(py::handle &m) {
 //
 // Without this, the linker may strip these as dead code.
 extern "C" {
-PYBIND11_EXPORT void *_force_symbol_inclusion() {
+NB_EXPORT void *_force_symbol_inclusion() {
 	static void *symbols[] = {
 	    (void *)&duckdb_adbc_init,
 	};
-	return symbols;
+	return (void *)symbols;
 }
 };
 
@@ -1100,7 +1117,7 @@ NB_MODULE(DUCKDB_PYTHON_LIB_NAME, m) { // NOLINT
 	m.def("connect", &DuckDBPyConnection::Connect,
 	      "Create a DuckDB database instance. Can take a database file name to read/write persistent data and a "
 	      "read_only flag if no changes are desired",
-	      py::arg("database") = ":memory:", py::arg("read_only") = false, py::arg_v("config", py::dict(), "None"));
+	      py::arg("database") = ":memory:", py::arg("read_only") = false, py::arg("config") = py::dict());
 	m.def("tokenize", PyTokenize,
 	      "Tokenizes a SQL string, returning a list of (position, type) tuples that can be "
 	      "used for e.g., syntax highlighting",
@@ -1114,11 +1131,12 @@ NB_MODULE(DUCKDB_PYTHON_LIB_NAME, m) { // NOLINT
 	    .value("comment", PySQLTokenType::PY_SQL_TOKEN_COMMENT)
 	    .export_values();
 
-	// we need this because otherwise we try to remove registered_dfs on shutdown when python is already dead
-	auto clean_default_connection = []() {
-		DuckDBPyConnection::Cleanup();
-	};
-	m.add_object("_clean_default_connection", py::capsule(clean_default_connection));
+	// we need this because otherwise we try to remove registered_dfs on shutdown when python is already dead.
+	// nanobind's capsule has no "callable destructor" ctor; use a non-null sentinel pointer + a cleanup callback
+	// that runs when the capsule (held in the module dict) is destroyed at interpreter shutdown.
+	static char clean_default_connection_sentinel;
+	m.attr("_clean_default_connection") =
+	    py::capsule(&clean_default_connection_sentinel, [](void *) noexcept { DuckDBPyConnection::Cleanup(); });
 }
 
 } // namespace duckdb
