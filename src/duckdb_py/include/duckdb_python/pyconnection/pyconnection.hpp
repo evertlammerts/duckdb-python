@@ -361,11 +361,6 @@ public:
 	void EnableProfiling();
 	void DisableProfiling();
 
-	//! Default connection to an in-memory database
-	static DefaultConnectionHolder default_connection;
-	//! Caches and provides an interface to get frequently used modules+subtypes
-	static std::shared_ptr<PythonImportCache> import_cache;
-
 	static bool IsPandasDataframe(const py::object &object);
 	static PyArrowObjectType GetArrowType(const py::handle &obj);
 	static bool IsAcceptedArrowObject(const py::object &object);
@@ -383,8 +378,6 @@ private:
 	                               bool side_effects);
 	vector<unique_ptr<SQLStatement>> GetStatements(const py::object &query);
 
-	static PythonEnvironmentType environment;
-	static std::string formatted_python_version;
 	static void DetectEnvironment();
 };
 
