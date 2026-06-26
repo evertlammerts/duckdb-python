@@ -523,7 +523,10 @@ public:
 		if (!numpy) {
 			throw InvalidInputException("'numpy' is required for this operation, but it wasn't installed");
 		}
-		auto numpy_version = py::cast<py::tuple>(numpy.attr("__version__"));
+		// numpy.__version__ is a string; pybind11's cast<py::tuple> converted it to a tuple of characters
+		// (PySequence_Tuple). nanobind's cast<py::tuple> would reject a non-tuple, so convert explicitly.
+		py::object numpy_version_str = numpy.attr("__version__");
+		auto numpy_version = py::tuple(numpy_version_str);
 		if (NumpyDeprecatesAccessToCore(numpy_version)) {
 			core = numpy.attr("_core");
 		} else {
