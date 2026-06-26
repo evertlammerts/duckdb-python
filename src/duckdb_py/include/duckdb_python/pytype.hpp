@@ -50,3 +50,67 @@ private:
 };
 
 } // namespace duckdb
+
+namespace nanobind {
+namespace detail {
+
+// Custom type caster for std::shared_ptr<duckdb::DuckDBPyType>.
+//
+// nanobind's default std::shared_ptr<T> caster strips cast_flags::convert before delegating to the inner caster,
+// which disables implicit conversions for shared_ptr-typed arguments. DuckDBPyType, however, is routinely passed
+// as a string ("VARCHAR"), a Python type object (int), a typing generic, or a dict, relying on its registered
+// implicit conversions (as it did under pybind11). Those conversions construct brand-new, fully-owned
+// DuckDBPyType objects, so they carry no dangling risk -- we therefore mirror nanobind's shared_ptr caster but
+// KEEP the convert flag. (This specialization is visible in every TU that converts the type, since such TUs use
+// DuckDBPyType and thus include this header.)
+template <>
+struct type_caster<std::shared_ptr<duckdb::DuckDBPyType>> {
+	using T = duckdb::DuckDBPyType;
+	using Caster = make_caster<T>;
+	NB_TYPE_CASTER(std::shared_ptr<T>, Caster::Name)
+
+	bool from_python(handle src, uint8_t flags, cleanup_list *cleanup) noexcept {
+		// NOTE: deliberately do NOT clear cast_flags::convert (see header comment).
+		Caster caster;
+		if (!caster.from_python(src, flags, cleanup)) {
+			return false;
+		}
+		T *ptr = caster.operator T *();
+		if (ptr) {
+			ft_object_guard guard(src);
+			if (auto sp = ptr->weak_from_this().lock()) {
+				value = std::static_pointer_cast<T>(std::move(sp));
+				return true;
+			}
+			value = shared_from_python(ptr, src);
+			return true;
+		}
+		value = shared_from_python(ptr, src);
+		return true;
+	}
+
+	static handle from_cpp(const std::shared_ptr<T> &value, rv_policy, cleanup_list *cleanup) noexcept {
+		bool is_new = false;
+		handle result;
+		T *ptr = value.get();
+		const std::type_info *type = &typeid(T);
+		constexpr bool has_type_hook = !std::is_base_of_v<std::false_type, type_hook<T>>;
+		if constexpr (has_type_hook) {
+			type = type_hook<T>::get(ptr);
+		}
+		if constexpr (!std::is_polymorphic_v<T>) {
+			result = nb_type_put(type, ptr, rv_policy::reference, cleanup, &is_new);
+		} else {
+			const std::type_info *type_p = (!has_type_hook && ptr) ? &typeid(*ptr) : nullptr;
+			result = nb_type_put_p(type, type_p, ptr, rv_policy::reference, cleanup, &is_new);
+		}
+		if (is_new) {
+			auto pp = std::static_pointer_cast<void>(value);
+			shared_from_cpp(std::move(pp), result.ptr());
+		}
+		return result;
+	}
+};
+
+} // namespace detail
+} // namespace nanobind

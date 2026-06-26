@@ -98,7 +98,10 @@ private:
 	//! cached and an array is held. `ctypes.data` is dtype-agnostic (works for the `object` dtype
 	//! too). Only ever called with the GIL held (construction / Resize).
 	void EnsurePointer() {
-		if (!cached_data_ && array.ptr() != nullptr) {
+		// Only numpy ndarrays expose `ctypes`; some NumpyArray wrappers hold other objects (e.g. a pandas Index)
+		// whose buffer pointer is never read. Guard the eager compute so constructing such a wrapper doesn't raise
+		// (the original lazy code only touched `ctypes` if Data()/MutableData() was actually called).
+		if (!cached_data_ && array.ptr() != nullptr && py::hasattr(array, "ctypes")) {
 			cached_data_ = reinterpret_cast<void *>(py::cast<uintptr_t>(array.attr("ctypes").attr("data")));
 		}
 	}
