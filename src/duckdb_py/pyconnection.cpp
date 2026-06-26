@@ -469,9 +469,9 @@ void DuckDBPyConnection::Initialize(py::handle &m) {
 	connection_module.def("__enter__", &DuckDBPyConnection::Enter)
 	    .def(
 	        "__exit__",
-	        [](DuckDBPyConnection &self, const py::object &exc_type, const py::object &exc,
-	           const py::object &traceback) { DuckDBPyConnection::Exit(self, exc_type, exc, traceback); },
-	        py::arg("exc_type"), py::arg("exc"), py::arg("traceback"));
+	        [](DuckDBPyConnection *self, const py::object &exc_type, const py::object &exc,
+	           const py::object &traceback) { DuckDBPyConnection::Exit(*self, exc_type, exc, traceback); },
+	        py::arg("exc_type").none(), py::arg("exc").none(), py::arg("traceback").none());
 	connection_module.def("__del__", &DuckDBPyConnection::Close);
 
 	InitializeConnectionMethods(connection_module);
