@@ -53,11 +53,11 @@ public:
 	DefaultConnectionHolder &operator=(DefaultConnectionHolder &&other) = delete;
 
 public:
-	shared_ptr<DuckDBPyConnection> Get();
-	void Set(shared_ptr<DuckDBPyConnection> conn);
+	std::shared_ptr<DuckDBPyConnection> Get();
+	void Set(std::shared_ptr<DuckDBPyConnection> conn);
 
 private:
-	shared_ptr<DuckDBPyConnection> connection;
+	std::shared_ptr<DuckDBPyConnection> connection;
 	mutex l;
 };
 
@@ -129,7 +129,7 @@ public:
 	void SetConnection(unique_ptr<Connection> con) {
 		connection = std::move(con);
 	}
-	void SetResult(unique_ptr<DuckDBPyRelation> res) {
+	void SetResult(std::unique_ptr<DuckDBPyRelation> res) {
 		result = std::move(res);
 	}
 
@@ -141,10 +141,10 @@ private:
 private:
 	shared_ptr<DuckDB> database;
 	unique_ptr<Connection> connection;
-	unique_ptr<DuckDBPyRelation> result;
+	std::unique_ptr<DuckDBPyRelation> result;
 };
 
-struct DuckDBPyConnection : public enable_shared_from_this<DuckDBPyConnection> {
+struct DuckDBPyConnection : public std::enable_shared_from_this<DuckDBPyConnection> {
 private:
 	class Cursors {
 	public:
@@ -152,12 +152,12 @@ private:
 		}
 
 	public:
-		void AddCursor(shared_ptr<DuckDBPyConnection> conn);
+		void AddCursor(std::shared_ptr<DuckDBPyConnection> conn);
 		void ClearCursors();
 
 	private:
 		mutex lock;
-		vector<weak_ptr<DuckDBPyConnection>> cursors;
+		vector<std::weak_ptr<DuckDBPyConnection>> cursors;
 	};
 
 public:
@@ -191,7 +191,7 @@ public:
 	// duckdb-python#435.
 	std::recursive_mutex py_connection_lock;
 	//! MemoryFileSystem used to temporarily store file-like objects for reading
-	shared_ptr<ModifiedMemoryFileSystem> internal_object_filesystem;
+	std::shared_ptr<ModifiedMemoryFileSystem> internal_object_filesystem;
 	case_insensitive_map_t<unique_ptr<ExternalDependency>> registered_functions;
 	case_insensitive_set_t registered_objects;
 
@@ -204,7 +204,7 @@ public:
 	static void Initialize(py::handle &m);
 	static void Cleanup();
 
-	shared_ptr<DuckDBPyConnection> Enter();
+	std::shared_ptr<DuckDBPyConnection> Enter();
 
 	static void Exit(DuckDBPyConnection &self, const py::object &exc_type, const py::object &exc,
 	                 const py::object &traceback);
@@ -212,16 +212,16 @@ public:
 	static bool DetectAndGetEnvironment();
 	static bool IsJupyter();
 	static std::string FormattedPythonVersion();
-	static shared_ptr<DuckDBPyConnection> DefaultConnection();
-	static void SetDefaultConnection(shared_ptr<DuckDBPyConnection> conn);
+	static std::shared_ptr<DuckDBPyConnection> DefaultConnection();
+	static void SetDefaultConnection(std::shared_ptr<DuckDBPyConnection> conn);
 	static PythonImportCache *ImportCache();
 	static bool IsInteractive();
 
-	unique_ptr<DuckDBPyRelation> ReadCSV(const py::object &name, py::kwargs &kwargs);
+	std::unique_ptr<DuckDBPyRelation> ReadCSV(const py::object &name, py::kwargs &kwargs);
 
 	py::list ExtractStatements(const string &query);
 
-	unique_ptr<DuckDBPyRelation> ReadJSON(
+	std::unique_ptr<DuckDBPyRelation> ReadJSON(
 	    const py::object &name, const Optional<py::object> &columns = py::none(),
 	    const Optional<py::object> &sample_size = py::none(), const Optional<py::object> &maximum_depth = py::none(),
 	    const Optional<py::str> &records = py::none(), const Optional<py::str> &format = py::none(),
@@ -237,28 +237,27 @@ public:
 	    const Optional<py::object> &union_by_name = py::none(), const Optional<py::object> &hive_types = py::none(),
 	    const Optional<py::object> &hive_types_autocast = py::none());
 
-	shared_ptr<DuckDBPyType> MapType(const shared_ptr<DuckDBPyType> &key_type,
-	                                 const shared_ptr<DuckDBPyType> &value_type);
-	shared_ptr<DuckDBPyType> StructType(const py::object &fields);
-	shared_ptr<DuckDBPyType> ListType(const shared_ptr<DuckDBPyType> &type);
-	shared_ptr<DuckDBPyType> ArrayType(const shared_ptr<DuckDBPyType> &type, idx_t size);
-	shared_ptr<DuckDBPyType> UnionType(const py::object &members);
-	shared_ptr<DuckDBPyType> EnumType(const string &name, const shared_ptr<DuckDBPyType> &type,
-	                                  const py::list &values_p);
-	shared_ptr<DuckDBPyType> DecimalType(int width, int scale);
-	shared_ptr<DuckDBPyType> StringType(const string &collation = string());
-	shared_ptr<DuckDBPyType> Type(const string &type_str);
+	std::shared_ptr<DuckDBPyType> MapType(const std::shared_ptr<DuckDBPyType> &key_type,
+	                                      const std::shared_ptr<DuckDBPyType> &value_type);
+	std::shared_ptr<DuckDBPyType> StructType(const py::object &fields);
+	std::shared_ptr<DuckDBPyType> ListType(const std::shared_ptr<DuckDBPyType> &type);
+	std::shared_ptr<DuckDBPyType> ArrayType(const std::shared_ptr<DuckDBPyType> &type, idx_t size);
+	std::shared_ptr<DuckDBPyType> UnionType(const py::object &members);
+	std::shared_ptr<DuckDBPyType> EnumType(const string &name, const std::shared_ptr<DuckDBPyType> &type,
+	                                       const py::list &values_p);
+	std::shared_ptr<DuckDBPyType> DecimalType(int width, int scale);
+	std::shared_ptr<DuckDBPyType> StringType(const string &collation = string());
+	std::shared_ptr<DuckDBPyType> Type(const string &type_str);
 
-	shared_ptr<DuckDBPyConnection>
-	RegisterScalarUDF(const string &name, const py::function &udf, const py::object &arguments = py::none(),
-	                  const shared_ptr<DuckDBPyType> &return_type = nullptr, PythonUDFType type = PythonUDFType::NATIVE,
-	                  FunctionNullHandling null_handling = FunctionNullHandling::DEFAULT_NULL_HANDLING,
-	                  PythonExceptionHandling exception_handling = PythonExceptionHandling::FORWARD_ERROR,
-	                  bool side_effects = false);
+	std::shared_ptr<DuckDBPyConnection> RegisterScalarUDF(
+	    const string &name, const py::function &udf, const py::object &arguments = py::none(),
+	    const std::shared_ptr<DuckDBPyType> &return_type = nullptr, PythonUDFType type = PythonUDFType::NATIVE,
+	    FunctionNullHandling null_handling = FunctionNullHandling::DEFAULT_NULL_HANDLING,
+	    PythonExceptionHandling exception_handling = PythonExceptionHandling::FORWARD_ERROR, bool side_effects = false);
 
-	shared_ptr<DuckDBPyConnection> UnregisterUDF(const string &name);
+	std::shared_ptr<DuckDBPyConnection> UnregisterUDF(const string &name);
 
-	shared_ptr<DuckDBPyConnection> ExecuteMany(const py::object &query, py::object params = py::list());
+	std::shared_ptr<DuckDBPyConnection> ExecuteMany(const py::object &query, py::object params = py::list());
 
 	void ExecuteImmediately(vector<unique_ptr<SQLStatement>> statements);
 	unique_ptr<PreparedStatement> PrepareQuery(unique_ptr<SQLStatement> statement);
@@ -266,12 +265,12 @@ public:
 	unique_ptr<QueryResult> PrepareAndExecuteInternal(unique_ptr<SQLStatement> statement,
 	                                                  py::object params = py::list());
 
-	shared_ptr<DuckDBPyConnection> Execute(const py::object &query, py::object params = py::list());
-	shared_ptr<DuckDBPyConnection> ExecuteFromString(const string &query);
+	std::shared_ptr<DuckDBPyConnection> Execute(const py::object &query, py::object params = py::list());
+	std::shared_ptr<DuckDBPyConnection> ExecuteFromString(const string &query);
 
-	shared_ptr<DuckDBPyConnection> Append(const string &name, const PandasDataFrame &value, bool by_name);
+	std::shared_ptr<DuckDBPyConnection> Append(const string &name, const PandasDataFrame &value, bool by_name);
 
-	shared_ptr<DuckDBPyConnection> RegisterPythonObject(const string &name, const py::object &python_object);
+	std::shared_ptr<DuckDBPyConnection> RegisterPythonObject(const string &name, const py::object &python_object);
 
 	void InstallExtension(const string &extension, bool force_install = false,
 	                      const py::object &repository = py::none(), const py::object &repository_url = py::none(),
@@ -279,35 +278,36 @@ public:
 
 	void LoadExtension(const string &extension);
 
-	unique_ptr<DuckDBPyRelation> RunQuery(const py::object &query, string alias = "", py::object params = py::list());
+	std::unique_ptr<DuckDBPyRelation> RunQuery(const py::object &query, string alias = "",
+	                                           py::object params = py::list());
 
-	unique_ptr<DuckDBPyRelation> Table(const string &tname);
+	std::unique_ptr<DuckDBPyRelation> Table(const string &tname);
 
-	unique_ptr<DuckDBPyRelation> Values(const py::args &params);
+	std::unique_ptr<DuckDBPyRelation> Values(const py::args &params);
 
-	unique_ptr<DuckDBPyRelation> View(const string &vname);
+	std::unique_ptr<DuckDBPyRelation> View(const string &vname);
 
-	unique_ptr<DuckDBPyRelation> TableFunction(const string &fname, py::object params = py::list());
+	std::unique_ptr<DuckDBPyRelation> TableFunction(const string &fname, py::object params = py::list());
 
-	unique_ptr<DuckDBPyRelation> FromDF(const PandasDataFrame &value);
+	std::unique_ptr<DuckDBPyRelation> FromDF(const PandasDataFrame &value);
 
-	unique_ptr<DuckDBPyRelation> FromParquet(const py::object &path_or_buffer, bool binary_as_string,
-	                                         bool file_row_number, bool filename, bool hive_partitioning,
-	                                         bool union_by_name, const py::object &compression = py::none());
+	std::unique_ptr<DuckDBPyRelation> FromParquet(const py::object &path_or_buffer, bool binary_as_string,
+	                                              bool file_row_number, bool filename, bool hive_partitioning,
+	                                              bool union_by_name, const py::object &compression = py::none());
 
-	unique_ptr<DuckDBPyRelation> FromArrow(py::object &arrow_object);
+	std::unique_ptr<DuckDBPyRelation> FromArrow(py::object &arrow_object);
 
 	unordered_set<string> GetTableNames(const string &query, bool qualified);
 
-	shared_ptr<DuckDBPyConnection> UnregisterPythonObject(const string &name);
+	std::shared_ptr<DuckDBPyConnection> UnregisterPythonObject(const string &name);
 
-	shared_ptr<DuckDBPyConnection> Begin();
+	std::shared_ptr<DuckDBPyConnection> Begin();
 
-	shared_ptr<DuckDBPyConnection> Commit();
+	std::shared_ptr<DuckDBPyConnection> Commit();
 
-	shared_ptr<DuckDBPyConnection> Rollback();
+	std::shared_ptr<DuckDBPyConnection> Rollback();
 
-	shared_ptr<DuckDBPyConnection> Checkpoint();
+	std::shared_ptr<DuckDBPyConnection> Checkpoint();
 
 	void Close();
 
@@ -318,7 +318,7 @@ public:
 	ModifiedMemoryFileSystem &GetObjectFileSystem();
 
 	// cursor() is stupid
-	shared_ptr<DuckDBPyConnection> Cursor();
+	std::shared_ptr<DuckDBPyConnection> Cursor();
 
 	Optional<py::list> GetDescription();
 
@@ -344,7 +344,8 @@ public:
 
 	duckdb::pyarrow::RecordBatchReader FetchRecordBatchReader(const idx_t rows_per_batch);
 
-	static shared_ptr<DuckDBPyConnection> Connect(const py::object &database, bool read_only, const py::dict &config);
+	static std::shared_ptr<DuckDBPyConnection> Connect(const py::object &database, bool read_only,
+	                                                   const py::dict &config);
 
 	static vector<Value> TransformPythonParamList(ClientContext &context, const py::handle &params);
 	static identifier_map_t<BoundParameterData> TransformPythonParamDict(ClientContext &context,
@@ -363,7 +364,7 @@ public:
 	//! Default connection to an in-memory database
 	static DefaultConnectionHolder default_connection;
 	//! Caches and provides an interface to get frequently used modules+subtypes
-	static shared_ptr<PythonImportCache> import_cache;
+	static std::shared_ptr<PythonImportCache> import_cache;
 
 	static bool IsPandasDataframe(const py::object &object);
 	static PyArrowObjectType GetArrowType(const py::handle &obj);
@@ -373,11 +374,11 @@ public:
 	static unique_ptr<QueryResult> CompletePendingQuery(PendingQueryResult &pending_query);
 
 private:
-	unique_ptr<DuckDBPyRelation> CreateRelation(shared_ptr<Relation> rel);
-	unique_ptr<DuckDBPyRelation> CreateRelation(shared_ptr<DuckDBPyResult> result);
+	std::unique_ptr<DuckDBPyRelation> CreateRelation(shared_ptr<Relation> rel);
+	std::unique_ptr<DuckDBPyRelation> CreateRelation(std::shared_ptr<DuckDBPyResult> result);
 	PathLike GetPathLike(const py::object &object);
 	ScalarFunction CreateScalarUDF(const string &name, const py::function &udf, const py::object &parameters,
-	                               const shared_ptr<DuckDBPyType> &return_type, bool vectorized,
+	                               const std::shared_ptr<DuckDBPyType> &return_type, bool vectorized,
 	                               FunctionNullHandling null_handling, PythonExceptionHandling exception_handling,
 	                               bool side_effects);
 	vector<unique_ptr<SQLStatement>> GetStatements(const py::object &query);

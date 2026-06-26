@@ -362,7 +362,7 @@ void NumpyScan::Scan(ClientContext &context, PandasColumnBindData &bind_data, id
 		// Get the data pointer and the validity mask of the result vector
 		auto tgt_ptr = FlatVector::GetDataMutable<string_t>(out);
 		auto &out_mask = FlatVector::ValidityMutable(out);
-		unique_ptr<PythonGILWrapper> gil;
+		std::unique_ptr<PythonGILWrapper> gil;
 		auto &import_cache = *DuckDBPyConnection::ImportCache();
 
 		// Loop over every row of the arrays contents
@@ -399,7 +399,7 @@ void NumpyScan::Scan(ClientContext &context, PandasColumnBindData &bind_data, id
 				}
 				if (!py::isinstance<py::str>(val)) {
 					if (!gil) {
-						gil = make_uniq<PythonGILWrapper>();
+						gil = std::make_unique<PythonGILWrapper>();
 					}
 					bind_data.object_str_val.Push(std::move(py::str(val)));
 					val = reinterpret_cast<PyObject *>(bind_data.object_str_val.LastAddedObject().ptr());

@@ -34,7 +34,7 @@ void NumpyBind::Bind(ClientContext &context, py::handle df, vector<PandasColumnB
 		auto column = get_fun(df_columns[col_idx]);
 
 		if (bind_data.numpy_type.type == NumpyNullableType::FLOAT_16) {
-			bind_data.pandas_col = make_uniq<PandasNumpyColumn>(py::array(column.attr("astype")("float32")));
+			bind_data.pandas_col = std::make_unique<PandasNumpyColumn>(py::array(column.attr("astype")("float32")));
 			bind_data.numpy_type.type = NumpyNullableType::FLOAT_32;
 			duckdb_col_type = NumpyToLogicalType(bind_data.numpy_type);
 		} else if (bind_data.numpy_type.type == NumpyNullableType::STRING) {
@@ -53,9 +53,9 @@ void NumpyBind::Bind(ClientContext &context, py::handle df, vector<PandasColumnB
 			duckdb_col_type = LogicalType::ENUM(enum_entries_vec, size);
 			auto pandas_col = uniq.attr("__getitem__")(1);
 			bind_data.internal_categorical_type = string(py::str(pandas_col.attr("dtype")));
-			bind_data.pandas_col = make_uniq<PandasNumpyColumn>(pandas_col);
+			bind_data.pandas_col = std::make_unique<PandasNumpyColumn>(pandas_col);
 		} else {
-			bind_data.pandas_col = make_uniq<PandasNumpyColumn>(column);
+			bind_data.pandas_col = std::make_unique<PandasNumpyColumn>(column);
 			duckdb_col_type = NumpyToLogicalType(bind_data.numpy_type);
 		}
 

@@ -18,8 +18,8 @@ struct RegisteredArray {
 
 struct PandasColumnBindData {
 	NumpyType numpy_type;
-	unique_ptr<PandasColumn> pandas_col;
-	unique_ptr<RegisteredArray> mask;
+	std::unique_ptr<PandasColumn> pandas_col;
+	std::unique_ptr<RegisteredArray> mask;
 	//! Only for categorical types
 	string internal_categorical_type;
 	//! Hold ownership of objects created during scanning

@@ -575,8 +575,8 @@ static bool ConvertDecimal(NumpyAppendData &append_data) {
 
 ArrayWrapper::ArrayWrapper(const LogicalType &type, const ClientProperties &client_properties_p, bool pandas)
     : requires_mask(false), client_properties(client_properties_p), pandas(pandas) {
-	data = make_uniq<RawArrayWrapper>(type);
-	mask = make_uniq<RawArrayWrapper>(LogicalType::BOOLEAN);
+	data = std::make_unique<RawArrayWrapper>(type);
+	mask = std::make_unique<RawArrayWrapper>(LogicalType::BOOLEAN);
 }
 
 void ArrayWrapper::Initialize(idx_t capacity) {
