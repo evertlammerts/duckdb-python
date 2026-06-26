@@ -151,13 +151,14 @@ string RawArrayWrapper::DuckDBToNumpyDtype(const LogicalType &type) {
 void RawArrayWrapper::Initialize(idx_t capacity) {
 	string dtype = DuckDBToNumpyDtype(type);
 
-	array = NumpyArray::Allocate(py::dtype(dtype), capacity);
+	array = NumpyArray::Allocate(dtype, capacity);
 	data = data_ptr_cast(array.MutableData());
 }
 
 void RawArrayWrapper::Resize(idx_t new_capacity) {
-	vector<py::ssize_t> new_shape {py::ssize_t(new_capacity)};
-	array.GetArray().resize(new_shape, false);
+	// numpy's ndarray.resize() is in-place (no data copy); refcheck=false because the buffer
+	// is referenced by this wrapper (and its cached data pointer).
+	array.GetArray().attr("resize")(new_capacity, py::arg("refcheck") = false);
 	data = data_ptr_cast(array.MutableData());
 }
 

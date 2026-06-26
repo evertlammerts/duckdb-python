@@ -918,14 +918,14 @@ void TransformPythonObjectInternal(optional_ptr<ClientContext> context, py::hand
 		OP::HandleNull(result, param);
 		break;
 	case PythonObjectType::Bool:
-		OP::HandleBoolean(result, param, ele.cast<bool>());
+		OP::HandleBoolean(result, param, py::cast<bool>(ele));
 		break;
 	case PythonObjectType::Float:
 		if (nan_as_null && std::isnan(PyFloat_AsDouble(ele.ptr()))) {
 			OP::HandleNull(result, param);
 			break;
 		}
-		OP::HandleDouble(result, param, ele.cast<double>());
+		OP::HandleDouble(result, param, py::cast<double>(ele));
 		break;
 	case PythonObjectType::Integer: {
 		auto ptr = ele.ptr();
@@ -992,7 +992,7 @@ void TransformPythonObjectInternal(optional_ptr<ClientContext> context, py::hand
 		break;
 	}
 	case PythonObjectType::String: {
-		auto stringified = ele.cast<string>();
+		auto stringified = py::cast<string>(ele);
 		OP::HandleString(result, param, stringified);
 		break;
 	}
@@ -1029,13 +1029,13 @@ void TransformPythonObjectInternal(optional_ptr<ClientContext> context, py::hand
 		break;
 	}
 	case PythonObjectType::MemoryView: {
-		py::memoryview py_view = ele.cast<py::memoryview>();
+		py::memoryview py_view = py::cast<py::memoryview>(ele);
 		Py_buffer *py_buf = PyUtil::PyMemoryViewGetBuffer(py_view); // NOLINT
 		OP::HandleBlob(result, param, const_data_ptr_t(py_buf->buf), idx_t(py_buf->len));
 		break;
 	}
 	case PythonObjectType::Bytes: {
-		const string &ele_string = ele.cast<string>();
+		const string &ele_string = py::cast<string>(ele);
 		OP::HandleBlob(result, param, const_data_ptr_t(ele_string.data()), ele_string.size());
 		break;
 	}

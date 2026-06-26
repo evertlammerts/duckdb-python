@@ -658,7 +658,7 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 		// because the return type of ArrayType::GetSize is idx_t,
 		// which is typedef'd to uint64_t and ssize_t is 4 bytes with Emscripten
 		// and pybind11 requires that the input be castable to ssize_t
-		py::tuple arr(static_cast<py::ssize_t>(array_size));
+		py::tuple arr(static_cast<Py_ssize_t>(array_size));
 
 		for (idx_t elem_idx = 0; elem_idx < array_size; elem_idx++) {
 			arr[elem_idx] = FromValue(array_values[elem_idx], child_type, client_properties);

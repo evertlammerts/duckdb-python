@@ -250,7 +250,7 @@ public:
 	std::shared_ptr<DuckDBPyType> Type(const string &type_str);
 
 	std::shared_ptr<DuckDBPyConnection> RegisterScalarUDF(
-	    const string &name, const py::function &udf, const py::object &arguments = py::none(),
+	    const string &name, const py::callable &udf, const py::object &arguments = py::none(),
 	    const std::shared_ptr<DuckDBPyType> &return_type = nullptr, PythonUDFType type = PythonUDFType::NATIVE,
 	    FunctionNullHandling null_handling = FunctionNullHandling::DEFAULT_NULL_HANDLING,
 	    PythonExceptionHandling exception_handling = PythonExceptionHandling::FORWARD_ERROR, bool side_effects = false);
@@ -372,7 +372,7 @@ private:
 	std::unique_ptr<DuckDBPyRelation> CreateRelation(shared_ptr<Relation> rel);
 	std::unique_ptr<DuckDBPyRelation> CreateRelation(std::shared_ptr<DuckDBPyResult> result);
 	PathLike GetPathLike(const py::object &object);
-	ScalarFunction CreateScalarUDF(const string &name, const py::function &udf, const py::object &parameters,
+	ScalarFunction CreateScalarUDF(const string &name, const py::callable &udf, const py::object &parameters,
 	                               const std::shared_ptr<DuckDBPyType> &return_type, bool vectorized,
 	                               FunctionNullHandling null_handling, PythonExceptionHandling exception_handling,
 	                               bool side_effects);

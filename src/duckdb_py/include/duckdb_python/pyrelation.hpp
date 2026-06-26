@@ -206,7 +206,7 @@ public:
 
 	std::unique_ptr<DuckDBPyRelation> Intersect(DuckDBPyRelation *other);
 
-	std::unique_ptr<DuckDBPyRelation> Map(py::function fun, Optional<py::object> schema);
+	std::unique_ptr<DuckDBPyRelation> Map(py::callable fun, Optional<py::object> schema);
 
 	std::unique_ptr<DuckDBPyRelation> Join(DuckDBPyRelation *other, const py::object &condition, const string &type);
 	std::unique_ptr<DuckDBPyRelation> Cross(DuckDBPyRelation *other);

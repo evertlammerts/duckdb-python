@@ -151,7 +151,7 @@ static void InitializeConnectionMethods(py::module_ &m) {
 	    "Disable profiling for the current connection", py::kw_only(), py::arg("connection") = py::none());
 	m.def(
 	    "create_function",
-	    [](const string &name, const py::function &udf, const py::object &arguments = py::none(),
+	    [](const string &name, const py::callable &udf, const py::object &arguments = py::none(),
 	       const std::shared_ptr<DuckDBPyType> &return_type = nullptr, PythonUDFType type = PythonUDFType::NATIVE,
 	       FunctionNullHandling null_handling = FunctionNullHandling::DEFAULT_NULL_HANDLING,
 	       PythonExceptionHandling exception_handling = PythonExceptionHandling::FORWARD_ERROR,
@@ -1075,7 +1075,6 @@ NB_MODULE(DUCKDB_PYTHON_LIB_NAME, m) { // NOLINT
 	DuckDBPyConnection::Initialize(m);
 	PythonObject::Initialize();
 
-	py::options pybind_opts;
 
 	m.doc() = "DuckDB is an embeddable SQL OLAP Database Management System";
 	m.attr("__package__") = "duckdb";

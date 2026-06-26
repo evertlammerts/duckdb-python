@@ -498,7 +498,7 @@ public:
 		}
 	}
 
-	ScalarFunction GetFunction(const py::function &udf, PythonExceptionHandling exception_handling, bool side_effects,
+	ScalarFunction GetFunction(const py::callable &udf, PythonExceptionHandling exception_handling, bool side_effects,
 	                           const ClientProperties &client_properties) {
 
 		// Import this module, because importing this from a non-main thread causes a segfault
@@ -533,7 +533,7 @@ public:
 
 } // namespace
 
-ScalarFunction DuckDBPyConnection::CreateScalarUDF(const string &name, const py::function &udf,
+ScalarFunction DuckDBPyConnection::CreateScalarUDF(const string &name, const py::callable &udf,
                                                    const py::object &parameters,
                                                    const std::shared_ptr<DuckDBPyType> &return_type, bool vectorized,
                                                    FunctionNullHandling null_handling,

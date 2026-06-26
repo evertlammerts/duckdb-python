@@ -129,7 +129,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::ProjectFromTypes(const py::o
 			rel->context->GetContext()->RunFunctionInTransaction(
 			    [&]() { type = TransformStringToLogicalType(type_str, *rel->context->GetContext().get()); });
 		} else if (py::isinstance<DuckDBPyType>(item)) {
-			auto *type_p = item.cast<DuckDBPyType *>();
+			auto *type_p = py::cast<DuckDBPyType *>(item);
 			type = type_p->Type();
 		} else {
 			string actual_type = py::str(py::type::of(item));
@@ -533,7 +533,7 @@ DuckDBPyRelation::BitStringAgg(const std::string &column, const Optional<py::obj
 		}
 	}
 	auto bitstring_agg_params =
-	    min.is_none() ? "" : (std::to_string(min.cast<int>()) + "," + std::to_string(max.cast<int>()));
+	    min.is_none() ? "" : (std::to_string(py::cast<int>(min)) + "," + std::to_string(py::cast<int>(max)));
 	return ApplyAggOrWin("bitstring_agg", column, bitstring_agg_params, groups, window_spec, projected_columns);
 }
 
@@ -650,7 +650,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::QuantileCont(const std::stri
                                                                  const std::string &projected_columns) {
 	string quantile_params = "";
 	if (py::isinstance<py::float_>(q)) {
-		quantile_params = std::to_string(q.cast<float>());
+		quantile_params = std::to_string(py::cast<float>(q));
 	} else if (py::isinstance<py::list>(q)) {
 		auto aux = q.cast<std::vector<double>>();
 		quantile_params += "[";
@@ -673,7 +673,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::QuantileDisc(const std::stri
                                                                  const std::string &projected_columns) {
 	string quantile_params = "";
 	if (py::isinstance<py::float_>(q)) {
-		quantile_params = std::to_string(q.cast<float>());
+		quantile_params = std::to_string(py::cast<float>(q));
 	} else if (py::isinstance<py::list>(q)) {
 		auto aux = q.cast<std::vector<double>>();
 		quantile_params += "[";
@@ -1248,8 +1248,8 @@ static Value NestedDictToStruct(const py::object &dictionary) {
 
 	child_list_t<Value> children;
 	for (auto item : dict_casted) {
-		py::object item_key = item.first.cast<py::object>();
-		py::object item_value = item.second.cast<py::object>();
+		py::object item_key = py::cast<py::object>(item.first);
+		py::object item_value = py::cast<py::object>(item.second);
 
 		if (!py::isinstance<py::str>(item_key)) {
 			throw InvalidInputException("NestedDictToStruct only accepts a dictionary with string keys");
@@ -1620,8 +1620,8 @@ void DuckDBPyRelation::Update(const py::object &set_p, const py::object &where) 
 	}
 
 	for (auto item : set) {
-		py::object item_key = item.first.cast<py::object>();
-		py::object item_value = item.second.cast<py::object>();
+		py::object item_key = py::cast<py::object>(item.first);
+		py::object item_value = py::cast<py::object>(item.second);
 
 		if (!py::isinstance<py::str>(item_key)) {
 			throw InvalidInputException("Please provide the column name as the key of the dictionary");
@@ -1659,7 +1659,7 @@ void DuckDBPyRelation::Create(const string &table) {
 	PyExecuteRelation(create);
 }
 
-std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Map(py::function fun, Optional<py::object> schema) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Map(py::callable fun, Optional<py::object> schema) {
 	AssertRelation();
 	vector<Value> params;
 	params.emplace_back(Value::POINTER(CastPointerToValue(fun.ptr())));

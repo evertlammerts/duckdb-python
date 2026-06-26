@@ -436,7 +436,7 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::UnregisterUDF(const stri
 }
 
 std::shared_ptr<DuckDBPyConnection>
-DuckDBPyConnection::RegisterScalarUDF(const string &name, const py::function &udf, const py::object &parameters_p,
+DuckDBPyConnection::RegisterScalarUDF(const string &name, const py::callable &udf, const py::object &parameters_p,
                                       const std::shared_ptr<DuckDBPyType> &return_type_p, PythonUDFType type,
                                       FunctionNullHandling null_handling, PythonExceptionHandling exception_handling,
                                       bool side_effects) {
@@ -552,7 +552,7 @@ py::list TransformNamedParameters(const case_insensitive_map_t<idx_t> &named_par
 	py::list new_params(params.size());
 
 	for (auto &item : params) {
-		const std::string &item_name = item.first.cast<std::string>();
+		const std::string &item_name = py::cast<std::string>(item.first);
 		auto entry = named_param_map.find(item_name);
 		if (entry == named_param_map.end()) {
 			throw InvalidInputException(
