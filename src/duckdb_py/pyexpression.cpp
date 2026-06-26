@@ -325,13 +325,13 @@ shared_ptr<DuckDBPyExpression> DuckDBPyExpression::ColumnExpression(const py::ar
 		}
 
 		auto qualified_name = QualifiedName::Parse(column_name);
-		if (!qualified_name.catalog.empty()) {
-			column_names.push_back(qualified_name.catalog);
+		if (!qualified_name.Catalog().empty()) {
+			column_names.push_back(qualified_name.Catalog());
 		}
-		if (!qualified_name.schema.empty()) {
-			column_names.push_back(qualified_name.schema);
+		if (!qualified_name.Schema().empty()) {
+			column_names.push_back(qualified_name.Schema());
 		}
-		column_names.push_back(qualified_name.name);
+		column_names.push_back(qualified_name.Name());
 	} else {
 		for (auto &part : names) {
 			column_names.push_back(Identifier(py::str(part)));

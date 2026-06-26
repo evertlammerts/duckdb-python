@@ -1581,7 +1581,7 @@ DuckDBPyRelation &DuckDBPyRelation::Execute() {
 void DuckDBPyRelation::InsertInto(const string &table) {
 	AssertRelation();
 	auto parsed_info = QualifiedName::Parse(table);
-	auto insert = rel->InsertRel(parsed_info.catalog, parsed_info.schema, parsed_info.name);
+	auto insert = rel->InsertRel(parsed_info.Catalog(), parsed_info.Schema(), parsed_info.Name());
 	PyExecuteRelation(insert);
 }
 
@@ -1645,7 +1645,7 @@ void DuckDBPyRelation::Insert(const py::object &params) const {
 void DuckDBPyRelation::Create(const string &table) {
 	AssertRelation();
 	auto parsed_info = QualifiedName::Parse(table);
-	auto create = rel->CreateRel(parsed_info.schema, parsed_info.name, false);
+	auto create = rel->CreateRel(parsed_info.Schema(), parsed_info.Name(), false);
 	PyExecuteRelation(create);
 }
 
@@ -1747,7 +1747,7 @@ string DuckDBPyRelation::Explain(ExplainType type, const string &format) {
 
 	// An empty format means "auto": the default format, or HTML when running under Jupyter.
 	const bool auto_format = format.empty();
-	auto explain_format = auto_format ? GetExplainFormat(type) : ProfilerPrintFormat::FromString(format);
+	auto explain_format = auto_format ? GetExplainFormat(type) : ProfilerPrintFormat(format);
 	auto res = rel->Explain(type, explain_format);
 	D_ASSERT(res->type == duckdb::QueryResultType::MATERIALIZED_RESULT);
 	auto &materialized = res->Cast<MaterializedQueryResult>();
