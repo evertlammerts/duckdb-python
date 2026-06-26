@@ -107,6 +107,18 @@ bool try_cast(const handle &object, T &result) {
 	return true;
 }
 
+// pybind11 compatibility shim: pybind11's py::register_exception<T>(scope, name[, base]) maps to nanobind's
+// nb::exception<T>(scope, name[, base]) (which both creates the Python exception type and registers a C++->Python
+// translator). Returns the exception object so callers can set .attr()/.doc().
+template <typename T>
+inline nanobind::object register_exception(nanobind::handle scope, const char *name) {
+	return nanobind::exception<T>(scope, name);
+}
+template <typename T>
+inline nanobind::object register_exception(nanobind::handle scope, const char *name, nanobind::handle base) {
+	return nanobind::exception<T>(scope, name, base);
+}
+
 } // namespace py
 
 template <class T, typename... ARGS>

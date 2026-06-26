@@ -1614,7 +1614,7 @@ void DuckDBPyRelation::Update(const py::object &set_p, const py::object &where) 
 	vector<string> names_;
 	vector<unique_ptr<ParsedExpression>> expressions;
 
-	py::dict set = py::dict(set_p);
+	py::dict set = py::cast<py::dict>(set_p);
 	auto arg_count = set.size();
 	if (arg_count == 0) {
 		throw InvalidInputException("Please provide at least one set expression");

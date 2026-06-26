@@ -21,9 +21,9 @@ std::shared_ptr<DuckDBPyType> DuckDBPyConnection::ArrayType(const std::shared_pt
 static child_list_t<LogicalType> GetChildList(const py::object &container) {
 	child_list_t<LogicalType> types;
 	if (py::isinstance<py::list>(container)) {
-		const py::list &fields = container;
+		py::list fields = py::cast<py::list>(container);
 		idx_t i = 1;
-		for (auto &item : fields) {
+		for (auto item : fields) {
 			std::shared_ptr<DuckDBPyType> pytype;
 			if (!py::try_cast<std::shared_ptr<DuckDBPyType>>(item, pytype)) {
 				string actual_type = py::cast<std::string>(py::str((item).type()));
@@ -33,10 +33,10 @@ static child_list_t<LogicalType> GetChildList(const py::object &container) {
 		}
 		return types;
 	} else if (py::isinstance<py::dict>(container)) {
-		const py::dict &fields = container;
-		for (auto &item : fields) {
-			auto &name_p = item.first;
-			auto &type_p = item.second;
+		py::dict fields = py::cast<py::dict>(container);
+		for (auto item : fields) {
+			auto name_p = item.first;
+			auto type_p = item.second;
 			auto name = Identifier(py::str(name_p));
 			std::shared_ptr<DuckDBPyType> pytype;
 			if (!py::try_cast<std::shared_ptr<DuckDBPyType>>(type_p, pytype)) {

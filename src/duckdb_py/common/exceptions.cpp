@@ -241,7 +241,8 @@ void PyThrowException(ErrorData &error, PyObject *http_exception) {
 	switch (error.Type()) {
 	case ExceptionType::HTTP: {
 		// construct exception object
-		auto e = py::handle(http_exception)(py::str(error.Message()));
+		auto exc_msg = error.Message();
+		auto e = py::handle(http_exception)(py::str(exc_msg.c_str(), exc_msg.size()));
 
 		auto headers = py::dict();
 		for (auto &entry : error.ExtraInfo()) {
@@ -252,7 +253,8 @@ void PyThrowException(ErrorData &error, PyObject *http_exception) {
 			} else if (entry.first == "reason") {
 				e.attr("reason") = entry.second;
 			} else if (StringUtil::StartsWith(entry.first, "header_")) {
-				headers[py::str(entry.first.substr(7))] = entry.second;
+				auto header_name = entry.first.substr(7);
+				headers[py::str(header_name.c_str(), header_name.size())] = entry.second;
 			}
 		}
 		e.attr("headers") = std::move(headers);
@@ -386,7 +388,7 @@ void RegisterExceptions(const py::module_ &m) {
 	auto not_supported_error = py::register_exception<NotSupportedError>(m, "NotSupportedError", db_error).ptr();
 	py::register_exception<PyNotImplementedException>(m, "NotImplementedException", not_supported_error);
 
-	py::register_exception_translator([](std::exception_ptr p) { // NOLINT(performance-unnecessary-value-param)
+	py::register_exception_translator([](const std::exception_ptr &p, void *) {
 		try {
 			if (p) {
 				std::rethrow_exception(p);

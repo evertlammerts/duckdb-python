@@ -65,7 +65,7 @@ PyDecimal::PyDecimal(py::handle &obj) : obj(obj) {
 	auto sign = py::cast<int8_t>(as_tuple.attr("sign"));
 	signed_value = sign != 0;
 
-	auto decimal_digits = as_tuple.attr("digits");
+	py::object decimal_digits = as_tuple.attr("digits");
 	auto width = py::len(decimal_digits);
 	digits.reserve(width);
 	for (auto digit : decimal_digits) {
@@ -392,12 +392,15 @@ py::object PythonObject::FromStruct(const Value &val, const LogicalType &type,
 
 	auto &child_types = StructType::GetChildTypes(type);
 	if (StructType::IsUnnamed(type)) {
-		py::tuple py_tuple(struct_values.size());
+		// nanobind tuples are immutable; build the pre-sized tuple via the raw CPython API (SET_ITEM steals
+		// the reference) to keep the hot FromValue path allocation-light.
+		auto py_tuple = py::steal<py::tuple>(PyTuple_New((Py_ssize_t)struct_values.size()));
 		for (idx_t i = 0; i < struct_values.size(); i++) {
 			auto &child_entry = child_types[i];
 			D_ASSERT(child_entry.first.empty());
 			auto &child_type = child_entry.second;
-			py_tuple[i] = FromValue(struct_values[i], child_type, client_properties);
+			PyTuple_SET_ITEM(py_tuple.ptr(), (Py_ssize_t)i,
+			                 FromValue(struct_values[i], child_type, client_properties).release().ptr());
 		}
 		return std::move(py_tuple);
 	} else {
@@ -658,10 +661,11 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 		// because the return type of ArrayType::GetSize is idx_t,
 		// which is typedef'd to uint64_t and ssize_t is 4 bytes with Emscripten
 		// and pybind11 requires that the input be castable to ssize_t
-		py::tuple arr(static_cast<Py_ssize_t>(array_size));
+		auto arr = py::steal<py::tuple>(PyTuple_New(static_cast<Py_ssize_t>(array_size)));
 
 		for (idx_t elem_idx = 0; elem_idx < array_size; elem_idx++) {
-			arr[elem_idx] = FromValue(array_values[elem_idx], child_type, client_properties);
+			PyTuple_SET_ITEM(arr.ptr(), (Py_ssize_t)elem_idx,
+			                 FromValue(array_values[elem_idx], child_type, client_properties).release().ptr());
 		}
 		return std::move(arr);
 	}
@@ -701,7 +705,8 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 	}
 	case LogicalTypeId::BIGNUM: {
 		auto bignum_value = val.GetValueUnsafe<bignum_t>();
-		return py::str(Bignum::BignumToVarchar(bignum_value));
+		auto bignum_str = Bignum::BignumToVarchar(bignum_value);
+		return py::str(bignum_str.c_str(), bignum_str.size());
 	}
 	case LogicalTypeId::INTERVAL: {
 		auto interval_value = val.GetValueUnsafe<interval_t>();

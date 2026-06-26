@@ -73,7 +73,8 @@ std::shared_ptr<DuckDBPyType> DuckDBPyType::GetAttribute(const string &name) con
 		} else {
 			throw py::attribute_error(StringUtil::Format("Tried to get a child from a map by the name of '%s', but "
 			                                             "this type only has 'key' and 'value' children",
-			                                             name));
+			                                             name)
+			                              .c_str());
 		}
 	}
 	throw py::attribute_error(
@@ -98,7 +99,7 @@ enum class PythonTypeObject : uint8_t {
 }
 
 static PythonTypeObject GetTypeObjectType(const py::handle &type_object) {
-	if (py::isinstance<py::type>(type_object)) {
+	if (py::isinstance<py::type_object>(type_object)) {
 		return PythonTypeObject::BASE;
 	}
 	if (py::isinstance<py::str>(type_object)) {
@@ -171,7 +172,7 @@ static bool FromNumpyType(const py::object &type, LogicalType &result) {
 	return true;
 }
 
-static LogicalType FromType(const py::type &obj) {
+static LogicalType FromType(const py::type_object &obj) {
 	py::module_ builtins = py::module_::import_("builtins");
 	if (obj.is(builtins.attr("str"))) {
 		return LogicalType::VARCHAR;
@@ -197,7 +198,7 @@ static LogicalType FromType(const py::type &obj) {
 		return result;
 	}
 
-	throw py::cast_error("Could not convert from unknown 'type' to DuckDBPyType");
+	throw py::type_error("Could not convert from unknown 'type' to DuckDBPyType");
 }
 
 static bool IsMapType(const py::tuple &args) {
@@ -283,7 +284,7 @@ static LogicalType FromDictionary(const py::object &obj) {
 		throw InvalidInputException("Could not convert empty dictionary to a duckdb STRUCT type");
 	}
 	children.reserve(dict.size());
-	for (auto &item : dict) {
+	for (auto item : dict) {
 		auto &name_p = item.first;
 		auto type_p = py::borrow<py::object>(item.second);
 		auto name = Identifier(py::str(name_p));
@@ -297,7 +298,7 @@ static LogicalType FromObject(const py::object &object) {
 	auto object_type = GetTypeObjectType(object);
 	switch (object_type) {
 	case PythonTypeObject::BASE: {
-		return FromType(object);
+		return FromType(py::cast<py::type_object>(object));
 	}
 	case PythonTypeObject::COMPOSITE: {
 		return FromGenericAlias(object);
@@ -335,7 +336,7 @@ void DuckDBPyType::Initialize(py::handle &m) {
 	                py::is_operator());
 	type_module.def("__eq__", &DuckDBPyType::EqualsString, "Compare two types for equality", py::arg("other"),
 	                py::is_operator());
-	type_module.def("__hash__", [](const DuckDBPyType &type) { return py::hash(py::str(type.ToString())); });
+	type_module.def("__hash__", [](const DuckDBPyType &type) { auto s = type.ToString(); return py::hash(py::str(s.c_str(), s.size())); });
 	type_module.def_prop_ro("id", &DuckDBPyType::GetId);
 	type_module.def_prop_ro("children", &DuckDBPyType::Children);
 	type_module.def(py::new_([](const string &type_str, std::shared_ptr<DuckDBPyConnection> connection) {
@@ -356,8 +357,8 @@ void DuckDBPyType::Initialize(py::handle &m) {
 		return std::make_shared<DuckDBPyType>(ltype);
 	}));
 	type_module.def("__getattr__", &DuckDBPyType::GetAttribute, "Get the child type by 'name'", py::arg("name"));
-	type_module.def("__getitem__", &DuckDBPyType::GetAttribute, "Get the child type by 'name'", py::arg("name"),
-	                py::is_operator());
+	// nanobind: py::is_operator() implies operator-style argument handling and rejects the explicit py::arg name
+	type_module.def("__getitem__", &DuckDBPyType::GetAttribute, "Get the child type by 'name'", py::is_operator());
 
 	py::implicitly_convertible<py::object, DuckDBPyType>();
 	py::implicitly_convertible<py::str, DuckDBPyType>();
@@ -400,7 +401,7 @@ py::list DuckDBPyType::Children() const {
 		auto strings = FlatVector::GetData<string_t>(values_insert_order);
 		py::list strings_list;
 		for (size_t i = 0; i < EnumType::GetSize(type); i++) {
-			strings_list.append(py::str(strings[i].GetString()));
+			{ auto sv = strings[i].GetString(); strings_list.append(py::str(sv.c_str(), sv.size())); }
 		}
 		children.append(py::make_tuple("values", strings_list));
 		return children;

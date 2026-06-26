@@ -29,7 +29,7 @@ void NumpyBind::Bind(ClientContext &context, py::handle df, vector<PandasColumnB
 		LogicalType duckdb_col_type;
 		PandasColumnBindData bind_data;
 
-		names.emplace_back(py::str(df_columns[col_idx]));
+		names.emplace_back(py::cast<std::string>(df_columns[col_idx]));
 		bind_data.numpy_type = ConvertNumpyType(df_types[col_idx]);
 
 		auto column = get_fun(df_columns[col_idx]);

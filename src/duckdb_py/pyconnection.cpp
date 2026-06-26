@@ -281,10 +281,8 @@ static void InitializeConnectionMethods(py::class_<DuckDBPyConnection> &m) {
 	      "Run a SQL query. If it is a SELECT statement, create a relation object from the given SQL query, otherwise "
 	      "run the query as-is.",
 	      py::arg("query"), py::kw_only(), py::arg("alias") = "", py::arg("params") = py::none());
-	m.def("read_csv", &DuckDBPyConnection::ReadCSV, "Create a relation object from the CSV file in 'name'",
-	      py::arg("path_or_buffer"), py::kw_only());
-	m.def("from_csv_auto", &DuckDBPyConnection::ReadCSV, "Create a relation object from the CSV file in 'name'",
-	      py::arg("path_or_buffer"), py::kw_only());
+	m.def("read_csv", &DuckDBPyConnection::ReadCSV, "Create a relation object from the CSV file in 'name'");
+	m.def("from_csv_auto", &DuckDBPyConnection::ReadCSV, "Create a relation object from the CSV file in 'name'");
 	m.def("from_df", &DuckDBPyConnection::FromDF, "Create a relation object from the DataFrame in df", py::arg("df"));
 	m.def("from_arrow", &DuckDBPyConnection::FromArrow, "Create a relation object from an Arrow object",
 	      py::arg("arrow_object"));
@@ -1951,7 +1949,7 @@ void DuckDBPyConnection::InstallExtension(const string &extension, bool force_in
 
 	string version_string;
 	if (!py::none().is(version)) {
-		version_string = py::str(version);
+		version_string = py::cast<std::string>(py::str(version));
 		if (version_string.empty()) {
 			throw InvalidInputException("The provided 'version' can not be empty!");
 		}
@@ -2143,9 +2141,9 @@ duckdb::pyarrow::RecordBatchReader DuckDBPyConnection::FetchRecordBatchReader(co
 
 case_insensitive_map_t<Value> TransformPyConfigDict(const py::dict &py_config_dict) {
 	case_insensitive_map_t<Value> config_dict;
-	for (auto &kv : py_config_dict) {
-		auto key = py::str(kv.first);
-		auto val = py::str(kv.second);
+	for (auto kv : py_config_dict) {
+		auto key = py::cast<std::string>(kv.first);
+		auto val = py::cast<std::string>(kv.second);
 		config_dict[key] = Value(val);
 	}
 	return config_dict;
@@ -2293,7 +2291,7 @@ identifier_map_t<BoundParameterData> DuckDBPyConnection::TransformPythonParamDic
 	for (auto pair : params) {
 		auto &key = pair.first;
 		auto &value = pair.second;
-		args[Identifier(py::str(key))] =
+		args[Identifier(py::cast<std::string>(key))] =
 		    BoundParameterData(TransformPythonValue(context, value, LogicalType::UNKNOWN, false));
 	}
 	return args;
@@ -2369,7 +2367,7 @@ bool IsValidNumpyDimensions(const py::handle &object, int &dim) {
 	if (!py::isinstance(object, import_cache.numpy.ndarray())) {
 		return false;
 	}
-	auto shape = NumpyArray(py::borrow<py::object>(object)).GetArray().attr("shape");
+	py::object shape = NumpyArray(py::borrow<py::object>(object)).GetArray().attr("shape");
 	if (py::len(shape) != 1) {
 		return false;
 	}
@@ -2383,7 +2381,7 @@ NumpyObjectType DuckDBPyConnection::IsAcceptedNumpyObject(const py::object &obje
 	}
 	auto import_cache_ = ImportCache();
 	if (py::isinstance(object, import_cache_->numpy.ndarray())) {
-		auto len = py::len(NumpyArray(object).GetArray().attr("shape"));
+		auto len = py::len(py::object(NumpyArray(object).GetArray().attr("shape")));
 		switch (len) {
 		case 1:
 			return NumpyObjectType::NDARRAY1D;
@@ -2420,7 +2418,7 @@ PyArrowObjectType DuckDBPyConnection::GetArrowType(const py::handle &obj) {
 		if (string(capsule.name()) != "arrow_array_stream") {
 			throw InvalidInputException("Expected a 'arrow_array_stream' PyCapsule, got: %s", string(capsule.name()));
 		}
-		auto stream = capsule.get_pointer<struct ArrowArrayStream>();
+		auto stream = reinterpret_cast<ArrowArrayStream *>(capsule.data("arrow_array_stream"));
 		if (!stream->release) {
 			throw InvalidInputException("The ArrowArrayStream was already released");
 		}
