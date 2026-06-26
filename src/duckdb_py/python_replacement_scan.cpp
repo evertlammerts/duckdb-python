@@ -231,6 +231,17 @@ static unique_ptr<TableRef> TryReplacement(py::dict &dict, const string &name, C
 	return result;
 }
 
+// Materialize a real py::dict from a frame's f_locals/f_globals. f_globals is already a dict (borrow it);
+// f_locals can be a FrameLocalsProxy on Python 3.13+ (PEP 667), which is a mapping but not a dict -- copy it.
+static py::dict FrameDictToDict(const py::object &frame_dict) {
+	if (PyDict_Check(frame_dict.ptr())) {
+		return py::borrow<py::dict>(frame_dict);
+	}
+	py::dict materialized;
+	materialized.update(frame_dict);
+	return materialized;
+}
+
 static unique_ptr<TableRef> ReplaceInternal(ClientContext &context, const string &table_name) {
 	Value result;
 	auto lookup_result = context.TryGetCurrentSetting("python_enable_replacements", result);
@@ -269,8 +280,10 @@ static unique_ptr<TableRef> ReplaceInternal(ClientContext &context, const string
 		}
 		has_locals = !py::none().is(local_dict_p);
 		if (has_locals) {
-			// search local dictionary
-			auto local_dict = py::cast<py::dict>(local_dict_p);
+			// search local dictionary. On Python 3.13+ (PEP 667) frame.f_locals is a FrameLocalsProxy, not a
+			// dict, so reinterpreting/cast<py::dict> would fail; materialize a real dict from the mapping
+			// (pybind11's cast<py::dict> did the equivalent dict(obj) conversion).
+			auto local_dict = FrameDictToDict(local_dict_p);
 			auto result = TryReplacement(local_dict, table_name, context, current_frame);
 			if (result) {
 				return result;
@@ -284,7 +297,7 @@ static unique_ptr<TableRef> ReplaceInternal(ClientContext &context, const string
 		}
 		has_globals = !py::none().is(global_dict_p);
 		if (has_globals) {
-			auto global_dict = py::cast<py::dict>(global_dict_p);
+			auto global_dict = FrameDictToDict(global_dict_p);
 			// search global dictionary
 			auto result = TryReplacement(global_dict, table_name, context, current_frame);
 			if (result) {
