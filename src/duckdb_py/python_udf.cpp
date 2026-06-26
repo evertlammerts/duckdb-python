@@ -459,7 +459,10 @@ public:
 		}
 		idx_t i = 0;
 		for (auto param : params) {
-			auto type = py::cast<std::shared_ptr<DuckDBPyType>>(param);
+			std::shared_ptr<DuckDBPyType> type;
+			if (!DuckDBPyType::TryConvert(py::borrow<py::object>(param), type)) {
+				throw InvalidInputException("Could not convert a provided parameter to a DuckDBPyType");
+			}
 			parameters[i++] = type->Type();
 		}
 	}
@@ -489,7 +492,10 @@ public:
 		}
 		param_count = py::len(sig_params);
 		parameters.reserve(param_count);
-		auto params = py::cast<py::dict>(sig_params);
+		// inspect.Signature.parameters is a mappingproxy, not a dict; materialize a real dict (nanobind's
+		// cast<py::dict> would reject the proxy, unlike pybind11's converting py::dict).
+		py::dict params;
+		params.update(sig_params);
 		for (auto item : params) {
 			auto value = item.second;
 			std::shared_ptr<DuckDBPyType> pytype;
