@@ -140,7 +140,7 @@ static bool FromNumpyType(const py::object &type, LogicalType &result) {
 	if (!py::hasattr(obj, "dtype")) {
 		return false;
 	}
-	string type_str = py::cast<std::string>(py::str(obj.attr("dtype")));
+	string type_str = py::cast<std::string>(py::str(py::object(obj.attr("dtype"))));
 	if (type_str == "bool") {
 		result = LogicalType::BOOLEAN;
 	} else if (type_str == "int8") {

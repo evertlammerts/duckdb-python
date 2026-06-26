@@ -400,7 +400,7 @@ static bool NumpyDeprecatesAccessToCore(const py::tuple &numpy_version) {
 	if (numpy_version.empty()) {
 		return false;
 	}
-	if (py::cast<std::string>(py::str(numpy_version[0])) == string("2")) {
+	if (py::cast<std::string>(py::str(py::object(numpy_version[0]))) == string("2")) {
 		//! Starting with numpy version 2.0.0 the use of 'core' is deprecated.
 		return true;
 	}

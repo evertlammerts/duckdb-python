@@ -225,7 +225,7 @@ static unique_ptr<TableRef> TryReplacement(py::dict &dict, const string &name, C
 	if (!result) {
 		std::string location = py::cast<std::string>(current_frame.attr("f_code").attr("co_filename"));
 		location += ":";
-		location += py::cast<std::string>(py::str(current_frame.attr("f_lineno")));
+		location += py::cast<std::string>(py::str(py::object(current_frame.attr("f_lineno"))));
 		ThrowScanFailureError(entry, name, location);
 	}
 	return result;

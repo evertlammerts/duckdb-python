@@ -319,7 +319,7 @@ std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::StarExpression(py::objec
 std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::ColumnExpression(const py::args &names) {
 	vector<Identifier> column_names;
 	if (names.size() == 1) {
-		string column_name = py::cast<std::string>(py::str(names[0]));
+		string column_name = py::cast<std::string>(py::str(py::object(names[0])));
 		if (column_name == "*") {
 			return StarExpression();
 		}

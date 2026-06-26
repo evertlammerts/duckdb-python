@@ -52,7 +52,7 @@ static py::object FunctionCall(NumpyResultConversion &conversion, const vector<I
 	if (!py::isinstance<PandasDataFrame>(df)) {
 		throw InvalidInputException(
 		    "Expected the UDF to return an object of type 'pandas.DataFrame', found '%s' instead",
-		    py::cast<std::string>(py::str(df.attr("__class__"))));
+		    py::cast<std::string>(py::str(py::object(df.attr("__class__")))));
 	}
 	if (PandasDataFrame::IsPyArrowBacked(df)) {
 		throw InvalidInputException(
