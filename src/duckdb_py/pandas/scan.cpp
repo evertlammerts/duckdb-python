@@ -215,7 +215,7 @@ unique_ptr<NodeStatistics> PandasScanFunction::PandasScanCardinality(ClientConte
 
 py::object PandasScanFunction::PandasReplaceCopiedNames(const py::object &original_df) {
 	py::object copy_df = original_df.attr("copy")(false);
-	auto df_columns = py::list(original_df.attr("columns"));
+	auto df_columns = py::list(py::object(original_df.attr("columns")));
 	vector<string> columns;
 	for (const auto &str : df_columns) {
 		columns.push_back(py::cast<std::string>(py::str(str)));

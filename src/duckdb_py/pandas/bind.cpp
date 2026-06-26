@@ -23,8 +23,8 @@ public:
 struct PandasDataFrameBind {
 public:
 	explicit PandasDataFrameBind(py::handle &df) {
-		names = py::list(df.attr("columns"));
-		types = py::list(df.attr("dtypes"));
+		names = py::list(py::object(df.attr("columns")));
+		types = py::list(py::object(df.attr("dtypes")));
 		getter = df.attr("__getitem__");
 	}
 	PandasBindColumn operator[](idx_t index) const {

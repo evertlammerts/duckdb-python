@@ -214,7 +214,10 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 		}
 
 		auto pyarrow_table = ConvertDataChunkToPyArrowTable(input, options, state.GetContext());
-		py::tuple column_list = pyarrow_table.attr("columns");
+		// pyarrow Table.columns is a list; PyObject_CallObject below needs a real tuple. nanobind's accessor->tuple
+		// only reinterprets (borrows), so convert explicitly via the tuple(handle) ctor (PySequence_Tuple).
+		py::object columns_obj = pyarrow_table.attr("columns");
+		py::tuple column_list(columns_obj);
 
 		auto count = input.size();
 

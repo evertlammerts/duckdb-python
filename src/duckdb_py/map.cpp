@@ -206,7 +206,7 @@ OperatorResultType MapFunction::MapFunctionExec(ExecutionContext &context, Table
 		                            StringUtil::Join(data.out_names, ", "), StringUtil::Join(pandas_names, ", "));
 	}
 
-	auto df_columns = py::list(df.attr("columns"));
+	auto df_columns = py::list(py::object(df.attr("columns")));
 	auto get_fun = df.attr("__getitem__");
 
 	idx_t row_count = py::len(get_fun(df_columns[0]));

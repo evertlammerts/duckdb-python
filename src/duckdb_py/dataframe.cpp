@@ -32,13 +32,15 @@ bool PandasDataFrame::IsPyArrowBacked(const py::handle &df) {
 	}
 
 	auto &import_cache = *DuckDBPyConnection::ImportCache();
-	py::list dtypes = df.attr("dtypes");
-	if (dtypes.empty()) {
+	// df.dtypes is a pandas Series, NOT a list -- under nanobind assigning it to py::list would reinterpret
+	// (borrow) the Series as a list and crash on list ops. Iterate it as a generic (iterable) object instead.
+	py::object dtypes = df.attr("dtypes");
+	if (py::len(dtypes) == 0) {
 		return false;
 	}
 
 	auto arrow_dtype = import_cache.pandas.ArrowDtype();
-	for (auto dtype : dtypes) { // nanobind list iteration yields temporary handles; bind by value (cheap handle, no copy of heavy data)
+	for (auto dtype : dtypes) { // Series iteration yields temporary handles; bind by value (cheap handle)
 		if (py::isinstance(dtype, arrow_dtype)) {
 			return true;
 		}
