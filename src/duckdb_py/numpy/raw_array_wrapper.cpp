@@ -151,14 +151,14 @@ string RawArrayWrapper::DuckDBToNumpyDtype(const LogicalType &type) {
 void RawArrayWrapper::Initialize(idx_t capacity) {
 	string dtype = DuckDBToNumpyDtype(type);
 
-	array = py::array(py::dtype(dtype), capacity);
-	data = data_ptr_cast(array.mutable_data());
+	array = NumpyArray::Allocate(py::dtype(dtype), capacity);
+	data = data_ptr_cast(array.MutableData());
 }
 
 void RawArrayWrapper::Resize(idx_t new_capacity) {
 	vector<py::ssize_t> new_shape {py::ssize_t(new_capacity)};
-	array.resize(new_shape, false);
-	data = data_ptr_cast(array.mutable_data());
+	array.GetArray().resize(new_shape, false);
+	data = data_ptr_cast(array.MutableData());
 }
 
 } // namespace duckdb

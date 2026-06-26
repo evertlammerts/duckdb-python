@@ -26,6 +26,7 @@
 #include "duckdb_python/pyresult.hpp"
 #include "duckdb_python/python_conversion.hpp"
 #include "duckdb_python/numpy/numpy_type.hpp"
+#include "duckdb_python/numpy/numpy_array.hpp"
 #include "duckdb_python/jupyter_progress_bar_display.hpp"
 #include "duckdb_python/pyfilesystem.hpp"
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
@@ -2352,7 +2353,7 @@ bool IsValidNumpyDimensions(const py::handle &object, int &dim) {
 	if (!py::isinstance(object, import_cache.numpy.ndarray())) {
 		return false;
 	}
-	auto shape = (py::cast<py::array>(object)).attr("shape");
+	auto shape = NumpyArray(py::reinterpret_borrow<py::object>(object)).GetArray().attr("shape");
 	if (py::len(shape) != 1) {
 		return false;
 	}
@@ -2366,7 +2367,7 @@ NumpyObjectType DuckDBPyConnection::IsAcceptedNumpyObject(const py::object &obje
 	}
 	auto import_cache_ = ImportCache();
 	if (py::isinstance(object, import_cache_->numpy.ndarray())) {
-		auto len = py::len((py::cast<py::array>(object)).attr("shape"));
+		auto len = py::len(NumpyArray(object).GetArray().attr("shape"));
 		switch (len) {
 		case 1:
 			return NumpyObjectType::NDARRAY1D;

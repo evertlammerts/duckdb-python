@@ -14,13 +14,14 @@
 #include "duckdb_python/numpy/numpy_type.hpp"
 #include "duckdb/function/scalar/nested_functions.hpp"
 #include "duckdb_python/numpy/numpy_scan.hpp"
+#include "duckdb_python/numpy/numpy_array.hpp"
 #include "duckdb_python/pandas/column/pandas_numpy_column.hpp"
 
 namespace duckdb {
 
 template <class T>
-void ScanNumpyColumn(py::array &numpy_col, idx_t stride, idx_t offset, Vector &out, idx_t count) {
-	auto src_ptr = (T *)numpy_col.data();
+void ScanNumpyColumn(NumpyArray &numpy_col, idx_t stride, idx_t offset, Vector &out, idx_t count) {
+	auto src_ptr = (T *)numpy_col.Data();
 	if (stride == sizeof(T)) {
 		FlatVector::SetData(out, data_ptr_cast(src_ptr + offset), count_t(count));
 	} else {
@@ -32,8 +33,8 @@ void ScanNumpyColumn(py::array &numpy_col, idx_t stride, idx_t offset, Vector &o
 }
 
 template <class T, class V>
-void ScanNumpyCategoryTemplated(py::array &column, idx_t offset, Vector &out, idx_t count) {
-	auto src_ptr = (T *)column.data();
+void ScanNumpyCategoryTemplated(NumpyArray &column, idx_t offset, Vector &out, idx_t count) {
+	auto src_ptr = (T *)column.Data();
 	auto tgt_ptr = (V *)FlatVector::GetData(out);
 	auto &tgt_mask = FlatVector::ValidityMutable(out);
 	for (idx_t i = 0; i < count; i++) {
@@ -47,7 +48,7 @@ void ScanNumpyCategoryTemplated(py::array &column, idx_t offset, Vector &out, id
 }
 
 template <class T>
-void ScanNumpyCategory(py::array &column, idx_t count, idx_t offset, Vector &out, string &src_type) {
+void ScanNumpyCategory(NumpyArray &column, idx_t count, idx_t offset, Vector &out, string &src_type) {
 	if (src_type == "int8") {
 		ScanNumpyCategoryTemplated<int8_t, T>(column, offset, out, count);
 	} else if (src_type == "int16") {
@@ -63,7 +64,7 @@ void ScanNumpyCategory(py::array &column, idx_t count, idx_t offset, Vector &out
 
 static void ApplyMask(PandasColumnBindData &bind_data, ValidityMask &validity, idx_t count, idx_t offset) {
 	D_ASSERT(bind_data.mask);
-	auto mask = reinterpret_cast<const bool *>(bind_data.mask->numpy_array.data());
+	auto mask = reinterpret_cast<const bool *>(bind_data.mask->numpy_array.Data());
 	for (idx_t i = 0; i < count; i++) {
 		auto is_null = mask[offset + i];
 		if (is_null) {
@@ -236,18 +237,18 @@ void NumpyScan::Scan(ClientContext &context, PandasColumnBindData &bind_data, id
 		ScanNumpyMasked<int64_t>(bind_data, count, offset, out);
 		break;
 	case NumpyNullableType::FLOAT_32:
-		ScanNumpyFpColumn<float>(bind_data, reinterpret_cast<const float *>(array.data()), numpy_col.stride, count,
+		ScanNumpyFpColumn<float>(bind_data, reinterpret_cast<const float *>(array.Data()), numpy_col.stride, count,
 		                         offset, out);
 		break;
 	case NumpyNullableType::FLOAT_64:
-		ScanNumpyFpColumn<double>(bind_data, reinterpret_cast<const double *>(array.data()), numpy_col.stride, count,
+		ScanNumpyFpColumn<double>(bind_data, reinterpret_cast<const double *>(array.Data()), numpy_col.stride, count,
 		                          offset, out);
 		break;
 	case NumpyNullableType::DATETIME_NS:
 	case NumpyNullableType::DATETIME_MS:
 	case NumpyNullableType::DATETIME_US:
 	case NumpyNullableType::DATETIME_S: {
-		auto src_ptr = reinterpret_cast<const int64_t *>(array.data());
+		auto src_ptr = reinterpret_cast<const int64_t *>(array.Data());
 		auto tgt_ptr = FlatVector::GetDataMutable<timestamp_t>(out);
 
 		using timestamp_convert_func = std::function<timestamp_t(int64_t)>;
@@ -307,7 +308,7 @@ void NumpyScan::Scan(ClientContext &context, PandasColumnBindData &bind_data, id
 	case NumpyNullableType::TIMEDELTA_US:
 	case NumpyNullableType::TIMEDELTA_MS:
 	case NumpyNullableType::TIMEDELTA_S: {
-		auto src_ptr = reinterpret_cast<const int64_t *>(array.data());
+		auto src_ptr = reinterpret_cast<const int64_t *>(array.Data());
 		auto tgt_ptr = FlatVector::GetDataMutable<interval_t>(out);
 		auto &mask = FlatVector::ValidityMutable(out);
 
@@ -352,7 +353,7 @@ void NumpyScan::Scan(ClientContext &context, PandasColumnBindData &bind_data, id
 	case NumpyNullableType::STRING:
 	case NumpyNullableType::OBJECT: {
 		// Get the source pointer of the numpy array
-		auto src_ptr = (PyObject **)array.data(); // NOLINT
+		auto src_ptr = (PyObject **)array.Data(); // NOLINT
 		const bool is_object_col = bind_data.numpy_type.type == NumpyNullableType::OBJECT;
 		if (is_object_col && out.GetType().id() != LogicalTypeId::VARCHAR) {
 			//! We have determined the underlying logical type of this object column
