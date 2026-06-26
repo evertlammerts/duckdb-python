@@ -44,7 +44,7 @@ static py::object FunctionCall(NumpyResultConversion &conversion, const vector<I
 		throw InvalidInputException("Python error. See above for a stack trace.");
 	}
 
-	auto df = py::reinterpret_steal<py::object>(df_obj);
+	auto df = py::steal<py::object>(df_obj);
 	if (df.is_none()) { // no return, probably modified in place
 		throw InvalidInputException("No return value from Python function");
 	}
@@ -102,7 +102,7 @@ unique_ptr<FunctionData> BindExplicitSchema(unique_ptr<MapFunctionData> function
                                             vector<LogicalType> &types, vector<string> &names) {
 	D_ASSERT(schema_p != Py_None);
 
-	auto schema_object = py::reinterpret_borrow<py::dict>(schema_p);
+	auto schema_object = py::borrow<py::dict>(schema_p);
 	if (!py::isinstance<py::dict>(schema_object)) {
 		throw InvalidInputException("'schema' should be given as a Dict[str, DuckDBType]");
 	}

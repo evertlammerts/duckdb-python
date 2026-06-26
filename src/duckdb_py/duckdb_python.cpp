@@ -25,7 +25,7 @@
 #define DUCKDB_PYTHON_LIB_NAME _duckdb
 #endif
 
-namespace py = pybind11;
+namespace py = nanobind;
 
 namespace duckdb {
 
@@ -1038,7 +1038,7 @@ PYBIND11_EXPORT void *_force_symbol_inclusion() {
 }
 };
 
-PYBIND11_MODULE(DUCKDB_PYTHON_LIB_NAME, m) { // NOLINT
+NB_MODULE(DUCKDB_PYTHON_LIB_NAME, m) { // NOLINT
 	// DO NOT REMOVE: the below forces that we include all symbols we want to export
 	volatile auto *keep_alive = _force_symbol_inclusion();
 	(void)keep_alive;

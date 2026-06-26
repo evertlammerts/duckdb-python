@@ -8,9 +8,23 @@
 
 #pragma once
 
-#include <pybind11/pybind11.h>
-#include <pybind11/numpy.h>
-#include <pybind11/stl.h>
+#include <nanobind/nanobind.h>
+#include <nanobind/ndarray.h>
+#include <nanobind/stl/string.h>
+#include <nanobind/stl/vector.h>
+#include <nanobind/stl/shared_ptr.h>
+#include <nanobind/stl/unique_ptr.h>
+#include <nanobind/stl/optional.h>
+#include <nanobind/stl/detail/nb_list.h>
+#include <nanobind/operators.h>
+
+// nanobind has no PYBIND11_NAMESPACE; the custom type_caster specializations below (and in the
+// conversion headers) live in `namespace nanobind`. Point the legacy macro at it so those headers
+// keep compiling unchanged. Must be defined BEFORE the conversion headers are included.
+#ifndef PYBIND11_NAMESPACE
+#define PYBIND11_NAMESPACE nanobind
+#endif
+
 // Custom type_caster specializations must be visible in every TU that converts the type (otherwise it is
 // UB); keep ALL of them here, in this universally-included umbrella, never in scattered per-feature headers.
 #include "duckdb_python/pybind11/conversions/identifier.hpp"
@@ -24,14 +38,16 @@
 #include "duckdb/common/assert.hpp"
 #include "duckdb/common/helper.hpp"
 #include <memory>
+#include <type_traits>
 
-PYBIND11_DECLARE_HOLDER_TYPE(T, duckdb::unique_ptr<T>)
-PYBIND11_DECLARE_HOLDER_TYPE(T, duckdb::shared_ptr<T>)
+// nanobind has no holder-type declaration macros; std::shared_ptr / std::unique_ptr support is
+// provided by the <nanobind/stl/shared_ptr.h> / <nanobind/stl/unique_ptr.h> includes above.
 
-namespace pybind11 {
+namespace nanobind {
 
 namespace detail {
 
+// duckdb::vector behaves like a Python list on the boundary; reuse nanobind's list_caster.
 template <typename Type, bool SAFE>
 struct type_caster<duckdb::vector<Type, SAFE>> : list_caster<duckdb::vector<Type, SAFE>, Type> {};
 } // namespace detail
@@ -43,28 +59,23 @@ bool is_dict_like(handle obj);
 
 std::string to_string(const object &obj);
 
-} // namespace pybind11
+} // namespace nanobind
 
 namespace duckdb {
-#ifdef __GNUG__
-#define PYBIND11_NAMESPACE pybind11 __attribute__((visibility("hidden")))
-#else
-#define PYBIND11_NAMESPACE pybind11
-#endif
 namespace py {
 
-// We include everything from pybind11
-using namespace pybind11;
+// We include everything from nanobind
+using namespace nanobind;
 
 // But we have the option to override certain functions
-template <typename T, detail::enable_if_t<std::is_base_of<object, T>::value, int> = 0>
+template <typename T, std::enable_if_t<std::is_base_of<object, T>::value, int> = 0>
 bool isinstance(handle obj) {
 	return T::check_(obj);
 }
 
-template <typename T, detail::enable_if_t<!std::is_base_of<object, T>::value, int> = 0>
+template <typename T, std::enable_if_t<!std::is_base_of<object, T>::value, int> = 0>
 bool isinstance(handle obj) {
-	return detail::isinstance_generic(obj, typeid(T));
+	return nanobind::isinstance<T>(obj);
 }
 
 template <>
@@ -81,7 +92,7 @@ inline bool isinstance(handle obj, handle type) {
 	}
 	const auto result = PyObject_IsInstance(obj.ptr(), type.ptr());
 	if (result == -1) {
-		throw error_already_set();
+		throw python_error();
 	}
 	return result != 0;
 }
@@ -90,7 +101,7 @@ template <class T>
 bool try_cast(const handle &object, T &result) {
 	try {
 		result = cast<T>(object);
-	} catch (pybind11::cast_error &) {
+	} catch (cast_error &) {
 		return false;
 	}
 	return true;

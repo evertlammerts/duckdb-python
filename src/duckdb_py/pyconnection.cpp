@@ -473,9 +473,9 @@ void DuckDBPyConnection::Initialize(py::handle &m) {
 	connection_module.def("__del__", &DuckDBPyConnection::Close);
 
 	InitializeConnectionMethods(connection_module);
-	connection_module.def_property_readonly("description", &DuckDBPyConnection::GetDescription,
+	connection_module.def_prop_ro("description", &DuckDBPyConnection::GetDescription,
 	                                        "Get result set attributes, mainly column names");
-	connection_module.def_property_readonly("rowcount", &DuckDBPyConnection::GetRowcount, "Get result set row count");
+	connection_module.def_prop_ro("rowcount", &DuckDBPyConnection::GetRowcount, "Get result set row count");
 	PyDateTime_IMPORT; // NOLINT
 	DuckDBPyConnection::ImportCache();
 }
@@ -513,7 +513,7 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::ExecuteMany(const py::ob
 	unique_ptr<QueryResult> query_result;
 	// Execute once for every set of parameters that are provided
 	for (auto &parameters : outer_list) {
-		auto params = py::reinterpret_borrow<py::object>(parameters);
+		auto params = py::borrow<py::object>(parameters);
 		query_result = ExecuteInternal(*prep, std::move(params));
 	}
 	// Set the internal 'result' object
@@ -859,7 +859,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadJSON(
 			string actual_type = py::str(py::type::of(records));
 			throw BinderException("read_json only accepts 'records' as a string, not '%s'", actual_type);
 		}
-		auto records_s = py::reinterpret_borrow<py::str>(records);
+		auto records_s = py::borrow<py::str>(records);
 		auto records_option = std::string(py::str(records_s));
 		options["records"] = Value(records_option);
 	}
@@ -869,7 +869,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadJSON(
 			string actual_type = py::str(py::type::of(format));
 			throw BinderException("read_json only accepts 'format' as a string, not '%s'", actual_type);
 		}
-		auto format_s = py::reinterpret_borrow<py::str>(format);
+		auto format_s = py::borrow<py::str>(format);
 		auto format_option = std::string(py::str(format_s));
 		options["format"] = Value(format_option);
 	}
@@ -879,7 +879,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadJSON(
 			string actual_type = py::str(py::type::of(date_format));
 			throw BinderException("read_json only accepts 'date_format' as a string, not '%s'", actual_type);
 		}
-		auto date_format_s = py::reinterpret_borrow<py::str>(date_format);
+		auto date_format_s = py::borrow<py::str>(date_format);
 		auto date_format_option = std::string(py::str(date_format_s));
 		options["date_format"] = Value(date_format_option);
 	}
@@ -889,7 +889,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadJSON(
 			string actual_type = py::str(py::type::of(timestamp_format));
 			throw BinderException("read_json only accepts 'timestamp_format' as a string, not '%s'", actual_type);
 		}
-		auto timestamp_format_s = py::reinterpret_borrow<py::str>(timestamp_format);
+		auto timestamp_format_s = py::borrow<py::str>(timestamp_format);
 		auto timestamp_format_option = std::string(py::str(timestamp_format_s));
 		options["timestamp_format"] = Value(timestamp_format_option);
 	}
@@ -899,7 +899,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadJSON(
 			string actual_type = py::str(py::type::of(compression));
 			throw BinderException("read_json only accepts 'compression' as a string, not '%s'", actual_type);
 		}
-		auto compression_s = py::reinterpret_borrow<py::str>(compression);
+		auto compression_s = py::borrow<py::str>(compression);
 		auto compression_option = std::string(py::str(compression_s));
 		options["compression"] = Value(compression_option);
 	}
@@ -2340,7 +2340,7 @@ void DuckDBPyConnection::Exit(DuckDBPyConnection &self, const py::object &exc_ty
 	if (exc_type.ptr() != Py_None) {
 		// Propagate the exception if any occurred
 		PyErr_SetObject(exc_type.ptr(), exc.ptr());
-		throw py::error_already_set();
+		throw py::python_error();
 	}
 }
 
@@ -2364,7 +2364,7 @@ bool IsValidNumpyDimensions(const py::handle &object, int &dim) {
 	if (!py::isinstance(object, import_cache.numpy.ndarray())) {
 		return false;
 	}
-	auto shape = NumpyArray(py::reinterpret_borrow<py::object>(object)).GetArray().attr("shape");
+	auto shape = NumpyArray(py::borrow<py::object>(object)).GetArray().attr("shape");
 	if (py::len(shape) != 1) {
 		return false;
 	}
@@ -2411,7 +2411,7 @@ PyArrowObjectType DuckDBPyConnection::GetArrowType(const py::handle &obj) {
 	D_ASSERT(py::gil_check());
 
 	if (py::isinstance<py::capsule>(obj)) {
-		auto capsule = py::reinterpret_borrow<py::capsule>(obj);
+		auto capsule = py::borrow<py::capsule>(obj);
 		if (string(capsule.name()) != "arrow_array_stream") {
 			throw InvalidInputException("Expected a 'arrow_array_stream' PyCapsule, got: %s", string(capsule.name()));
 		}

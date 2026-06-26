@@ -40,7 +40,7 @@ void PythonImportCacheItem::LoadModule(PythonImportCache &cache) {
 		py::gil_assert();
 		object = AddCache(cache, std::move(py::module::import(name.c_str())));
 		load_succeeded = true;
-	} catch (py::error_already_set &e) {
+	} catch (py::python_error &e) {
 		if (IsRequired()) {
 			throw InvalidInputException(
 			    "Required module '%s' failed to import, due to the following Python exception:\n%s", name, e.what());

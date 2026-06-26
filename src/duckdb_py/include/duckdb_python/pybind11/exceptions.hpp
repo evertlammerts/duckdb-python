@@ -1,6 +1,6 @@
 #include "duckdb_python/pybind11/pybind_wrapper.hpp"
 
-namespace py = pybind11;
+namespace py = nanobind;
 
 namespace duckdb {
 

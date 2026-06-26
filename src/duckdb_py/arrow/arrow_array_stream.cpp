@@ -68,7 +68,7 @@ unique_ptr<ArrowArrayStreamWrapper> PythonTableArrowArrayStreamFactory::Produce(
 	auto arrow_object_type = factory->cached_arrow_type;
 
 	if (arrow_object_type == PyArrowObjectType::PolarsLazyFrame) {
-		py::object lf = py::reinterpret_borrow<py::object>(arrow_obj_handle);
+		py::object lf = py::borrow<py::object>(arrow_obj_handle);
 
 		auto filters = parameters.filters;
 		bool filters_pushed = false;
@@ -110,7 +110,7 @@ unique_ptr<ArrowArrayStreamWrapper> PythonTableArrowArrayStreamFactory::Produce(
 		}
 
 		auto capsule_obj = arrow_table.attr("__arrow_c_stream__")();
-		auto capsule = py::reinterpret_borrow<py::capsule>(capsule_obj);
+		auto capsule = py::borrow<py::capsule>(capsule_obj);
 		auto stream = capsule.get_pointer<struct ArrowArrayStream>();
 		auto res = make_uniq<ArrowArrayStreamWrapper>();
 		res->arrow_array_stream = *stream;
@@ -120,7 +120,7 @@ unique_ptr<ArrowArrayStreamWrapper> PythonTableArrowArrayStreamFactory::Produce(
 
 	if (arrow_object_type == PyArrowObjectType::PyCapsuleInterface || arrow_object_type == PyArrowObjectType::Table) {
 		py::object capsule_obj = arrow_obj_handle.attr("__arrow_c_stream__")();
-		auto capsule = py::reinterpret_borrow<py::capsule>(capsule_obj);
+		auto capsule = py::borrow<py::capsule>(capsule_obj);
 		auto stream = capsule.get_pointer<struct ArrowArrayStream>();
 		if (!stream->release) {
 			throw InvalidInputException(
@@ -159,7 +159,7 @@ unique_ptr<ArrowArrayStreamWrapper> PythonTableArrowArrayStreamFactory::Produce(
 
 	if (arrow_object_type == PyArrowObjectType::PyCapsule) {
 		auto res = make_uniq<ArrowArrayStreamWrapper>();
-		auto capsule = py::reinterpret_borrow<py::capsule>(arrow_obj_handle);
+		auto capsule = py::borrow<py::capsule>(arrow_obj_handle);
 		auto stream = capsule.get_pointer<struct ArrowArrayStream>();
 		if (!stream->release) {
 			throw InvalidInputException("This ArrowArrayStream has already been consumed and cannot be scanned again.");
@@ -203,7 +203,7 @@ unique_ptr<ArrowArrayStreamWrapper> PythonTableArrowArrayStreamFactory::Produce(
 void PythonTableArrowArrayStreamFactory::GetSchemaInternal(py::handle arrow_obj_handle, ArrowSchemaWrapper &schema) {
 	// PyCapsule (from bare capsule Produce path)
 	if (py::isinstance<py::capsule>(arrow_obj_handle)) {
-		auto capsule = py::reinterpret_borrow<py::capsule>(arrow_obj_handle);
+		auto capsule = py::borrow<py::capsule>(arrow_obj_handle);
 		auto stream = capsule.get_pointer<struct ArrowArrayStream>();
 		if (!stream->release) {
 			throw InvalidInputException("This ArrowArrayStream has already been consumed and cannot be scanned again.");
@@ -247,7 +247,7 @@ void PythonTableArrowArrayStreamFactory::GetSchema(uintptr_t factory_ptr, ArrowS
 		// collect_schema() would give Polars-native types (e.g. string_view) that don't match the actual export.
 		const auto empty_arrow = arrow_obj_handle.attr("head")(0).attr("collect")().attr("to_arrow")();
 		const auto schema_capsule = empty_arrow.attr("schema").attr("__arrow_c_schema__")();
-		const auto capsule = py::reinterpret_borrow<py::capsule>(schema_capsule);
+		const auto capsule = py::borrow<py::capsule>(schema_capsule);
 		const auto arrow_schema = capsule.get_pointer<struct ArrowSchema>();
 		factory->cached_schema = *arrow_schema;
 		arrow_schema->release = nullptr;
@@ -260,7 +260,7 @@ void PythonTableArrowArrayStreamFactory::GetSchema(uintptr_t factory_ptr, ArrowS
 		// Get __arrow_c_schema__ if it exists
 		if (py::hasattr(arrow_obj_handle, "__arrow_c_schema__")) {
 			auto schema_capsule = arrow_obj_handle.attr("__arrow_c_schema__")();
-			auto capsule = py::reinterpret_borrow<py::capsule>(schema_capsule);
+			auto capsule = py::borrow<py::capsule>(schema_capsule);
 			auto arrow_schema = capsule.get_pointer<struct ArrowSchema>();
 			factory->cached_schema = *arrow_schema; // factory takes ownership
 			arrow_schema->release = nullptr;
@@ -279,7 +279,7 @@ void PythonTableArrowArrayStreamFactory::GetSchema(uintptr_t factory_ptr, ArrowS
 		}
 		// Fallback: create a temporary stream just for the schema (consumes single-use streams!)
 		auto stream_capsule = arrow_obj_handle.attr("__arrow_c_stream__")();
-		auto capsule = py::reinterpret_borrow<py::capsule>(stream_capsule);
+		auto capsule = py::borrow<py::capsule>(stream_capsule);
 		auto stream = capsule.get_pointer<struct ArrowArrayStream>();
 		if (stream->get_schema(stream, &schema.arrow_schema)) {
 			throw InvalidInputException("Failed to get Arrow schema from stream: %s",

@@ -29,7 +29,7 @@ public:
 	}
 	PandasBindColumn operator[](idx_t index) const {
 		D_ASSERT(index < names.size());
-		auto column = py::reinterpret_borrow<py::object>(getter(names[index]));
+		auto column = py::borrow<py::object>(getter(names[index]));
 		auto type = types[index];
 		auto name = names[index];
 		return PandasBindColumn(name, type, column);

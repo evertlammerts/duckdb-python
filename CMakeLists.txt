@@ -35,8 +35,12 @@ endif()
 # ────────────────────────────────────────────
 # Dependencies
 # ────────────────────────────────────────────
-# PyBind11
-find_package(pybind11 REQUIRED CONFIG)
+# nanobind (requires Python to be located first; pybind11 used to do this internally)
+find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
+find_package(nanobind CONFIG REQUIRED)
+# Build nanobind's core support library up front so the object libraries below (which include
+# nanobind headers via the umbrella) compile against its include dirs + Python headers + flags.
+nanobind_build_library(nanobind-static)
 
 # DuckDB
 include(cmake/duckdb_loader.cmake)
@@ -49,7 +53,7 @@ duckdb_add_library(duckdb_target)
 
 # Bundle in INTERFACE library
 add_library(_duckdb_dependencies INTERFACE)
-target_link_libraries(_duckdb_dependencies INTERFACE pybind11::pybind11
+target_link_libraries(_duckdb_dependencies INTERFACE nanobind-static
                                                      duckdb_target)
 # Also add include directory
 target_include_directories(
@@ -67,8 +71,9 @@ target_compile_definitions(_duckdb_dependencies INTERFACE DUCKDB_STATIC_BUILD)
 # ────────────────────────────────────────────
 add_subdirectory(src/duckdb_py)
 
-pybind11_add_module(
+nanobind_add_module(
   _duckdb
+  NB_STATIC
   $<TARGET_OBJECTS:python_src>
   $<TARGET_OBJECTS:python_arrow>
   $<TARGET_OBJECTS:python_common>

@@ -287,7 +287,7 @@ static bool TryTransformPythonLongToHugeInt(py::handle ele, const LogicalType &t
 
 	// Extract upper bits by right-shifting by 64
 	py::int_ shift_amount(64);
-	py::object upper_obj = py::reinterpret_steal<py::object>(PyNumber_Rshift(ptr, shift_amount.ptr()));
+	py::object upper_obj = py::steal<py::object>(PyNumber_Rshift(ptr, shift_amount.ptr()));
 
 	// Try signed 128-bit (hugeint) first
 	int overflow;
@@ -581,7 +581,7 @@ struct PythonValueConversion {
 			return Value::INTERVAL(timedelta.ToInterval());
 		}
 		case PythonObjectType::Dict: {
-			PyDictionary dict = PyDictionary(py::reinterpret_borrow<py::object>(ele));
+			PyDictionary dict = PyDictionary(py::borrow<py::object>(ele));
 			switch (target_type.id()) {
 			case LogicalTypeId::STRUCT:
 				return TransformDictionaryToStruct(context, dict, target_type);

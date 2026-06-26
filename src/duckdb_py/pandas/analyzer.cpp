@@ -242,7 +242,7 @@ LogicalType PandasAnalyzer::GetListType(py::object &ele, bool &can_convert) {
 	idx_t i = 0;
 	LogicalType list_type = LogicalType::SQLNULL;
 	for (auto py_val : ele) {
-		auto object = py::reinterpret_borrow<py::object>(py_val);
+		auto object = py::borrow<py::object>(py_val);
 		auto item_type = GetItemType(object, can_convert);
 		if (!i) {
 			list_type = item_type;
@@ -409,7 +409,7 @@ LogicalType PandasAnalyzer::GetItemType(py::object ele, bool &can_convert) {
 	case PythonObjectType::List:
 		return LogicalType::LIST(GetListType(ele, can_convert));
 	case PythonObjectType::Dict: {
-		PyDictionary dict = PyDictionary(py::reinterpret_borrow<py::object>(ele));
+		PyDictionary dict = PyDictionary(py::borrow<py::object>(ele));
 		// Assuming keys and values are the same size
 
 		if (dict.len == 0) {

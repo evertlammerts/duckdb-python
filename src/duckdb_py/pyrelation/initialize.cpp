@@ -14,17 +14,17 @@
 namespace duckdb {
 
 static void InitializeReadOnlyProperties(py::class_<DuckDBPyRelation> &m) {
-	m.def_property_readonly("type", &DuckDBPyRelation::Type, "Get the type of the relation.")
-	    .def_property_readonly("columns", &DuckDBPyRelation::Columns,
+	m.def_prop_ro("type", &DuckDBPyRelation::Type, "Get the type of the relation.")
+	    .def_prop_ro("columns", &DuckDBPyRelation::Columns,
 	                           "Return a list containing the names of the columns of the relation.")
-	    .def_property_readonly("types", &DuckDBPyRelation::ColumnTypes,
+	    .def_prop_ro("types", &DuckDBPyRelation::ColumnTypes,
 	                           "Return a list containing the types of the columns of the relation.")
-	    .def_property_readonly("dtypes", &DuckDBPyRelation::ColumnTypes,
+	    .def_prop_ro("dtypes", &DuckDBPyRelation::ColumnTypes,
 	                           "Return a list containing the types of the columns of the relation.")
-	    .def_property_readonly("description", &DuckDBPyRelation::Description, "Return the description of the result")
-	    .def_property_readonly("alias", &DuckDBPyRelation::GetAlias, "Get the name of the current alias")
+	    .def_prop_ro("description", &DuckDBPyRelation::Description, "Return the description of the result")
+	    .def_prop_ro("alias", &DuckDBPyRelation::GetAlias, "Get the name of the current alias")
 	    .def("__len__", &DuckDBPyRelation::Length, "Number of rows in relation.")
-	    .def_property_readonly("shape", &DuckDBPyRelation::Shape, " Tuple of # of rows, # of columns in relation.");
+	    .def_prop_ro("shape", &DuckDBPyRelation::Shape, " Tuple of # of rows, # of columns in relation.");
 }
 
 static void InitializeConsumers(py::class_<DuckDBPyRelation> &m) {
@@ -103,7 +103,7 @@ static void InitializeConsumers(py::class_<DuckDBPyRelation> &m) {
 		        PyErr_WarnEx(PyExc_DeprecationWarning,
 		                     "fetch_arrow_reader() is deprecated, use to_arrow_reader() instead.", 0);
 		        if (PyErr_Occurred()) {
-			        throw py::error_already_set();
+			        throw py::python_error();
 		        }
 		        return self.attr("to_arrow_reader")(batch_size);
 	        },

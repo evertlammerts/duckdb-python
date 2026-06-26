@@ -215,7 +215,7 @@ static py::tuple FilterNones(const py::tuple &args) {
 	py::list result;
 
 	for (const auto &arg : args) {
-		py::object object = py::reinterpret_borrow<py::object>(arg);
+		py::object object = py::borrow<py::object>(arg);
 		if (object.is(py::type::of(py::none()))) {
 			continue;
 		}
@@ -230,7 +230,7 @@ static LogicalType FromUnionTypeInternal(const py::tuple &args) {
 
 	for (const auto &arg : args) {
 		auto name = Identifier(StringUtil::Format("u%d", index++));
-		py::object object = py::reinterpret_borrow<py::object>(arg);
+		py::object object = py::borrow<py::object>(arg);
 		members.push_back(make_pair(name, FromObject(object)));
 	}
 
@@ -276,7 +276,7 @@ static LogicalType FromGenericAlias(const py::object &obj) {
 }
 
 static LogicalType FromDictionary(const py::object &obj) {
-	auto dict = py::reinterpret_borrow<py::dict>(obj);
+	auto dict = py::borrow<py::dict>(obj);
 	child_list_t<LogicalType> children;
 	if (dict.size() == 0) {
 		throw InvalidInputException("Could not convert empty dictionary to a duckdb STRUCT type");
@@ -284,7 +284,7 @@ static LogicalType FromDictionary(const py::object &obj) {
 	children.reserve(dict.size());
 	for (auto &item : dict) {
 		auto &name_p = item.first;
-		auto type_p = py::reinterpret_borrow<py::object>(item.second);
+		auto type_p = py::borrow<py::object>(item.second);
 		auto name = Identifier(py::str(name_p));
 		auto type = FromObject(type_p);
 		children.push_back(std::make_pair(name, std::move(type)));
@@ -335,8 +335,8 @@ void DuckDBPyType::Initialize(py::handle &m) {
 	type_module.def("__eq__", &DuckDBPyType::EqualsString, "Compare two types for equality", py::arg("other"),
 	                py::is_operator());
 	type_module.def("__hash__", [](const DuckDBPyType &type) { return py::hash(py::str(type.ToString())); });
-	type_module.def_property_readonly("id", &DuckDBPyType::GetId);
-	type_module.def_property_readonly("children", &DuckDBPyType::Children);
+	type_module.def_prop_ro("id", &DuckDBPyType::GetId);
+	type_module.def_prop_ro("children", &DuckDBPyType::Children);
 	type_module.def(py::init<>([](const string &type_str, std::shared_ptr<DuckDBPyConnection> connection = nullptr) {
 		auto ltype = FromString(type_str, std::move(connection));
 		return std::make_shared<DuckDBPyType>(ltype);

@@ -42,7 +42,7 @@ static void CreateArrowScan(const string &name, py::object entry, TableFunctionR
 				buffer_values.push_back({"ptr", Value::POINTER(buffer_address)});
 				buffer_values.push_back({"size", Value::UBIGINT(buffer_size)});
 				values.push_back(Value::STRUCT(buffer_values));
-			} catch (const py::error_already_set &e) {
+			} catch (const py::python_error &e) {
 				break;
 			}
 		}
@@ -249,7 +249,7 @@ static unique_ptr<TableRef> ReplaceInternal(ClientContext &context, const string
 	py::object current_frame;
 	try {
 		current_frame = py::module::import("inspect").attr("currentframe")();
-	} catch (py::error_already_set &e) {
+	} catch (py::python_error &e) {
 		//! Likely no call stack exists, just safely return
 		return nullptr;
 	}
@@ -264,7 +264,7 @@ static unique_ptr<TableRef> ReplaceInternal(ClientContext &context, const string
 		py::object local_dict_p;
 		try {
 			local_dict_p = current_frame.attr("f_locals");
-		} catch (py::error_already_set &e) {
+		} catch (py::python_error &e) {
 			return nullptr;
 		}
 		has_locals = !py::none().is(local_dict_p);
@@ -279,7 +279,7 @@ static unique_ptr<TableRef> ReplaceInternal(ClientContext &context, const string
 		py::object global_dict_p;
 		try {
 			global_dict_p = current_frame.attr("f_globals");
-		} catch (py::error_already_set &e) {
+		} catch (py::python_error &e) {
 			return nullptr;
 		}
 		has_globals = !py::none().is(global_dict_p);
@@ -293,7 +293,7 @@ static unique_ptr<TableRef> ReplaceInternal(ClientContext &context, const string
 		}
 		try {
 			current_frame = current_frame.attr("f_back");
-		} catch (py::error_already_set &e) {
+		} catch (py::python_error &e) {
 			return nullptr;
 		}
 	} while (scan_all_frames && (has_locals || has_globals));

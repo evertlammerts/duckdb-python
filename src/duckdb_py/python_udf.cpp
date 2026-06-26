@@ -224,7 +224,7 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 		if (ret == nullptr && PyErr_Occurred()) {
 			exception_occurred = true;
 			if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
-				auto exception = py::error_already_set();
+				auto exception = py::python_error();
 				throw InvalidInputException("Python exception occurred while executing the UDF: %s", exception.what());
 			} else if (exception_handling == PythonExceptionHandling::RETURN_NULL) {
 				PyErr_Clear();
@@ -233,7 +233,7 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 				throw NotImplementedException("Exception handling type not implemented");
 			}
 		} else {
-			python_object = py::reinterpret_steal<py::object>(ret);
+			python_object = py::steal<py::object>(ret);
 		}
 		if (!py::isinstance(python_object, py::module_::import("pyarrow").attr("lib").attr("Table"))) {
 			// Try to convert into a table
@@ -245,7 +245,7 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 			try {
 				python_object = py::module_::import("pyarrow").attr("lib").attr("Table").attr("from_arrays")(
 				    single_array, py::arg("names") = single_name);
-			} catch (py::error_already_set &) {
+			} catch (py::python_error &) {
 				throw InvalidInputException("Could not convert the result into an Arrow Table");
 			}
 		}
@@ -334,15 +334,15 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 					continue;
 				}
 				// Call the function
-				ret = py::reinterpret_steal<py::object>(PyObject_CallObject(function, bundled_parameters.ptr()));
+				ret = py::steal<py::object>(PyObject_CallObject(function, bundled_parameters.ptr()));
 			} else {
-				ret = py::reinterpret_steal<py::object>(PyObject_CallObject(function, nullptr));
+				ret = py::steal<py::object>(PyObject_CallObject(function, nullptr));
 			}
 
 			if (!ret || ret.is_none()) {
 				if (PyErr_Occurred()) {
 					if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
-						auto exception = py::error_already_set();
+						auto exception = py::python_error();
 						throw InvalidInputException("Python exception occurred while executing the UDF: %s",
 						                            exception.what());
 					}

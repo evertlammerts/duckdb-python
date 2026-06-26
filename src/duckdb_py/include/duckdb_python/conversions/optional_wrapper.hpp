@@ -5,7 +5,7 @@
 
 using duckdb::Optional;
 
-namespace py = pybind11;
+namespace py = nanobind;
 
 namespace PYBIND11_NAMESPACE {
 namespace detail {

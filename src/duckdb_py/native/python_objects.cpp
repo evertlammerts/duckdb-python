@@ -247,7 +247,7 @@ int32_t PyTime::GetMicros(py::handle &obj) {
 
 py::object PyTime::GetTZInfo(py::handle &obj) {
 	// The object returned is borrowed, there is no reference to steal
-	return py::reinterpret_borrow<py::object>(PyDateTime_TIME_GET_TZINFO(obj.ptr())); // NOLINT
+	return py::borrow<py::object>(PyDateTime_TIME_GET_TZINFO(obj.ptr())); // NOLINT
 }
 
 interval_t PyTimezone::GetUTCOffset(py::handle &datetime, py::handle &tzone_obj) {
@@ -352,7 +352,7 @@ int32_t PyDateTime::GetMicros(py::handle &obj) {
 
 py::object PyDateTime::GetTZInfo(py::handle &obj) {
 	// The object returned is borrowed, there is no reference to steal
-	return py::reinterpret_borrow<py::object>(PyDateTime_DATE_GET_TZINFO(obj.ptr())); // NOLINT
+	return py::borrow<py::object>(PyDateTime_DATE_GET_TZINFO(obj.ptr())); // NOLINT
 }
 
 PyDate::PyDate(py::handle &ele) {
@@ -496,9 +496,9 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 	case LogicalTypeId::UBIGINT:
 		return py::cast(val.GetValue<uint64_t>());
 	case LogicalTypeId::HUGEINT:
-		return py::reinterpret_steal<py::object>(PyLong_FromString(val.GetValue<string>().c_str(), nullptr, 10));
+		return py::steal<py::object>(PyLong_FromString(val.GetValue<string>().c_str(), nullptr, 10));
 	case LogicalTypeId::UHUGEINT:
-		return py::reinterpret_steal<py::object>(PyLong_FromString(val.GetValue<string>().c_str(), nullptr, 10));
+		return py::steal<py::object>(PyLong_FromString(val.GetValue<string>().c_str(), nullptr, 10));
 	case LogicalTypeId::FLOAT:
 		return py::cast(val.GetValue<float>());
 	case LogicalTypeId::DOUBLE:
@@ -529,10 +529,10 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 
 		InfinityType infinity = GetTimestampInfinityType(timestamp);
 		if (infinity == InfinityType::POSITIVE) {
-			return py::reinterpret_borrow<py::object>(import_cache.datetime.datetime.max());
+			return py::borrow<py::object>(import_cache.datetime.datetime.max());
 		}
 		if (infinity == InfinityType::NEGATIVE) {
-			return py::reinterpret_borrow<py::object>(import_cache.datetime.datetime.min());
+			return py::borrow<py::object>(import_cache.datetime.datetime.min());
 		}
 
 		if (type.id() == LogicalTypeId::TIMESTAMP_MS) {
@@ -553,10 +553,10 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 		try {
 			auto python_conversion = PyDateTime_FromDateAndTime(year, month, day, hour, min, sec, micros);
 			if (!python_conversion) {
-				throw py::error_already_set();
+				throw py::python_error();
 			}
-			py_timestamp = py::reinterpret_steal<py::object>(python_conversion);
-		} catch (py::error_already_set &e) {
+			py_timestamp = py::steal<py::object>(python_conversion);
+		} catch (py::python_error &e) {
 			// Failed to convert, fall back to str
 			return py::str(val.ToString());
 		}
@@ -580,10 +580,10 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 		try {
 			auto python_conversion = PyTime_FromTime(hour, min, sec, microsec);
 			if (!python_conversion) {
-				throw py::error_already_set();
+				throw py::python_error();
 			}
-			py_time = py::reinterpret_steal<py::object>(python_conversion);
-		} catch (py::error_already_set &e) {
+			py_time = py::steal<py::object>(python_conversion);
+		} catch (py::python_error &e) {
 			// Failed to convert, fall back to str
 			return py::str(val.ToString());
 		}
@@ -609,10 +609,10 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 		try {
 			auto pytime = PyTime_FromTime(hour, min, sec, usec);
 			if (!pytime) {
-				throw py::error_already_set();
+				throw py::python_error();
 			}
-			return py::reinterpret_steal<py::object>(pytime);
-		} catch (py::error_already_set &e) {
+			return py::steal<py::object>(pytime);
+		} catch (py::python_error &e) {
 			return py::str(val.ToString());
 		}
 	}
@@ -622,18 +622,18 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 		int32_t year, month, day;
 		if (!Value::IsFinite(date)) {
 			if (date == date_t::infinity()) {
-				return py::reinterpret_borrow<py::object>(import_cache.datetime.date.max());
+				return py::borrow<py::object>(import_cache.datetime.date.max());
 			}
-			return py::reinterpret_borrow<py::object>(import_cache.datetime.date.min());
+			return py::borrow<py::object>(import_cache.datetime.date.min());
 		}
 		duckdb::Date::Convert(date, year, month, day);
 		try {
 			auto pydate = PyDate_FromDate(year, month, day);
 			if (!pydate) {
-				throw py::error_already_set();
+				throw py::python_error();
 			}
-			return py::reinterpret_steal<py::object>(pydate);
-		} catch (py::error_already_set &e) {
+			return py::steal<py::object>(pydate);
+		} catch (py::python_error &e) {
 			return py::str(val.ToString());
 		}
 	}

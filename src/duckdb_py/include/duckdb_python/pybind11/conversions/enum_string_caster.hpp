@@ -1,96 +1,78 @@
 #pragma once
 
-#include <pybind11/pybind11.h>
+#include <nanobind/nanobind.h>
 #include <cstdint>
 #include <string>
 
 //===----------------------------------------------------------------------===//
-// Reusable pybind11 type_caster macros for "string / integer or enum" arguments
+// Reusable nanobind type_caster macros for "string / integer or enum" arguments
 //===----------------------------------------------------------------------===//
 //
 // Several DuckDB enums are exposed to Python so that a binding parameter typed as
-// the enum also accepts a string (and, for most, an integer) naming one of its
-// values, while still accepting an actual registered enum instance. Every one of
-// these casters had an identical shape:
+// the enum accepts a string (and, for most, an integer) naming one of its values.
+// These enums are NOT registered as Python types (no nb::enum_), so the caster only
+// needs the str/int -> enum direction; there is no registered-instance to delegate to.
 //
-//   - if the source is a Python str  -> value = <Enum>FromString(...)
-//   - if the source is a Python int  -> value = <Enum>FromInteger(...)   (optional)
-//   - otherwise delegate to a *local* type_caster_base<Enum> for the registered
-//     enum instance.
+// The macros collapse the boilerplate into one invocation per enum, so the caster
+// rewrite is a single-place change. nanobind requires from_python()/from_cpp() to be
+// noexcept, so the DuckDB *FromString/*FromInteger calls (which throw on bad input)
+// are wrapped — a bad value reports a generic conversion failure rather than the
+// original InvalidInputException message (acceptable; refine post-cutover if needed).
 //
-// The macros below collapse that boilerplate into a single invocation per enum so
-// the eventual nanobind port is a one-place change. Behavior is intentionally
-// identical to the hand-written casters they replace.
-//
-// IMPORTANT (matches the original per-file notes): these casters own their value
-// via PYBIND11_TYPE_CASTER and delegate ONLY the registered-instance case to a
-// local base caster -- they do NOT inherit type_caster_base. Inheriting the base
-// while also writing custom branches is what historically made a caster accept
-// str XOR the enum depending on include visibility. Each specialization must be
-// visible in every TU that converts the type (they live under the universally
-// included pybind_wrapper.hpp umbrella), otherwise it is UB.
-//
-// Invoke these macros at GLOBAL scope (outside any namespace); each expands to a
-// full `namespace pybind11 { namespace detail { ... } }` specialization. Pass
-// fully-qualified names (e.g. duckdb::ExplainTypeFromString) for the conversion
-// functions and the enum type.
+// Invoke at GLOBAL scope (outside any namespace); each expands to a full
+// `namespace nanobind { namespace detail { ... } }` specialization. Pass fully
+// qualified names for the conversion functions and the enum type.
 
-//! str + int + registered-enum form.
-#define DUCKDB_PY_ENUM_STRING_INT_CASTER(EnumType, FromStringFn, FromIntegerFn, NameLiteral)                           \
-	namespace PYBIND11_NAMESPACE {                                                                                     \
+//! str + int + enum form.
+#define DUCKDB_PY_ENUM_STRING_INT_CASTER(EnumType, FromStringFn, FromIntegerFn, NameLiteral)                            \
+	namespace nanobind {                                                                                               \
 	namespace detail {                                                                                                 \
 	template <>                                                                                                        \
 	struct type_caster<EnumType> {                                                                                     \
-		PYBIND11_TYPE_CASTER(EnumType, const_name(NameLiteral));                                                       \
-                                                                                                                       \
-		bool load(handle src, bool convert) {                                                                          \
-			if (isinstance<str>(src)) {                                                                                \
-				value = FromStringFn(src.cast<std::string>());                                                         \
-				return true;                                                                                           \
-			}                                                                                                          \
-			if (isinstance<int_>(src)) {                                                                               \
-				value = FromIntegerFn(src.cast<int64_t>());                                                            \
-				return true;                                                                                           \
-			}                                                                                                          \
-			type_caster_base<EnumType> base;                                                                           \
-			if (!base.load(src, convert)) {                                                                            \
-				return false;                                                                                          \
-			}                                                                                                          \
-			value = *static_cast<EnumType *>(base);                                                                    \
-			return true;                                                                                               \
-		}                                                                                                              \
-                                                                                                                       \
-		static handle cast(EnumType src, return_value_policy policy, handle parent) {                                  \
-			return type_caster_base<EnumType>::cast(src, policy, parent);                                              \
-		}                                                                                                              \
-	};                                                                                                                 \
-	} /* namespace detail */                                                                                           \
-	} /* namespace PYBIND11_NAMESPACE */
+		NB_TYPE_CASTER(EnumType, const_name(NameLiteral))                                                              \
+		bool from_python(handle src, uint8_t, cleanup_list *) noexcept {                                              \
+			try {                                                                                                     \
+				if (nanobind::isinstance<nanobind::str>(src)) {                                                      \
+					value = FromStringFn(nanobind::cast<std::string>(src));                                          \
+					return true;                                                                                    \
+				}                                                                                                   \
+				if (nanobind::isinstance<nanobind::int_>(src)) {                                                     \
+					value = FromIntegerFn(nanobind::cast<int64_t>(src));                                            \
+					return true;                                                                                    \
+				}                                                                                                   \
+			} catch (...) {                                                                                          \
+				return false;                                                                                       \
+			}                                                                                                       \
+			return false;                                                                                           \
+		}                                                                                                            \
+		static handle from_cpp(EnumType src, rv_policy, cleanup_list *) noexcept {                                    \
+			return nanobind::int_((int64_t)src).release();                                                           \
+		}                                                                                                            \
+	};                                                                                                               \
+	} /* namespace detail */                                                                                         \
+	} /* namespace nanobind */
 
-//! str + registered-enum form (no integer accepted).
-#define DUCKDB_PY_ENUM_STRING_CASTER(EnumType, FromStringFn, NameLiteral)                                              \
-	namespace PYBIND11_NAMESPACE {                                                                                     \
+//! str + enum form (no integer accepted).
+#define DUCKDB_PY_ENUM_STRING_CASTER(EnumType, FromStringFn, NameLiteral)                                               \
+	namespace nanobind {                                                                                               \
 	namespace detail {                                                                                                 \
 	template <>                                                                                                        \
 	struct type_caster<EnumType> {                                                                                     \
-		PYBIND11_TYPE_CASTER(EnumType, const_name(NameLiteral));                                                       \
-                                                                                                                       \
-		bool load(handle src, bool convert) {                                                                          \
-			if (isinstance<str>(src)) {                                                                                \
-				value = FromStringFn(src.cast<std::string>());                                                         \
-				return true;                                                                                           \
-			}                                                                                                          \
-			type_caster_base<EnumType> base;                                                                           \
-			if (!base.load(src, convert)) {                                                                            \
-				return false;                                                                                          \
-			}                                                                                                          \
-			value = *static_cast<EnumType *>(base);                                                                    \
-			return true;                                                                                               \
-		}                                                                                                              \
-                                                                                                                       \
-		static handle cast(EnumType src, return_value_policy policy, handle parent) {                                  \
-			return type_caster_base<EnumType>::cast(src, policy, parent);                                              \
-		}                                                                                                              \
-	};                                                                                                                 \
-	} /* namespace detail */                                                                                           \
-	} /* namespace PYBIND11_NAMESPACE */
+		NB_TYPE_CASTER(EnumType, const_name(NameLiteral))                                                              \
+		bool from_python(handle src, uint8_t, cleanup_list *) noexcept {                                              \
+			try {                                                                                                     \
+				if (nanobind::isinstance<nanobind::str>(src)) {                                                      \
+					value = FromStringFn(nanobind::cast<std::string>(src));                                          \
+					return true;                                                                                    \
+				}                                                                                                   \
+			} catch (...) {                                                                                          \
+				return false;                                                                                       \
+			}                                                                                                       \
+			return false;                                                                                           \
+		}                                                                                                            \
+		static handle from_cpp(EnumType src, rv_policy, cleanup_list *) noexcept {                                    \
+			return nanobind::int_((int64_t)src).release();                                                           \
+		}                                                                                                            \
+	};                                                                                                               \
+	} /* namespace detail */                                                                                         \
+	} /* namespace nanobind */
