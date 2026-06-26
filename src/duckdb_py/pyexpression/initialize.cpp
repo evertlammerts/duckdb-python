@@ -11,7 +11,7 @@ void InitializeStaticMethods(py::module_ &m) {
 
 	// Constant Expression
 	docs = "Create a constant expression from the provided value";
-	m.def("ConstantExpression", &DuckDBPyExpression::ConstantExpression, py::arg("value"), docs);
+	m.def("ConstantExpression", &DuckDBPyExpression::ConstantExpression, py::arg("value").none(), docs); // None accepted (lit(None))
 
 	// ColumnRef Expression
 	docs = "Create a column reference from the provided column name";
