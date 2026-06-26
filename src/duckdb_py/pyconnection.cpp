@@ -2146,8 +2146,10 @@ duckdb::pyarrow::RecordBatchReader DuckDBPyConnection::FetchRecordBatchReader(co
 case_insensitive_map_t<Value> TransformPyConfigDict(const py::dict &py_config_dict) {
 	case_insensitive_map_t<Value> config_dict;
 	for (auto kv : py_config_dict) {
-		auto key = py::cast<std::string>(kv.first);
-		auto val = py::cast<std::string>(kv.second);
+		// Config values may be int/bool/str; str-ify them (matches pybind11's py::str(value)) rather than
+		// requiring an actual Python str (py::cast<std::string> would throw on a non-str like 0 or False).
+		auto key = py::cast<std::string>(py::str(kv.first));
+		auto val = py::cast<std::string>(py::str(kv.second));
 		config_dict[key] = Value(val);
 	}
 	return config_dict;
