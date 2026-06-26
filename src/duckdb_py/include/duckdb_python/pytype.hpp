@@ -90,20 +90,11 @@ struct type_caster<std::shared_ptr<duckdb::DuckDBPyType>> {
 	}
 
 	static handle from_cpp(const std::shared_ptr<T> &value, rv_policy, cleanup_list *cleanup) noexcept {
+		// DuckDBPyType is non-polymorphic and registers no type_hook, so this is a simplified version of
+		// nanobind's shared_ptr from_cpp.
 		bool is_new = false;
-		handle result;
 		T *ptr = value.get();
-		const std::type_info *type = &typeid(T);
-		constexpr bool has_type_hook = !std::is_base_of_v<std::false_type, type_hook<T>>;
-		if constexpr (has_type_hook) {
-			type = type_hook<T>::get(ptr);
-		}
-		if constexpr (!std::is_polymorphic_v<T>) {
-			result = nb_type_put(type, ptr, rv_policy::reference, cleanup, &is_new);
-		} else {
-			const std::type_info *type_p = (!has_type_hook && ptr) ? &typeid(*ptr) : nullptr;
-			result = nb_type_put_p(type, type_p, ptr, rv_policy::reference, cleanup, &is_new);
-		}
+		handle result = nb_type_put(&typeid(T), ptr, rv_policy::reference, cleanup, &is_new);
 		if (is_new) {
 			auto pp = std::static_pointer_cast<void>(value);
 			shared_from_cpp(std::move(pp), result.ptr());
