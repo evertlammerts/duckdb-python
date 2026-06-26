@@ -207,7 +207,7 @@ struct PythonObject {
 template <class T>
 class Optional : public py::object {
 public:
-	Optional(const py::object &o) : py::object(o, borrowed_t {}) {
+	Optional(const py::object &o) : py::object(o, py::detail::borrow_t {}) {
 	}
 	using py::object::object;
 
@@ -219,23 +219,14 @@ public:
 
 class FileLikeObject : public py::object {
 public:
-	FileLikeObject(const py::object &o) : py::object(o, borrowed_t {}) {
+	FileLikeObject(const py::object &o) : py::object(o, py::detail::borrow_t {}) {
 	}
 	using py::object::object;
 
 public:
 	static bool check_(const py::handle &object) {
-		return py::isinstance(object, py::module::import("io").attr("IOBase"));
+		return py::isinstance(object, py::module_::import_("io").attr("IOBase"));
 	}
 };
 
 } // namespace duckdb
-
-namespace pybind11 {
-namespace detail {
-template <typename T>
-struct handle_type_name<duckdb::Optional<T>> {
-	static constexpr auto name = const_name("typing.Optional[") + concat(make_caster<T>::name) + const_name("]");
-};
-} // namespace detail
-} // namespace pybind11

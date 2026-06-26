@@ -27,7 +27,7 @@ namespace pyarrow {
 
 class RecordBatchReader : public py::object {
 public:
-	RecordBatchReader(const py::object &o) : py::object(o, borrowed_t {}) {
+	RecordBatchReader(const py::object &o) : py::object(o, py::detail::borrow_t {}) {
 	}
 	using py::object::object;
 
@@ -39,7 +39,7 @@ public:
 
 class Table : public py::object {
 public:
-	Table(const py::object &o) : py::object(o, borrowed_t {}) {
+	Table(const py::object &o) : py::object(o, py::detail::borrow_t {}) {
 	}
 	using py::object::object;
 
@@ -110,15 +110,3 @@ private:
 };
 } // namespace duckdb
 
-namespace pybind11 {
-namespace detail {
-template <>
-struct handle_type_name<duckdb::pyarrow::RecordBatchReader> {
-	static constexpr auto name = _("pyarrow.lib.RecordBatchReader");
-};
-template <>
-struct handle_type_name<duckdb::pyarrow::Table> {
-	static constexpr auto name = _("pyarrow.lib.Table");
-};
-} // namespace detail
-} // namespace pybind11

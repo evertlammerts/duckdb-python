@@ -41,7 +41,7 @@ void PathLikeProcessor::AddFile(const py::object &object) {
 	}
 	if (py::isinstance<py::bytes>(object) || py::hasattr(object, "__fspath__")) {
 		// A bytes path or an os.PathLike object (e.g. pathlib.Path) - decode it to a string
-		auto fsdecode = py::module_::import("os").attr("fsdecode");
+		auto fsdecode = py::module_::import_("os").attr("fsdecode");
 		all_files.push_back(std::string(py::str(fsdecode(object))));
 		return;
 	}

@@ -43,7 +43,7 @@ void NumpyBind::Bind(ClientContext &context, py::handle df, vector<PandasColumnB
 			// here we call numpy.unique
 			// this function call will return the unique values of a given array
 			// together with the indices to reconstruct the given array
-			auto uniq = py::cast<py::tuple>(py::module_::import("numpy").attr("unique")(column, false, true));
+			auto uniq = py::cast<py::tuple>(py::module_::import_("numpy").attr("unique")(column, false, true));
 			vector<string> enum_entries = py::cast<vector<string>>(uniq.attr("__getitem__")(0));
 			idx_t size = enum_entries.size();
 			Vector enum_entries_vec(LogicalType::VARCHAR, size);

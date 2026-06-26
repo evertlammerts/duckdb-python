@@ -405,7 +405,7 @@ PandasDataFrame DuckDBPyResult::FetchDFChunk(idx_t num_of_vectors, bool date_as_
 
 py::dict DuckDBPyResult::FetchPyTorch() {
 	auto result_dict = FetchNumpyInternal();
-	auto from_numpy = py::module::import("torch").attr("from_numpy");
+	auto from_numpy = py::module_::import_("torch").attr("from_numpy");
 	for (auto &item : result_dict) {
 		result_dict[item.first] = from_numpy(item.second);
 	}
@@ -414,7 +414,7 @@ py::dict DuckDBPyResult::FetchPyTorch() {
 
 py::dict DuckDBPyResult::FetchTF() {
 	auto result_dict = FetchNumpyInternal();
-	auto convert_to_tensor = py::module::import("tensorflow").attr("convert_to_tensor");
+	auto convert_to_tensor = py::module_::import_("tensorflow").attr("convert_to_tensor");
 	for (auto &item : result_dict) {
 		result_dict[item.first] = convert_to_tensor(item.second);
 	}
@@ -590,7 +590,7 @@ duckdb::pyarrow::RecordBatchReader DuckDBPyResult::FetchRecordBatchReader(idx_t 
 		throw InternalException("FetchRecordBatchReader called with unsupported query result: %d", result->type);
 	}
 	py::gil_scoped_acquire acquire;
-	auto pyarrow_lib_module = py::module::import("pyarrow").attr("lib");
+	auto pyarrow_lib_module = py::module_::import_("pyarrow").attr("lib");
 	auto record_batch_reader_func = pyarrow_lib_module.attr("RecordBatchReader").attr("_import_from_c");
 	auto stream = FetchArrowArrayStream(rows_per_batch);
 	py::object record_batch_reader = record_batch_reader_func((uint64_t)&stream); // NOLINT

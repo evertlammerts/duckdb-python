@@ -49,7 +49,7 @@ bool PandasDataFrame::IsPyArrowBacked(const py::handle &df) {
 py::object PandasDataFrame::ToArrowTable(const py::object &df) {
 	D_ASSERT(py::gil_check());
 	try {
-		return py::module_::import("pyarrow").attr("lib").attr("Table").attr("from_pandas")(df);
+		return py::module_::import_("pyarrow").attr("lib").attr("Table").attr("from_pandas")(df);
 	} catch (py::python_error &) {
 		// We don't fetch the original Python exception because it can cause a segfault
 		// The cause of this is not known yet, for now we just side-step the issue.

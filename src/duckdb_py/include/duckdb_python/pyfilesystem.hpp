@@ -17,7 +17,7 @@ public:
 
 public:
 	static bool check_(const py::handle &object) {
-		return py::isinstance(object, py::module::import("duckdb.filesystem").attr("ModifiedMemoryFileSystem"));
+		return py::isinstance(object, py::module_::import_("duckdb.filesystem").attr("ModifiedMemoryFileSystem"));
 	}
 };
 
@@ -27,7 +27,7 @@ public:
 
 public:
 	static bool check_(const py::handle &object) {
-		return py::isinstance(object, py::module::import("fsspec").attr("AbstractFileSystem"));
+		return py::isinstance(object, py::module_::import_("fsspec").attr("AbstractFileSystem"));
 	}
 };
 
@@ -104,12 +104,3 @@ public:
 };
 
 } // namespace duckdb
-
-namespace pybind11 {
-namespace detail {
-template <>
-struct handle_type_name<duckdb::AbstractFileSystem> {
-	static constexpr auto name = const_name("fsspec.AbstractFileSystem");
-};
-} // namespace detail
-} // namespace pybind11

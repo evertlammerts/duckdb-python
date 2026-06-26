@@ -750,7 +750,7 @@ py::object ArrayWrapper::ToArray() const {
 	auto nullmask = std::move(mask->array.GetArray());
 
 	// create masked array and return it
-	auto masked_array = py::module::import("numpy.ma").attr("masked_array")(values, nullmask);
+	auto masked_array = py::module_::import_("numpy.ma").attr("masked_array")(values, nullmask);
 	return masked_array;
 }
 

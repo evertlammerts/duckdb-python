@@ -16,7 +16,7 @@ namespace duckdb {
 
 void TransformDuckToArrowChunk(py::object pyarrow_schema, ArrowArray &data, py::list &batches) {
 	py::gil_assert();
-	auto pyarrow_lib_module = py::module::import("pyarrow").attr("lib");
+	auto pyarrow_lib_module = py::module_::import_("pyarrow").attr("lib");
 	auto batch_import_func = pyarrow_lib_module.attr("RecordBatch").attr("_import_from_c");
 	batches.append(batch_import_func(reinterpret_cast<uint64_t>(&data), pyarrow_schema));
 }
@@ -133,7 +133,7 @@ unique_ptr<ArrowArrayStreamWrapper> PythonTableArrowArrayStreamFactory::Produce(
 		if (import_cache_check.pyarrow.dataset()) {
 			// Tier A: full pushdown via pyarrow.dataset
 			// Import as RecordBatchReader, feed through Scanner.from_batches for projection/filter pushdown.
-			auto pyarrow_lib_module = py::module::import("pyarrow").attr("lib");
+			auto pyarrow_lib_module = py::module_::import_("pyarrow").attr("lib");
 			auto import_func = pyarrow_lib_module.attr("RecordBatchReader").attr("_import_from_c");
 			py::object reader = import_func(reinterpret_cast<uint64_t>(stream));
 			// _import_from_c takes ownership of the stream; null out to prevent capsule double-free

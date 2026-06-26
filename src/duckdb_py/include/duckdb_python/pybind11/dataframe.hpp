@@ -15,7 +15,7 @@ namespace duckdb {
 
 class PandasDataFrame : public py::object {
 public:
-	PandasDataFrame(const py::object &o) : py::object(o, borrowed_t {}) {
+	PandasDataFrame(const py::object &o) : py::object(o, py::detail::borrow_t {}) {
 	}
 	using py::object::object;
 
@@ -27,7 +27,7 @@ public:
 
 class PolarsDataFrame : public py::object {
 public:
-	PolarsDataFrame(const py::object &o) : py::object(o, borrowed_t {}) {
+	PolarsDataFrame(const py::object &o) : py::object(o, py::detail::borrow_t {}) {
 	}
 	using py::object::object;
 
@@ -37,12 +37,3 @@ public:
 	static bool check_(const py::handle &object); // NOLINT
 };
 } // namespace duckdb
-
-namespace pybind11 {
-namespace detail {
-template <>
-struct handle_type_name<duckdb::PandasDataFrame> {
-	static constexpr auto name = _("pandas.DataFrame");
-};
-} // namespace detail
-} // namespace pybind11

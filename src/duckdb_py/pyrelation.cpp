@@ -1015,7 +1015,7 @@ PolarsDataFrame DuckDBPyRelation::ToPolars(idx_t batch_size, bool lazy) {
 	if (!lazy) {
 		auto arrow = ToArrowTableInternal(batch_size, true);
 		return py::cast<PolarsDataFrame>(
-		    pybind11::module_::import("polars").attr("from_arrow")(arrow, py::arg("rechunk") = false));
+		    pybind11::module_::import_("polars").attr("from_arrow")(arrow, py::arg("rechunk") = false));
 	}
 	auto &import_cache = *DuckDBPyConnection::ImportCache();
 	auto lazy_frame_produce = import_cache.duckdb.polars_io.duckdb_source();
@@ -1038,7 +1038,7 @@ PolarsDataFrame DuckDBPyRelation::ToPolars(idx_t batch_size, bool lazy) {
 	auto empty_table = pyarrow::ToArrowTable(types, result_names, batches, client_properties);
 
 	// And we extract the polars schema from the arrow table
-	auto polars_df = py::cast<PolarsDataFrame>(pybind11::module_::import("polars").attr("DataFrame")(empty_table));
+	auto polars_df = py::cast<PolarsDataFrame>(pybind11::module_::import_("polars").attr("DataFrame")(empty_table));
 	auto polars_schema = polars_df.attr("schema");
 
 	return lazy_frame_produce(*this, polars_schema);

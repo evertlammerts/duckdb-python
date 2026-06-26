@@ -38,7 +38,7 @@ py::handle PythonImportCacheItem::AddCache(PythonImportCache &cache, py::object 
 void PythonImportCacheItem::LoadModule(PythonImportCache &cache) {
 	try {
 		py::gil_assert();
-		object = AddCache(cache, std::move(py::module::import(name.c_str())));
+		object = AddCache(cache, std::move(py::module_::import_(name.c_str())));
 		load_succeeded = true;
 	} catch (py::python_error &e) {
 		if (IsRequired()) {

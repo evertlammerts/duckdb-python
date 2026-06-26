@@ -171,7 +171,7 @@ static bool FromNumpyType(const py::object &type, LogicalType &result) {
 }
 
 static LogicalType FromType(const py::type &obj) {
-	py::module_ builtins = py::module_::import("builtins");
+	py::module_ builtins = py::module_::import_("builtins");
 	if (obj.is(builtins.attr("str"))) {
 		return LogicalType::VARCHAR;
 	}
@@ -251,8 +251,8 @@ static LogicalType FromUnionType(const py::object &obj) {
 };
 
 static LogicalType FromGenericAlias(const py::object &obj) {
-	py::module_ builtins = py::module_::import("builtins");
-	py::module_ types = py::module_::import("types");
+	py::module_ builtins = py::module_::import_("builtins");
+	py::module_ types = py::module_::import_("types");
 	auto generic_alias = types.attr("GenericAlias");
 	D_ASSERT(py::isinstance(obj, generic_alias));
 	auto origin = obj.attr("__origin__");

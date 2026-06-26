@@ -248,7 +248,7 @@ static unique_ptr<TableRef> ReplaceInternal(ClientContext &context, const string
 	py::gil_scoped_acquire acquire;
 	py::object current_frame;
 	try {
-		current_frame = py::module::import("inspect").attr("currentframe")();
+		current_frame = py::module_::import_("inspect").attr("currentframe")();
 	} catch (py::python_error &e) {
 		//! Likely no call stack exists, just safely return
 		return nullptr;

@@ -319,7 +319,7 @@ static void UnsetPythonException() {
 /**
  * @see https://peps.python.org/pep-0249/#exceptions
  */
-void RegisterExceptions(const py::module &m) {
+void RegisterExceptions(const py::module_ &m) {
 	// The base class is mapped to Error in python to somewhat match the DBAPI 2.0 specifications
 	py::register_exception<Warning>(m, "Warning");
 	auto error = py::register_exception<PyError>(m, "Error").ptr();
@@ -357,7 +357,7 @@ void RegisterExceptions(const py::module &m) {
 		auto http_exc = py::register_exception<PyHTTPException>(m, "HTTPException", io_exception);
 		HTTP_EXCEPTION = http_exc.ptr();
 		const auto string_type = py::type::of(py::str());
-		const auto Dict = py::module_::import("typing").attr("Dict");
+		const auto Dict = py::module_::import_("typing").attr("Dict");
 		http_exc.attr("__annotations__") = py::dict(
 		    py::arg("status_code") = py::type::of(py::int_()), py::arg("body") = string_type,
 		    py::arg("reason") = string_type, py::arg("headers") = Dict[py::make_tuple(string_type, string_type)]);

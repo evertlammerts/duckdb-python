@@ -4,6 +4,6 @@ namespace py = nanobind;
 
 namespace duckdb {
 
-void RegisterExceptions(const py::module &m);
+void RegisterExceptions(const py::module_ &m);
 
 } // namespace duckdb

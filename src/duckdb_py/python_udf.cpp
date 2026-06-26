@@ -228,14 +228,14 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 				throw InvalidInputException("Python exception occurred while executing the UDF: %s", exception.what());
 			} else if (exception_handling == PythonExceptionHandling::RETURN_NULL) {
 				PyErr_Clear();
-				python_object = py::module_::import("pyarrow").attr("nulls")(count);
+				python_object = py::module_::import_("pyarrow").attr("nulls")(count);
 			} else {
 				throw NotImplementedException("Exception handling type not implemented");
 			}
 		} else {
 			python_object = py::steal<py::object>(ret);
 		}
-		if (!py::isinstance(python_object, py::module_::import("pyarrow").attr("lib").attr("Table"))) {
+		if (!py::isinstance(python_object, py::module_::import_("pyarrow").attr("lib").attr("Table"))) {
 			// Try to convert into a table
 			py::list single_array(1);
 			py::list single_name(1);
@@ -243,7 +243,7 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 			single_array[0] = python_object;
 			single_name[0] = "c0";
 			try {
-				python_object = py::module_::import("pyarrow").attr("lib").attr("Table").attr("from_arrays")(
+				python_object = py::module_::import_("pyarrow").attr("lib").attr("Table").attr("from_arrays")(
 				    single_array, py::arg("names") = single_name);
 			} catch (py::python_error &) {
 				throw InvalidInputException("Could not convert the result into an Arrow Table");
@@ -460,7 +460,7 @@ public:
 		const int32_t PYTHON_3_10_HEX = 0x030a00f0;
 		auto python_version = PY_VERSION_HEX;
 
-		auto signature_func = py::module_::import("inspect").attr("signature");
+		auto signature_func = py::module_::import_("inspect").attr("signature");
 		if (python_version >= PYTHON_3_10_HEX) {
 			return signature_func(udf, py::arg("eval_str") = true);
 		} else {
@@ -472,7 +472,7 @@ public:
 		auto signature = GetSignature(udf);
 		auto sig_params = signature.attr("parameters");
 		auto return_annotation = signature.attr("return_annotation");
-		auto empty = py::module_::import("inspect").attr("Signature").attr("empty");
+		auto empty = py::module_::import_("inspect").attr("Signature").attr("empty");
 		if (!py::none().is(return_annotation) && !empty.is(return_annotation)) {
 			std::shared_ptr<DuckDBPyType> pytype;
 			if (py::try_cast<std::shared_ptr<DuckDBPyType>>(return_annotation, pytype)) {
