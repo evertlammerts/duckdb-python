@@ -1259,7 +1259,7 @@ static Value NestedDictToStruct(const py::object &dictionary) {
 		auto item_key_str = py::cast<std::string>(py::str(item_key));
 
 		if (py::isinstance<py::int_>(item_value)) {
-			int32_t item_value_int = py::int_(item_value);
+			int32_t item_value_int = (int32_t)py::int_(item_value);
 			children.push_back(std::make_pair(Identifier(item_key_str), Value(item_value_int)));
 		} else if (py::isinstance<py::dict>(item_value)) {
 			children.push_back(std::make_pair(Identifier(item_key_str), NestedDictToStruct(item_value)));
@@ -1283,7 +1283,7 @@ void DuckDBPyRelation::ToParquet(const string &filename, const py::object &compr
 		if (!py::isinstance<py::str>(compression)) {
 			throw InvalidInputException("to_parquet only accepts 'compression' as a string");
 		}
-		options["compression"] = {Value(py::str(compression))};
+		options["compression"] = {Value(py::cast<std::string>(compression))};
 	}
 
 	if (!py::none().is(field_ids)) {
@@ -1291,7 +1291,7 @@ void DuckDBPyRelation::ToParquet(const string &filename, const py::object &compr
 			Value field_ids_value = NestedDictToStruct(field_ids);
 			options["field_ids"] = {field_ids_value};
 		} else if (py::isinstance<py::str>(field_ids)) {
-			options["field_ids"] = {Value(py::str(field_ids))};
+			options["field_ids"] = {Value(py::cast<std::string>(field_ids))};
 		} else {
 			throw InvalidInputException("to_parquet only accepts 'field_ids' as a dictionary or 'auto'");
 		}
@@ -1299,10 +1299,10 @@ void DuckDBPyRelation::ToParquet(const string &filename, const py::object &compr
 
 	if (!py::none().is(row_group_size_bytes)) {
 		if (py::isinstance<py::int_>(row_group_size_bytes)) {
-			int64_t row_group_size_bytes_int = py::int_(row_group_size_bytes);
+			int64_t row_group_size_bytes_int = (int64_t)py::int_(row_group_size_bytes);
 			options["row_group_size_bytes"] = {Value(row_group_size_bytes_int)};
 		} else if (py::isinstance<py::str>(row_group_size_bytes)) {
-			options["row_group_size_bytes"] = {Value(py::str(row_group_size_bytes))};
+			options["row_group_size_bytes"] = {Value(py::cast<std::string>(row_group_size_bytes))};
 		} else {
 			throw InvalidInputException(
 			    "to_parquet only accepts 'row_group_size_bytes' as an integer or 'auto' string");
@@ -1313,7 +1313,7 @@ void DuckDBPyRelation::ToParquet(const string &filename, const py::object &compr
 		if (!py::isinstance<py::int_>(row_group_size)) {
 			throw InvalidInputException("to_parquet only accepts 'row_group_size' as an integer");
 		}
-		int64_t row_group_size_int = py::int_(row_group_size);
+		int64_t row_group_size_int = (int64_t)py::int_(row_group_size);
 		options["row_group_size"] = {Value(row_group_size_int)};
 	}
 
@@ -1322,12 +1322,12 @@ void DuckDBPyRelation::ToParquet(const string &filename, const py::object &compr
 			throw InvalidInputException("to_parquet only accepts 'partition_by' as a list of strings");
 		}
 		vector<Value> partition_by_values;
-		const py::list &partition_fields = partition_by;
-		for (auto &field : partition_fields) {
+		py::list partition_fields = py::cast<py::list>(partition_by);
+		for (auto field : partition_fields) {
 			if (!py::isinstance<py::str>(field)) {
 				throw InvalidInputException("to_parquet only accepts 'partition_by' as a list of strings");
 			}
-			partition_by_values.emplace_back(py::str(field));
+			partition_by_values.emplace_back(py::cast<std::string>(py::str(field)));
 		}
 		options["partition_by"] = {partition_by_values};
 	}
@@ -1371,15 +1371,15 @@ void DuckDBPyRelation::ToParquet(const string &filename, const py::object &compr
 		if (!py::isinstance<py::str>(filename_pattern)) {
 			throw InvalidInputException("to_parquet only accepts 'filename_pattern' as a string");
 		}
-		options["filename_pattern"] = {Value(py::str(filename_pattern))};
+		options["filename_pattern"] = {Value(py::cast<std::string>(filename_pattern))};
 	}
 
 	if (!py::none().is(file_size_bytes)) {
 		if (py::isinstance<py::int_>(file_size_bytes)) {
-			int64_t file_size_bytes_int = py::int_(file_size_bytes);
+			int64_t file_size_bytes_int = (int64_t)py::int_(file_size_bytes);
 			options["file_size_bytes"] = {Value(file_size_bytes_int)};
 		} else if (py::isinstance<py::str>(file_size_bytes)) {
-			options["file_size_bytes"] = {Value(py::str(file_size_bytes))};
+			options["file_size_bytes"] = {Value(py::cast<std::string>(file_size_bytes))};
 		} else {
 			throw InvalidInputException("to_parquet only accepts 'file_size_bytes' as an integer or string");
 		}
@@ -1402,14 +1402,14 @@ void DuckDBPyRelation::ToCSV(const string &filename, const py::object &sep, cons
 		if (!py::isinstance<py::str>(sep)) {
 			throw InvalidInputException("to_csv only accepts 'sep' as a string");
 		}
-		options["delimiter"] = {Value(py::str(sep))};
+		options["delimiter"] = {Value(py::cast<std::string>(sep))};
 	}
 
 	if (!py::none().is(na_rep)) {
 		if (!py::isinstance<py::str>(na_rep)) {
 			throw InvalidInputException("to_csv only accepts 'na_rep' as a string");
 		}
-		options["null"] = {Value(py::str(na_rep))};
+		options["null"] = {Value(py::cast<std::string>(na_rep))};
 	}
 
 	if (!py::none().is(header)) {
@@ -1423,40 +1423,40 @@ void DuckDBPyRelation::ToCSV(const string &filename, const py::object &sep, cons
 		if (!py::isinstance<py::str>(quotechar)) {
 			throw InvalidInputException("to_csv only accepts 'quotechar' as a string");
 		}
-		options["quote"] = {Value(py::str(quotechar))};
+		options["quote"] = {Value(py::cast<std::string>(quotechar))};
 	}
 
 	if (!py::none().is(escapechar)) {
 		if (!py::isinstance<py::str>(escapechar)) {
 			throw InvalidInputException("to_csv only accepts 'escapechar' as a string");
 		}
-		options["escape"] = {Value(py::str(escapechar))};
+		options["escape"] = {Value(py::cast<std::string>(escapechar))};
 	}
 
 	if (!py::none().is(date_format)) {
 		if (!py::isinstance<py::str>(date_format)) {
 			throw InvalidInputException("to_csv only accepts 'date_format' as a string");
 		}
-		options["dateformat"] = {Value(py::str(date_format))};
+		options["dateformat"] = {Value(py::cast<std::string>(date_format))};
 	}
 
 	if (!py::none().is(timestamp_format)) {
 		if (!py::isinstance<py::str>(timestamp_format)) {
 			throw InvalidInputException("to_csv only accepts 'timestamp_format' as a string");
 		}
-		options["timestampformat"] = {Value(py::str(timestamp_format))};
+		options["timestampformat"] = {Value(py::cast<std::string>(timestamp_format))};
 	}
 
 	if (!py::none().is(quoting)) {
 		// TODO: add list of strings as valid option
 		if (py::isinstance<py::str>(quoting)) {
-			string quoting_option = StringUtil::Lower(py::str(quoting));
+			string quoting_option = StringUtil::Lower(py::cast<std::string>(py::str(quoting)));
 			if (quoting_option != "force" && quoting_option != "all") {
 				throw InvalidInputException(
 				    "to_csv 'quoting' supported options are ALL or FORCE (both set FORCE_QUOTE=True)");
 			}
 		} else if (py::isinstance<py::int_>(quoting)) {
-			int64_t quoting_value = py::int_(quoting);
+			int64_t quoting_value = (int64_t)py::int_(quoting);
 			// csv.QUOTE_ALL expands to 1
 			static constexpr int64_t QUOTE_ALL = 1;
 			if (quoting_value != QUOTE_ALL) {
@@ -1473,7 +1473,7 @@ void DuckDBPyRelation::ToCSV(const string &filename, const py::object &sep, cons
 		if (!py::isinstance<py::str>(encoding)) {
 			throw InvalidInputException("to_csv only accepts 'encoding' as a string");
 		}
-		string encoding_option = StringUtil::Lower(py::str(encoding));
+		string encoding_option = StringUtil::Lower(py::cast<std::string>(py::str(encoding)));
 		if (encoding_option != "utf-8" && encoding_option != "utf8") {
 			throw InvalidInputException("The only supported encoding option is 'UTF8");
 		}
@@ -1483,7 +1483,7 @@ void DuckDBPyRelation::ToCSV(const string &filename, const py::object &sep, cons
 		if (!py::isinstance<py::str>(compression)) {
 			throw InvalidInputException("to_csv only accepts 'compression' as a string");
 		}
-		options["compression"] = {Value(py::str(compression))};
+		options["compression"] = {Value(py::cast<std::string>(compression))};
 	}
 
 	if (!py::none().is(overwrite)) {
@@ -1512,12 +1512,12 @@ void DuckDBPyRelation::ToCSV(const string &filename, const py::object &sep, cons
 			throw InvalidInputException("to_csv only accepts 'partition_by' as a list of strings");
 		}
 		vector<Value> partition_by_values;
-		const py::list &partition_fields = partition_by;
-		for (auto &field : partition_fields) {
+		py::list partition_fields = py::cast<py::list>(partition_by);
+		for (auto field : partition_fields) {
 			if (!py::isinstance<py::str>(field)) {
 				throw InvalidInputException("to_csv only accepts 'partition_by' as a list of strings");
 			}
-			partition_by_values.emplace_back(py::str(field));
+			partition_by_values.emplace_back(py::cast<std::string>(py::str(field)));
 		}
 		options["partition_by"] = {partition_by_values};
 	}
@@ -1732,7 +1732,8 @@ void DuckDBPyRelation::Print(const Optional<py::int_> &max_width, const Optional
 		}
 	}
 
-	py::print(py::str(ToStringInternal(config, invalidate_cache)));
+	auto str_repr = ToStringInternal(config, invalidate_cache);
+	py::print(py::str(str_repr.c_str(), str_repr.size()));
 }
 
 static ProfilerPrintFormat GetExplainFormat(ExplainType type) {
@@ -1746,7 +1747,7 @@ static void DisplayHTML(const string &html) {
 	py::gil_scoped_acquire gil;
 	auto &import_cache = *DuckDBPyConnection::ImportCache();
 	auto html_attr = import_cache.IPython.display.HTML();
-	auto html_object = html_attr(py::str(html));
+	auto html_object = html_attr(py::str(html.c_str(), html.size()));
 	auto display_attr = import_cache.IPython.display.display();
 	display_attr(html_object);
 }
@@ -1852,7 +1853,8 @@ py::str DuckDBPyRelation::Type() {
 	if (!rel) {
 		return py::str("QUERY_RESULT");
 	}
-	return py::str(RelationTypeToString(rel->type));
+	auto type_str = RelationTypeToString(rel->type);
+	return py::str(type_str.c_str(), type_str.size());
 }
 
 py::list DuckDBPyRelation::Columns() {

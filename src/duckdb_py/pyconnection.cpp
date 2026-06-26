@@ -852,7 +852,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadJSON(
 				string actual_type = py::cast<std::string>(py::str((column_name).type()));
 				throw BinderException("The provided column type must be a str, not of type '%s'", actual_type);
 			}
-			struct_fields.emplace_back(py::str(column_name), Value(py::str(type)));
+			struct_fields.emplace_back(py::cast<std::string>(py::str(column_name)), Value(py::cast<std::string>(type)));
 		}
 		auto dtype_struct = Value::STRUCT(std::move(struct_fields));
 		options["columns"] = std::move(dtype_struct);
@@ -1252,10 +1252,10 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadCSV(const py::object &
 		} else if (py::is_list_like(dtype)) {
 			vector<Value> list_values;
 			py::list dtype_list = py::cast<py::list>(dtype);
-			for (auto &child : dtype_list) {
+			for (auto child : dtype_list) {
 				std::shared_ptr<DuckDBPyType> sql_type;
 				if (!py::try_cast(child, sql_type)) {
-					list_values.push_back(Value(py::str(child)));
+					list_values.push_back(Value(py::cast<std::string>(child)));
 				} else {
 					list_values.push_back(sql_type->ToString());
 				}
@@ -1272,9 +1272,9 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadCSV(const py::object &
 		throw InvalidInputException("read_csv takes either 'delimiter' or 'sep', not both");
 	}
 	if (has_sep) {
-		bind_parameters["delim"] = Value(py::str(sep));
+		bind_parameters["delim"] = Value(py::cast<std::string>(sep));
 	} else if (has_delimiter) {
-		bind_parameters["delim"] = Value(py::str(delimiter));
+		bind_parameters["delim"] = Value(py::cast<std::string>(delimiter));
 	}
 
 	if (!py::none().is(files_to_sniff)) {
@@ -1290,7 +1290,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadCSV(const py::object &
 		}
 		vector<Value> names;
 		py::list names_list = py::cast<py::list>(names_p);
-		for (auto &elem : names_list) {
+		for (auto elem : names_list) {
 			if (!py::isinstance<py::str>(elem)) {
 				throw InvalidInputException("read_csv 'names' list has to consist of only strings");
 			}
@@ -1304,10 +1304,10 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadCSV(const py::object &
 		if (!py::isinstance<py::str>(na_values) && !py::is_list_like(na_values)) {
 			throw InvalidInputException("read_csv only accepts 'na_values' as a string or a list of strings");
 		} else if (py::isinstance<py::str>(na_values)) {
-			null_values.push_back(Value(py::str(na_values)));
+			null_values.push_back(Value(py::cast<std::string>(na_values)));
 		} else {
 			py::list null_list = py::cast<py::list>(na_values);
-			for (auto &elem : null_list) {
+			for (auto elem : null_list) {
 				if (!py::isinstance<py::str>(elem)) {
 					throw InvalidInputException("read_csv 'na_values' list has to consist of only strings");
 				}
@@ -1335,35 +1335,35 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadCSV(const py::object &
 		if (!py::isinstance<py::str>(quotechar)) {
 			throw InvalidInputException("read_csv only accepts 'quotechar' as a string");
 		}
-		bind_parameters["quote"] = Value(py::str(quotechar));
+		bind_parameters["quote"] = Value(py::cast<std::string>(quotechar));
 	}
 
 	if (!py::none().is(comment)) {
 		if (!py::isinstance<py::str>(comment)) {
 			throw InvalidInputException("read_csv only accepts 'comment' as a string");
 		}
-		bind_parameters["comment"] = Value(py::str(comment));
+		bind_parameters["comment"] = Value(py::cast<std::string>(comment));
 	}
 
 	if (!py::none().is(thousands_separator)) {
 		if (!py::isinstance<py::str>(thousands_separator)) {
 			throw InvalidInputException("read_csv only accepts 'thousands' as a string");
 		}
-		bind_parameters["thousands"] = Value(py::str(thousands_separator));
+		bind_parameters["thousands"] = Value(py::cast<std::string>(thousands_separator));
 	}
 
 	if (!py::none().is(escapechar)) {
 		if (!py::isinstance<py::str>(escapechar)) {
 			throw InvalidInputException("read_csv only accepts 'escapechar' as a string");
 		}
-		bind_parameters["escape"] = Value(py::str(escapechar));
+		bind_parameters["escape"] = Value(py::cast<std::string>(escapechar));
 	}
 
 	if (!py::none().is(encoding)) {
 		if (!py::isinstance<py::str>(encoding)) {
 			throw InvalidInputException("read_csv only accepts 'encoding' as a string");
 		}
-		string encoding_str = StringUtil::Lower(py::str(encoding));
+		string encoding_str = StringUtil::Lower(py::cast<std::string>(encoding));
 		if (encoding_str != "utf8" && encoding_str != "utf-8") {
 			throw BinderException("Copy is only supported for UTF-8 encoded files, ENCODING 'UTF-8'");
 		}
@@ -1373,7 +1373,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadCSV(const py::object &
 		if (!py::isinstance<py::str>(date_format)) {
 			throw InvalidInputException("read_csv only accepts 'date_format' as a string");
 		}
-		bind_parameters["dateformat"] = Value(py::str(date_format));
+		bind_parameters["dateformat"] = Value(py::cast<std::string>(date_format));
 	}
 
 	if (!py::none().is(auto_detect)) {
@@ -1397,7 +1397,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadCSV(const py::object &
 		if (!py::isinstance<py::str>(timestamp_format)) {
 			throw InvalidInputException("read_csv only accepts 'timestamp_format' as a string");
 		}
-		bind_parameters["timestampformat"] = Value(py::str(timestamp_format));
+		bind_parameters["timestampformat"] = Value(py::cast<std::string>(timestamp_format));
 	}
 
 	if (!py::none().is(sample_size)) {
@@ -1556,7 +1556,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadCSV(const py::object &
 				string actual_type = py::cast<std::string>(py::str((column_name).type()));
 				throw BinderException("The provided column type must be a str, not of type '%s'", actual_type);
 			}
-			struct_fields.emplace_back(py::str(column_name), Value(py::str(type)));
+			struct_fields.emplace_back(py::cast<std::string>(py::str(column_name)), Value(py::cast<std::string>(type)));
 		}
 		auto dtype_struct = Value::STRUCT(std::move(struct_fields));
 		bind_parameters["columns"] = std::move(dtype_struct);
@@ -1678,7 +1678,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::Table(const string &tname)
 		// CatalogException will be of the type '... is not a table'
 		// Not a table in the database, make a query relation that can perform replacement scans
 		auto sql_query = StringUtil::Format("from %s", SQLIdentifier::ToString(tname));
-		return RunQuery(py::str(sql_query), tname);
+		return RunQuery(py::str(sql_query.c_str(), sql_query.size()), tname);
 	}
 }
 
@@ -1810,7 +1810,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::FromParquet(const py::obje
 		if (!py::isinstance<py::str>(compression)) {
 			throw InvalidInputException("from_parquet only accepts 'compression' as a string");
 		}
-		named_parameters["compression"] = Value(py::str(compression));
+		named_parameters["compression"] = Value(py::cast<std::string>(compression));
 	}
 	D_ASSERT(py::gil_check());
 	py::gil_scoped_release gil;
@@ -1940,9 +1940,9 @@ void DuckDBPyConnection::InstallExtension(const string &extension, bool force_in
 	}
 	string repository_string;
 	if (has_repository) {
-		repository_string = py::str(repository);
+		repository_string = py::cast<std::string>(py::str(repository));
 	} else if (has_repository_url) {
-		repository_string = py::str(repository_url);
+		repository_string = py::cast<std::string>(py::str(repository_url));
 	}
 
 	if ((has_repository || has_repository_url) && repository_string.empty()) {

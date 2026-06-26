@@ -289,7 +289,7 @@ static void InitializeDunderMethods(py::class_<DuckDBPyExpression> &m) {
 
 static void InitializeImplicitConversion(py::class_<DuckDBPyExpression> &m) {
 	m.def(py::new_([](const string &name) {
-		auto names = py::make_tuple(py::str(name));
+		auto names = py::cast<py::args>(py::make_tuple(py::str(name.c_str(), name.size())));
 		return DuckDBPyExpression::ColumnExpression(names);
 	}));
 	m.def(py::new_([](const py::object &obj) {
