@@ -315,7 +315,7 @@ void DuckDBPyConnection::UnregisterFilesystem(const py::str &name) {
 	auto &database = con.GetDatabase();
 	auto &fs = database.GetFileSystem();
 
-	fs.ExtractSubSystem(name);
+	fs.ExtractSubSystem(py::cast<std::string>(name));
 }
 
 void DuckDBPyConnection::RegisterFilesystem(AbstractFileSystem filesystem) {
@@ -335,10 +335,10 @@ void DuckDBPyConnection::RegisterFilesystem(AbstractFileSystem filesystem) {
 
 	vector<string> protocols;
 	if (py::isinstance<py::str>(protocol)) {
-		protocols.push_back(py::str(protocol));
+		protocols.push_back(py::cast<std::string>(py::str(protocol)));
 	} else {
 		for (const auto &sub_protocol : protocol) {
-			protocols.push_back(py::str(sub_protocol));
+			protocols.push_back(py::cast<std::string>(py::str(sub_protocol)));
 		}
 	}
 
@@ -350,7 +350,7 @@ py::list DuckDBPyConnection::ListFilesystems() {
 	auto subsystems = database.GetFileSystem().ListSubSystems();
 	py::list names;
 	for (auto &name : subsystems) {
-		names.append(py::str(name));
+		names.append(py::str(name.c_str(), name.size()));
 	}
 	return names;
 }
@@ -378,8 +378,8 @@ py::str DuckDBPyConnection::GetProfilingInformation(const string &format) {
 		    ". Valid options are: query_tree, json, query_tree_optimizer, no_output, html, graphviz.");
 	}
 	auto &connection = con.GetConnection();
-	py::str profiling_info = connection.GetProfilingInformation(format_enum);
-	return profiling_info;
+	auto profiling_info = connection.GetProfilingInformation(format_enum);
+	return py::str(profiling_info.c_str(), profiling_info.size());
 }
 
 void DuckDBPyConnection::EnableProfiling() {
@@ -512,7 +512,7 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::ExecuteMany(const py::ob
 
 	unique_ptr<QueryResult> query_result;
 	// Execute once for every set of parameters that are provided
-	for (auto &parameters : outer_list) {
+	for (auto parameters : outer_list) {
 		auto params = py::borrow<py::object>(parameters);
 		query_result = ExecuteInternal(*prep, std::move(params));
 	}
@@ -549,9 +549,13 @@ unique_ptr<QueryResult> DuckDBPyConnection::CompletePendingQuery(PendingQueryRes
 }
 
 py::list TransformNamedParameters(const case_insensitive_map_t<idx_t> &named_param_map, const py::dict &params) {
-	py::list new_params(params.size());
+	// nanobind py::list has no pre-sized constructor; pre-fill with None so indexed assignment below works
+	py::list new_params;
+	for (idx_t i = 0; i < params.size(); i++) {
+		new_params.append(py::none());
+	}
 
-	for (auto &item : params) {
+	for (auto item : params) {
 		const std::string &item_name = py::cast<std::string>(item.first);
 		auto entry = named_param_map.find(item_name);
 		if (entry == named_param_map.end()) {
@@ -698,7 +702,7 @@ vector<unique_ptr<SQLStatement>> DuckDBPyConnection::GetStatements(const py::obj
 }
 
 std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::ExecuteFromString(const string &query) {
-	return Execute(py::str(query));
+	return Execute(py::str(query.c_str(), query.size()));
 }
 
 std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::Execute(const py::object &query, py::object params) {
@@ -736,7 +740,7 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::Append(const string &nam
 	if (by_name) {
 		auto df_columns = value.attr("columns");
 		vector<string> column_names;
-		for (auto &column : df_columns) {
+		for (auto column : df_columns) {
 			column_names.push_back(py::cast<std::string>(py::str(column)));
 		}
 		columns += "(";
@@ -751,7 +755,7 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::Append(const string &nam
 	}
 
 	auto sql_query = StringUtil::Format("INSERT INTO %s %s SELECT * FROM __append_df", SQLIdentifier(name), columns);
-	return Execute(py::str(sql_query));
+	return Execute(py::str(sql_query.c_str(), sql_query.size()));
 }
 
 std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::RegisterPythonObject(const string &name,
@@ -834,12 +838,12 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadJSON(
 		if (!py::is_dict_like(columns)) {
 			throw BinderException("read_json only accepts 'columns' as a dict[str, str]");
 		}
-		py::dict columns_dict = columns;
+		py::dict columns_dict = py::cast<py::dict>(columns);
 		child_list_t<Value> struct_fields;
 
-		for (auto &kv : columns_dict) {
-			auto &column_name = kv.first;
-			auto &type = kv.second;
+		for (auto kv : columns_dict) { // nanobind dict iteration yields std::pair<handle,handle> by value
+			auto column_name = kv.first;
+			auto type = kv.second;
 			if (!py::isinstance<py::str>(column_name)) {
 				string actual_type = py::cast<std::string>(py::str((column_name).type()));
 				throw BinderException("The provided column name must be a str, not of type '%s'", actual_type);
@@ -909,7 +913,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadJSON(
 			string actual_type = py::cast<std::string>(py::str((sample_size).type()));
 			throw BinderException("read_json only accepts 'sample_size' as an integer, not '%s'", actual_type);
 		}
-		options["sample_size"] = Value::INTEGER(py::int_(sample_size));
+		options["sample_size"] = Value::INTEGER((int32_t)py::int_(sample_size));
 	}
 
 	if (!py::none().is(maximum_depth)) {
@@ -917,7 +921,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadJSON(
 			string actual_type = py::cast<std::string>(py::str((maximum_depth).type()));
 			throw BinderException("read_json only accepts 'maximum_depth' as an integer, not '%s'", actual_type);
 		}
-		options["maximum_depth"] = Value::INTEGER(py::int_(maximum_depth));
+		options["maximum_depth"] = Value::INTEGER((int32_t)py::int_(maximum_depth));
 	}
 
 	if (!py::none().is(maximum_object_size)) {
@@ -1062,7 +1066,7 @@ void ConvertBooleanValue(const py::object &value, string param_name, named_param
 
 		bool converted_value;
 		if (value_as_bool) {
-			converted_value = py::bool_(value);
+			converted_value = (bool)py::bool_(value);
 		} else if (value_as_int) {
 			if (static_cast<int>(py::int_(value)) != 0) {
 				throw InvalidInputException("read_csv only accepts 0 if '%s' is given as an integer", param_name);
@@ -1118,7 +1122,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadCSV(const py::object &
 	py::object comment = py::none();
 	py::object thousands_separator = py::none();
 
-	for (auto &arg : kwargs) {
+	for (auto arg : kwargs) { // nanobind dict iteration yields std::pair<handle,handle> by value
 		const auto &arg_name = py::cast<std::string>(py::str(arg.first));
 		if (arg_name == "header") {
 			header = kwargs[arg_name.c_str()];
@@ -1227,17 +1231,18 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadCSV(const py::object &
 		if (!py::isinstance<py::str>(compression)) {
 			throw InvalidInputException("read_csv only accepts 'compression' as a string");
 		}
-		bind_parameters["compression"] = Value(py::str(compression));
+		bind_parameters["compression"] = Value(py::cast<std::string>(py::str(compression)));
 	}
 
 	if (!py::none().is(dtype)) {
 		if (py::is_dict_like(dtype)) {
 			child_list_t<Value> struct_fields;
-			py::dict dtype_dict = dtype;
-			for (auto &kv : dtype_dict) {
+			py::dict dtype_dict = py::cast<py::dict>(dtype);
+			for (auto kv : dtype_dict) { // nanobind dict iteration yields std::pair<handle,handle> by value
 				std::shared_ptr<DuckDBPyType> sql_type;
 				if (!py::try_cast(kv.second, sql_type)) {
-					struct_fields.emplace_back(py::str(kv.first), py::str(kv.second));
+					struct_fields.emplace_back(py::cast<std::string>(py::str(kv.first)),
+					                           Value(py::cast<std::string>(py::str(kv.second))));
 				} else {
 					struct_fields.emplace_back(py::str(kv.first), Value(sql_type->ToString()));
 				}
@@ -1246,7 +1251,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadCSV(const py::object &
 			bind_parameters["dtypes"] = std::move(dtype_struct);
 		} else if (py::is_list_like(dtype)) {
 			vector<Value> list_values;
-			py::list dtype_list = dtype;
+			py::list dtype_list = py::cast<py::list>(dtype);
 			for (auto &child : dtype_list) {
 				std::shared_ptr<DuckDBPyType> sql_type;
 				if (!py::try_cast(child, sql_type)) {
@@ -1276,7 +1281,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadCSV(const py::object &
 		if (!py::isinstance<py::int_>(files_to_sniff)) {
 			throw InvalidInputException("read_csv only accepts 'files_to_sniff' as an integer");
 		}
-		bind_parameters["files_to_sniff"] = Value::INTEGER(py::int_(files_to_sniff));
+		bind_parameters["files_to_sniff"] = Value::INTEGER((int32_t)py::int_(files_to_sniff));
 	}
 
 	if (!py::none().is(names_p)) {
@@ -1284,7 +1289,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadCSV(const py::object &
 			throw InvalidInputException("read_csv only accepts 'names' as a list of strings");
 		}
 		vector<Value> names;
-		py::list names_list = names_p;
+		py::list names_list = py::cast<py::list>(names_p);
 		for (auto &elem : names_list) {
 			if (!py::isinstance<py::str>(elem)) {
 				throw InvalidInputException("read_csv 'names' list has to consist of only strings");
@@ -1301,7 +1306,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadCSV(const py::object &
 		} else if (py::isinstance<py::str>(na_values)) {
 			null_values.push_back(Value(py::str(na_values)));
 		} else {
-			py::list null_list = na_values;
+			py::list null_list = py::cast<py::list>(na_values);
 			for (auto &elem : null_list) {
 				if (!py::isinstance<py::str>(elem)) {
 					throw InvalidInputException("read_csv 'na_values' list has to consist of only strings");
@@ -1316,14 +1321,14 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadCSV(const py::object &
 		if (!py::isinstance<py::int_>(skiprows)) {
 			throw InvalidInputException("read_csv only accepts 'skiprows' as an integer");
 		}
-		bind_parameters["skip"] = Value::INTEGER(py::int_(skiprows));
+		bind_parameters["skip"] = Value::INTEGER((int32_t)py::int_(skiprows));
 	}
 
 	if (!py::none().is(parallel)) {
 		if (!py::isinstance<py::bool_>(parallel)) {
 			throw InvalidInputException("read_csv only accepts 'parallel' as a boolean");
 		}
-		bind_parameters["parallel"] = Value::BOOLEAN(py::bool_(parallel));
+		bind_parameters["parallel"] = Value::BOOLEAN((bool)py::bool_(parallel));
 	}
 
 	if (!py::none().is(quotechar)) {
@@ -1376,7 +1381,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadCSV(const py::object &
 		bool auto_detect_as_bool = py::isinstance<py::bool_>(auto_detect);
 		bool auto_detect_value;
 		if (auto_detect_as_bool) {
-			auto_detect_value = py::bool_(auto_detect);
+			auto_detect_value = (bool)py::bool_(auto_detect);
 		} else if (auto_detect_as_int) {
 			if ((int)py::int_(auto_detect) != 0) {
 				throw InvalidInputException("read_csv only accepts 0 if 'auto_detect' is given as an integer");
@@ -1399,28 +1404,28 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadCSV(const py::object &
 		if (!py::isinstance<py::int_>(sample_size)) {
 			throw InvalidInputException("read_csv only accepts 'sample_size' as an integer");
 		}
-		bind_parameters["sample_size"] = Value::INTEGER(py::int_(sample_size));
+		bind_parameters["sample_size"] = Value::INTEGER((int32_t)py::int_(sample_size));
 	}
 
 	if (!py::none().is(all_varchar)) {
 		if (!py::isinstance<py::bool_>(all_varchar)) {
 			throw InvalidInputException("read_csv only accepts 'all_varchar' as a boolean");
 		}
-		bind_parameters["all_varchar"] = Value::BOOLEAN(py::bool_(all_varchar));
+		bind_parameters["all_varchar"] = Value::BOOLEAN((bool)py::bool_(all_varchar));
 	}
 
 	if (!py::none().is(normalize_names)) {
 		if (!py::isinstance<py::bool_>(normalize_names)) {
 			throw InvalidInputException("read_csv only accepts 'normalize_names' as a boolean");
 		}
-		bind_parameters["normalize_names"] = Value::BOOLEAN(py::bool_(normalize_names));
+		bind_parameters["normalize_names"] = Value::BOOLEAN((bool)py::bool_(normalize_names));
 	}
 
 	if (!py::none().is(null_padding)) {
 		if (!py::isinstance<py::bool_>(null_padding)) {
 			throw InvalidInputException("read_csv only accepts 'null_padding' as a boolean");
 		}
-		bind_parameters["null_padding"] = Value::BOOLEAN(py::bool_(null_padding));
+		bind_parameters["null_padding"] = Value::BOOLEAN((bool)py::bool_(null_padding));
 	}
 
 	if (!py::none().is(lineterminator)) {
@@ -1537,12 +1542,12 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadCSV(const py::object &
 		if (!py::is_dict_like(columns)) {
 			throw BinderException("read_csv only accepts 'columns' as a dict[str, str]");
 		}
-		py::dict columns_dict = columns;
+		py::dict columns_dict = py::cast<py::dict>(columns);
 		child_list_t<Value> struct_fields;
 
-		for (auto &kv : columns_dict) {
-			auto &column_name = kv.first;
-			auto &type = kv.second;
+		for (auto kv : columns_dict) { // nanobind dict iteration yields std::pair<handle,handle> by value
+			auto column_name = kv.first;
+			auto type = kv.second;
 			if (!py::isinstance<py::str>(column_name)) {
 				string actual_type = py::cast<std::string>(py::str((column_name).type()));
 				throw BinderException("The provided column name must be a str, not of type '%s'", actual_type);

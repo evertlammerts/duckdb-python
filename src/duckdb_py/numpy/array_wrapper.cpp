@@ -340,7 +340,8 @@ struct MapConvert {
 	static py::dict ConvertValue(Vector &input, idx_t chunk_offset, NumpyAppendData &append_data) {
 		auto &client_properties = append_data.client_properties;
 		auto val = input.GetValue(chunk_offset);
-		return PythonObject::FromValue(val, input.GetType(), client_properties);
+		// FromValue returns a py::object; a MAP value materializes as a Python dict (nulls use NullValue, not this path)
+		return py::cast<py::dict>(PythonObject::FromValue(val, input.GetType(), client_properties));
 	}
 };
 

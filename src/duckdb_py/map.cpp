@@ -106,13 +106,13 @@ unique_ptr<FunctionData> BindExplicitSchema(unique_ptr<MapFunctionData> function
 	if (!py::isinstance<py::dict>(schema_object)) {
 		throw InvalidInputException("'schema' should be given as a Dict[str, DuckDBType]");
 	}
-	auto schema = py::dict(schema_object);
+	auto schema = py::cast<py::dict>(schema_object);
 
 	auto column_count = schema.size();
 
 	types.reserve(column_count);
 	names.reserve(column_count);
-	for (auto &item : schema) {
+	for (auto item : schema) { // nanobind dict iteration yields std::pair<handle,handle> by value
 		auto name = item.first;
 		auto type_p = item.second;
 		names.push_back(py::cast<std::string>(py::str(name)));

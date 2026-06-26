@@ -210,7 +210,7 @@ static bool IsBuiltinFunction(const py::object &object) {
 
 static unique_ptr<TableRef> TryReplacement(py::dict &dict, const string &name, ClientContext &context,
                                            py::object &current_frame) {
-	auto table_name = py::str(name);
+	auto table_name = py::str(name.c_str(), name.size());
 	if (!dict.contains(table_name)) {
 		// not present in the globals
 		return nullptr;
@@ -223,9 +223,9 @@ static unique_ptr<TableRef> TryReplacement(py::dict &dict, const string &name, C
 
 	auto result = PythonReplacementScan::TryReplacementObject(entry, name, context);
 	if (!result) {
-		std::string location = py::cast<py::str>(current_frame.attr("f_code").attr("co_filename"));
+		std::string location = py::cast<std::string>(current_frame.attr("f_code").attr("co_filename"));
 		location += ":";
-		location += py::cast<py::str>(current_frame.attr("f_lineno"));
+		location += py::cast<std::string>(py::str(current_frame.attr("f_lineno")));
 		ThrowScanFailureError(entry, name, location);
 	}
 	return result;

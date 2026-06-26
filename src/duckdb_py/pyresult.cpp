@@ -25,7 +25,7 @@
 #include "duckdb/parser/statement/select_statement.hpp"
 #include "duckdb/parser/tableref/column_data_ref.hpp"
 
-using namespace pybind11::literals;
+using namespace nanobind::literals;
 
 namespace duckdb {
 
@@ -136,19 +136,21 @@ Optional<py::tuple> DuckDBPyResult::Fetchone() {
 	if (!current_chunk || current_chunk->size() == 0) {
 		return py::none();
 	}
-	py::tuple res(result->types.size());
+	// nanobind tuples are immutable (no pre-sized ctor / indexed assignment); build a list sequentially
+	// and convert to a tuple at the end. Only py-object refcounts move here, no heavy C++ data is copied.
+	py::list res;
 
 	for (idx_t col_idx = 0; col_idx < result->types.size(); col_idx++) {
 		auto &mask = FlatVector::Validity(current_chunk->data[col_idx]);
 		if (!mask.RowIsValid(chunk_offset)) {
-			res[col_idx] = py::none();
+			res.append(py::none());
 			continue;
 		}
 		auto val = current_chunk->data[col_idx].GetValue(chunk_offset);
-		res[col_idx] = PythonObject::FromValue(val, result->types[col_idx], result->client_properties);
+		res.append(PythonObject::FromValue(val, result->types[col_idx], result->client_properties));
 	}
 	chunk_offset++;
-	return res;
+	return py::tuple(res);
 }
 
 py::list DuckDBPyResult::Fetchmany(idx_t size) {
@@ -406,7 +408,7 @@ PandasDataFrame DuckDBPyResult::FetchDFChunk(idx_t num_of_vectors, bool date_as_
 py::dict DuckDBPyResult::FetchPyTorch() {
 	auto result_dict = FetchNumpyInternal();
 	auto from_numpy = py::module_::import_("torch").attr("from_numpy");
-	for (auto &item : result_dict) {
+	for (auto item : result_dict) { // nanobind dict iteration yields std::pair<handle,handle> by value
 		result_dict[item.first] = from_numpy(item.second);
 	}
 	return result_dict;
@@ -415,7 +417,7 @@ py::dict DuckDBPyResult::FetchPyTorch() {
 py::dict DuckDBPyResult::FetchTF() {
 	auto result_dict = FetchNumpyInternal();
 	auto convert_to_tensor = py::module_::import_("tensorflow").attr("convert_to_tensor");
-	for (auto &item : result_dict) {
+	for (auto item : result_dict) { // nanobind dict iteration yields std::pair<handle,handle> by value
 		result_dict[item.first] = convert_to_tensor(item.second);
 	}
 	return result_dict;
@@ -597,8 +599,8 @@ duckdb::pyarrow::RecordBatchReader DuckDBPyResult::FetchRecordBatchReader(idx_t 
 	return py::cast<duckdb::pyarrow::RecordBatchReader>(record_batch_reader);
 }
 
-static void ArrowArrayStreamPyCapsuleDestructor(PyObject *object) {
-	auto data = PyCapsule_GetPointer(object, "arrow_array_stream");
+static void ArrowArrayStreamPyCapsuleDestructor(void *data) noexcept {
+	// nanobind capsule cleanup receives the raw pointer (via PyCapsule_GetPointer using the capsule's name)
 	if (!data) {
 		return;
 	}
@@ -636,7 +638,7 @@ py::list DuckDBPyResult::GetDescription(const vector<string> &names, const vecto
 	py::list desc;
 
 	for (idx_t col_idx = 0; col_idx < names.size(); col_idx++) {
-		auto py_name = py::str(names[col_idx]);
+		auto py_name = py::str(names[col_idx].c_str(), names[col_idx].size());
 		auto py_type = DuckDBPyType(types[col_idx]);
 		desc.append(py::make_tuple(py_name, py_type, py::none(), py::none(), py::none(), py::none(), py::none()));
 	}

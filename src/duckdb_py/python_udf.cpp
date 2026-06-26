@@ -237,8 +237,10 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 		}
 		if (!py::isinstance(python_object, py::module_::import_("pyarrow").attr("lib").attr("Table"))) {
 			// Try to convert into a table
-			py::list single_array(1);
-			py::list single_name(1);
+			py::list single_array;
+			single_array.append(py::none());
+			py::list single_name;
+			single_name.append(py::none());
 
 			single_array[0] = python_object;
 			single_name[0] = "c0";
@@ -316,7 +318,9 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 
 			py::object ret;
 			if (input.ColumnCount() > 0) {
-				auto bundled_parameters = py::tuple((int)input.ColumnCount());
+				// nanobind tuples are immutable; build a pre-sized tuple with the raw CPython API (SET_ITEM steals a
+				// reference) so the per-row UDF path keeps pybind11's allocation profile (no list-then-convert copy).
+				auto bundled_parameters = py::steal<py::tuple>(PyTuple_New((Py_ssize_t)input.ColumnCount()));
 				bool contains_null = false;
 				for (idx_t i = 0; i < input.ColumnCount(); i++) {
 					// Fill the tuple with the arguments for this row
@@ -326,7 +330,8 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 						contains_null = true;
 						break;
 					}
-					bundled_parameters[i] = PythonObject::FromValue(value, column.GetType(), client_properties);
+					PyTuple_SET_ITEM(bundled_parameters.ptr(), (Py_ssize_t)i,
+					                 PythonObject::FromValue(value, column.GetType(), client_properties).release().ptr());
 				}
 				if (contains_null) {
 					// Immediately insert None, no need to call the function
@@ -450,7 +455,7 @@ public:
 			}
 		}
 		idx_t i = 0;
-		for (auto &param : params) {
+		for (auto param : params) {
 			auto type = py::cast<std::shared_ptr<DuckDBPyType>>(param);
 			parameters[i++] = type->Type();
 		}
@@ -470,7 +475,7 @@ public:
 
 	void AnalyzeSignature(const py::object &udf) {
 		auto signature = GetSignature(udf);
-		auto sig_params = signature.attr("parameters");
+		py::object sig_params = signature.attr("parameters");
 		auto return_annotation = signature.attr("return_annotation");
 		auto empty = py::module_::import_("inspect").attr("Signature").attr("empty");
 		if (!py::none().is(return_annotation) && !empty.is(return_annotation)) {
@@ -481,9 +486,9 @@ public:
 		}
 		param_count = py::len(sig_params);
 		parameters.reserve(param_count);
-		auto params = py::dict(sig_params);
-		for (auto &item : params) {
-			auto &value = item.second;
+		auto params = py::cast<py::dict>(sig_params);
+		for (auto item : params) {
+			auto value = item.second;
 			std::shared_ptr<DuckDBPyType> pytype;
 			if (py::try_cast<std::shared_ptr<DuckDBPyType>>(value.attr("annotation"), pytype)) {
 				parameters.push_back(pytype->Type());
