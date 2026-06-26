@@ -10,6 +10,15 @@ namespace py = pybind11;
 namespace PYBIND11_NAMESPACE {
 namespace detail {
 
+// NANOBIND PORTING NOTE (None handling):
+// This caster maps a Python None (or an omitted `connection=None` argument) to the module-level default
+// connection. It works under pybind11 because pybind11 forwards None into a holder/pointer argument's caster
+// `load()` by default (argument_record.none defaults to true). nanobind inverts this: it REJECTS None for
+// bound-type (shared_ptr / pointer) arguments BEFORE the caster runs, unless the binding annotates the argument
+// with `.none()`. So the eventual nanobind port must (1) keep this None -> DefaultConnection() branch AND
+// (2) add `.none()` to every `connection` argument that currently defaults to `py::none()` (see
+// NANOBIND_NONE_AUDIT.md -- 81 sites in duckdb_python.cpp). Object-family arguments (py::object / Optional<T>)
+// do not need this annotation; their value casters accept None directly.
 template <>
 class type_caster<std::shared_ptr<DuckDBPyConnection>>
     : public copyable_holder_caster<DuckDBPyConnection, std::shared_ptr<DuckDBPyConnection>> {

@@ -5,6 +5,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/box_renderer.hpp"
 #include "duckdb/common/enum_util.hpp"
+#include "duckdb_python/pybind11/conversions/enum_string_caster.hpp"
 
 namespace duckdb {
 
@@ -24,35 +25,6 @@ inline RenderMode RenderModeFromInteger(int64_t value) {
 
 } // namespace duckdb
 
-namespace PYBIND11_NAMESPACE {
-namespace detail {
-
-//! See python_udf_type_enum.hpp for the rationale (composition over inheritance, umbrella visibility).
-template <>
-struct type_caster<duckdb::RenderMode> {
-	PYBIND11_TYPE_CASTER(duckdb::RenderMode, const_name("RenderMode"));
-
-	bool load(handle src, bool convert) {
-		if (isinstance<str>(src)) {
-			value = duckdb::RenderModeFromString(src.cast<std::string>());
-			return true;
-		}
-		if (isinstance<int_>(src)) {
-			value = duckdb::RenderModeFromInteger(src.cast<int64_t>());
-			return true;
-		}
-		type_caster_base<duckdb::RenderMode> base;
-		if (!base.load(src, convert)) {
-			return false;
-		}
-		value = *static_cast<duckdb::RenderMode *>(base);
-		return true;
-	}
-
-	static handle cast(duckdb::RenderMode src, return_value_policy policy, handle parent) {
-		return type_caster_base<duckdb::RenderMode>::cast(src, policy, parent);
-	}
-};
-
-} // namespace detail
-} // namespace PYBIND11_NAMESPACE
+//! See enum_string_caster.hpp for the rationale (composition over inheritance, umbrella visibility).
+DUCKDB_PY_ENUM_STRING_INT_CASTER(duckdb::RenderMode, duckdb::RenderModeFromString, duckdb::RenderModeFromInteger,
+                                 "RenderMode")
