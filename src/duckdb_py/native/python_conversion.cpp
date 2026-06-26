@@ -60,7 +60,7 @@ vector<Identifier> TransformStructKeys(py::handle keys, idx_t size, const Logica
 	vector<Identifier> res;
 	res.reserve(size);
 	for (idx_t i = 0; i < size; i++) {
-		res.emplace_back(Identifier(py::str(keys.attr("__getitem__")(i))));
+		res.emplace_back(Identifier(py::cast<std::string>(keys.attr("__getitem__")(i))));
 	}
 	return res;
 }

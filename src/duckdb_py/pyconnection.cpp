@@ -1242,7 +1242,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadCSV(const py::object &
 					struct_fields.emplace_back(py::cast<std::string>(py::str(kv.first)),
 					                           Value(py::cast<std::string>(py::str(kv.second))));
 				} else {
-					struct_fields.emplace_back(py::str(kv.first), Value(sql_type->ToString()));
+					struct_fields.emplace_back(py::cast<std::string>(py::str(kv.first)), Value(sql_type->ToString()));
 				}
 			}
 			auto dtype_struct = Value::STRUCT(std::move(struct_fields));

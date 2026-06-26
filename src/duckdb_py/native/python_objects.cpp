@@ -518,7 +518,10 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 		return py::cast(StringValue::Get(val));
 	case LogicalTypeId::BLOB:
 	case LogicalTypeId::GEOMETRY:
-		return py::bytes(StringValue::Get(val));
+{
+		auto &blob = StringValue::Get(val);
+		return py::bytes(blob.data(), blob.size());
+	}
 	case LogicalTypeId::BIT:
 		return py::cast(Bit::ToString(StringValue::Get(val)));
 	case LogicalTypeId::TIMESTAMP:
@@ -561,7 +564,8 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 			py_timestamp = py::steal<py::object>(python_conversion);
 		} catch (py::python_error &e) {
 			// Failed to convert, fall back to str
-			return py::str(val.ToString());
+			auto fallback_str = val.ToString();
+			return py::str(fallback_str.c_str(), fallback_str.size());
 		}
 		if (type.id() == LogicalTypeId::TIMESTAMP_TZ || type.id() == LogicalTypeId::TIMESTAMP_TZ_NS) {
 			// We have to add the timezone info
@@ -588,7 +592,8 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 			py_time = py::steal<py::object>(python_conversion);
 		} catch (py::python_error &e) {
 			// Failed to convert, fall back to str
-			return py::str(val.ToString());
+			auto fallback_str = val.ToString();
+			return py::str(fallback_str.c_str(), fallback_str.size());
 		}
 		// We have to add the timezone info
 		auto timedelta = import_cache.datetime.timedelta()(py::arg("seconds") = offset);
