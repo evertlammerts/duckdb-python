@@ -340,6 +340,9 @@ bool DuckDBPyType::TryConvert(const py::object &object, std::shared_ptr<DuckDBPy
 		result = py::cast<std::shared_ptr<DuckDBPyType>>(converted);
 		return true;
 	} catch (...) {
+		// A failed construction (e.g. an unannotated parameter) leaves the Python error indicator set; clear it
+		// so the caller's subsequent Python operations don't trip on a stale error.
+		PyErr_Clear();
 		return false;
 	}
 }

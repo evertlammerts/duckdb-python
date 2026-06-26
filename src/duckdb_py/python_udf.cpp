@@ -502,7 +502,7 @@ public:
 			if (DuckDBPyType::TryConvert(py::borrow<py::object>(value.attr("annotation")), pytype)) {
 				parameters.push_back(pytype->Type());
 			} else {
-				std::string kind = py::cast<std::string>(py::str(value.attr("kind")));
+				std::string kind = py::cast<std::string>(value.attr("kind").attr("name"));
 				auto parameter_kind = ParameterKind::FromString(kind);
 				if (parameter_kind == ParameterKind::Type::VAR_POSITIONAL) {
 					varargs = LogicalType::ANY;
