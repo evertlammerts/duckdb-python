@@ -53,7 +53,7 @@ static LogicalType BindColumn(ClientContext &context, PandasBindColumn &column_p
 
 	if (column_has_mask) {
 		// masked object, fetch the internal data and mask array
-		bind_data.mask = make_uniq<RegisteredArray>(column.attr("array").attr("_mask"));
+		bind_data.mask = std::make_unique<RegisteredArray>(column.attr("array").attr("_mask"));
 	}
 
 	if (bind_data.numpy_type.type == NumpyNullableType::CATEGORY) {
@@ -76,31 +76,31 @@ static LogicalType BindColumn(ClientContext &context, PandasBindColumn &column_p
 			column_type = LogicalType::ENUM(enum_entries_vec, size);
 			auto pandas_col = py::array(column.attr("cat").attr("codes"));
 			bind_data.internal_categorical_type = string(py::str(pandas_col.attr("dtype")));
-			bind_data.pandas_col = make_uniq<PandasNumpyColumn>(pandas_col);
+			bind_data.pandas_col = std::make_unique<PandasNumpyColumn>(pandas_col);
 		} else {
 			auto pandas_col = py::array(column.attr("to_numpy")());
 			auto numpy_type = pandas_col.attr("dtype");
-			bind_data.pandas_col = make_uniq<PandasNumpyColumn>(pandas_col);
+			bind_data.pandas_col = std::make_unique<PandasNumpyColumn>(pandas_col);
 			// for category types (non-strings), we use the converted numpy type
 			bind_data.numpy_type = ConvertNumpyType(numpy_type);
 			column_type = NumpyToLogicalType(bind_data.numpy_type);
 		}
 	} else if (bind_data.numpy_type.type == NumpyNullableType::FLOAT_16) {
 		auto pandas_array = column.attr("array");
-		bind_data.pandas_col = make_uniq<PandasNumpyColumn>(py::array(column.attr("to_numpy")("float32")));
+		bind_data.pandas_col = std::make_unique<PandasNumpyColumn>(py::array(column.attr("to_numpy")("float32")));
 		bind_data.numpy_type.type = NumpyNullableType::FLOAT_32;
 		column_type = NumpyToLogicalType(bind_data.numpy_type);
 	} else {
 		auto pandas_array = column.attr("array");
 		if (py::hasattr(pandas_array, "_data")) {
 			// This means we can access the numpy array directly
-			bind_data.pandas_col = make_uniq<PandasNumpyColumn>(column.attr("array").attr("_data"));
+			bind_data.pandas_col = std::make_unique<PandasNumpyColumn>(column.attr("array").attr("_data"));
 		} else if (py::hasattr(pandas_array, "asi8")) {
 			// This is a datetime object, has the option to get the array as int64_t's
-			bind_data.pandas_col = make_uniq<PandasNumpyColumn>(py::array(pandas_array.attr("asi8")));
+			bind_data.pandas_col = std::make_unique<PandasNumpyColumn>(py::array(pandas_array.attr("asi8")));
 		} else {
 			// Otherwise we have to get it through 'to_numpy()'
-			bind_data.pandas_col = make_uniq<PandasNumpyColumn>(py::array(column.attr("to_numpy")()));
+			bind_data.pandas_col = std::make_unique<PandasNumpyColumn>(py::array(column.attr("to_numpy")()));
 		}
 		column_type = NumpyToLogicalType(bind_data.numpy_type);
 	}

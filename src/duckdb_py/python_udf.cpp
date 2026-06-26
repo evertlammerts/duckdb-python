@@ -423,7 +423,7 @@ public:
 		}
 	}
 
-	void OverrideReturnType(const shared_ptr<DuckDBPyType> &type) {
+	void OverrideReturnType(const std::shared_ptr<DuckDBPyType> &type) {
 		if (!type) {
 			return;
 		}
@@ -451,7 +451,7 @@ public:
 		}
 		idx_t i = 0;
 		for (auto &param : params) {
-			auto type = py::cast<shared_ptr<DuckDBPyType>>(param);
+			auto type = py::cast<std::shared_ptr<DuckDBPyType>>(param);
 			parameters[i++] = type->Type();
 		}
 	}
@@ -474,8 +474,8 @@ public:
 		auto return_annotation = signature.attr("return_annotation");
 		auto empty = py::module_::import("inspect").attr("Signature").attr("empty");
 		if (!py::none().is(return_annotation) && !empty.is(return_annotation)) {
-			shared_ptr<DuckDBPyType> pytype;
-			if (py::try_cast<shared_ptr<DuckDBPyType>>(return_annotation, pytype)) {
+			std::shared_ptr<DuckDBPyType> pytype;
+			if (py::try_cast<std::shared_ptr<DuckDBPyType>>(return_annotation, pytype)) {
 				return_type = pytype->Type();
 			}
 		}
@@ -484,8 +484,8 @@ public:
 		auto params = py::dict(sig_params);
 		for (auto &item : params) {
 			auto &value = item.second;
-			shared_ptr<DuckDBPyType> pytype;
-			if (py::try_cast<shared_ptr<DuckDBPyType>>(value.attr("annotation"), pytype)) {
+			std::shared_ptr<DuckDBPyType> pytype;
+			if (py::try_cast<std::shared_ptr<DuckDBPyType>>(value.attr("annotation"), pytype)) {
 				parameters.push_back(pytype->Type());
 			} else {
 				std::string kind = py::str(value.attr("kind"));
@@ -535,7 +535,7 @@ public:
 
 ScalarFunction DuckDBPyConnection::CreateScalarUDF(const string &name, const py::function &udf,
                                                    const py::object &parameters,
-                                                   const shared_ptr<DuckDBPyType> &return_type, bool vectorized,
+                                                   const std::shared_ptr<DuckDBPyType> &return_type, bool vectorized,
                                                    FunctionNullHandling null_handling,
                                                    PythonExceptionHandling exception_handling, bool side_effects) {
 	PythonUDFData data(name, vectorized, null_handling);

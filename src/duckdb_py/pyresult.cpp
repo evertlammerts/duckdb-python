@@ -220,7 +220,7 @@ void InsertCategory(QueryResult &result, unordered_map<idx_t, py::list> &categor
 	}
 }
 
-unique_ptr<NumpyResultConversion> DuckDBPyResult::InitializeNumpyConversion(bool pandas) {
+std::unique_ptr<NumpyResultConversion> DuckDBPyResult::InitializeNumpyConversion(bool pandas) {
 	if (!result) {
 		throw InvalidInputException("result closed");
 	}
@@ -233,12 +233,12 @@ unique_ptr<NumpyResultConversion> DuckDBPyResult::InitializeNumpyConversion(bool
 	}
 
 	auto conversion =
-	    make_uniq<NumpyResultConversion>(result->types, initial_capacity, result->client_properties, pandas);
+	    std::make_unique<NumpyResultConversion>(result->types, initial_capacity, result->client_properties, pandas);
 	return conversion;
 }
 
 py::dict DuckDBPyResult::FetchNumpyInternal(bool stream, idx_t vectors_per_chunk,
-                                            unique_ptr<NumpyResultConversion> conversion_p) {
+                                            std::unique_ptr<NumpyResultConversion> conversion_p) {
 	if (!result) {
 		throw InvalidInputException("result closed");
 	}

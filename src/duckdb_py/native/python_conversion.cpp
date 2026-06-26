@@ -595,8 +595,8 @@ struct PythonValueConversion {
 			// Extract the internal object and the type from the Value instance
 			auto object = ele.attr("object");
 			auto type = ele.attr("type");
-			shared_ptr<DuckDBPyType> internal_type;
-			if (!py::try_cast<shared_ptr<DuckDBPyType>>(type, internal_type)) {
+			std::shared_ptr<DuckDBPyType> internal_type;
+			if (!py::try_cast<std::shared_ptr<DuckDBPyType>>(type, internal_type)) {
 				string actual_type = py::str(py::type::of(type));
 				throw InvalidInputException("The 'type' of a Value should be of type DuckDBPyType, not '%s'",
 				                            actual_type);

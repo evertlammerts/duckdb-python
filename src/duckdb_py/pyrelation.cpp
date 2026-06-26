@@ -63,7 +63,8 @@ DuckDBPyRelation::~DuckDBPyRelation() {
 	rel.reset();
 }
 
-DuckDBPyRelation::DuckDBPyRelation(shared_ptr<DuckDBPyResult> result_p) : rel(nullptr), result(std::move(result_p)) {
+DuckDBPyRelation::DuckDBPyRelation(std::shared_ptr<DuckDBPyResult> result_p)
+    : rel(nullptr), result(std::move(result_p)) {
 	if (!result) {
 		throw InternalException("DuckDBPyRelation created without a result");
 	}
@@ -72,7 +73,7 @@ DuckDBPyRelation::DuckDBPyRelation(shared_ptr<DuckDBPyResult> result_p) : rel(nu
 	this->names = result->GetNames();
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::ProjectFromExpression(const string &expression) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::ProjectFromExpression(const string &expression) {
 	auto projected_relation = DeriveRelation(rel->Project(expression));
 	for (auto &dep : this->rel->external_dependencies) {
 		projected_relation->rel->AddExternalDependency(dep);
@@ -80,7 +81,7 @@ unique_ptr<DuckDBPyRelation> DuckDBPyRelation::ProjectFromExpression(const strin
 	return projected_relation;
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Project(const py::args &args, const string &groups) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Project(const py::args &args, const string &groups) {
 	if (!rel) {
 		return nullptr;
 	}
@@ -95,8 +96,8 @@ unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Project(const py::args &args, con
 	} else {
 		vector<unique_ptr<ParsedExpression>> expressions;
 		for (auto arg : args) {
-			shared_ptr<DuckDBPyExpression> py_expr;
-			if (!py::try_cast<shared_ptr<DuckDBPyExpression>>(arg, py_expr)) {
+			std::shared_ptr<DuckDBPyExpression> py_expr;
+			if (!py::try_cast<std::shared_ptr<DuckDBPyExpression>>(arg, py_expr)) {
 				throw InvalidInputException("Please provide arguments of type Expression!");
 			}
 			auto expr = py_expr->GetExpression().Copy();
@@ -111,7 +112,7 @@ unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Project(const py::args &args, con
 	}
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::ProjectFromTypes(const py::object &obj) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::ProjectFromTypes(const py::object &obj) {
 	if (!rel) {
 		return nullptr;
 	}
@@ -160,8 +161,9 @@ unique_ptr<DuckDBPyRelation> DuckDBPyRelation::ProjectFromTypes(const py::object
 	return ProjectFromExpression(projection);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::EmptyResult(const shared_ptr<ClientContext> &context,
-                                                           const vector<LogicalType> &types, vector<string> names) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::EmptyResult(const shared_ptr<ClientContext> &context,
+                                                                const vector<LogicalType> &types,
+                                                                vector<string> names) {
 	vector<Value> dummy_values;
 	D_ASSERT(types.size() == names.size());
 	dummy_values.reserve(types.size());
@@ -171,12 +173,12 @@ unique_ptr<DuckDBPyRelation> DuckDBPyRelation::EmptyResult(const shared_ptr<Clie
 	}
 	vector<vector<Value>> single_row(1, dummy_values);
 	auto values_relation =
-	    make_uniq<DuckDBPyRelation>(make_shared_ptr<ValueRelation>(context, single_row, std::move(names)));
+	    std::make_unique<DuckDBPyRelation>(make_shared_ptr<ValueRelation>(context, single_row, std::move(names)));
 	// Add a filter on an impossible condition
 	return values_relation->FilterFromExpression("true = false");
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::SetAlias(const string &expr) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::SetAlias(const string &expr) {
 	return DeriveRelation(rel->Alias(expr));
 }
 
@@ -184,12 +186,12 @@ py::str DuckDBPyRelation::GetAlias() {
 	return py::str(string(rel->GetAlias()));
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Filter(const py::object &expr) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Filter(const py::object &expr) {
 	if (py::isinstance<py::str>(expr)) {
 		string expression = py::cast<py::str>(expr);
 		return FilterFromExpression(expression);
 	}
-	shared_ptr<DuckDBPyExpression> expression;
+	std::shared_ptr<DuckDBPyExpression> expression;
 	if (!py::try_cast(expr, expression)) {
 		throw InvalidInputException("Please provide either a string or a DuckDBPyExpression object to 'filter'");
 	}
@@ -197,25 +199,25 @@ unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Filter(const py::object &expr) {
 	return DeriveRelation(rel->Filter(std::move(expr_p)));
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::FilterFromExpression(const string &expr) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::FilterFromExpression(const string &expr) {
 	return DeriveRelation(rel->Filter(expr));
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Limit(int64_t n, int64_t offset) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Limit(int64_t n, int64_t offset) {
 	return DeriveRelation(rel->Limit(n, offset));
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Order(const string &expr) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Order(const string &expr) {
 	return DeriveRelation(rel->Order(expr));
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Sort(const py::args &args) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Sort(const py::args &args) {
 	vector<OrderByNode> order_nodes;
 	order_nodes.reserve(args.size());
 
 	for (auto arg : args) {
-		shared_ptr<DuckDBPyExpression> py_expr;
-		if (!py::try_cast<shared_ptr<DuckDBPyExpression>>(arg, py_expr)) {
+		std::shared_ptr<DuckDBPyExpression> py_expr;
+		if (!py::try_cast<std::shared_ptr<DuckDBPyExpression>>(arg, py_expr)) {
 			string actual_type = py::str(py::type::of(arg));
 			throw InvalidInputException("Expected argument of type Expression, received '%s' instead", actual_type);
 		}
@@ -233,8 +235,8 @@ vector<unique_ptr<ParsedExpression>> GetExpressions(ClientContext &context, cons
 		vector<unique_ptr<ParsedExpression>> expressions;
 		auto aggregate_list = py::list(expr);
 		for (auto &item : aggregate_list) {
-			shared_ptr<DuckDBPyExpression> py_expr;
-			if (!py::try_cast<shared_ptr<DuckDBPyExpression>>(item, py_expr)) {
+			std::shared_ptr<DuckDBPyExpression> py_expr;
+			if (!py::try_cast<std::shared_ptr<DuckDBPyExpression>>(item, py_expr)) {
 				throw InvalidInputException("Please provide arguments of type Expression!");
 			}
 			auto expr_ = py_expr->GetExpression().Copy();
@@ -252,7 +254,7 @@ vector<unique_ptr<ParsedExpression>> GetExpressions(ClientContext &context, cons
 	}
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Aggregate(const py::object &expr, const string &groups) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Aggregate(const py::object &expr, const string &groups) {
 	AssertRelation();
 	auto expressions = GetExpressions(*rel->context->GetContext(), expr);
 	if (!groups.empty()) {
@@ -344,7 +346,7 @@ vector<string> CreateExpressionList(const vector<ColumnDefinition> &columns,
 	return expressions;
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Describe() {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Describe() {
 	auto &columns = rel->Columns();
 	vector<DescribeAggregateInfo> aggregates;
 	aggregates = {DescribeAggregateInfo("count"),        DescribeAggregateInfo("mean", true),
@@ -439,10 +441,9 @@ string DuckDBPyRelation::GenerateExpressionList(const string &function_name, vec
 
 /* General aggregate functions */
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::GenericAggregator(const string &function_name,
-                                                                 const string &aggregated_columns, const string &groups,
-                                                                 const string &function_parameter,
-                                                                 const string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation>
+DuckDBPyRelation::GenericAggregator(const string &function_name, const string &aggregated_columns, const string &groups,
+                                    const string &function_parameter, const string &projected_columns) {
 
 	//! Construct Aggregation Expression
 	auto expr = GenerateExpressionList(function_name, aggregated_columns, groups, function_parameter, false,
@@ -450,7 +451,7 @@ unique_ptr<DuckDBPyRelation> DuckDBPyRelation::GenericAggregator(const string &f
 	return Aggregate(py::str(expr), groups);
 }
 
-unique_ptr<DuckDBPyRelation>
+std::unique_ptr<DuckDBPyRelation>
 DuckDBPyRelation::GenericWindowFunction(const string &function_name, const string &function_parameters,
                                         const string &aggr_columns, const string &window_spec, const bool &ignore_nulls,
                                         const string &projected_columns) {
@@ -459,10 +460,11 @@ DuckDBPyRelation::GenericWindowFunction(const string &function_name, const strin
 	return DeriveRelation(rel->Project(expr));
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::ApplyAggOrWin(const string &function_name, const string &agg_columns,
-                                                             const string &function_parameters, const string &groups,
-                                                             const string &window_spec, const string &projected_columns,
-                                                             bool ignore_nulls) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::ApplyAggOrWin(const string &function_name,
+                                                                  const string &agg_columns,
+                                                                  const string &function_parameters,
+                                                                  const string &groups, const string &window_spec,
+                                                                  const string &projected_columns, bool ignore_nulls) {
 	if (!groups.empty() && !window_spec.empty()) {
 		throw InvalidInputException("Either groups or window must be set (can't be both at the same time)");
 	}
@@ -474,52 +476,54 @@ unique_ptr<DuckDBPyRelation> DuckDBPyRelation::ApplyAggOrWin(const string &funct
 	}
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::AnyValue(const std::string &column, const std::string &groups,
-                                                        const std::string &window_spec,
-                                                        const std::string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::AnyValue(const std::string &column, const std::string &groups,
+                                                             const std::string &window_spec,
+                                                             const std::string &projected_columns) {
 	return ApplyAggOrWin("any_value", column, "", groups, window_spec, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::ArgMax(const std::string &arg_column, const std::string &value_column,
-                                                      const std::string &groups, const std::string &window_spec,
-                                                      const std::string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::ArgMax(const std::string &arg_column,
+                                                           const std::string &value_column, const std::string &groups,
+                                                           const std::string &window_spec,
+                                                           const std::string &projected_columns) {
 	return ApplyAggOrWin("arg_max", arg_column, value_column, groups, window_spec, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::ArgMin(const std::string &arg_column, const std::string &value_column,
-                                                      const std::string &groups, const std::string &window_spec,
-                                                      const std::string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::ArgMin(const std::string &arg_column,
+                                                           const std::string &value_column, const std::string &groups,
+                                                           const std::string &window_spec,
+                                                           const std::string &projected_columns) {
 	return ApplyAggOrWin("arg_min", arg_column, value_column, groups, window_spec, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Avg(const std::string &column, const std::string &groups,
-                                                   const std::string &window_spec,
-                                                   const std::string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Avg(const std::string &column, const std::string &groups,
+                                                        const std::string &window_spec,
+                                                        const std::string &projected_columns) {
 	return ApplyAggOrWin("avg", column, "", groups, window_spec, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::BitAnd(const std::string &column, const std::string &groups,
-                                                      const std::string &window_spec,
-                                                      const std::string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::BitAnd(const std::string &column, const std::string &groups,
+                                                           const std::string &window_spec,
+                                                           const std::string &projected_columns) {
 	return ApplyAggOrWin("bit_and", column, "", groups, window_spec, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::BitOr(const std::string &column, const std::string &groups,
-                                                     const std::string &window_spec,
-                                                     const std::string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::BitOr(const std::string &column, const std::string &groups,
+                                                          const std::string &window_spec,
+                                                          const std::string &projected_columns) {
 	return ApplyAggOrWin("bit_or", column, "", groups, window_spec, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::BitXor(const std::string &column, const std::string &groups,
-                                                      const std::string &window_spec,
-                                                      const std::string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::BitXor(const std::string &column, const std::string &groups,
+                                                           const std::string &window_spec,
+                                                           const std::string &projected_columns) {
 	return ApplyAggOrWin("bit_xor", column, "", groups, window_spec, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::BitStringAgg(const std::string &column, const Optional<py::object> &min,
-                                                            const Optional<py::object> &max, const std::string &groups,
-                                                            const std::string &window_spec,
-                                                            const std::string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation>
+DuckDBPyRelation::BitStringAgg(const std::string &column, const Optional<py::object> &min,
+                               const Optional<py::object> &max, const std::string &groups,
+                               const std::string &window_spec, const std::string &projected_columns) {
 	if ((min.is_none() && !max.is_none()) || (!min.is_none() && max.is_none())) {
 		throw InvalidInputException("Both min and max values must be set");
 	}
@@ -533,116 +537,117 @@ unique_ptr<DuckDBPyRelation> DuckDBPyRelation::BitStringAgg(const std::string &c
 	return ApplyAggOrWin("bitstring_agg", column, bitstring_agg_params, groups, window_spec, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::BoolAnd(const std::string &column, const std::string &groups,
-                                                       const std::string &window_spec,
-                                                       const std::string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::BoolAnd(const std::string &column, const std::string &groups,
+                                                            const std::string &window_spec,
+                                                            const std::string &projected_columns) {
 	return ApplyAggOrWin("bool_and", column, "", groups, window_spec, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::BoolOr(const std::string &column, const std::string &groups,
-                                                      const std::string &window_spec,
-                                                      const std::string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::BoolOr(const std::string &column, const std::string &groups,
+                                                           const std::string &window_spec,
+                                                           const std::string &projected_columns) {
 	return ApplyAggOrWin("bool_or", column, "", groups, window_spec, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::ValueCounts(const std::string &column, const std::string &groups) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::ValueCounts(const std::string &column, const std::string &groups) {
 	return Count(column, groups, "", column);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Count(const std::string &column, const std::string &groups,
-                                                     const std::string &window_spec,
-                                                     const std::string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Count(const std::string &column, const std::string &groups,
+                                                          const std::string &window_spec,
+                                                          const std::string &projected_columns) {
 	return ApplyAggOrWin("count", column, "", groups, window_spec, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::FAvg(const std::string &column, const std::string &groups,
-                                                    const std::string &window_spec,
-                                                    const std::string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::FAvg(const std::string &column, const std::string &groups,
+                                                         const std::string &window_spec,
+                                                         const std::string &projected_columns) {
 	return ApplyAggOrWin("favg", column, "", groups, window_spec, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::First(const string &column, const std::string &groups,
-                                                     const string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::First(const string &column, const std::string &groups,
+                                                          const string &projected_columns) {
 	return GenericAggregator("first", column, groups, "", projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::FSum(const std::string &column, const std::string &groups,
-                                                    const std::string &window_spec,
-                                                    const std::string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::FSum(const std::string &column, const std::string &groups,
+                                                         const std::string &window_spec,
+                                                         const std::string &projected_columns) {
 	return ApplyAggOrWin("fsum", column, "", groups, window_spec, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::GeoMean(const std::string &column, const std::string &groups,
-                                                       const std::string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::GeoMean(const std::string &column, const std::string &groups,
+                                                            const std::string &projected_columns) {
 	return GenericAggregator("geomean", column, groups, "", projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Histogram(const std::string &column, const std::string &groups,
-                                                         const std::string &window_spec,
-                                                         const std::string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Histogram(const std::string &column, const std::string &groups,
+                                                              const std::string &window_spec,
+                                                              const std::string &projected_columns) {
 	return ApplyAggOrWin("histogram", column, "", groups, window_spec, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::List(const std::string &column, const std::string &groups,
-                                                    const std::string &window_spec,
-                                                    const std::string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::List(const std::string &column, const std::string &groups,
+                                                         const std::string &window_spec,
+                                                         const std::string &projected_columns) {
 	return ApplyAggOrWin("list", column, "", groups, window_spec, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Last(const std::string &column, const std::string &groups,
-                                                    const std::string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Last(const std::string &column, const std::string &groups,
+                                                         const std::string &projected_columns) {
 	return GenericAggregator("last", column, groups, "", projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Max(const std::string &column, const std::string &groups,
-                                                   const std::string &window_spec,
-                                                   const std::string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Max(const std::string &column, const std::string &groups,
+                                                        const std::string &window_spec,
+                                                        const std::string &projected_columns) {
 	return ApplyAggOrWin("max", column, "", groups, window_spec, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Min(const std::string &column, const std::string &groups,
-                                                   const std::string &window_spec,
-                                                   const std::string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Min(const std::string &column, const std::string &groups,
+                                                        const std::string &window_spec,
+                                                        const std::string &projected_columns) {
 	return ApplyAggOrWin("min", column, "", groups, window_spec, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Product(const std::string &column, const std::string &groups,
-                                                       const std::string &window_spec,
-                                                       const std::string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Product(const std::string &column, const std::string &groups,
+                                                            const std::string &window_spec,
+                                                            const std::string &projected_columns) {
 	return ApplyAggOrWin("product", column, "", groups, window_spec, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::StringAgg(const std::string &column, const std::string &sep,
-                                                         const std::string &groups, const std::string &window_spec,
-                                                         const std::string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::StringAgg(const std::string &column, const std::string &sep,
+                                                              const std::string &groups, const std::string &window_spec,
+                                                              const std::string &projected_columns) {
 	auto string_agg_params = SQLString::ToString(sep);
 	return ApplyAggOrWin("string_agg", column, string_agg_params, groups, window_spec, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Sum(const std::string &column, const std::string &groups,
-                                                   const std::string &window_spec,
-                                                   const std::string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Sum(const std::string &column, const std::string &groups,
+                                                        const std::string &window_spec,
+                                                        const std::string &projected_columns) {
 	return ApplyAggOrWin("sum", column, "", groups, window_spec, projected_columns);
 }
 
 /* TODO: Approximate aggregate functions */
 
 /* TODO: Statistical aggregate functions */
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Median(const std::string &column, const std::string &groups,
-                                                      const std::string &window_spec,
-                                                      const std::string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Median(const std::string &column, const std::string &groups,
+                                                           const std::string &window_spec,
+                                                           const std::string &projected_columns) {
 	return ApplyAggOrWin("median", column, "", groups, window_spec, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Mode(const std::string &column, const std::string &groups,
-                                                    const std::string &window_spec,
-                                                    const std::string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Mode(const std::string &column, const std::string &groups,
+                                                         const std::string &window_spec,
+                                                         const std::string &projected_columns) {
 	return ApplyAggOrWin("mode", column, "", groups, window_spec, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::QuantileCont(const std::string &column, const py::object &q,
-                                                            const std::string &groups, const std::string &window_spec,
-                                                            const std::string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::QuantileCont(const std::string &column, const py::object &q,
+                                                                 const std::string &groups,
+                                                                 const std::string &window_spec,
+                                                                 const std::string &projected_columns) {
 	string quantile_params = "";
 	if (py::isinstance<py::float_>(q)) {
 		quantile_params = std::to_string(q.cast<float>());
@@ -662,9 +667,10 @@ unique_ptr<DuckDBPyRelation> DuckDBPyRelation::QuantileCont(const std::string &c
 	return ApplyAggOrWin("quantile_cont", column, quantile_params, groups, window_spec, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::QuantileDisc(const std::string &column, const py::object &q,
-                                                            const std::string &groups, const std::string &window_spec,
-                                                            const std::string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::QuantileDisc(const std::string &column, const py::object &q,
+                                                                 const std::string &groups,
+                                                                 const std::string &window_spec,
+                                                                 const std::string &projected_columns) {
 	string quantile_params = "";
 	if (py::isinstance<py::float_>(q)) {
 		quantile_params = std::to_string(q.cast<float>());
@@ -684,27 +690,27 @@ unique_ptr<DuckDBPyRelation> DuckDBPyRelation::QuantileDisc(const std::string &c
 	return ApplyAggOrWin("quantile_disc", column, quantile_params, groups, window_spec, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::StdPop(const std::string &column, const std::string &groups,
-                                                      const std::string &window_spec,
-                                                      const std::string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::StdPop(const std::string &column, const std::string &groups,
+                                                           const std::string &window_spec,
+                                                           const std::string &projected_columns) {
 	return ApplyAggOrWin("stddev_pop", column, "", groups, window_spec, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::StdSamp(const std::string &column, const std::string &groups,
-                                                       const std::string &window_spec,
-                                                       const std::string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::StdSamp(const std::string &column, const std::string &groups,
+                                                            const std::string &window_spec,
+                                                            const std::string &projected_columns) {
 	return ApplyAggOrWin("stddev_samp", column, "", groups, window_spec, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::VarPop(const std::string &column, const std::string &groups,
-                                                      const std::string &window_spec,
-                                                      const std::string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::VarPop(const std::string &column, const std::string &groups,
+                                                           const std::string &window_spec,
+                                                           const std::string &projected_columns) {
 	return ApplyAggOrWin("var_pop", column, "", groups, window_spec, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::VarSamp(const std::string &column, const std::string &groups,
-                                                       const std::string &window_spec,
-                                                       const std::string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::VarSamp(const std::string &column, const std::string &groups,
+                                                            const std::string &window_spec,
+                                                            const std::string &projected_columns) {
 	return ApplyAggOrWin("var_samp", column, "", groups, window_spec, projected_columns);
 }
 
@@ -721,45 +727,49 @@ py::tuple DuckDBPyRelation::Shape() {
 	return py::make_tuple(length, rel->Columns().size());
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Unique(const string &std_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Unique(const string &std_columns) {
 	return DeriveRelation(rel->Project(std_columns)->Distinct());
 }
 
 /* General-purpose window functions */
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::RowNumber(const string &window_spec, const string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::RowNumber(const string &window_spec,
+                                                              const string &projected_columns) {
 	return GenericWindowFunction("row_number", "", "*", window_spec, false, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Rank(const string &window_spec, const string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Rank(const string &window_spec, const string &projected_columns) {
 	return GenericWindowFunction("rank", "", "*", window_spec, false, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::DenseRank(const string &window_spec, const string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::DenseRank(const string &window_spec,
+                                                              const string &projected_columns) {
 	return GenericWindowFunction("dense_rank", "", "*", window_spec, false, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::PercentRank(const string &window_spec, const string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::PercentRank(const string &window_spec,
+                                                                const string &projected_columns) {
 	return GenericWindowFunction("percent_rank", "", "*", window_spec, false, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::CumeDist(const string &window_spec, const string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::CumeDist(const string &window_spec,
+                                                             const string &projected_columns) {
 	return GenericWindowFunction("cume_dist", "", "*", window_spec, false, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::FirstValue(const string &column, const string &window_spec,
-                                                          const string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::FirstValue(const string &column, const string &window_spec,
+                                                               const string &projected_columns) {
 	return GenericWindowFunction("first_value", "", column, window_spec, false, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::NTile(const string &window_spec, const int &num_buckets,
-                                                     const string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::NTile(const string &window_spec, const int &num_buckets,
+                                                          const string &projected_columns) {
 	return GenericWindowFunction("ntile", std::to_string(num_buckets), "", window_spec, false, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Lag(const string &column, const string &window_spec, const int &offset,
-                                                   const string &default_value, const bool &ignore_nulls,
-                                                   const string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Lag(const string &column, const string &window_spec,
+                                                        const int &offset, const string &default_value,
+                                                        const bool &ignore_nulls, const string &projected_columns) {
 	string lag_params = "";
 	if (offset != 0) {
 		lag_params += std::to_string(offset);
@@ -770,14 +780,14 @@ unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Lag(const string &column, const s
 	return GenericWindowFunction("lag", lag_params, column, window_spec, ignore_nulls, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::LastValue(const std::string &column, const std::string &window_spec,
-                                                         const std::string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::LastValue(const std::string &column, const std::string &window_spec,
+                                                              const std::string &projected_columns) {
 	return GenericWindowFunction("last_value", "", column, window_spec, false, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Lead(const string &column, const string &window_spec, const int &offset,
-                                                    const string &default_value, const bool &ignore_nulls,
-                                                    const string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Lead(const string &column, const string &window_spec,
+                                                         const int &offset, const string &default_value,
+                                                         const bool &ignore_nulls, const string &projected_columns) {
 	string lead_params = "";
 	if (offset != 0) {
 		lead_params += std::to_string(offset);
@@ -788,14 +798,14 @@ unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Lead(const string &column, const 
 	return GenericWindowFunction("lead", lead_params, column, window_spec, ignore_nulls, projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::NthValue(const string &column, const string &window_spec,
-                                                        const int &offset, const bool &ignore_nulls,
-                                                        const string &projected_columns) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::NthValue(const string &column, const string &window_spec,
+                                                             const int &offset, const bool &ignore_nulls,
+                                                             const string &projected_columns) {
 	return GenericWindowFunction("nth_value", std::to_string(offset), column, window_spec, ignore_nulls,
 	                             projected_columns);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Distinct() {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Distinct() {
 	return DeriveRelation(rel->Distinct());
 }
 
@@ -830,7 +840,7 @@ void DuckDBPyRelation::ExecuteOrThrow(bool stream_result) {
 	if (query_result->HasError()) {
 		query_result->ThrowError();
 	}
-	result = make_uniq<DuckDBPyResult>(std::move(query_result));
+	result = std::make_unique<DuckDBPyResult>(std::move(query_result));
 }
 
 PandasDataFrame DuckDBPyRelation::FetchDF(bool date_as_object) {
@@ -1071,14 +1081,14 @@ void DuckDBPyRelation::SetConnectionOwner(py::object owner) {
 	connection_owner = std::move(owner);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::DeriveRelation(shared_ptr<Relation> new_rel) {
-	auto result_ = make_uniq<DuckDBPyRelation>(std::move(new_rel));
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::DeriveRelation(shared_ptr<Relation> new_rel) {
+	auto result_ = std::make_unique<DuckDBPyRelation>(std::move(new_rel));
 	result_->connection_owner = connection_owner;
 	return result_;
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::DeriveRelation(shared_ptr<DuckDBPyResult> result_p) {
-	auto result_ = make_uniq<DuckDBPyRelation>(std::move(result_p));
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::DeriveRelation(std::shared_ptr<DuckDBPyResult> result_p) {
+	auto result_ = std::make_unique<DuckDBPyRelation>(std::move(result_p));
 	result_->connection_owner = connection_owner;
 	return result_;
 }
@@ -1097,7 +1107,7 @@ static bool ContainsStructFieldByName(LogicalType &type, const string &name) {
 	return false;
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::GetAttribute(const string &name) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::GetAttribute(const string &name) {
 	// TODO: support fetching a result containing only column 'name' from a value_relation
 	if (!rel) {
 		throw py::attribute_error(
@@ -1126,15 +1136,15 @@ unique_ptr<DuckDBPyRelation> DuckDBPyRelation::GetAttribute(const string &name) 
 	return DeriveRelation(rel->Project(std::move(expressions), aliases));
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Union(DuckDBPyRelation *other) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Union(DuckDBPyRelation *other) {
 	return DeriveRelation(rel->Union(other->rel));
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Except(DuckDBPyRelation *other) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Except(DuckDBPyRelation *other) {
 	return DeriveRelation(rel->Except(other->rel));
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Intersect(DuckDBPyRelation *other) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Intersect(DuckDBPyRelation *other) {
 	return DeriveRelation(rel->Intersect(other->rel));
 }
 
@@ -1177,8 +1187,8 @@ static JoinType ParseJoinType(const string &type) {
 	throw InvalidInputException("Unsupported join type %s, try one of: %s", provided, options);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Join(DuckDBPyRelation *other, const py::object &condition,
-                                                    const string &type) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Join(DuckDBPyRelation *other, const py::object &condition,
+                                                         const string &type) {
 	if (!other) {
 		throw InvalidInputException("No relation provided for join");
 	}
@@ -1216,7 +1226,7 @@ unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Join(DuckDBPyRelation *other, con
 		auto join_relation = make_shared_ptr<JoinRelation>(rel, other->rel, std::move(using_list), join_type);
 		return DeriveRelation(std::move(join_relation));
 	}
-	shared_ptr<DuckDBPyExpression> condition_expr;
+	std::shared_ptr<DuckDBPyExpression> condition_expr;
 	if (!py::try_cast(condition, condition_expr)) {
 		throw InvalidInputException(
 		    "Please provide condition as an expression either in string form or as an Expression object");
@@ -1226,7 +1236,7 @@ unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Join(DuckDBPyRelation *other, con
 	return DeriveRelation(rel->Join(other->rel, std::move(conditions), join_type));
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Cross(DuckDBPyRelation *other) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Cross(DuckDBPyRelation *other) {
 	return DeriveRelation(rel->CrossProduct(other->rel));
 }
 
@@ -1523,7 +1533,7 @@ void DuckDBPyRelation::ToCSV(const string &filename, const py::object &sep, cons
 }
 
 // should this return a rel with the new view?
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::CreateView(const string &view_name, bool replace) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::CreateView(const string &view_name, bool replace) {
 	rel->CreateView(Identifier(view_name), replace);
 	return DeriveRelation(rel);
 }
@@ -1539,7 +1549,7 @@ static bool IsDescribeStatement(SQLStatement &statement) {
 	return true;
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Query(const string &view_name, const string &sql_query) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Query(const string &view_name, const string &sql_query) {
 	rel->CreateView(Identifier(view_name), /*replace=*/true, /*temporary=*/true);
 	auto all_dependencies = rel->GetAllDependencies();
 
@@ -1589,8 +1599,8 @@ void DuckDBPyRelation::Update(const py::object &set_p, const py::object &where) 
 	AssertRelation();
 	unique_ptr<ParsedExpression> condition;
 	if (!py::none().is(where)) {
-		shared_ptr<DuckDBPyExpression> py_expr;
-		if (!py::try_cast<shared_ptr<DuckDBPyExpression>>(where, py_expr)) {
+		std::shared_ptr<DuckDBPyExpression> py_expr;
+		if (!py::try_cast<std::shared_ptr<DuckDBPyExpression>>(where, py_expr)) {
 			throw InvalidInputException("Please provide an Expression to 'condition'");
 		}
 		condition = py_expr->GetExpression().Copy();
@@ -1616,8 +1626,8 @@ void DuckDBPyRelation::Update(const py::object &set_p, const py::object &where) 
 		if (!py::isinstance<py::str>(item_key)) {
 			throw InvalidInputException("Please provide the column name as the key of the dictionary");
 		}
-		shared_ptr<DuckDBPyExpression> py_expr;
-		if (!py::try_cast<shared_ptr<DuckDBPyExpression>>(item_value, py_expr)) {
+		std::shared_ptr<DuckDBPyExpression> py_expr;
+		if (!py::try_cast<std::shared_ptr<DuckDBPyExpression>>(item_value, py_expr)) {
 			string actual_type = py::str(py::type::of(item_value));
 			throw InvalidInputException("Please provide an object of type Expression as the value, not %s",
 			                            actual_type);
@@ -1649,7 +1659,7 @@ void DuckDBPyRelation::Create(const string &table) {
 	PyExecuteRelation(create);
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Map(py::function fun, Optional<py::object> schema) {
+std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Map(py::function fun, Optional<py::object> schema) {
 	AssertRelation();
 	vector<Value> params;
 	params.emplace_back(Value::POINTER(CastPointerToValue(fun.ptr())));

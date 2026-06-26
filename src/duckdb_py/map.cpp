@@ -117,7 +117,7 @@ unique_ptr<FunctionData> BindExplicitSchema(unique_ptr<MapFunctionData> function
 		auto type_p = item.second;
 		names.push_back(string(py::str(name)));
 		// TODO: replace with py::try_cast so we can catch the error and throw a better exception
-		auto type = py::cast<shared_ptr<DuckDBPyType>>(type_p);
+		auto type = py::cast<std::shared_ptr<DuckDBPyType>>(type_p);
 		types.push_back(type->Type());
 	}
 
