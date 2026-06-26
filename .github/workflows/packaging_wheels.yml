@@ -32,7 +32,7 @@ jobs:
       matrix:
         python: [ cp314 ]
         platform:
-          - { os: windows-2025,     arch: amd64,      cibw_system: win }
+          - { os: windows-2022,     arch: amd64,      cibw_system: win }
           - { os: windows-11-arm,   arch: ARM64,      cibw_system: win }
           - { os: ubuntu-24.04,     arch: x86_64,     cibw_system: manylinux }
           - { os: ubuntu-24.04-arm, arch: aarch64,    cibw_system: manylinux }

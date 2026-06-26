@@ -413,7 +413,7 @@ shared_ptr<DuckDBPyConnection> DuckDBPyConnection::UnregisterUDF(const string &n
 		auto &catalog = Catalog::GetCatalog(context, SYSTEM_CATALOG);
 		DropInfo info;
 		info.type = CatalogType::SCALAR_FUNCTION_ENTRY;
-		info.name = Identifier(name);
+		info.NameMutable() = Identifier(name);
 		info.allow_drop_internal = true;
 		info.cascade = false;
 		info.if_not_found = OnEntryNotFound::THROW_EXCEPTION;
@@ -1651,11 +1651,12 @@ unique_ptr<DuckDBPyRelation> DuckDBPyConnection::RunQuery(const py::object &quer
 unique_ptr<DuckDBPyRelation> DuckDBPyConnection::Table(const string &tname) {
 	auto &connection = con.GetConnection();
 	auto qualified_name = QualifiedName::Parse(tname);
-	if (qualified_name.schema.empty()) {
-		qualified_name.schema = DEFAULT_SCHEMA;
+	if (qualified_name.Schema().empty()) {
+		qualified_name.SchemaMutable() = DEFAULT_SCHEMA;
 	}
 	try {
-		return CreateRelation(connection.Table(qualified_name.catalog, qualified_name.schema, qualified_name.name));
+		return CreateRelation(
+		    connection.Table(qualified_name.Catalog(), qualified_name.Schema(), qualified_name.Name()));
 	} catch (const CatalogException &) {
 		// CatalogException will be of the type '... is not a table'
 		// Not a table in the database, make a query relation that can perform replacement scans

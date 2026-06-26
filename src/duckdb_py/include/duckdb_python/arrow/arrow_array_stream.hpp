@@ -62,7 +62,7 @@ enum class PyArrowObjectType {
 	PolarsLazyFrame
 };
 
-void TransformDuckToArrowChunk(ArrowSchema &arrow_schema, ArrowArray &data, py::list &batches);
+void TransformDuckToArrowChunk(py::object pyarrow_schema, ArrowArray &data, py::list &batches);
 
 PyArrowObjectType GetArrowType(const py::handle &obj);
 
