@@ -52,7 +52,7 @@ static py::object FunctionCall(NumpyResultConversion &conversion, const vector<I
 	if (!py::isinstance<PandasDataFrame>(df)) {
 		throw InvalidInputException(
 		    "Expected the UDF to return an object of type 'pandas.DataFrame', found '%s' instead",
-		    std::string(py::str(df.attr("__class__"))));
+		    py::cast<std::string>(py::str(df.attr("__class__"))));
 	}
 	if (PandasDataFrame::IsPyArrowBacked(df)) {
 		throw InvalidInputException(
@@ -115,7 +115,7 @@ unique_ptr<FunctionData> BindExplicitSchema(unique_ptr<MapFunctionData> function
 	for (auto &item : schema) {
 		auto name = item.first;
 		auto type_p = item.second;
-		names.push_back(string(py::str(name)));
+		names.push_back(py::cast<std::string>(py::str(name)));
 		// TODO: replace with py::try_cast so we can catch the error and throw a better exception
 		auto type = py::cast<std::shared_ptr<DuckDBPyType>>(type_p);
 		types.push_back(type->Type());

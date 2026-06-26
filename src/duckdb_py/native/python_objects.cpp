@@ -45,15 +45,15 @@ interval_t PyTimeDelta::ToInterval() {
 }
 
 int64_t PyTimeDelta::GetDays(py::handle &obj) {
-	return py::int_(obj.attr("days")).cast<int64_t>();
+	return py::cast<int64_t>(py::int_(obj.attr("days")));
 }
 
 int64_t PyTimeDelta::GetSeconds(py::handle &obj) {
-	return py::int_(obj.attr("seconds")).cast<int64_t>();
+	return py::cast<int64_t>(py::int_(obj.attr("seconds")));
 }
 
 int64_t PyTimeDelta::GetMicros(py::handle &obj) {
-	return py::int_(obj.attr("microseconds")).cast<int64_t>();
+	return py::cast<int64_t>(py::int_(obj.attr("microseconds")));
 }
 
 PyDecimal::PyDecimal(py::handle &obj) : obj(obj) {
@@ -126,7 +126,7 @@ void PyDecimal::SetExponent(py::handle &exponent) {
 		return;
 	}
 	if (py::isinstance<py::str>(exponent)) {
-		string exponent_string = py::str(exponent);
+		string exponent_string = py::cast<std::string>(py::str(exponent));
 		if (exponent_string == "n") {
 			exponent_type = PyDecimalExponentType::EXPONENT_NAN;
 			return;
@@ -161,7 +161,7 @@ Value PyDecimalCastSwitch(PyDecimal &decimal, uint8_t width, uint8_t scale) {
 
 // Wont fit in a DECIMAL, fall back to DOUBLE
 static Value CastToDouble(py::handle &obj) {
-	string converted = py::str(obj);
+	string converted = py::cast<std::string>(py::str(obj));
 	string_t decimal_string(converted);
 	double double_val;
 	bool try_cast = TryCast::Operation<string_t, double>(decimal_string, double_val, true);

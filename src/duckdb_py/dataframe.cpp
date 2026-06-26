@@ -38,7 +38,7 @@ bool PandasDataFrame::IsPyArrowBacked(const py::handle &df) {
 	}
 
 	auto arrow_dtype = import_cache.pandas.ArrowDtype();
-	for (auto &dtype : dtypes) {
+	for (auto dtype : dtypes) { // nanobind list iteration yields temporary handles; bind by value (cheap handle, no copy of heavy data)
 		if (py::isinstance(dtype, arrow_dtype)) {
 			return true;
 		}

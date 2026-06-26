@@ -392,7 +392,7 @@ static bool NumpyDeprecatesAccessToCore(const py::tuple &numpy_version) {
 	if (numpy_version.empty()) {
 		return false;
 	}
-	if (string(py::str(numpy_version[0])) == string("2")) {
+	if (py::cast<std::string>(py::str(numpy_version[0])) == string("2")) {
 		//! Starting with numpy version 2.0.0 the use of 'core' is deprecated.
 		return true;
 	}
@@ -488,7 +488,7 @@ public:
 			if (py::try_cast<std::shared_ptr<DuckDBPyType>>(value.attr("annotation"), pytype)) {
 				parameters.push_back(pytype->Type());
 			} else {
-				std::string kind = py::str(value.attr("kind"));
+				std::string kind = py::cast<std::string>(py::str(value.attr("kind")));
 				auto parameter_kind = ParameterKind::FromString(kind);
 				if (parameter_kind == ParameterKind::Type::VAR_POSITIONAL) {
 					varargs = LogicalType::ANY;

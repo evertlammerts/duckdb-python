@@ -356,10 +356,10 @@ void RegisterExceptions(const py::module_ &m) {
 	{
 		auto http_exc = py::register_exception<PyHTTPException>(m, "HTTPException", io_exception);
 		HTTP_EXCEPTION = http_exc.ptr();
-		const auto string_type = py::type::of(py::str());
+		const auto string_type = (py::str()).type();
 		const auto Dict = py::module_::import_("typing").attr("Dict");
 		http_exc.attr("__annotations__") = py::dict(
-		    py::arg("status_code") = py::type::of(py::int_()), py::arg("body") = string_type,
+		    py::arg("status_code") = (py::int_()).type(), py::arg("body") = string_type,
 		    py::arg("reason") = string_type, py::arg("headers") = Dict[py::make_tuple(string_type, string_type)]);
 		http_exc.doc() = "Thrown when an error occurs in the httpfs extension, or whilst downloading an extension.";
 	}

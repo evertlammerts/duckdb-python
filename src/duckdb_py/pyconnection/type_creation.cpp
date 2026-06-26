@@ -26,7 +26,7 @@ static child_list_t<LogicalType> GetChildList(const py::object &container) {
 		for (auto &item : fields) {
 			std::shared_ptr<DuckDBPyType> pytype;
 			if (!py::try_cast<std::shared_ptr<DuckDBPyType>>(item, pytype)) {
-				string actual_type = py::str(py::type::of(item));
+				string actual_type = py::cast<std::string>(py::str((item).type()));
 				throw InvalidInputException("object has to be a list of DuckDBPyType's, not '%s'", actual_type);
 			}
 			types.push_back(std::make_pair(Identifier(StringUtil::Format("v%d", i++)), pytype->Type()));
@@ -40,14 +40,14 @@ static child_list_t<LogicalType> GetChildList(const py::object &container) {
 			auto name = Identifier(py::str(name_p));
 			std::shared_ptr<DuckDBPyType> pytype;
 			if (!py::try_cast<std::shared_ptr<DuckDBPyType>>(type_p, pytype)) {
-				string actual_type = py::str(py::type::of(type_p));
+				string actual_type = py::cast<std::string>(py::str((type_p).type()));
 				throw InvalidInputException("object has to be a list of DuckDBPyType's, not '%s'", actual_type);
 			}
 			types.push_back(std::make_pair(name, pytype->Type()));
 		}
 		return types;
 	} else {
-		string actual_type = py::str(py::type::of(container));
+		string actual_type = py::cast<std::string>(py::str((container).type()));
 		throw InvalidInputException(
 		    "Can not construct a child list from object of type '%s', only dict/list is supported", actual_type);
 	}

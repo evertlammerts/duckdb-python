@@ -91,7 +91,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Project(const py::args &args
 	}
 	py::handle first_arg = args[0];
 	if (arg_count == 1 && py::isinstance<py::str>(first_arg)) {
-		string expr_string = py::str(first_arg);
+		string expr_string = py::cast<std::string>(py::str(first_arg));
 		return ProjectFromExpression(expr_string);
 	} else {
 		vector<unique_ptr<ParsedExpression>> expressions;
@@ -125,14 +125,14 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::ProjectFromTypes(const py::o
 	for (auto &item : list) {
 		LogicalType type;
 		if (py::isinstance<py::str>(item)) {
-			string type_str = py::str(item);
+			string type_str = py::cast<std::string>(py::str(item));
 			rel->context->GetContext()->RunFunctionInTransaction(
 			    [&]() { type = TransformStringToLogicalType(type_str, *rel->context->GetContext().get()); });
 		} else if (py::isinstance<DuckDBPyType>(item)) {
 			auto *type_p = py::cast<DuckDBPyType *>(item);
 			type = type_p->Type();
 		} else {
-			string actual_type = py::str(py::type::of(item));
+			string actual_type = py::cast<std::string>(py::str((item).type()));
 			throw InvalidInputException("Can only project on objects of type DuckDBPyType or str, not '%s'",
 			                            actual_type);
 		}
@@ -218,7 +218,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Sort(const py::args &args) {
 	for (auto arg : args) {
 		std::shared_ptr<DuckDBPyExpression> py_expr;
 		if (!py::try_cast<std::shared_ptr<DuckDBPyExpression>>(arg, py_expr)) {
-			string actual_type = py::str(py::type::of(arg));
+			string actual_type = py::cast<std::string>(py::str((arg).type()));
 			throw InvalidInputException("Expected argument of type Expression, received '%s' instead", actual_type);
 		}
 		auto expr = py_expr->GetExpression().Copy();
@@ -244,11 +244,11 @@ vector<unique_ptr<ParsedExpression>> GetExpressions(ClientContext &context, cons
 		}
 		return expressions;
 	} else if (py::isinstance<py::str>(expr)) {
-		auto aggregate_list = std::string(py::str(expr));
+		auto aggregate_list = py::cast<std::string>(py::str(expr));
 		return Parser::ParseExpressionList(aggregate_list, context.GetParserOptions());
 	} else {
 		// A single Expression could be supported here by wrapping it in a vector
-		string actual_type = py::str(py::type::of(expr));
+		string actual_type = py::cast<std::string>(py::str((expr).type()));
 		throw InvalidInputException("Please provide either a string or list of Expression objects, not %s",
 		                            actual_type);
 	}
@@ -652,7 +652,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::QuantileCont(const std::stri
 	if (py::isinstance<py::float_>(q)) {
 		quantile_params = std::to_string(py::cast<float>(q));
 	} else if (py::isinstance<py::list>(q)) {
-		auto aux = q.cast<std::vector<double>>();
+		auto aux = py::cast<std::vector<double>>(q);
 		quantile_params += "[";
 		for (idx_t i = 0; i < aux.size(); i++) {
 			quantile_params += std::to_string(aux[i]);
@@ -675,7 +675,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::QuantileDisc(const std::stri
 	if (py::isinstance<py::float_>(q)) {
 		quantile_params = std::to_string(py::cast<float>(q));
 	} else if (py::isinstance<py::list>(q)) {
-		auto aux = q.cast<std::vector<double>>();
+		auto aux = py::cast<std::vector<double>>(q);
 		quantile_params += "[";
 		for (idx_t i = 0; i < aux.size(); i++) {
 			quantile_params += std::to_string(aux[i]);
@@ -1015,7 +1015,7 @@ PolarsDataFrame DuckDBPyRelation::ToPolars(idx_t batch_size, bool lazy) {
 	if (!lazy) {
 		auto arrow = ToArrowTableInternal(batch_size, true);
 		return py::cast<PolarsDataFrame>(
-		    pybind11::module_::import_("polars").attr("from_arrow")(arrow, py::arg("rechunk") = false));
+		    py::module_::import_("polars").attr("from_arrow")(arrow, py::arg("rechunk") = false));
 	}
 	auto &import_cache = *DuckDBPyConnection::ImportCache();
 	auto lazy_frame_produce = import_cache.duckdb.polars_io.duckdb_source();
@@ -1038,7 +1038,7 @@ PolarsDataFrame DuckDBPyRelation::ToPolars(idx_t batch_size, bool lazy) {
 	auto empty_table = pyarrow::ToArrowTable(types, result_names, batches, client_properties);
 
 	// And we extract the polars schema from the arrow table
-	auto polars_df = py::cast<PolarsDataFrame>(pybind11::module_::import_("polars").attr("DataFrame")(empty_table));
+	auto polars_df = py::cast<PolarsDataFrame>(py::module_::import_("polars").attr("DataFrame")(empty_table));
 	auto polars_schema = polars_df.attr("schema");
 
 	return lazy_frame_produce(*this, polars_schema);
@@ -1215,10 +1215,10 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Join(DuckDBPyRelation *other
 	if (py::is_list_like(condition)) {
 		for (auto &item : py::list(condition)) {
 			if (!py::isinstance<py::str>(item)) {
-				string actual_type = py::str(py::type::of(item));
+				string actual_type = py::cast<std::string>(py::str((item).type()));
 				throw InvalidInputException("Using clause should be a list of strings, not %s", actual_type);
 			}
-			using_list.push_back(Identifier(std::string(py::str(item))));
+			using_list.push_back(Identifier(py::cast<std::string>(py::str(item))));
 		}
 		if (using_list.empty()) {
 			throw InvalidInputException("Please provide at least one string in the condition to create a USING clause");
@@ -1255,7 +1255,7 @@ static Value NestedDictToStruct(const py::object &dictionary) {
 			throw InvalidInputException("NestedDictToStruct only accepts a dictionary with string keys");
 		}
 
-		auto item_key_str = string(py::str(item_key));
+		auto item_key_str = py::cast<std::string>(py::str(item_key));
 
 		if (py::isinstance<py::int_>(item_value)) {
 			int32_t item_value_int = py::int_(item_value);
@@ -1628,11 +1628,11 @@ void DuckDBPyRelation::Update(const py::object &set_p, const py::object &where) 
 		}
 		std::shared_ptr<DuckDBPyExpression> py_expr;
 		if (!py::try_cast<std::shared_ptr<DuckDBPyExpression>>(item_value, py_expr)) {
-			string actual_type = py::str(py::type::of(item_value));
+			string actual_type = py::cast<std::string>(py::str((item_value).type()));
 			throw InvalidInputException("Please provide an object of type Expression as the value, not %s",
 			                            actual_type);
 		}
-		names_.push_back(std::string(py::str(item_key)));
+		names_.push_back(py::cast<std::string>(py::str(item_key)));
 		expressions.push_back(py_expr->GetExpression().Copy());
 	}
 

@@ -323,7 +323,7 @@ static bool TryTransformPythonLongToHugeInt(py::handle ele, const LogicalType &t
 static Value TransformPythonLongToHugeInt(py::handle ele, const LogicalType &target_type) {
 	Value result;
 	if (!TryTransformPythonLongToHugeInt(ele, target_type, result)) {
-		throw InvalidInputException("Python integer too large for 128-bit integer type: %s", std::string(py::str(ele)));
+		throw InvalidInputException("Python integer too large for 128-bit integer type: %s", py::cast<std::string>(py::str(ele)));
 	}
 	return result;
 }
@@ -573,7 +573,7 @@ struct PythonValueConversion {
 			return decimal.ToDuckValue();
 		}
 		case PythonObjectType::Uuid: {
-			auto string_val = py::str(ele).cast<string>();
+			auto string_val = py::cast<string>(py::str(ele));
 			return Value::UUID(string_val);
 		}
 		case PythonObjectType::Timedelta: {
@@ -597,7 +597,7 @@ struct PythonValueConversion {
 			auto type = ele.attr("type");
 			std::shared_ptr<DuckDBPyType> internal_type;
 			if (!py::try_cast<std::shared_ptr<DuckDBPyType>>(type, internal_type)) {
-				string actual_type = py::str(py::type::of(type));
+				string actual_type = py::cast<std::string>(py::str((type).type()));
 				throw InvalidInputException("The 'type' of a Value should be of type DuckDBPyType, not '%s'",
 				                            actual_type);
 			}
@@ -1001,7 +1001,7 @@ void TransformPythonObjectInternal(optional_ptr<ClientContext> context, py::hand
 		bool is_nat = false;
 		if (import_cache.pandas.isnull(false)) {
 			auto isnull_result = import_cache.pandas.isnull()(ele);
-			is_nat = string(py::str(isnull_result)) == "True";
+			is_nat = py::cast<std::string>(py::str(isnull_result)) == "True";
 		}
 		if (is_nat) {
 			OP::HandleNull(result, param);
@@ -1053,7 +1053,7 @@ void TransformPythonObjectInternal(optional_ptr<ClientContext> context, py::hand
 	}
 	case PythonObjectType::Other:
 		throw NotImplementedException("Unable to transform python value of type '%s' to DuckDB LogicalType",
-		                              py::str(py::type::of(ele)).cast<string>());
+		                              py::cast<string>(py::str((ele).type())));
 	default:
 		throw InternalException("Object type recognized but not implemented!");
 	}

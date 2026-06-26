@@ -15,7 +15,7 @@ void NumpyBind::Bind(ClientContext &context, py::handle df, vector<PandasColumnB
 	auto df_columns = py::list(df.attr("keys")());
 	auto df_types = py::list();
 	for (auto item : py::cast<py::dict>(df)) {
-		if (string(py::str(item.second.attr("dtype").attr("char"))) == "U") {
+		if (py::cast<std::string>(py::str(item.second.attr("dtype").attr("char"))) == "U") {
 			df_types.attr("append")(py::str("string"));
 			continue;
 		}
@@ -53,7 +53,7 @@ void NumpyBind::Bind(ClientContext &context, py::handle df, vector<PandasColumnB
 			}
 			duckdb_col_type = LogicalType::ENUM(enum_entries_vec, size);
 			auto pandas_col = uniq.attr("__getitem__")(1);
-			bind_data.internal_categorical_type = string(py::str(pandas_col.attr("dtype")));
+			bind_data.internal_categorical_type = py::cast<std::string>(py::str(pandas_col.attr("dtype")));
 			bind_data.pandas_col = std::make_unique<PandasNumpyColumn>(NumpyArray(pandas_col));
 		} else {
 			bind_data.pandas_col = std::make_unique<PandasNumpyColumn>(NumpyArray(column));

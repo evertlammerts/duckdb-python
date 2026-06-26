@@ -383,7 +383,7 @@ private:
 
 template <typename T>
 static bool ModuleIsLoaded() {
-	auto dict = pybind11::module_::import_("sys").attr("modules");
+	auto dict = py::module_::import_("sys").attr("modules");
 	return dict.contains(py::str(T::Name));
 }
 

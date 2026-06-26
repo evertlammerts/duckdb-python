@@ -218,7 +218,7 @@ py::object PandasScanFunction::PandasReplaceCopiedNames(const py::object &origin
 	auto df_columns = py::list(original_df.attr("columns"));
 	vector<string> columns;
 	for (const auto &str : df_columns) {
-		columns.push_back(string(py::str(str)));
+		columns.push_back(py::cast<std::string>(py::str(str)));
 	}
 	QueryResult::DeduplicateColumns(columns);
 

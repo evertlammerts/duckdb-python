@@ -36,8 +36,8 @@ static void CreateArrowScan(const string &name, py::object entry, TableFunctionR
 					break;
 				}
 				stream_messages.append(message.attr("serialize")());
-				const auto buffer_address = stream_messages[stream_messages.size() - 1].attr("address").cast<int64_t>();
-				const auto buffer_size = stream_messages[stream_messages.size() - 1].attr("size").cast<uint32_t>();
+				const auto buffer_address = py::cast<int64_t>(stream_messages[stream_messages.size() - 1].attr("address"));
+				const auto buffer_size = py::cast<uint32_t>(stream_messages[stream_messages.size() - 1].attr("size"));
 				child_list_t<Value> buffer_values;
 				buffer_values.push_back({"ptr", Value::POINTER(buffer_address)});
 				buffer_values.push_back({"size", Value::UBIGINT(buffer_size)});
@@ -85,7 +85,7 @@ static void CreateArrowScan(const string &name, py::object entry, TableFunctionR
 
 static void ThrowScanFailureError(const py::object &entry, const string &name, const string &location = "") {
 	string error;
-	auto py_object_type = string(py::str(py::type::of(entry).attr("__name__")));
+	auto py_object_type = py::cast<std::string>(py::str((entry).type().attr("__name__")));
 	error += StringUtil::Format("Python Object \"%s\" of type \"%s\"", name, py_object_type);
 	if (!location.empty()) {
 		error += StringUtil::Format(" found on line \"%s\"", location);

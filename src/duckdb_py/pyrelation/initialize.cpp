@@ -72,7 +72,7 @@ static void InitializeConsumers(py::class_<DuckDBPyRelation> &m) {
 	         py::arg("batch_size") = 1000000)
 	    .def(
 	        "fetch_arrow_table",
-	        [](pybind11::object &self, idx_t batch_size) {
+	        [](py::object &self, idx_t batch_size) {
 		        PyErr_WarnEx(PyExc_DeprecationWarning,
 		                     "fetch_arrow_table() is deprecated, use to_arrow_table() instead.", 0);
 		        return self.attr("to_arrow_table")(batch_size);
@@ -91,7 +91,7 @@ static void InitializeConsumers(py::class_<DuckDBPyRelation> &m) {
 	      py::arg("requested_schema") = py::none());
 	m.def(
 	     "fetch_record_batch",
-	     [](pybind11::object &self, idx_t rows_per_batch) {
+	     [](py::object &self, idx_t rows_per_batch) {
 		     PyErr_WarnEx(PyExc_DeprecationWarning,
 		                  "fetch_record_batch() is deprecated, use to_arrow_reader() instead.", 0);
 		     return self.attr("to_arrow_reader")(rows_per_batch);
@@ -99,7 +99,7 @@ static void InitializeConsumers(py::class_<DuckDBPyRelation> &m) {
 	     "Execute and return an Arrow Record Batch Reader that yields all rows", py::arg("rows_per_batch") = 1000000)
 	    .def(
 	        "fetch_arrow_reader",
-	        [](pybind11::object &self, idx_t batch_size) {
+	        [](py::object &self, idx_t batch_size) {
 		        PyErr_WarnEx(PyExc_DeprecationWarning,
 		                     "fetch_arrow_reader() is deprecated, use to_arrow_reader() instead.", 0);
 		        if (PyErr_Occurred()) {
@@ -267,7 +267,7 @@ static void InitializeMetaQueries(py::class_<DuckDBPyRelation> &m) {
 	        "explain",
 	        [](DuckDBPyRelation &self, ExplainType type, const py::object &format) {
 		        // An omitted format (None) maps to "" = auto-select (default, or HTML under Jupyter).
-		        string format_str = format.is_none() ? string() : string(py::str(format));
+		        string format_str = format.is_none() ? string() : py::cast<std::string>(py::str(format));
 		        return self.Explain(type, format_str);
 	        },
 	        py::arg("type") = ExplainType::EXPLAIN_STANDARD, py::arg("format") = py::none());

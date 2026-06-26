@@ -2,7 +2,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb_python/pyconnection/pyconnection.hpp"
 
-namespace pybind11 {
+namespace nanobind {
 
 // NOLINTNEXTLINE(readability-identifier-naming)
 bool gil_check() {
@@ -38,7 +38,7 @@ bool is_dict_like(handle obj) {
 
 // NOLINTNEXTLINE(readability-identifier-naming)
 std::string to_string(const object &obj) {
-	return std::string(py::str(obj));
+	return nanobind::cast<std::string>(nanobind::str(obj));
 }
 
-} // namespace pybind11
+} // namespace nanobind

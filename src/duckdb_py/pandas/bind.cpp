@@ -76,7 +76,7 @@ static LogicalType BindColumn(ClientContext &context, PandasBindColumn &column_p
 			D_ASSERT(py::hasattr(column.attr("cat"), "codes"));
 			column_type = LogicalType::ENUM(enum_entries_vec, size);
 			NumpyArray pandas_col(column.attr("cat").attr("codes"));
-			bind_data.internal_categorical_type = string(py::str(pandas_col.GetArray().attr("dtype")));
+			bind_data.internal_categorical_type = py::cast<std::string>(py::str(pandas_col.GetArray().attr("dtype")));
 			bind_data.pandas_col = std::make_unique<PandasNumpyColumn>(std::move(pandas_col));
 		} else {
 			NumpyArray pandas_col(column.attr("to_numpy")());

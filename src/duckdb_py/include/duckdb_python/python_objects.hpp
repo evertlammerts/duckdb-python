@@ -41,7 +41,7 @@ public:
 
 public:
 	string ToString() const {
-		return string(py::str(dict));
+		return py::cast<std::string>(py::str(dict));
 	}
 
 private:

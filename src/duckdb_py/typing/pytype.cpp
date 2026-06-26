@@ -138,7 +138,7 @@ static bool FromNumpyType(const py::object &type, LogicalType &result) {
 	if (!py::hasattr(obj, "dtype")) {
 		return false;
 	}
-	string type_str = py::str(obj.attr("dtype"));
+	string type_str = py::cast<std::string>(py::str(obj.attr("dtype")));
 	if (type_str == "bool") {
 		result = LogicalType::BOOLEAN;
 	} else if (type_str == "int8") {
@@ -216,7 +216,7 @@ static py::tuple FilterNones(const py::tuple &args) {
 
 	for (const auto &arg : args) {
 		py::object object = py::borrow<py::object>(arg);
-		if (object.is(py::type::of(py::none()))) {
+		if (object.is((py::none()).type())) {
 			continue;
 		}
 		result.append(object);
@@ -271,7 +271,7 @@ static LogicalType FromGenericAlias(const py::object &obj) {
 			throw NotImplementedException("Can only create a MAP from a dict if args is formed correctly");
 		}
 	}
-	string origin_type = py::str(origin);
+	string origin_type = py::cast<std::string>(py::str(origin));
 	throw InvalidInputException("Could not convert from '%s' to DuckDBPyType", origin_type);
 }
 
@@ -308,26 +308,26 @@ static LogicalType FromObject(const py::object &object) {
 		return FromUnionType(object);
 	}
 	case PythonTypeObject::STRING: {
-		auto string_value = std::string(py::str(object));
+		auto string_value = py::cast<std::string>(py::str(object));
 		return FromString(string_value, nullptr);
 	}
 	case PythonTypeObject::TYPE: {
 		std::shared_ptr<DuckDBPyType> type_object;
 		if (!py::try_cast<std::shared_ptr<DuckDBPyType>>(object, type_object)) {
-			string actual_type = py::str(py::type::of(object));
+			string actual_type = py::cast<std::string>(py::str((object).type()));
 			throw InvalidInputException("Expected argument of type DuckDBPyType, received '%s' instead", actual_type);
 		}
 		return type_object->Type();
 	}
 	default: {
-		string actual_type = py::str(py::type::of(object));
+		string actual_type = py::cast<std::string>(py::str((object).type()));
 		throw NotImplementedException("Could not convert from object of type '%s' to DuckDBPyType", actual_type);
 	}
 	}
 }
 
 void DuckDBPyType::Initialize(py::handle &m) {
-	auto type_module = py::class_<DuckDBPyType, std::shared_ptr<DuckDBPyType>>(m, "DuckDBPyType");
+	auto type_module = py::class_<DuckDBPyType>(m, "DuckDBPyType");
 
 	type_module.def("__repr__", &DuckDBPyType::ToString, "Stringified representation of the type object");
 	type_module.def("__eq__", &DuckDBPyType::Equals, "Compare two types for equality", py::arg("other"),

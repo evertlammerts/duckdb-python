@@ -36,13 +36,13 @@ public:
 
 void PathLikeProcessor::AddFile(const py::object &object) {
 	if (py::isinstance<py::str>(object)) {
-		all_files.push_back(std::string(py::str(object)));
+		all_files.push_back(py::cast<std::string>(py::str(object)));
 		return;
 	}
 	if (py::isinstance<py::bytes>(object) || py::hasattr(object, "__fspath__")) {
 		// A bytes path or an os.PathLike object (e.g. pathlib.Path) - decode it to a string
 		auto fsdecode = py::module_::import_("os").attr("fsdecode");
-		all_files.push_back(std::string(py::str(fsdecode(object))));
+		all_files.push_back(py::cast<std::string>(py::str(fsdecode(object))));
 		return;
 	}
 	// This is (assumed to be) a file-like object
@@ -82,7 +82,7 @@ PathLike PathLike::Create(const py::object &object, DuckDBPyConnection &connecti
 	PathLikeProcessor processor(connection);
 	if (py::isinstance<py::list>(object)) {
 		auto list = py::list(object);
-		for (auto &item : list) {
+		for (auto item : list) { // nanobind list iteration yields temporary handles; bind by value (cheap handle)
 			processor.AddFile(py::borrow<py::object>(item));
 		}
 	} else {

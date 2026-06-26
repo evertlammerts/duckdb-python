@@ -298,7 +298,7 @@ static void ReplaceDFColumn(PandasDataFrame &df, const char *col_name, idx_t idx
 
 // TODO: unify these with an enum/flag to indicate which conversions to do
 void DuckDBPyResult::ConvertDateTimeTypes(PandasDataFrame &df, bool date_as_object) const {
-	auto names = df.attr("columns").cast<vector<string>>();
+	auto names = py::cast<vector<string>>(df.attr("columns"));
 
 	for (idx_t i = 0; i < result->ColumnCount(); i++) {
 		if (result->types[i] == LogicalType::TIMESTAMP_TZ) {
@@ -388,7 +388,7 @@ PandasDataFrame DuckDBPyResult::FrameFromNumpy(bool date_as_object, const py::ha
 	// Convert TZ and (optionally) Date types
 	ConvertDateTimeTypes(df, date_as_object);
 
-	auto names = df.attr("columns").cast<vector<string>>();
+	auto names = py::cast<vector<string>>(df.attr("columns"));
 	D_ASSERT(result->ColumnCount() == names.size());
 	return df;
 }

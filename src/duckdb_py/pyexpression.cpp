@@ -292,7 +292,7 @@ static void PopulateExcludeList(qualified_column_set_t &exclude, py::object list
 	py::list list = py::cast<py::list>(list_p);
 	for (auto item : list) {
 		if (py::isinstance<py::str>(item)) {
-			string col_str = std::string(py::str(item));
+			string col_str = py::cast<std::string>(py::str(item));
 			QualifiedColumnName qname = QualifiedColumnName::Parse(col_str);
 			exclude.insert(qname);
 			continue;
@@ -319,7 +319,7 @@ std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::StarExpression(py::objec
 std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::ColumnExpression(const py::args &names) {
 	vector<Identifier> column_names;
 	if (names.size() == 1) {
-		string column_name = std::string(py::str(names[0]));
+		string column_name = py::cast<std::string>(py::str(names[0]));
 		if (column_name == "*") {
 			return StarExpression();
 		}
@@ -333,8 +333,8 @@ std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::ColumnExpression(const p
 		}
 		column_names.push_back(qualified_name.Name());
 	} else {
-		for (auto &part : names) {
-			column_names.push_back(Identifier(py::str(part)));
+		for (auto part : names) { // nanobind args iteration yields temporary handles; bind by value (cheap handle)
+			column_names.push_back(Identifier(py::cast<std::string>(part)));
 		}
 	}
 	auto column_ref = make_uniq<duckdb::ColumnRefExpression>(std::move(column_names));
@@ -354,7 +354,7 @@ static py::args CreateArgsFromItem(py::handle item) {
 	if (py::isinstance<py::tuple>(item)) {
 		return py::cast<py::args>(item);
 	} else {
-		return py::make_tuple(item);
+		return py::cast<py::args>(py::make_tuple(item));
 	}
 }
 
@@ -365,7 +365,7 @@ std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::LambdaExpression(const p
 		// LambdaExpression(lhs=(<item>, <item>, <item>))
 		auto lhs_tuple = py::cast<py::tuple>(lhs_p);
 		vector<unique_ptr<ParsedExpression>> children;
-		for (auto &item : lhs_tuple) {
+		for (auto item : lhs_tuple) { // nanobind tuple iteration yields temporary handles; bind by value (cheap handle)
 			unique_ptr<ParsedExpression> column;
 			if (py::isinstance<DuckDBPyExpression>(item)) {
 				// 'item' is already an Expression, check its type and use it
@@ -504,7 +504,7 @@ std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::FunctionExpression(const
 	for (auto arg : args) {
 		std::shared_ptr<DuckDBPyExpression> py_expr;
 		if (!py::try_cast<std::shared_ptr<DuckDBPyExpression>>(arg, py_expr)) {
-			string actual_type = py::str(py::type::of(arg));
+			string actual_type = py::cast<std::string>(py::str((arg).type()));
 			throw InvalidInputException("Expected argument of type Expression, received '%s' instead", actual_type);
 		}
 		auto expr = py_expr->GetExpression().Copy();
