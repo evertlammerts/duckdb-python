@@ -156,9 +156,10 @@ void RawArrayWrapper::Initialize(idx_t capacity) {
 }
 
 void RawArrayWrapper::Resize(idx_t new_capacity) {
-	// numpy's ndarray.resize() is in-place (no data copy); refcheck=false because the buffer
-	// is referenced by this wrapper (and its cached data pointer).
-	array.GetArray().attr("resize")(new_capacity, py::arg("refcheck") = false);
+	// numpy's ndarray.resize() is in-place (no data copy) but REALLOCATES the buffer; NumpyArray::Resize
+	// performs it (refcheck=false) and invalidates+recomputes the cached buffer pointer, so MutableData()
+	// below returns the fresh address.
+	array.Resize(new_capacity);
 	data = data_ptr_cast(array.MutableData());
 }
 

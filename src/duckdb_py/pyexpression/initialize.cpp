@@ -32,7 +32,7 @@ void InitializeStaticMethods(py::module_ &m) {
 
 	// Function Expression
 	docs = "";
-	m.def("FunctionExpression", &DuckDBPyExpression::FunctionExpression, py::arg("function_name"), docs);
+	m.def("FunctionExpression", &DuckDBPyExpression::FunctionExpression, docs); // nanobind: cannot name a positional before py::args
 
 	// Coalesce Operator
 	docs = "";

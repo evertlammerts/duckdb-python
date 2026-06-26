@@ -338,7 +338,7 @@ LogicalType PandasAnalyzer::DictToStruct(const PyDictionary &dict, bool &can_con
 		auto dict_key = dict.keys.attr("__getitem__")(i);
 
 		//! Have to already transform here because the child_list needs a string as key
-		auto key = Identifier(py::str(dict_key));
+		auto key = Identifier(py::cast<std::string>(dict_key));
 
 		auto dict_val = dict.values.attr("__getitem__")(i);
 		auto val = GetItemType(dict_val, can_convert);

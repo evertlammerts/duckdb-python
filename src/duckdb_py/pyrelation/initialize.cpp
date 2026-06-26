@@ -291,10 +291,20 @@ void DuckDBPyRelation::Initialize(py::handle &m) {
 
 	relation_module.def("filter", &DuckDBPyRelation::Filter, "Filter the relation object by the filter in filter_expr",
 	                    py::arg("filter_expr"));
-	// nanobind: params after py::args are implicitly keyword-only, and an explicit py::kw_only() there violates
-	// its placement rules, so drop it (Project takes py::args + groups).
-	DefineMethod({"select", "project"}, relation_module, &DuckDBPyRelation::Project,
-	             "Project the relation object by the projection in project_expr", py::arg("groups") = "");
+	// nanobind forbids a named typed parameter (groups) after py::args; bind via a lambda that pulls the
+	// keyword-only `groups` from **kwargs (preserving `rel.select(*exprs, groups=...)`).
+	for (const char *alias : {"select", "project"}) {
+		relation_module.def(
+		    alias,
+		    [](DuckDBPyRelation &self, const py::args &expr, const py::kwargs &kwargs) {
+			    string groups = "";
+			    if (kwargs.contains("groups") && !kwargs["groups"].is_none()) {
+				    groups = py::cast<std::string>(kwargs["groups"]);
+			    }
+			    return self.Project(expr, groups);
+		    },
+		    "Project the relation object by the projection in project_expr");
+	}
 	DefineMethod({"select_types", "select_dtypes"}, relation_module, &DuckDBPyRelation::ProjectFromTypes,
 	             "Select columns from the relation, by filtering based on type(s)", py::arg("types"));
 

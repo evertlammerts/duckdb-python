@@ -222,7 +222,11 @@ py::object PandasScanFunction::PandasReplaceCopiedNames(const py::object &origin
 	}
 	QueryResult::DeduplicateColumns(columns);
 
-	py::list new_columns(columns.size());
+	// nanobind py::list has no pre-sized ctor; pre-fill with None so the indexed assignment below works
+	py::list new_columns;
+	for (idx_t i = 0; i < columns.size(); i++) {
+		new_columns.append(py::none());
+	}
 	for (idx_t i = 0; i < columns.size(); i++) {
 		new_columns[i] = std::move(columns[i]);
 	}

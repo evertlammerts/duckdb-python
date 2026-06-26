@@ -621,7 +621,10 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 			}
 			return py::steal<py::object>(pytime);
 		} catch (py::python_error &e) {
-			return py::str(val.ToString());
+			{
+				auto fallback = val.ToString();
+				return py::str(fallback.c_str(), fallback.size());
+			}
 		}
 	}
 	case LogicalTypeId::DATE: {
@@ -642,7 +645,10 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 			}
 			return py::steal<py::object>(pydate);
 		} catch (py::python_error &e) {
-			return py::str(val.ToString());
+			{
+				auto fallback = val.ToString();
+				return py::str(fallback.c_str(), fallback.size());
+			}
 		}
 	}
 	case LogicalTypeId::LIST: {

@@ -138,7 +138,7 @@ void Pandas::Bind(ClientContext &context, py::handle df_p, vector<PandasColumnBi
 	for (idx_t col_idx = 0; col_idx < column_count; col_idx++) {
 		PandasColumnBindData bind_data;
 
-		names.emplace_back(py::str(df.names[col_idx]));
+		names.emplace_back(py::cast<std::string>(df.names[col_idx]));
 		auto column = df[col_idx];
 		auto column_type = BindColumn(context, column, bind_data);
 

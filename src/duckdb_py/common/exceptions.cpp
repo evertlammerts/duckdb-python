@@ -360,9 +360,13 @@ void RegisterExceptions(const py::module_ &m) {
 		HTTP_EXCEPTION = http_exc.ptr();
 		const auto string_type = (py::str()).type();
 		const auto Dict = py::module_::import_("typing").attr("Dict");
-		http_exc.attr("__annotations__") = py::dict(
-		    py::arg("status_code") = (py::int_()).type(), py::arg("body") = string_type,
-		    py::arg("reason") = string_type, py::arg("headers") = Dict[py::make_tuple(string_type, string_type)]);
+		// nanobind py::dict has no kwargs constructor; build the annotations dict explicitly.
+		py::dict annotations;
+		annotations["status_code"] = (py::int_()).type();
+		annotations["body"] = string_type;
+		annotations["reason"] = string_type;
+		annotations["headers"] = Dict[py::make_tuple(string_type, string_type)];
+		http_exc.attr("__annotations__") = annotations;
 		http_exc.doc() = "Thrown when an error occurs in the httpfs extension, or whilst downloading an extension.";
 	}
 
