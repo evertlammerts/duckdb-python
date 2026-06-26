@@ -739,15 +739,15 @@ void ArrayWrapper::Append(idx_t current_offset, Vector &input, idx_t source_size
 }
 
 py::object ArrayWrapper::ToArray() const {
-	D_ASSERT(data->array && mask->array);
+	D_ASSERT(data->array.GetArray() && mask->array.GetArray());
 	data->Resize(data->count);
 	if (!requires_mask) {
-		return std::move(data->array);
+		return std::move(data->array.GetArray());
 	}
 	mask->Resize(mask->count);
 	// construct numpy arrays from the data and the mask
-	auto values = std::move(data->array);
-	auto nullmask = std::move(mask->array);
+	auto values = std::move(data->array.GetArray());
+	auto nullmask = std::move(mask->array.GetArray());
 
 	// create masked array and return it
 	auto masked_array = py::module::import("numpy.ma").attr("masked_array")(values, nullmask);
