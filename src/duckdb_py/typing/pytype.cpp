@@ -327,7 +327,7 @@ static LogicalType FromObject(const py::object &object) {
 }
 
 void DuckDBPyType::Initialize(py::handle &m) {
-	auto type_module = py::class_<DuckDBPyType, std::shared_ptr<DuckDBPyType>>(m, "DuckDBPyType", py::module_local());
+	auto type_module = py::class_<DuckDBPyType, std::shared_ptr<DuckDBPyType>>(m, "DuckDBPyType");
 
 	type_module.def("__repr__", &DuckDBPyType::ToString, "Stringified representation of the type object");
 	type_module.def("__eq__", &DuckDBPyType::Equals, "Compare two types for equality", py::arg("other"),

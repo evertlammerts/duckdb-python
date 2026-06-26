@@ -301,8 +301,7 @@ static void InitializeImplicitConversion(py::class_<DuckDBPyExpression, std::sha
 }
 
 void DuckDBPyExpression::Initialize(py::module_ &m) {
-	auto expression =
-	    py::class_<DuckDBPyExpression, std::shared_ptr<DuckDBPyExpression>>(m, "Expression", py::module_local());
+	auto expression = py::class_<DuckDBPyExpression, std::shared_ptr<DuckDBPyExpression>>(m, "Expression");
 
 	InitializeStaticMethods(m);
 	InitializeDunderMethods(expression);

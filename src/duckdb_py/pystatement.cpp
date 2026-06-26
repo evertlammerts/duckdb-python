@@ -15,8 +15,7 @@ static void InitializeReadOnlyProperties(py::class_<DuckDBPyStatement, std::uniq
 }
 
 void DuckDBPyStatement::Initialize(py::handle &m) {
-	auto relation_module =
-	    py::class_<DuckDBPyStatement, std::unique_ptr<DuckDBPyStatement>>(m, "Statement", py::module_local());
+	auto relation_module = py::class_<DuckDBPyStatement, std::unique_ptr<DuckDBPyStatement>>(m, "Statement");
 	InitializeReadOnlyProperties(relation_module);
 }
 
