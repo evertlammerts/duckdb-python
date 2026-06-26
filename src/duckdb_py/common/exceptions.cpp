@@ -358,11 +358,11 @@ void RegisterExceptions(const py::module_ &m) {
 	{
 		auto http_exc = py::register_exception<PyHTTPException>(m, "HTTPException", io_exception);
 		HTTP_EXCEPTION = http_exc.ptr();
-		const auto string_type = (py::str()).type();
+		const auto string_type = (py::str("")).type();
 		const auto Dict = py::module_::import_("typing").attr("Dict");
 		// nanobind py::dict has no kwargs constructor; build the annotations dict explicitly.
 		py::dict annotations;
-		annotations["status_code"] = (py::int_()).type();
+		annotations["status_code"] = (py::int_(0)).type();
 		annotations["body"] = string_type;
 		annotations["reason"] = string_type;
 		annotations["headers"] = Dict[py::make_tuple(string_type, string_type)];
