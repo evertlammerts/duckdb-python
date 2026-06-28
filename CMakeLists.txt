@@ -35,11 +35,25 @@ endif()
 # ────────────────────────────────────────────
 # Dependencies
 # ────────────────────────────────────────────
-# nanobind (requires Python to be located first; pybind11 used to do this internally)
-find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
+# nanobind (requires Python to be located first; pybind11 used to do this
+# internally)
+find_package(
+  Python
+  COMPONENTS Interpreter Development.Module
+  REQUIRED)
+# Nanobind ships its CMake config inside site-packages/nanobind/cmake, so
+# find_package() can't discover it unless we set it. (scikit-build-core does
+# this as well)
+if(NOT nanobind_ROOT)
+  execute_process(
+    COMMAND "${Python_EXECUTABLE}" -m nanobind --cmake_dir
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    OUTPUT_VARIABLE nanobind_ROOT)
+endif()
 find_package(nanobind CONFIG REQUIRED)
-# Build nanobind's core support library up front so the object libraries below (which include
-# nanobind headers via the umbrella) compile against its include dirs + Python headers + flags.
+# Build nanobind's core support library up front so the object libraries below
+# (which include nanobind headers via the umbrella) compile against its include
+# dirs + Python headers + flags.
 nanobind_build_library(nanobind-static)
 
 # DuckDB
