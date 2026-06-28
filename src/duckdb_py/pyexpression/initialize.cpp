@@ -295,7 +295,8 @@ static void InitializeImplicitConversion(py::class_<DuckDBPyExpression> &m) {
 	m.def(py::new_([](const py::object &obj) {
 		auto val = TransformPythonValue(nullptr, obj);
 		return DuckDBPyExpression::InternalConstantExpression(std::move(val));
-	}));
+	}),
+	      py::arg("value").none()); // accept None -> NULL constant (nanobind rejects None for py::object otherwise)
 	py::implicitly_convertible<py::str, DuckDBPyExpression>();
 	py::implicitly_convertible<py::object, DuckDBPyExpression>();
 }

@@ -205,6 +205,11 @@ std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::CreateCompareExpression(
 		if (!py::try_cast<std::shared_ptr<DuckDBPyExpression>>(arg, py_expr)) {
 			throw InvalidInputException("Please provide arguments of type Expression!");
 		}
+		if (!py_expr) {
+			// nanobind maps Python None to an empty shared_ptr (rather than running the implicit conversion the
+			// way it does for by-value/by-ref args); pybind11 turned None into a NULL constant expression here.
+			py_expr = InternalConstantExpression(TransformPythonValue(nullptr, py::borrow<py::object>(arg)));
+		}
 		auto expr = py_expr->GetExpression().Copy();
 		expressions.push_back(std::move(expr));
 	}
@@ -236,6 +241,11 @@ std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::Coalesce(const py::args 
 		std::shared_ptr<DuckDBPyExpression> py_expr;
 		if (!py::try_cast<std::shared_ptr<DuckDBPyExpression>>(arg, py_expr)) {
 			throw InvalidInputException("Please provide arguments of type Expression!");
+		}
+		if (!py_expr) {
+			// nanobind maps Python None to an empty shared_ptr (rather than running the implicit conversion the
+			// way it does for by-value/by-ref args); pybind11 turned None into a NULL constant expression here.
+			py_expr = InternalConstantExpression(TransformPythonValue(nullptr, py::borrow<py::object>(arg)));
 		}
 		auto expr = py_expr->GetExpression().Copy();
 		expressions.push_back(std::move(expr));

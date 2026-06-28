@@ -139,3 +139,68 @@ public:
 };
 
 } // namespace duckdb
+
+namespace nanobind {
+namespace detail {
+
+// Custom type caster for std::shared_ptr<duckdb::DuckDBPyExpression>.
+//
+// Mirrors the DuckDBPyType caster (see pytype.hpp): nanobind's default std::shared_ptr<T> caster strips
+// cast_flags::convert before delegating to the inner caster, which disables the implicit conversions the
+// expression API relies on -- a Python str becomes a column expression and any other object becomes a
+// constant expression (registered via implicitly_convertible<py::str/py::object, DuckDBPyExpression>).
+// Those conversions construct brand-new, fully-owned DuckDBPyExpression objects, so they carry no dangling
+// risk; we therefore keep the convert flag. Visible in every TU that converts the type (pyexpression.cpp,
+// pyconnection.cpp, pyrelation.cpp all include this header).
+template <>
+struct type_caster<std::shared_ptr<duckdb::DuckDBPyExpression>> {
+	using T = duckdb::DuckDBPyExpression;
+	using Caster = make_caster<T>;
+	NB_TYPE_CASTER(std::shared_ptr<T>, Caster::Name)
+
+	bool from_python(handle src, uint8_t flags, cleanup_list *cleanup) noexcept {
+		// NOTE: deliberately do NOT clear cast_flags::convert (see comment above).
+		Caster caster;
+		if (caster.from_python(src, flags, cleanup)) {
+			T *ptr = caster.operator T *();
+			if (ptr) {
+				ft_object_guard guard(src);
+				if (auto sp = ptr->weak_from_this().lock()) {
+					value = std::static_pointer_cast<T>(std::move(sp));
+					return true;
+				}
+				value = shared_from_python(ptr, src);
+				return true;
+			}
+		}
+		// The inner caster yielded no instance. nanobind maps Python None (and leaves some scalars) to an empty
+		// shared_ptr here, whereas pybind11 ran the registered implicit conversion. Reproduce that by constructing
+		// through the registered Python constructor (None -> NULL constant, str -> column, scalar -> constant). The
+		// result is a real, owned object, so there is no dangling -- and unlike the empty-shared_ptr default, it
+		// never leaves callers dereferencing a null. Clear the Python error on failure so a rejected conversion
+		// doesn't leave a stale exception for the next operation.
+		try {
+			nanobind::object converted = nanobind::type<T>()(nanobind::borrow<nanobind::object>(src));
+			value = nanobind::cast<std::shared_ptr<T>>(converted);
+			return true;
+		} catch (...) {
+			PyErr_Clear();
+			return false;
+		}
+	}
+
+	static handle from_cpp(const std::shared_ptr<T> &value, rv_policy, cleanup_list *cleanup) noexcept {
+		// DuckDBPyExpression is non-polymorphic and registers no type_hook (simplified shared_ptr from_cpp).
+		bool is_new = false;
+		T *ptr = value.get();
+		handle result = nb_type_put(&typeid(T), ptr, rv_policy::reference, cleanup, &is_new);
+		if (is_new) {
+			auto pp = std::static_pointer_cast<void>(value);
+			shared_from_cpp(std::move(pp), result.ptr());
+		}
+		return result;
+	}
+};
+
+} // namespace detail
+} // namespace nanobind
