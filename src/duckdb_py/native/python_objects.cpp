@@ -517,8 +517,7 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 	case LogicalTypeId::VARCHAR:
 		return py::cast(StringValue::Get(val));
 	case LogicalTypeId::BLOB:
-	case LogicalTypeId::GEOMETRY:
-{
+	case LogicalTypeId::GEOMETRY: {
 		auto &blob = StringValue::Get(val);
 		return py::bytes(blob.data(), blob.size());
 	}

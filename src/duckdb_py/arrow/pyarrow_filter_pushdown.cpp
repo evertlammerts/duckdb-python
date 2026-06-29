@@ -143,14 +143,14 @@ py::object MakePyArrowScalar(const Value &constant, const string &timezone_confi
 		if (arrow_type && arrow_type->GetTypeInfo<ArrowStringInfo>().GetSizeType() == ArrowVariableSizeType::VIEW) {
 			py::handle binary_view_type = import_cache.pyarrow.binary_view();
 			{
-			auto blob = constant.GetValueUnsafe<string>();
-			return dataset_scalar(scalar(py::bytes(blob.data(), blob.size()), binary_view_type()));
-		}
+				auto blob = constant.GetValueUnsafe<string>();
+				return dataset_scalar(scalar(py::bytes(blob.data(), blob.size()), binary_view_type()));
+			}
 		}
 		{
-		auto blob = constant.GetValueUnsafe<string>();
-		return dataset_scalar(py::bytes(blob.data(), blob.size()));
-	}
+			auto blob = constant.GetValueUnsafe<string>();
+			return dataset_scalar(py::bytes(blob.data(), blob.size()));
+		}
 	}
 	case LogicalTypeId::DECIMAL: {
 		if (!arrow_type) {

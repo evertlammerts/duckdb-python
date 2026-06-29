@@ -109,4 +109,3 @@ private:
 	                                 ArrowStreamParameters &parameters, const ClientProperties &client_properties);
 };
 } // namespace duckdb
-

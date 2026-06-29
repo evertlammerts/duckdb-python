@@ -149,8 +149,10 @@ std::string DuckDBPyConnection::FormattedPythonVersion() {
 
 static void InitializeConnectionMethods(py::class_<DuckDBPyConnection> &m) {
 	m.def("cursor", &DuckDBPyConnection::Cursor, "Create a duplicate of the current connection");
+	// .none() lets None reach RegisterFilesystem's body, which imports fsspec explicitly (surfacing
+	// ModuleNotFoundError when fsspec is absent) before validating the instance.
 	m.def("register_filesystem", &DuckDBPyConnection::RegisterFilesystem, "Register a fsspec compliant filesystem",
-	      py::arg("filesystem"));
+	      py::arg("filesystem").none());
 	m.def("unregister_filesystem", &DuckDBPyConnection::UnregisterFilesystem, "Unregister a filesystem",
 	      py::arg("name"));
 	m.def("list_filesystems", &DuckDBPyConnection::ListFilesystems,
@@ -281,8 +283,16 @@ static void InitializeConnectionMethods(py::class_<DuckDBPyConnection> &m) {
 	      "Run a SQL query. If it is a SELECT statement, create a relation object from the given SQL query, otherwise "
 	      "run the query as-is.",
 	      py::arg("query"), py::kw_only(), py::arg("alias") = "", py::arg("params") = py::none());
-	m.def("read_csv", &DuckDBPyConnection::ReadCSV, "Create a relation object from the CSV file in 'name'");
-	m.def("from_csv_auto", &DuckDBPyConnection::ReadCSV, "Create a relation object from the CSV file in 'name'");
+	// read_csv takes a positional source plus **kwargs of options. Bind via a py::args lambda so None is accepted as
+	// the source: a typed py::object param would be rejected by nanobind before ReadCSV's body runs (and .none()
+	// can't combine with py::kwargs), whereas a py::args tuple element may be None. ReadCSV itself raises the
+	// "non file-like object" error for a None/invalid source.
+	auto read_csv_fn = [](DuckDBPyConnection &self, py::args args, py::kwargs kwargs) {
+		py::object name = args.size() >= 1 ? py::object(args[0]) : py::object(py::none());
+		return self.ReadCSV(name, kwargs);
+	};
+	m.def("read_csv", read_csv_fn, "Create a relation object from the CSV file in 'name'");
+	m.def("from_csv_auto", read_csv_fn, "Create a relation object from the CSV file in 'name'");
 	m.def("from_df", &DuckDBPyConnection::FromDF, "Create a relation object from the DataFrame in df", py::arg("df"));
 	m.def("from_arrow", &DuckDBPyConnection::FromArrow, "Create a relation object from an Arrow object",
 	      py::arg("arrow_object"));
@@ -316,11 +326,14 @@ void DuckDBPyConnection::UnregisterFilesystem(const py::str &name) {
 	fs.ExtractSubSystem(py::cast<std::string>(name));
 }
 
-void DuckDBPyConnection::RegisterFilesystem(AbstractFileSystem filesystem) {
+void DuckDBPyConnection::RegisterFilesystem(py::object filesystem) {
 	PythonGILWrapper gil_wrapper;
 
 	auto &database = con.GetDatabase();
-	if (!py::isinstance<AbstractFileSystem>(filesystem)) {
+	// Import fsspec here (a normal, throwing context) so a missing install surfaces as ModuleNotFoundError, rather
+	// than terminating inside the noexcept AbstractFileSystem type check (which nanobind cannot let throw).
+	auto abstract_filesystem = py::module_::import_("fsspec").attr("AbstractFileSystem");
+	if (filesystem.is_none() || !py::isinstance(filesystem, abstract_filesystem)) {
 		throw InvalidInputException("Bad filesystem instance");
 	}
 
@@ -340,7 +353,7 @@ void DuckDBPyConnection::RegisterFilesystem(AbstractFileSystem filesystem) {
 		}
 	}
 
-	fs.RegisterSubSystem(make_uniq<PythonFilesystem>(std::move(protocols), std::move(filesystem)));
+	fs.RegisterSubSystem(make_uniq<PythonFilesystem>(std::move(protocols), py::borrow<AbstractFileSystem>(filesystem)));
 }
 
 py::list DuckDBPyConnection::ListFilesystems() {

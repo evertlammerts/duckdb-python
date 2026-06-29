@@ -21,6 +21,15 @@
 
 namespace duckdb {
 
+//! Format a caught Python error as "TypeName: message" (e.g. "AttributeError: error"), matching pybind11's
+//! error_already_set::what(). nanobind's python_error::what() returns the full multi-line traceback (including
+//! interpreter/pytest frames), which is far too noisy to embed verbatim in the DuckDB error message.
+static string FormatUDFPythonError(py::python_error &error) {
+	auto type_name = py::cast<std::string>(py::str(py::object(error.type().attr("__name__"))));
+	auto message = py::cast<std::string>(py::str(error.value()));
+	return type_name + ": " + message;
+}
+
 static py::list ConvertToSingleBatch(vector<LogicalType> &types, vector<string> &names, DataChunk &input,
                                      ClientProperties &options, ClientContext &context) {
 	ArrowSchema schema;
@@ -228,7 +237,8 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 			exception_occurred = true;
 			if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
 				auto exception = py::python_error();
-				throw InvalidInputException("Python exception occurred while executing the UDF: %s", exception.what());
+				throw InvalidInputException("Python exception occurred while executing the UDF: %s",
+				                            FormatUDFPythonError(exception));
 			} else if (exception_handling == PythonExceptionHandling::RETURN_NULL) {
 				PyErr_Clear();
 				python_object = py::module_::import_("pyarrow").attr("nulls")(count);
@@ -353,7 +363,7 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 					if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
 						auto exception = py::python_error();
 						throw InvalidInputException("Python exception occurred while executing the UDF: %s",
-						                            exception.what());
+						                            FormatUDFPythonError(exception));
 					}
 					if (exception_handling == PythonExceptionHandling::RETURN_NULL) {
 						PyErr_Clear();

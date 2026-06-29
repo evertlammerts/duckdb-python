@@ -24,62 +24,69 @@
 // qualified names for the conversion functions and the enum type.
 
 //! str + int + enum form.
-#define DUCKDB_PY_ENUM_STRING_INT_CASTER(EnumType, FromStringFn, FromIntegerFn, NameLiteral)                            \
+#define DUCKDB_PY_ENUM_STRING_INT_CASTER(EnumType, FromStringFn, FromIntegerFn, NameLiteral)                           \
 	namespace nanobind {                                                                                               \
 	namespace detail {                                                                                                 \
 	template <>                                                                                                        \
 	struct type_caster<EnumType> {                                                                                     \
 		NB_TYPE_CASTER(EnumType, const_name(NameLiteral))                                                              \
-		bool from_python(handle src, uint8_t, cleanup_list *) noexcept {                                              \
-			try {                                                                                                     \
-				if (nanobind::isinstance<nanobind::str>(src)) {                                                      \
-					value = FromStringFn(nanobind::cast<std::string>(src));                                          \
-					return true;                                                                                    \
-				}                                                                                                   \
-				if (nanobind::isinstance<nanobind::int_>(src)) {                                                     \
-					value = FromIntegerFn(nanobind::cast<int64_t>(src));                                            \
-					return true;                                                                                    \
-				}                                                                                                   \
-				/* Registered nb::enum_ instances aren't int subclasses (unlike pybind11's), so accept a member  */ \
-				/* of the registered enum by reading its integer .value.                                         */ \
-				nanobind::handle enum_type = nanobind::type<EnumType>();                                            \
-				if (enum_type.is_valid() && PyObject_IsInstance(src.ptr(), enum_type.ptr()) == 1) {                 \
-					value = FromIntegerFn(nanobind::cast<int64_t>(src.attr("value")));                              \
-					return true;                                                                                    \
-				}                                                                                                   \
-			} catch (...) {                                                                                          \
-				return false;                                                                                       \
-			}                                                                                                       \
-			return false;                                                                                           \
-		}                                                                                                            \
-		static handle from_cpp(EnumType src, rv_policy, cleanup_list *) noexcept {                                    \
-			return nanobind::int_((int64_t)src).release();                                                           \
-		}                                                                                                            \
-	};                                                                                                               \
-	} /* namespace detail */                                                                                         \
+		bool from_python(handle src, uint8_t, cleanup_list *) noexcept {                                               \
+			try {                                                                                                      \
+				if (nanobind::isinstance<nanobind::str>(src)) {                                                        \
+					value = FromStringFn(nanobind::cast<std::string>(src));                                            \
+					return true;                                                                                       \
+				}                                                                                                      \
+				if (nanobind::isinstance<nanobind::int_>(src)) {                                                       \
+					value = FromIntegerFn(nanobind::cast<int64_t>(src));                                               \
+					return true;                                                                                       \
+				}                                                                                                      \
+				/* Registered nb::enum_ instances aren't int subclasses (unlike pybind11's), so accept a member  */    \
+				/* of the registered enum by reading its integer .value.                                         */    \
+				nanobind::handle enum_type = nanobind::type<EnumType>();                                               \
+				if (enum_type.is_valid() && PyObject_IsInstance(src.ptr(), enum_type.ptr()) == 1) {                    \
+					value = FromIntegerFn(nanobind::cast<int64_t>(src.attr("value")));                                 \
+					return true;                                                                                       \
+				}                                                                                                      \
+			} catch (...) {                                                                                            \
+				return false;                                                                                          \
+			}                                                                                                          \
+			return false;                                                                                              \
+		}                                                                                                              \
+		static handle from_cpp(EnumType src, rv_policy, cleanup_list *) noexcept {                                     \
+			return nanobind::int_((int64_t)src).release();                                                             \
+		}                                                                                                              \
+	};                                                                                                                 \
+	} /* namespace detail */                                                                                           \
 	} /* namespace nanobind */
 
 //! str + enum form (no integer accepted).
-#define DUCKDB_PY_ENUM_STRING_CASTER(EnumType, FromStringFn, NameLiteral)                                               \
+#define DUCKDB_PY_ENUM_STRING_CASTER(EnumType, FromStringFn, NameLiteral)                                              \
 	namespace nanobind {                                                                                               \
 	namespace detail {                                                                                                 \
 	template <>                                                                                                        \
 	struct type_caster<EnumType> {                                                                                     \
 		NB_TYPE_CASTER(EnumType, const_name(NameLiteral))                                                              \
-		bool from_python(handle src, uint8_t, cleanup_list *) noexcept {                                              \
-			try {                                                                                                     \
-				if (nanobind::isinstance<nanobind::str>(src)) {                                                      \
-					value = FromStringFn(nanobind::cast<std::string>(src));                                          \
-					return true;                                                                                    \
-				}                                                                                                   \
-			} catch (...) {                                                                                          \
-				return false;                                                                                       \
-			}                                                                                                       \
-			return false;                                                                                           \
-		}                                                                                                            \
-		static handle from_cpp(EnumType src, rv_policy, cleanup_list *) noexcept {                                    \
-			return nanobind::int_((int64_t)src).release();                                                           \
-		}                                                                                                            \
-	};                                                                                                               \
-	} /* namespace detail */                                                                                         \
+		bool from_python(handle src, uint8_t, cleanup_list *) noexcept {                                               \
+			try {                                                                                                      \
+				if (nanobind::isinstance<nanobind::str>(src)) {                                                        \
+					value = FromStringFn(nanobind::cast<std::string>(src));                                            \
+					return true;                                                                                       \
+				}                                                                                                      \
+				/* Registered nb::enum_ instances aren't int subclasses; accept a member of the registered enum  */    \
+				/* by reading its integer .value (this enum has no FromInteger, so cast the int directly).        */   \
+				nanobind::handle enum_type = nanobind::type<EnumType>();                                               \
+				if (enum_type.is_valid() && PyObject_IsInstance(src.ptr(), enum_type.ptr()) == 1) {                    \
+					value = (EnumType)nanobind::cast<int64_t>(src.attr("value"));                                      \
+					return true;                                                                                       \
+				}                                                                                                      \
+			} catch (...) {                                                                                            \
+				return false;                                                                                          \
+			}                                                                                                          \
+			return false;                                                                                              \
+		}                                                                                                              \
+		static handle from_cpp(EnumType src, rv_policy, cleanup_list *) noexcept {                                     \
+			return nanobind::int_((int64_t)src).release();                                                             \
+		}                                                                                                              \
+	};                                                                                                                 \
+	} /* namespace detail */                                                                                           \
 	} /* namespace nanobind */

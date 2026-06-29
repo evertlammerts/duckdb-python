@@ -27,7 +27,14 @@ public:
 
 public:
 	static bool check_(const py::handle &object) {
-		return py::isinstance(object, py::module_::import_("fsspec").attr("AbstractFileSystem"));
+		// Non-throwing: if fsspec isn't installed, nothing is an AbstractFileSystem. nanobind invokes check_ from
+		// noexcept contexts (argument casters, isinstance), so a thrown import error would std::terminate rather
+		// than propagate. register_filesystem() re-imports fsspec in a throwing context to surface ModuleNotFoundError.
+		try {
+			return py::isinstance(object, py::module_::import_("fsspec").attr("AbstractFileSystem"));
+		} catch (...) {
+			return false;
+		}
 	}
 };
 

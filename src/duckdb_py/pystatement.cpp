@@ -8,10 +8,10 @@ static void InitializeReadOnlyProperties(py::class_<DuckDBPyStatement> &m) {
 	m.def_prop_ro("type", &DuckDBPyStatement::Type, "Get the type of the statement.")
 	    .def_prop_ro("query", &DuckDBPyStatement::Query, "Get the query equivalent to this statement.")
 	    .def_prop_ro("named_parameters", &DuckDBPyStatement::NamedParameters,
-	                           "Get the map of named parameters this statement has.")
+	                 "Get the map of named parameters this statement has.")
 	    .def_prop_ro("expected_result_type", &DuckDBPyStatement::ExpectedResultType,
-	                           "Get the expected type of result produced by this statement, actual type may vary "
-	                           "depending on the statement.");
+	                 "Get the expected type of result produced by this statement, actual type may vary "
+	                 "depending on the statement.");
 }
 
 void DuckDBPyStatement::Initialize(py::handle &m) {

@@ -36,7 +36,8 @@ static void CreateArrowScan(const string &name, py::object entry, TableFunctionR
 					break;
 				}
 				stream_messages.append(message.attr("serialize")());
-				const auto buffer_address = py::cast<int64_t>(stream_messages[stream_messages.size() - 1].attr("address"));
+				const auto buffer_address =
+				    py::cast<int64_t>(stream_messages[stream_messages.size() - 1].attr("address"));
 				const auto buffer_size = py::cast<uint32_t>(stream_messages[stream_messages.size() - 1].attr("size"));
 				child_list_t<Value> buffer_values;
 				buffer_values.push_back({"ptr", Value::POINTER(buffer_address)});

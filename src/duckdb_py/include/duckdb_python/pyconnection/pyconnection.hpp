@@ -350,7 +350,9 @@ public:
 	static identifier_map_t<BoundParameterData> TransformPythonParamDict(ClientContext &context,
 	                                                                     const py::dict &params);
 
-	void RegisterFilesystem(AbstractFileSystem filesystem);
+	// Takes py::object (not AbstractFileSystem) so the binding can accept None: nanobind's .none() does not bypass a
+	// py::object-subclass wrapper's check_(). The body imports fsspec and validates the instance explicitly.
+	void RegisterFilesystem(py::object filesystem);
 	void UnregisterFilesystem(const py::str &name);
 	py::list ListFilesystems();
 	bool FileSystemIsRegistered(const string &name);

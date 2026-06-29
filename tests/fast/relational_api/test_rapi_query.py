@@ -169,11 +169,12 @@ class TestRAPIQuery:
         assert con2.table("d").fetchall() == [([1, 2, 3],)]
 
     def test_set_default_connection_error(self, scoped_default):
-        with pytest.raises(TypeError, match="Invoked with: None"):
-            # set_default_connection does not allow None
+        # set_default_connection does not allow None: nanobind rejects it at the argument boundary with an
+        # "incompatible function arguments" TypeError (pybind11 phrased this as "Invoked with: None").
+        with pytest.raises(TypeError, match="incompatible function arguments"):
             duckdb.set_default_connection(None)
 
-        with pytest.raises(TypeError, match="Invoked with: 5"):
+        with pytest.raises(TypeError, match="incompatible function arguments"):
             duckdb.set_default_connection(5)
 
         assert duckdb.sql("select 42").fetchall() == [(42,)]

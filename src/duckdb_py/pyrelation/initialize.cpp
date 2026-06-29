@@ -16,11 +16,11 @@ namespace duckdb {
 static void InitializeReadOnlyProperties(py::class_<DuckDBPyRelation> &m) {
 	m.def_prop_ro("type", &DuckDBPyRelation::Type, "Get the type of the relation.")
 	    .def_prop_ro("columns", &DuckDBPyRelation::Columns,
-	                           "Return a list containing the names of the columns of the relation.")
+	                 "Return a list containing the names of the columns of the relation.")
 	    .def_prop_ro("types", &DuckDBPyRelation::ColumnTypes,
-	                           "Return a list containing the types of the columns of the relation.")
+	                 "Return a list containing the types of the columns of the relation.")
 	    .def_prop_ro("dtypes", &DuckDBPyRelation::ColumnTypes,
-	                           "Return a list containing the types of the columns of the relation.")
+	                 "Return a list containing the types of the columns of the relation.")
 	    .def_prop_ro("description", &DuckDBPyRelation::Description, "Return the description of the result")
 	    .def_prop_ro("alias", &DuckDBPyRelation::GetAlias, "Get the name of the current alias")
 	    .def("__len__", &DuckDBPyRelation::Length, "Number of rows in relation.")
@@ -28,7 +28,11 @@ static void InitializeReadOnlyProperties(py::class_<DuckDBPyRelation> &m) {
 }
 
 static void InitializeConsumers(py::class_<DuckDBPyRelation> &m) {
-	m.def("execute", &DuckDBPyRelation::Execute, "Transform the relation into a result set")
+	// Execute() returns *this (DuckDBPyRelation&). Without reference_internal nanobind applies the default policy to
+	// the reference return and *moves* the (move-only) relation into a fresh wrapper, leaving the original with a
+	// null rel/result (so a subsequent fetch returns []). reference_internal returns the existing object instead.
+	m.def("execute", &DuckDBPyRelation::Execute, py::rv_policy::reference_internal,
+	      "Transform the relation into a result set")
 	    .def("close", &DuckDBPyRelation::Close, "Closes the result");
 
 	DefineMethod({"to_parquet", "write_parquet"}, m, &DuckDBPyRelation::ToParquet,
