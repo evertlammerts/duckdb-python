@@ -3,41 +3,47 @@
 
 namespace duckdb {
 
+//! Heap-allocate an owned DuckDBPyType. Spelled std::unique_ptr (not duckdb::unique_ptr) so the `m.attr(...) =`
+//! assignment finds nanobind's type_caster<std::unique_ptr<T>> and transfers ownership to Python.
+static std::unique_ptr<DuckDBPyType> MakeType(LogicalType type) {
+	return make_uniq<DuckDBPyType>(std::move(type));
+}
+
 static void DefineBaseTypes(py::handle &m) {
-	m.attr("SQLNULL") = std::make_shared<DuckDBPyType>(LogicalType::SQLNULL);
-	m.attr("BOOLEAN") = std::make_shared<DuckDBPyType>(LogicalType::BOOLEAN);
-	m.attr("TINYINT") = std::make_shared<DuckDBPyType>(LogicalType::TINYINT);
-	m.attr("UTINYINT") = std::make_shared<DuckDBPyType>(LogicalType::UTINYINT);
-	m.attr("SMALLINT") = std::make_shared<DuckDBPyType>(LogicalType::SMALLINT);
-	m.attr("USMALLINT") = std::make_shared<DuckDBPyType>(LogicalType::USMALLINT);
-	m.attr("INTEGER") = std::make_shared<DuckDBPyType>(LogicalType::INTEGER);
-	m.attr("UINTEGER") = std::make_shared<DuckDBPyType>(LogicalType::UINTEGER);
-	m.attr("BIGINT") = std::make_shared<DuckDBPyType>(LogicalType::BIGINT);
-	m.attr("UBIGINT") = std::make_shared<DuckDBPyType>(LogicalType::UBIGINT);
-	m.attr("HUGEINT") = std::make_shared<DuckDBPyType>(LogicalType::HUGEINT);
-	m.attr("UHUGEINT") = std::make_shared<DuckDBPyType>(LogicalType::UHUGEINT);
-	m.attr("UUID") = std::make_shared<DuckDBPyType>(LogicalType::UUID);
-	m.attr("FLOAT") = std::make_shared<DuckDBPyType>(LogicalType::FLOAT);
-	m.attr("DOUBLE") = std::make_shared<DuckDBPyType>(LogicalType::DOUBLE);
-	m.attr("DATE") = std::make_shared<DuckDBPyType>(LogicalType::DATE);
+	m.attr("SQLNULL") = MakeType(LogicalType::SQLNULL);
+	m.attr("BOOLEAN") = MakeType(LogicalType::BOOLEAN);
+	m.attr("TINYINT") = MakeType(LogicalType::TINYINT);
+	m.attr("UTINYINT") = MakeType(LogicalType::UTINYINT);
+	m.attr("SMALLINT") = MakeType(LogicalType::SMALLINT);
+	m.attr("USMALLINT") = MakeType(LogicalType::USMALLINT);
+	m.attr("INTEGER") = MakeType(LogicalType::INTEGER);
+	m.attr("UINTEGER") = MakeType(LogicalType::UINTEGER);
+	m.attr("BIGINT") = MakeType(LogicalType::BIGINT);
+	m.attr("UBIGINT") = MakeType(LogicalType::UBIGINT);
+	m.attr("HUGEINT") = MakeType(LogicalType::HUGEINT);
+	m.attr("UHUGEINT") = MakeType(LogicalType::UHUGEINT);
+	m.attr("UUID") = MakeType(LogicalType::UUID);
+	m.attr("FLOAT") = MakeType(LogicalType::FLOAT);
+	m.attr("DOUBLE") = MakeType(LogicalType::DOUBLE);
+	m.attr("DATE") = MakeType(LogicalType::DATE);
 
-	m.attr("TIMESTAMP") = std::make_shared<DuckDBPyType>(LogicalType::TIMESTAMP);
-	m.attr("TIMESTAMP_MS") = std::make_shared<DuckDBPyType>(LogicalType::TIMESTAMP_MS);
-	m.attr("TIMESTAMP_NS") = std::make_shared<DuckDBPyType>(LogicalType::TIMESTAMP_NS);
-	m.attr("TIMESTAMP_S") = std::make_shared<DuckDBPyType>(LogicalType::TIMESTAMP_S);
+	m.attr("TIMESTAMP") = MakeType(LogicalType::TIMESTAMP);
+	m.attr("TIMESTAMP_MS") = MakeType(LogicalType::TIMESTAMP_MS);
+	m.attr("TIMESTAMP_NS") = MakeType(LogicalType::TIMESTAMP_NS);
+	m.attr("TIMESTAMP_S") = MakeType(LogicalType::TIMESTAMP_S);
 
-	m.attr("TIME") = std::make_shared<DuckDBPyType>(LogicalType::TIME);
-	m.attr("TIME_NS") = std::make_shared<DuckDBPyType>(LogicalType::TIME_NS);
+	m.attr("TIME") = MakeType(LogicalType::TIME);
+	m.attr("TIME_NS") = MakeType(LogicalType::TIME_NS);
 
-	m.attr("TIME_TZ") = std::make_shared<DuckDBPyType>(LogicalType::TIME_TZ);
-	m.attr("TIMESTAMP_TZ") = std::make_shared<DuckDBPyType>(LogicalType::TIMESTAMP_TZ);
+	m.attr("TIME_TZ") = MakeType(LogicalType::TIME_TZ);
+	m.attr("TIMESTAMP_TZ") = MakeType(LogicalType::TIMESTAMP_TZ);
 
-	m.attr("VARCHAR") = std::make_shared<DuckDBPyType>(LogicalType::VARCHAR);
+	m.attr("VARCHAR") = MakeType(LogicalType::VARCHAR);
 
-	m.attr("BLOB") = std::make_shared<DuckDBPyType>(LogicalType::BLOB);
-	m.attr("BIT") = std::make_shared<DuckDBPyType>(LogicalType::BIT);
-	m.attr("INTERVAL") = std::make_shared<DuckDBPyType>(LogicalType::INTERVAL);
-	m.attr("VARIANT") = std::make_shared<DuckDBPyType>(LogicalType::VARIANT());
+	m.attr("BLOB") = MakeType(LogicalType::BLOB);
+	m.attr("BIT") = MakeType(LogicalType::BIT);
+	m.attr("INTERVAL") = MakeType(LogicalType::INTERVAL);
+	m.attr("VARIANT") = MakeType(LogicalType::VARIANT());
 }
 
 void DuckDBPyTyping::Initialize(py::module_ &parent) {

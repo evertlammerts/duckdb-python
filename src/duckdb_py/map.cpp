@@ -116,8 +116,14 @@ unique_ptr<FunctionData> BindExplicitSchema(unique_ptr<MapFunctionData> function
 		auto name = item.first;
 		auto type_p = item.second;
 		names.push_back(py::cast<std::string>(py::str(name)));
-		// TODO: replace with py::try_cast so we can catch the error and throw a better exception
-		auto type = py::cast<std::shared_ptr<DuckDBPyType>>(type_p);
+		// TryConvert applies the same implicit conversions a DuckDBPyType parameter would (DuckDBPyType instance,
+		// a type string, or a Python type object), and reports a clear error instead of a raw cast failure.
+		std::unique_ptr<DuckDBPyType> type;
+		if (!DuckDBPyType::TryConvert(py::borrow<py::object>(type_p), type)) {
+			string actual_type = py::cast<std::string>(py::str((type_p).type()));
+			throw InvalidInputException("'schema' value could not be converted to a DuckDBPyType, got '%s'",
+			                            actual_type);
+		}
 		types.push_back(type->Type());
 	}
 

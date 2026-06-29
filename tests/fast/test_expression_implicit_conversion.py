@@ -280,3 +280,45 @@ def test_aggregate_with_scalar():
     result = rel.aggregate([5]).fetchall()
     assert len(result) == 3
     assert all(row == (5,) for row in result)
+
+
+# ---------------------------------------------------------------------------
+# 13. Value-semantic invariants
+#
+# DuckDBPyExpression is a value-semantic bound type: returned by std::unique_ptr,
+# with no shared_ptr holder, no enable_shared_from_this, and no custom type_caster.
+# Every combinator deep-copies its operands into a fresh tree, so two wrappers never
+# alias the same expression. These lock in the two contracts that design relies on:
+#   1. expressions are never cached/aliased by identity (each builder returns fresh)
+#   2. an unconvertible argument raises a clear InvalidInputException, not a leaked
+#      C++ exception (the helper that replaced the caster must catch + re-raise)
+# ---------------------------------------------------------------------------
+
+
+def test_expressions_are_not_identity_cached():
+    """Every builder call yields a fresh object; expressions are value-like, never aliased."""
+    a = ColumnExpression("a")
+    assert a.alias("x") is not a.alias("x")
+    assert (a == 5) is not (a == 5)
+    assert a.isin(1, 2) is not a.isin(1, 2)
+    # A non-modifier passthrough still yields a distinct wrapper.
+    assert a.cast("INTEGER") is not a.cast("INTEGER")
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda bad: ColumnExpression("i").isin(bad),  # py::args path
+        lambda bad: CoalesceOperator(bad),  # py::args path
+        lambda bad: FunctionExpression("greatest", bad),  # py::args path
+    ],
+    ids=["isin", "coalesce", "function_expression"],
+)
+def test_unconvertible_arg_raises_clean_error(build):
+    """A value with no expression conversion raises InvalidInputException, not a raw C++ error."""
+
+    class NotConvertible:
+        pass
+
+    with pytest.raises(duckdb.InvalidInputException, match="arguments of type Expression"):
+        build(NotConvertible())

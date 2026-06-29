@@ -110,7 +110,8 @@ static void InitializeConnectionMethods(py::module_ &m) {
 		    }
 		    return conn->ListFilesystems();
 	    },
-	    "List registered filesystems, including builtin ones", py::kw_only(), py::arg("connection").none() = py::none());
+	    "List registered filesystems, including builtin ones", py::kw_only(),
+	    py::arg("connection").none() = py::none());
 	m.def(
 	    "filesystem_is_registered",
 	    [](const string &name, std::shared_ptr<DuckDBPyConnection> conn = nullptr) {
@@ -152,7 +153,7 @@ static void InitializeConnectionMethods(py::module_ &m) {
 	m.def(
 	    "create_function",
 	    [](const string &name, const py::callable &udf, const py::object &arguments = py::none(),
-	       const std::shared_ptr<DuckDBPyType> &return_type = nullptr, PythonUDFType type = PythonUDFType::NATIVE,
+	       const py::object &return_type = py::none(), PythonUDFType type = PythonUDFType::NATIVE,
 	       FunctionNullHandling null_handling = FunctionNullHandling::DEFAULT_NULL_HANDLING,
 	       PythonExceptionHandling exception_handling = PythonExceptionHandling::FORWARD_ERROR,
 	       bool side_effects = false, std::shared_ptr<DuckDBPyConnection> conn = nullptr) {
@@ -163,8 +164,9 @@ static void InitializeConnectionMethods(py::module_ &m) {
 		                                   side_effects);
 	    },
 	    "Create a DuckDB function out of the passing in Python function so it can be used in queries", py::arg("name"),
-	    py::arg("function"), py::arg("parameters") = py::none(), py::arg("return_type").none() = py::none(), py::kw_only(),
-	    py::arg("type") = PythonUDFType::NATIVE, py::arg("null_handling") = FunctionNullHandling::DEFAULT_NULL_HANDLING,
+	    py::arg("function"), py::arg("parameters") = py::none(), py::arg("return_type").none() = py::none(),
+	    py::kw_only(), py::arg("type") = PythonUDFType::NATIVE,
+	    py::arg("null_handling") = FunctionNullHandling::DEFAULT_NULL_HANDLING,
 	    py::arg("exception_handling") = PythonExceptionHandling::FORWARD_ERROR, py::arg("side_effects") = false,
 	    py::arg("connection").none() = py::none());
 	m.def(
@@ -175,7 +177,8 @@ static void InitializeConnectionMethods(py::module_ &m) {
 		    }
 		    return conn->UnregisterUDF(name);
 	    },
-	    "Remove a previously created function", py::arg("name"), py::kw_only(), py::arg("connection").none() = py::none());
+	    "Remove a previously created function", py::arg("name"), py::kw_only(),
+	    py::arg("connection").none() = py::none());
 	m.def(
 	    "sqltype",
 	    [](const string &type_str, std::shared_ptr<DuckDBPyConnection> conn = nullptr) {
@@ -208,7 +211,7 @@ static void InitializeConnectionMethods(py::module_ &m) {
 	    py::arg("connection").none() = py::none());
 	m.def(
 	    "array_type",
-	    [](const std::shared_ptr<DuckDBPyType> &type, idx_t size, std::shared_ptr<DuckDBPyConnection> conn = nullptr) {
+	    [](const DuckDBPyType &type, idx_t size, std::shared_ptr<DuckDBPyConnection> conn = nullptr) {
 		    if (!conn) {
 			    conn = DuckDBPyConnection::DefaultConnection();
 		    }
@@ -218,7 +221,7 @@ static void InitializeConnectionMethods(py::module_ &m) {
 	    py::arg("connection").none() = py::none());
 	m.def(
 	    "list_type",
-	    [](const std::shared_ptr<DuckDBPyType> &type, std::shared_ptr<DuckDBPyConnection> conn = nullptr) {
+	    [](const DuckDBPyType &type, std::shared_ptr<DuckDBPyConnection> conn = nullptr) {
 		    if (!conn) {
 			    conn = DuckDBPyConnection::DefaultConnection();
 		    }
@@ -248,7 +251,7 @@ static void InitializeConnectionMethods(py::module_ &m) {
 	    py::arg("connection").none() = py::none());
 	m.def(
 	    "enum_type",
-	    [](const string &name, const std::shared_ptr<DuckDBPyType> &type, const py::list &values_p,
+	    [](const string &name, const DuckDBPyType &type, const py::list &values_p,
 	       std::shared_ptr<DuckDBPyConnection> conn = nullptr) {
 		    if (!conn) {
 			    conn = DuckDBPyConnection::DefaultConnection();
@@ -289,7 +292,7 @@ static void InitializeConnectionMethods(py::module_ &m) {
 	    py::arg("connection").none() = py::none());
 	m.def(
 	    "map_type",
-	    [](const std::shared_ptr<DuckDBPyType> &key_type, const std::shared_ptr<DuckDBPyType> &value_type,
+	    [](const DuckDBPyType &key_type, const DuckDBPyType &value_type,
 	       std::shared_ptr<DuckDBPyConnection> conn = nullptr) {
 		    if (!conn) {
 			    conn = DuckDBPyConnection::DefaultConnection();
@@ -392,7 +395,8 @@ static void InitializeConnectionMethods(py::module_ &m) {
 		    }
 		    return conn->FetchNumpy();
 	    },
-	    "Fetch a result as list of NumPy arrays following execute", py::kw_only(), py::arg("connection").none() = py::none());
+	    "Fetch a result as list of NumPy arrays following execute", py::kw_only(),
+	    py::arg("connection").none() = py::none());
 	m.def(
 	    "fetchdf",
 	    [](bool date_as_object, std::shared_ptr<DuckDBPyConnection> conn = nullptr) {
@@ -768,7 +772,8 @@ static void InitializeConnectionMethods(py::module_ &m) {
 	    "Create a relation object from the Parquet path(s) or file-like object(s) in 'path_or_buffer'",
 	    py::arg("path_or_buffer"), py::arg("binary_as_string") = false, py::kw_only(),
 	    py::arg("file_row_number") = false, py::arg("filename") = false, py::arg("hive_partitioning") = false,
-	    py::arg("union_by_name") = false, py::arg("compression") = py::none(), py::arg("connection").none() = py::none());
+	    py::arg("union_by_name") = false, py::arg("compression") = py::none(),
+	    py::arg("connection").none() = py::none());
 	m.def(
 	    "read_parquet",
 	    [](const py::object &path_or_buffer, bool binary_as_string, bool file_row_number, bool filename,
@@ -783,7 +788,8 @@ static void InitializeConnectionMethods(py::module_ &m) {
 	    "Create a relation object from the Parquet path(s) or file-like object(s) in 'path_or_buffer'",
 	    py::arg("path_or_buffer"), py::arg("binary_as_string") = false, py::kw_only(),
 	    py::arg("file_row_number") = false, py::arg("filename") = false, py::arg("hive_partitioning") = false,
-	    py::arg("union_by_name") = false, py::arg("compression") = py::none(), py::arg("connection").none() = py::none());
+	    py::arg("union_by_name") = false, py::arg("compression") = py::none(),
+	    py::arg("connection").none() = py::none());
 	m.def(
 	    "get_table_names",
 	    [](const string &query, bool qualified, std::shared_ptr<DuckDBPyConnection> conn = nullptr) {
@@ -806,7 +812,8 @@ static void InitializeConnectionMethods(py::module_ &m) {
 	    },
 	    "Install an extension by name, with an optional version and/or repository to get the extension from",
 	    py::arg("extension"), py::kw_only(), py::arg("force_install") = false, py::arg("repository") = py::none(),
-	    py::arg("repository_url") = py::none(), py::arg("version") = py::none(), py::arg("connection").none() = py::none());
+	    py::arg("repository_url") = py::none(), py::arg("version") = py::none(),
+	    py::arg("connection").none() = py::none());
 	m.def(
 	    "load_extension",
 	    [](const string &extension, std::shared_ptr<DuckDBPyConnection> conn = nullptr) {
@@ -1091,7 +1098,6 @@ NB_MODULE(DUCKDB_PYTHON_LIB_NAME, m) { // NOLINT
 	DuckDBPyRelation::Initialize(m);
 	DuckDBPyConnection::Initialize(m);
 	PythonObject::Initialize();
-
 
 	m.doc() = "DuckDB is an embeddable SQL OLAP Database Management System";
 	m.attr("__package__") = "duckdb";

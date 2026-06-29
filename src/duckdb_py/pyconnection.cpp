@@ -159,8 +159,8 @@ static void InitializeConnectionMethods(py::class_<DuckDBPyConnection> &m) {
 	      "Check if a filesystem with the provided name is currently registered", py::arg("name"));
 	m.def("create_function", &DuckDBPyConnection::RegisterScalarUDF,
 	      "Create a DuckDB function out of the passing in Python function so it can be used in queries",
-	      py::arg("name"), py::arg("function"), py::arg("parameters") = py::none(), py::arg("return_type").none() = py::none(),
-	      py::kw_only(), py::arg("type") = PythonUDFType::NATIVE,
+	      py::arg("name"), py::arg("function"), py::arg("parameters") = py::none(),
+	      py::arg("return_type").none() = py::none(), py::kw_only(), py::arg("type") = PythonUDFType::NATIVE,
 	      py::arg("null_handling") = FunctionNullHandling::DEFAULT_NULL_HANDLING,
 	      py::arg("exception_handling") = PythonExceptionHandling::FORWARD_ERROR, py::arg("side_effects") = false);
 	m.def("remove_function", &DuckDBPyConnection::UnregisterUDF, "Remove a previously created function",
@@ -435,7 +435,7 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::UnregisterUDF(const stri
 
 std::shared_ptr<DuckDBPyConnection>
 DuckDBPyConnection::RegisterScalarUDF(const string &name, const py::callable &udf, const py::object &parameters_p,
-                                      const std::shared_ptr<DuckDBPyType> &return_type_p, PythonUDFType type,
+                                      const py::object &return_type_p, PythonUDFType type,
                                       FunctionNullHandling null_handling, PythonExceptionHandling exception_handling,
                                       bool side_effects) {
 	auto &connection = con.GetConnection();
@@ -463,8 +463,7 @@ DuckDBPyConnection::RegisterScalarUDF(const string &name, const py::callable &ud
 }
 
 void DuckDBPyConnection::Initialize(py::handle &m) {
-	auto connection_module =
-	    py::class_<DuckDBPyConnection>(m, "DuckDBPyConnection");
+	auto connection_module = py::class_<DuckDBPyConnection>(m, "DuckDBPyConnection");
 
 	connection_module.def("__enter__", &DuckDBPyConnection::Enter)
 	    .def(
@@ -476,7 +475,7 @@ void DuckDBPyConnection::Initialize(py::handle &m) {
 
 	InitializeConnectionMethods(connection_module);
 	connection_module.def_prop_ro("description", &DuckDBPyConnection::GetDescription,
-	                                        "Get result set attributes, mainly column names");
+	                              "Get result set attributes, mainly column names");
 	connection_module.def_prop_ro("rowcount", &DuckDBPyConnection::GetRowcount, "Get result set row count");
 	PyDateTime_IMPORT; // NOLINT
 	DuckDBPyConnection::ImportCache();
@@ -1247,13 +1246,13 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadCSV(const py::object &
 					// A type string -- pass through for DuckDB to parse.
 					struct_fields.emplace_back(key, Value(py::cast<std::string>(value_obj)));
 				} else {
-					// A DuckDBPyType instance, or a Python type object (int/str/...). nanobind's shared_ptr caster
-					// strips the implicit-convert flag, so build the DuckDBPyType via its registered constructor.
+					// A DuckDBPyType instance, or a Python type object (int/str/...). Build the DuckDBPyType via its
+					// registered constructor, then borrow a const ref (no ownership extraction) to read it.
 					if (!py::isinstance<DuckDBPyType>(value_obj)) {
 						value_obj = py::type<DuckDBPyType>()(value_obj);
 					}
-					auto sql_type = py::cast<std::shared_ptr<DuckDBPyType>>(value_obj);
-					struct_fields.emplace_back(key, Value(sql_type->ToString()));
+					auto &sql_type = py::cast<const DuckDBPyType &>(value_obj);
+					struct_fields.emplace_back(key, Value(sql_type.ToString()));
 				}
 			}
 			auto dtype_struct = Value::STRUCT(std::move(struct_fields));
@@ -1263,7 +1262,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadCSV(const py::object &
 			py::list dtype_list = py::cast<py::list>(dtype);
 			for (auto child : dtype_list) {
 				auto child_obj = py::borrow<py::object>(child);
-				std::shared_ptr<DuckDBPyType> sql_type;
+				std::unique_ptr<DuckDBPyType> sql_type;
 				if (!py::isinstance<py::str>(child_obj) && DuckDBPyType::TryConvert(child_obj, sql_type)) {
 					list_values.push_back(sql_type->ToString());
 				} else {
@@ -1701,12 +1700,8 @@ static vector<unique_ptr<ParsedExpression>> ValueListFromExpressions(const py::a
 
 	for (idx_t i = 0; i < arg_count; i++) {
 		py::handle arg = expressions[i];
-		std::shared_ptr<DuckDBPyExpression> py_expr;
-		if (!py::try_cast<std::shared_ptr<DuckDBPyExpression>>(arg, py_expr)) {
-			throw InvalidInputException("Please provide arguments of type Expression!");
-		}
-		auto expr = py_expr->GetExpression().Copy();
-		result.push_back(std::move(expr));
+		auto py_expr = DuckDBPyExpression::ToExpression(arg);
+		result.push_back(py_expr->GetExpression().Copy());
 	}
 	return result;
 }

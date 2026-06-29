@@ -11,7 +11,8 @@ void InitializeStaticMethods(py::module_ &m) {
 
 	// Constant Expression
 	docs = "Create a constant expression from the provided value";
-	m.def("ConstantExpression", &DuckDBPyExpression::ConstantExpression, py::arg("value").none(), docs); // None accepted (lit(None))
+	m.def("ConstantExpression", &DuckDBPyExpression::ConstantExpression, py::arg("value").none(),
+	      docs); // None accepted (lit(None))
 
 	// ColumnRef Expression
 	docs = "Create a column reference from the provided column name";
@@ -23,7 +24,7 @@ void InitializeStaticMethods(py::module_ &m) {
 
 	// Case Expression
 	docs = "";
-	m.def("CaseExpression", &DuckDBPyExpression::CaseExpression, py::arg("condition"), py::arg("value"), docs);
+	m.def("CaseExpression", &DuckDBPyExpression::CaseExpression, py::arg("condition"), py::arg("value").none(), docs);
 
 	// Star Expression
 	docs = "";
@@ -32,7 +33,8 @@ void InitializeStaticMethods(py::module_ &m) {
 
 	// Function Expression
 	docs = "";
-	m.def("FunctionExpression", &DuckDBPyExpression::FunctionExpression, docs); // nanobind: cannot name a positional before py::args
+	m.def("FunctionExpression", &DuckDBPyExpression::FunctionExpression,
+	      docs); // nanobind: cannot name a positional before py::args
 
 	// Coalesce Operator
 	docs = "";
@@ -293,9 +295,9 @@ static void InitializeImplicitConversion(py::class_<DuckDBPyExpression> &m) {
 		return DuckDBPyExpression::ColumnExpression(names);
 	}));
 	m.def(py::new_([](const py::object &obj) {
-		auto val = TransformPythonValue(nullptr, obj);
-		return DuckDBPyExpression::InternalConstantExpression(std::move(val));
-	}),
+		      auto val = TransformPythonValue(nullptr, obj);
+		      return DuckDBPyExpression::InternalConstantExpression(std::move(val));
+	      }),
 	      py::arg("value").none()); // accept None -> NULL constant (nanobind rejects None for py::object otherwise)
 	py::implicitly_convertible<py::str, DuckDBPyExpression>();
 	py::implicitly_convertible<py::object, DuckDBPyExpression>();
@@ -398,7 +400,7 @@ void DuckDBPyExpression::Initialize(py::module_ &m) {
 		Returns:
 			CaseExpression: self with an additional WHEN clause.
 	)";
-	expression.def("when", &DuckDBPyExpression::When, py::arg("condition"), py::arg("value"), docs);
+	expression.def("when", &DuckDBPyExpression::When, py::arg("condition"), py::arg("value").none(), docs);
 
 	docs = R"(
 		Add an ELSE <value> clause to the CaseExpression.
@@ -409,7 +411,7 @@ void DuckDBPyExpression::Initialize(py::module_ &m) {
 		Returns:
 			CaseExpression: self with an ELSE clause.
 	)";
-	expression.def("otherwise", &DuckDBPyExpression::Else, py::arg("value"), docs);
+	expression.def("otherwise", &DuckDBPyExpression::Else, py::arg("value").none(), docs);
 
 	docs = R"(
 		Create a CastExpression to type from self

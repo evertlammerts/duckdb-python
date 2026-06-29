@@ -43,35 +43,35 @@ const ParsedExpression &DuckDBPyExpression::GetExpression() const {
 	return *expression;
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::Copy() const {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::Copy() const {
 	auto expr = GetExpression().Copy();
-	return std::make_shared<DuckDBPyExpression>(std::move(expr), order_type, null_order);
+	return make_uniq<DuckDBPyExpression>(std::move(expr), order_type, null_order);
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::SetAlias(const string &name) const {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::SetAlias(const string &name) const {
 	auto copied_expression = GetExpression().Copy();
 	copied_expression->SetAlias(Identifier(name));
-	return std::make_shared<DuckDBPyExpression>(std::move(copied_expression));
+	return make_uniq<DuckDBPyExpression>(std::move(copied_expression));
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::Cast(const DuckDBPyType &type) const {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::Cast(const DuckDBPyType &type) const {
 	auto copied_expression = GetExpression().Copy();
 	auto case_expr = make_uniq<duckdb::CastExpression>(type.Type(), std::move(copied_expression));
-	return std::make_shared<DuckDBPyExpression>(std::move(case_expr));
+	return make_uniq<DuckDBPyExpression>(std::move(case_expr));
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::Between(const DuckDBPyExpression &lower,
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::Between(const DuckDBPyExpression &lower,
                                                                 const DuckDBPyExpression &upper) {
 	auto copied_expression = GetExpression().Copy();
 	auto between_expr = make_uniq<BetweenExpression>(std::move(copied_expression), lower.GetExpression().Copy(),
 	                                                 upper.GetExpression().Copy());
-	return std::make_shared<DuckDBPyExpression>(std::move(between_expr));
+	return make_uniq<DuckDBPyExpression>(std::move(between_expr));
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::Collate(const string &collation) {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::Collate(const string &collation) {
 	auto copied_expression = GetExpression().Copy();
 	auto collation_expression = make_uniq<CollateExpression>(collation, std::move(copied_expression));
-	return std::make_shared<DuckDBPyExpression>(std::move(collation_expression));
+	return make_uniq<DuckDBPyExpression>(std::move(collation_expression));
 }
 
 // Case Expression modifiers
@@ -82,117 +82,119 @@ void DuckDBPyExpression::AssertCaseExpression() const {
 	}
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::InternalWhen(unique_ptr<duckdb::CaseExpression> expr,
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::InternalWhen(unique_ptr<duckdb::CaseExpression> expr,
                                                                      const DuckDBPyExpression &condition,
                                                                      const DuckDBPyExpression &value) {
 	CaseCheck check;
 	check.when_expr = condition.GetExpression().Copy();
 	check.then_expr = value.GetExpression().Copy();
 	expr->CaseChecksMutable().push_back(std::move(check));
-	return std::make_shared<DuckDBPyExpression>(std::move(expr));
+	return make_uniq<DuckDBPyExpression>(std::move(expr));
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::When(const DuckDBPyExpression &condition,
-                                                             const DuckDBPyExpression &value) {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::When(const DuckDBPyExpression &condition,
+                                                             const py::object &value) {
 	AssertCaseExpression();
 	auto expr_p = expression->Copy();
 	auto expr = unique_ptr_cast<ParsedExpression, duckdb::CaseExpression>(std::move(expr_p));
 
-	return InternalWhen(std::move(expr), condition, value);
+	auto value_expr = ToExpression(value);
+	return InternalWhen(std::move(expr), condition, *value_expr);
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::Else(const DuckDBPyExpression &value) {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::Else(const py::object &value) {
 	AssertCaseExpression();
 	auto expr_p = expression->Copy();
 	auto expr = unique_ptr_cast<ParsedExpression, duckdb::CaseExpression>(std::move(expr_p));
 
-	expr->ElseMutable() = value.GetExpression().Copy();
-	return std::make_shared<DuckDBPyExpression>(std::move(expr));
+	auto value_expr = ToExpression(value);
+	expr->ElseMutable() = value_expr->GetExpression().Copy();
+	return make_uniq<DuckDBPyExpression>(std::move(expr));
 }
 
 // Binary operators
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::Add(const DuckDBPyExpression &other) const {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::Add(const DuckDBPyExpression &other) const {
 	return DuckDBPyExpression::BinaryOperator("+", *this, other);
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::Subtract(const DuckDBPyExpression &other) const {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::Subtract(const DuckDBPyExpression &other) const {
 	return DuckDBPyExpression::BinaryOperator("-", *this, other);
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::Multiply(const DuckDBPyExpression &other) const {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::Multiply(const DuckDBPyExpression &other) const {
 	return DuckDBPyExpression::BinaryOperator("*", *this, other);
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::Division(const DuckDBPyExpression &other) const {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::Division(const DuckDBPyExpression &other) const {
 	return DuckDBPyExpression::BinaryOperator("/", *this, other);
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::FloorDivision(const DuckDBPyExpression &other) const {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::FloorDivision(const DuckDBPyExpression &other) const {
 	return DuckDBPyExpression::BinaryOperator("//", *this, other);
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::Modulo(const DuckDBPyExpression &other) const {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::Modulo(const DuckDBPyExpression &other) const {
 	return DuckDBPyExpression::BinaryOperator("%", *this, other);
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::Power(const DuckDBPyExpression &other) const {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::Power(const DuckDBPyExpression &other) const {
 	return DuckDBPyExpression::BinaryOperator("**", *this, other);
 }
 
 // Comparison expressions
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::Equality(const DuckDBPyExpression &other) {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::Equality(const DuckDBPyExpression &other) {
 	return ComparisonExpression(ExpressionType::COMPARE_EQUAL, *this, other);
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::Inequality(const DuckDBPyExpression &other) {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::Inequality(const DuckDBPyExpression &other) {
 	return ComparisonExpression(ExpressionType::COMPARE_NOTEQUAL, *this, other);
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::GreaterThan(const DuckDBPyExpression &other) {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::GreaterThan(const DuckDBPyExpression &other) {
 	return ComparisonExpression(ExpressionType::COMPARE_GREATERTHAN, *this, other);
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::GreaterThanOrEqual(const DuckDBPyExpression &other) {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::GreaterThanOrEqual(const DuckDBPyExpression &other) {
 	return ComparisonExpression(ExpressionType::COMPARE_GREATERTHANOREQUALTO, *this, other);
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::LessThan(const DuckDBPyExpression &other) {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::LessThan(const DuckDBPyExpression &other) {
 	return ComparisonExpression(ExpressionType::COMPARE_LESSTHAN, *this, other);
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::LessThanOrEqual(const DuckDBPyExpression &other) {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::LessThanOrEqual(const DuckDBPyExpression &other) {
 	return ComparisonExpression(ExpressionType::COMPARE_LESSTHANOREQUALTO, *this, other);
 }
 
 // AND, OR and NOT
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::Not() {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::Not() {
 	return DuckDBPyExpression::InternalUnaryOperator(ExpressionType::OPERATOR_NOT, *this);
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::And(const DuckDBPyExpression &other) const {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::And(const DuckDBPyExpression &other) const {
 	return DuckDBPyExpression::InternalConjunction(ExpressionType::CONJUNCTION_AND, *this, other);
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::Or(const DuckDBPyExpression &other) const {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::Or(const DuckDBPyExpression &other) const {
 	return DuckDBPyExpression::InternalConjunction(ExpressionType::CONJUNCTION_OR, *this, other);
 }
 
 // NULL
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::IsNull() {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::IsNull() {
 	return DuckDBPyExpression::InternalUnaryOperator(ExpressionType::OPERATOR_IS_NULL, *this);
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::IsNotNull() {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::IsNotNull() {
 	return DuckDBPyExpression::InternalUnaryOperator(ExpressionType::OPERATOR_IS_NOT_NULL, *this);
 }
 
 // IN / NOT IN
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::CreateCompareExpression(ExpressionType compare_type,
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::CreateCompareExpression(ExpressionType compare_type,
                                                                                 const py::args &args) {
 	D_ASSERT(args.size() >= 1);
 
@@ -201,30 +203,22 @@ std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::CreateCompareExpression(
 	expressions.push_back(GetExpression().Copy());
 
 	for (auto arg : args) {
-		std::shared_ptr<DuckDBPyExpression> py_expr;
-		if (!py::try_cast<std::shared_ptr<DuckDBPyExpression>>(arg, py_expr)) {
-			throw InvalidInputException("Please provide arguments of type Expression!");
-		}
-		if (!py_expr) {
-			// nanobind maps Python None to an empty shared_ptr (rather than running the implicit conversion the
-			// way it does for by-value/by-ref args); pybind11 turned None into a NULL constant expression here.
-			py_expr = InternalConstantExpression(TransformPythonValue(nullptr, py::borrow<py::object>(arg)));
-		}
-		auto expr = py_expr->GetExpression().Copy();
-		expressions.push_back(std::move(expr));
+		// ToExpression applies the implicit conversion (Expression copied, str -> column, scalar/None -> constant).
+		auto py_expr = ToExpression(arg);
+		expressions.push_back(py_expr->GetExpression().Copy());
 	}
 	auto operator_expr = make_uniq<OperatorExpression>(compare_type, std::move(expressions));
-	return std::make_shared<DuckDBPyExpression>(std::move(operator_expr));
+	return make_uniq<DuckDBPyExpression>(std::move(operator_expr));
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::In(const py::args &args) {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::In(const py::args &args) {
 	if (args.size() == 0) {
 		throw InvalidInputException("Incorrect amount of parameters to 'isin', needs at least 1 parameter");
 	}
 	return CreateCompareExpression(ExpressionType::COMPARE_IN, args);
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::NotIn(const py::args &args) {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::NotIn(const py::args &args) {
 	if (args.size() == 0) {
 		throw InvalidInputException("Incorrect amount of parameters to 'isnotin', needs at least 1 parameter");
 	}
@@ -233,39 +227,30 @@ std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::NotIn(const py::args &ar
 
 // COALESCE
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::Coalesce(const py::args &args) {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::Coalesce(const py::args &args) {
 	vector<unique_ptr<ParsedExpression>> expressions;
 	expressions.reserve(args.size());
 
 	for (auto arg : args) {
-		std::shared_ptr<DuckDBPyExpression> py_expr;
-		if (!py::try_cast<std::shared_ptr<DuckDBPyExpression>>(arg, py_expr)) {
-			throw InvalidInputException("Please provide arguments of type Expression!");
-		}
-		if (!py_expr) {
-			// nanobind maps Python None to an empty shared_ptr (rather than running the implicit conversion the
-			// way it does for by-value/by-ref args); pybind11 turned None into a NULL constant expression here.
-			py_expr = InternalConstantExpression(TransformPythonValue(nullptr, py::borrow<py::object>(arg)));
-		}
-		auto expr = py_expr->GetExpression().Copy();
-		expressions.push_back(std::move(expr));
+		auto py_expr = ToExpression(arg);
+		expressions.push_back(py_expr->GetExpression().Copy());
 	}
 	if (expressions.empty()) {
 		throw InvalidInputException("Please provide at least one argument");
 	}
 	auto operator_expr = make_uniq<OperatorExpression>(ExpressionType::OPERATOR_COALESCE, std::move(expressions));
-	return std::make_shared<DuckDBPyExpression>(std::move(operator_expr));
+	return make_uniq<DuckDBPyExpression>(std::move(operator_expr));
 }
 
 // Order modifiers
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::Ascending() {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::Ascending() {
 	auto py_expr = Copy();
 	py_expr->order_type = OrderType::ASCENDING;
 	return py_expr;
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::Descending() {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::Descending() {
 	auto py_expr = Copy();
 	py_expr->order_type = OrderType::DESCENDING;
 	return py_expr;
@@ -273,13 +258,13 @@ std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::Descending() {
 
 // Null order modifiers
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::NullsFirst() {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::NullsFirst() {
 	auto py_expr = Copy();
 	py_expr->null_order = OrderByNullType::NULLS_FIRST;
 	return py_expr;
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::NullsLast() {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::NullsLast() {
 	auto py_expr = Copy();
 	py_expr->null_order = OrderByNullType::NULLS_LAST;
 	return py_expr;
@@ -287,7 +272,7 @@ std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::NullsLast() {
 
 // Unary operators
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::Negate() {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::Negate() {
 	vector<unique_ptr<ParsedExpression>> children;
 	children.push_back(GetExpression().Copy());
 	return DuckDBPyExpression::InternalFunctionExpression("-", std::move(children), true);
@@ -307,10 +292,7 @@ static void PopulateExcludeList(qualified_column_set_t &exclude, py::object list
 			exclude.insert(qname);
 			continue;
 		}
-		std::shared_ptr<DuckDBPyExpression> expr;
-		if (!py::try_cast(item, expr)) {
-			throw py::value_error("Items in the exclude list should either be 'str' or Expression");
-		}
+		auto expr = DuckDBPyExpression::ToExpression(item);
 		if (expr->GetExpression().GetExpressionType() != ExpressionType::COLUMN_REF) {
 			throw py::value_error("Only ColumnExpressions are accepted Expression types here");
 		}
@@ -319,14 +301,14 @@ static void PopulateExcludeList(qualified_column_set_t &exclude, py::object list
 	}
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::StarExpression(py::object exclude_list) {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::StarExpression(py::object exclude_list) {
 	case_insensitive_set_t exclude;
 	auto star = make_uniq<duckdb::StarExpression>();
 	PopulateExcludeList(star->ExcludeListMutable(), std::move(exclude_list));
-	return std::make_shared<DuckDBPyExpression>(std::move(star));
+	return make_uniq<DuckDBPyExpression>(std::move(star));
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::ColumnExpression(const py::args &names) {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::ColumnExpression(const py::args &names) {
 	vector<Identifier> column_names;
 	if (names.size() == 1) {
 		string column_name = py::cast<std::string>(py::str(py::object(names[0])));
@@ -348,16 +330,46 @@ std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::ColumnExpression(const p
 		}
 	}
 	auto column_ref = make_uniq<duckdb::ColumnRefExpression>(std::move(column_names));
-	return std::make_shared<DuckDBPyExpression>(std::move(column_ref));
+	return make_uniq<DuckDBPyExpression>(std::move(column_ref));
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::DefaultExpression() {
-	return std::make_shared<DuckDBPyExpression>(make_uniq<duckdb::DefaultExpression>());
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::DefaultExpression() {
+	return make_uniq<DuckDBPyExpression>(make_uniq<duckdb::DefaultExpression>());
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::ConstantExpression(const py::object &value) {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::ConstantExpression(const py::object &value) {
 	auto val = TransformPythonValue(nullptr, value);
 	return InternalConstantExpression(std::move(val));
+}
+
+bool DuckDBPyExpression::TryToExpression(py::handle obj, std::unique_ptr<DuckDBPyExpression> &result) {
+	// Mirrors the registered implicit conversions; the old shared_ptr caster wrapped the whole conversion in a
+	// catch-all and reported failure as "not convertible", so callers could raise their own message. Do the same.
+	try {
+		if (py::isinstance<DuckDBPyExpression>(obj)) {
+			// An existing Expression is copied (preserving any order_type / null_order modifiers).
+			result = py::cast<const DuckDBPyExpression &>(obj).Copy();
+		} else if (py::isinstance<py::str>(obj)) {
+			// A str becomes a column reference, mirrors the registered str constructor.
+			result = ColumnExpression(py::cast<py::args>(py::make_tuple(obj)));
+		} else {
+			// Anything else, including None, becomes a constant -- mirrors the registered object constructor
+			// (None -> NULL constant; TransformPythonValue throws on genuinely unsupported types).
+			result = ConstantExpression(py::borrow<py::object>(obj));
+		}
+		return true;
+	} catch (...) {
+		PyErr_Clear();
+		return false;
+	}
+}
+
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::ToExpression(py::handle obj) {
+	std::unique_ptr<DuckDBPyExpression> result;
+	if (!TryToExpression(obj, result)) {
+		throw InvalidInputException("Please provide arguments of type Expression!");
+	}
+	return result;
 }
 
 static py::args CreateArgsFromItem(py::handle item) {
@@ -368,7 +380,7 @@ static py::args CreateArgsFromItem(py::handle item) {
 	}
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::LambdaExpression(const py::object &lhs_p,
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::LambdaExpression(const py::object &lhs_p,
                                                                          const DuckDBPyExpression &rhs) {
 	unique_ptr<ParsedExpression> lhs;
 	if (py::isinstance<py::tuple>(lhs_p)) {
@@ -379,12 +391,12 @@ std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::LambdaExpression(const p
 			unique_ptr<ParsedExpression> column;
 			if (py::isinstance<DuckDBPyExpression>(item)) {
 				// 'item' is already an Expression, check its type and use it
-				auto column_expr = py::cast<std::shared_ptr<DuckDBPyExpression>>(item);
-				if (column_expr->GetExpression().GetExpressionType() != ExpressionType::COLUMN_REF) {
+				auto &column_expr = py::cast<const DuckDBPyExpression &>(item);
+				if (column_expr.GetExpression().GetExpressionType() != ExpressionType::COLUMN_REF) {
 					throw py::value_error("'lhs' was provided as a tuple of columns, but one of the columns is not of "
 					                      "type ColumnExpression");
 				}
-				column = column_expr->GetExpression().Copy();
+				column = column_expr.GetExpression().Copy();
 			} else {
 				// 'item' is a tuple[str, ...] or str, construct a ColumnExpression from it
 				auto args = CreateArgsFromItem(item);
@@ -410,11 +422,11 @@ std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::LambdaExpression(const p
 	} else if (py::isinstance<DuckDBPyExpression>(lhs_p)) {
 		// LambdaExpression(lhs=Expression)
 		// 'lhs_p' is already an Expression, check its type and use it
-		auto column_expr = py::cast<std::shared_ptr<DuckDBPyExpression>>(lhs_p);
-		if (column_expr->GetExpression().GetExpressionType() != ExpressionType::COLUMN_REF) {
+		auto &column_expr = py::cast<const DuckDBPyExpression &>(lhs_p);
+		if (column_expr.GetExpression().GetExpressionType() != ExpressionType::COLUMN_REF) {
 			throw py::value_error("'lhs' was an Expression, but is not of type ColumnExpression");
 		}
-		lhs = column_expr->GetExpression().Copy();
+		lhs = column_expr.GetExpression().Copy();
 	} else {
 		throw py::value_error("Please provide 'lhs' as either a tuple containing strings, or a single string");
 	}
@@ -423,10 +435,10 @@ std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::LambdaExpression(const p
 	// parameters) is identical to what the named-parameter constructor produces; only the syntax type differs, and
 	// the single-arrow form is now deprecated and errors by default.
 	lambda_expression->GetLambdaSyntaxTypeMutable() = LambdaSyntaxType::LAMBDA_KEYWORD;
-	return std::make_shared<DuckDBPyExpression>(std::move(lambda_expression));
+	return make_uniq<DuckDBPyExpression>(std::move(lambda_expression));
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::SQLExpression(string sql) {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::SQLExpression(string sql) {
 	auto conn = DuckDBPyConnection::DefaultConnection();
 	auto &context = *conn->con.GetConnection().context;
 	vector<unique_ptr<ParsedExpression>> expressions;
@@ -442,12 +454,12 @@ std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::SQLExpression(string sql
 		    expressions.size());
 	}
 
-	return std::make_shared<DuckDBPyExpression>(std::move(expressions[0]));
+	return make_uniq<DuckDBPyExpression>(std::move(expressions[0]));
 }
 
 // Private methods
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::BinaryOperator(const string &function_name,
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::BinaryOperator(const string &function_name,
                                                                        const DuckDBPyExpression &arg_one,
                                                                        const DuckDBPyExpression &arg_two) {
 	vector<unique_ptr<ParsedExpression>> children;
@@ -457,22 +469,22 @@ std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::BinaryOperator(const str
 	return InternalFunctionExpression(function_name, std::move(children), true);
 }
 
-std::shared_ptr<DuckDBPyExpression>
+std::unique_ptr<DuckDBPyExpression>
 DuckDBPyExpression::InternalFunctionExpression(const string &function_name,
                                                vector<unique_ptr<ParsedExpression>> children, bool is_operator) {
 	auto function_expression = make_uniq<duckdb::FunctionExpression>(Identifier(function_name), std::move(children),
 	                                                                 nullptr, nullptr, false, is_operator);
-	return std::make_shared<DuckDBPyExpression>(std::move(function_expression));
+	return make_uniq<DuckDBPyExpression>(std::move(function_expression));
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::InternalUnaryOperator(ExpressionType type,
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::InternalUnaryOperator(ExpressionType type,
                                                                               const DuckDBPyExpression &arg) {
 	auto expr = arg.GetExpression().Copy();
 	auto operator_expression = make_uniq<OperatorExpression>(type, std::move(expr));
-	return std::make_shared<DuckDBPyExpression>(std::move(operator_expression));
+	return make_uniq<DuckDBPyExpression>(std::move(operator_expression));
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::InternalConjunction(ExpressionType type,
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::InternalConjunction(ExpressionType type,
                                                                             const DuckDBPyExpression &arg,
                                                                             const DuckDBPyExpression &other) {
 	vector<unique_ptr<ParsedExpression>> children;
@@ -481,26 +493,27 @@ std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::InternalConjunction(Expr
 	children.push_back(other.GetExpression().Copy());
 
 	auto operator_expression = make_uniq<ConjunctionExpression>(type, std::move(children));
-	return std::make_shared<DuckDBPyExpression>(std::move(operator_expression));
+	return make_uniq<DuckDBPyExpression>(std::move(operator_expression));
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::InternalConstantExpression(Value val) {
-	return std::make_shared<DuckDBPyExpression>(make_uniq<duckdb::ConstantExpression>(std::move(val)));
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::InternalConstantExpression(Value val) {
+	return make_uniq<DuckDBPyExpression>(make_uniq<duckdb::ConstantExpression>(std::move(val)));
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::ComparisonExpression(ExpressionType type,
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::ComparisonExpression(ExpressionType type,
                                                                              const DuckDBPyExpression &left_p,
                                                                              const DuckDBPyExpression &right_p) {
 	auto left = left_p.GetExpression().Copy();
 	auto right = right_p.GetExpression().Copy();
-	return std::make_shared<DuckDBPyExpression>(
+	return make_uniq<DuckDBPyExpression>(
 	    make_uniq<duckdb::ComparisonExpression>(type, std::move(left), std::move(right)));
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::CaseExpression(const DuckDBPyExpression &condition,
-                                                                       const DuckDBPyExpression &value) {
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::CaseExpression(const DuckDBPyExpression &condition,
+                                                                       const py::object &value) {
 	auto expr = make_uniq<duckdb::CaseExpression>();
-	auto case_expr = InternalWhen(std::move(expr), condition, value);
+	auto value_expr = ToExpression(value);
+	auto case_expr = InternalWhen(std::move(expr), condition, *value_expr);
 
 	// Add NULL as default Else expression
 	auto &internal_expression = reinterpret_cast<duckdb::CaseExpression &>(*case_expr->expression);
@@ -508,17 +521,12 @@ std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::CaseExpression(const Duc
 	return case_expr;
 }
 
-std::shared_ptr<DuckDBPyExpression> DuckDBPyExpression::FunctionExpression(const string &function_name,
+std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::FunctionExpression(const string &function_name,
                                                                            const py::args &args) {
 	vector<unique_ptr<ParsedExpression>> expressions;
 	for (auto arg : args) {
-		std::shared_ptr<DuckDBPyExpression> py_expr;
-		if (!py::try_cast<std::shared_ptr<DuckDBPyExpression>>(arg, py_expr)) {
-			string actual_type = py::cast<std::string>(py::str((arg).type()));
-			throw InvalidInputException("Expected argument of type Expression, received '%s' instead", actual_type);
-		}
-		auto expr = py_expr->GetExpression().Copy();
-		expressions.push_back(std::move(expr));
+		auto py_expr = ToExpression(arg);
+		expressions.push_back(py_expr->GetExpression().Copy());
 	}
 	return InternalFunctionExpression(function_name, std::move(expressions));
 }

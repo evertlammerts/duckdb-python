@@ -38,38 +38,42 @@ bool PyUnionType::check_(const py::handle &object) {
 DuckDBPyType::DuckDBPyType(LogicalType type) : type(std::move(type)) {
 }
 
-bool DuckDBPyType::Equals(const std::shared_ptr<DuckDBPyType> &other) const {
-	if (!other) {
-		return false;
-	}
-	return type == other->type;
+//! Heap-allocate an owned DuckDBPyType. Spelled std::unique_ptr (not duckdb::unique_ptr) so nanobind's
+//! type_caster<std::unique_ptr<T>> transfers ownership to Python; lets call-sites embed a type in a tuple/attr
+//! and lets the py::new_ factories deduce the right return type.
+static std::unique_ptr<DuckDBPyType> MakeType(LogicalType type) {
+	return make_uniq<DuckDBPyType>(std::move(type));
+}
+
+bool DuckDBPyType::Equals(const DuckDBPyType &other) const {
+	return type == other.Type();
 }
 
 bool DuckDBPyType::EqualsString(const string &type_str) const {
 	return StringUtil::CIEquals(type.ToString(), type_str);
 }
 
-std::shared_ptr<DuckDBPyType> DuckDBPyType::GetAttribute(const string &name) const {
+std::unique_ptr<DuckDBPyType> DuckDBPyType::GetAttribute(const string &name) const {
 	auto name_identifier = Identifier(name);
 	if (type.id() == LogicalTypeId::STRUCT || type.id() == LogicalTypeId::UNION) {
 		auto &children = StructType::GetChildTypes(type);
 		for (idx_t i = 0; i < children.size(); i++) {
 			auto &child = children[i];
 			if (child.first == name) {
-				return std::make_shared<DuckDBPyType>(StructType::GetChildType(type, i));
+				return MakeType(StructType::GetChildType(type, i));
 			}
 		}
 	}
 	if (type.id() == LogicalTypeId::LIST && StringUtil::CIEquals(name, "child")) {
-		return std::make_shared<DuckDBPyType>(ListType::GetChildType(type));
+		return MakeType(ListType::GetChildType(type));
 	}
 	if (type.id() == LogicalTypeId::MAP) {
 		auto is_key = StringUtil::CIEquals(name, "key");
 		auto is_value = StringUtil::CIEquals(name, "value");
 		if (is_key) {
-			return std::make_shared<DuckDBPyType>(MapType::KeyType(type));
+			return MakeType(MapType::KeyType(type));
 		} else if (is_value) {
-			return std::make_shared<DuckDBPyType>(MapType::ValueType(type));
+			return MakeType(MapType::ValueType(type));
 		} else {
 			throw py::attribute_error(StringUtil::Format("Tried to get a child from a map by the name of '%s', but "
 			                                             "this type only has 'key' and 'value' children",
@@ -314,12 +318,9 @@ static LogicalType FromObject(const py::object &object) {
 		return FromString(string_value, nullptr);
 	}
 	case PythonTypeObject::TYPE: {
-		std::shared_ptr<DuckDBPyType> type_object;
-		if (!py::try_cast<std::shared_ptr<DuckDBPyType>>(object, type_object)) {
-			string actual_type = py::cast<std::string>(py::str((object).type()));
-			throw InvalidInputException("Expected argument of type DuckDBPyType, received '%s' instead", actual_type);
-		}
-		return type_object->Type();
+		// GetTypeObjectType already established that `object` is a DuckDBPyType instance, so borrow a const ref
+		// (no ownership extraction) and copy out its LogicalType.
+		return py::cast<const DuckDBPyType &>(object).Type();
 	}
 	default: {
 		string actual_type = py::cast<std::string>(py::str((object).type()));
@@ -328,16 +329,18 @@ static LogicalType FromObject(const py::object &object) {
 	}
 }
 
-bool DuckDBPyType::TryConvert(const py::object &object, std::shared_ptr<DuckDBPyType> &result) {
+bool DuckDBPyType::TryConvert(const py::object &object, std::unique_ptr<DuckDBPyType> &result) {
 	if (py::isinstance<DuckDBPyType>(object)) {
-		result = py::cast<std::shared_ptr<DuckDBPyType>>(object);
+		// Copy the existing type into a fresh owned instance (value semantics; mirrors the old shared_ptr share).
+		result = MakeType(py::cast<const DuckDBPyType &>(object).Type());
 		return true;
 	}
 	try {
 		// Construct via the registered DuckDBPyType type (DuckDBPyType(object)); this hits the same factories
-		// that drive the implicit conversion, which nanobind's shared_ptr caster otherwise bypasses.
+		// that drive the implicit conversion. The constructed Python object owns its DuckDBPyType, so copy its
+		// LogicalType into our own owned instance before it goes out of scope.
 		py::object converted = py::type<DuckDBPyType>()(object);
-		result = py::cast<std::shared_ptr<DuckDBPyType>>(converted);
+		result = MakeType(py::cast<const DuckDBPyType &>(converted).Type());
 		return true;
 	} catch (...) {
 		// A failed construction (e.g. an unannotated parameter) leaves the Python error indicator set; clear it
@@ -355,25 +358,28 @@ void DuckDBPyType::Initialize(py::handle &m) {
 	                py::is_operator());
 	type_module.def("__eq__", &DuckDBPyType::EqualsString, "Compare two types for equality", py::arg("other"),
 	                py::is_operator());
-	type_module.def("__hash__", [](const DuckDBPyType &type) { auto s = type.ToString(); return py::hash(py::str(s.c_str(), s.size())); });
+	type_module.def("__hash__", [](const DuckDBPyType &type) {
+		auto s = type.ToString();
+		return py::hash(py::str(s.c_str(), s.size()));
+	});
 	type_module.def_prop_ro("id", &DuckDBPyType::GetId);
 	type_module.def_prop_ro("children", &DuckDBPyType::Children);
 	type_module.def(py::new_([](const string &type_str, std::shared_ptr<DuckDBPyConnection> connection) {
-		            auto ltype = FromString(type_str, std::move(connection));
-		            return std::make_shared<DuckDBPyType>(ltype);
-	            }),
+		                auto ltype = FromString(type_str, std::move(connection));
+		                return MakeType(ltype);
+	                }),
 	                py::arg("type_str"), py::arg("connection").none() = py::none());
 	type_module.def(py::new_([](const PyGenericAlias &obj) {
 		auto ltype = FromGenericAlias(obj);
-		return std::make_shared<DuckDBPyType>(ltype);
+		return MakeType(ltype);
 	}));
 	type_module.def(py::new_([](const PyUnionType &obj) {
 		auto ltype = FromUnionType(obj);
-		return std::make_shared<DuckDBPyType>(ltype);
+		return MakeType(ltype);
 	}));
 	type_module.def(py::new_([](const py::object &obj) {
 		auto ltype = FromObject(obj);
-		return std::make_shared<DuckDBPyType>(ltype);
+		return MakeType(ltype);
 	}));
 	type_module.def("__getattr__", &DuckDBPyType::GetAttribute, "Get the child type by 'name'", py::arg("name"));
 	// nanobind: py::is_operator() implies operator-style argument handling and rejects the explicit py::arg name
@@ -407,11 +413,11 @@ py::list DuckDBPyType::Children() const {
 	py::list children;
 	auto id = type.id();
 	if (id == LogicalTypeId::LIST) {
-		children.append(py::make_tuple("child", std::make_shared<DuckDBPyType>(ListType::GetChildType(type))));
+		children.append(py::make_tuple("child", MakeType(ListType::GetChildType(type))));
 		return children;
 	}
 	if (id == LogicalTypeId::ARRAY) {
-		children.append(py::make_tuple("child", std::make_shared<DuckDBPyType>(ArrayType::GetChildType(type))));
+		children.append(py::make_tuple("child", MakeType(ArrayType::GetChildType(type))));
 		children.append(py::make_tuple("size", ArrayType::GetSize(type)));
 		return children;
 	}
@@ -420,7 +426,10 @@ py::list DuckDBPyType::Children() const {
 		auto strings = FlatVector::GetData<string_t>(values_insert_order);
 		py::list strings_list;
 		for (size_t i = 0; i < EnumType::GetSize(type); i++) {
-			{ auto sv = strings[i].GetString(); strings_list.append(py::str(sv.c_str(), sv.size())); }
+			{
+				auto sv = strings[i].GetString();
+				strings_list.append(py::str(sv.c_str(), sv.size()));
+			}
 		}
 		children.append(py::make_tuple("values", strings_list));
 		return children;
@@ -429,14 +438,13 @@ py::list DuckDBPyType::Children() const {
 		auto &struct_children = StructType::GetChildTypes(type);
 		for (idx_t i = 0; i < struct_children.size(); i++) {
 			auto &child = struct_children[i];
-			children.append(
-			    py::make_tuple(child.first, std::make_shared<DuckDBPyType>(StructType::GetChildType(type, i))));
+			children.append(py::make_tuple(child.first, MakeType(StructType::GetChildType(type, i))));
 		}
 		return children;
 	}
 	if (id == LogicalTypeId::MAP) {
-		children.append(py::make_tuple("key", std::make_shared<DuckDBPyType>(MapType::KeyType(type))));
-		children.append(py::make_tuple("value", std::make_shared<DuckDBPyType>(MapType::ValueType(type))));
+		children.append(py::make_tuple("key", MakeType(MapType::KeyType(type))));
+		children.append(py::make_tuple("value", MakeType(MapType::ValueType(type))));
 		return children;
 	}
 	if (id == LogicalTypeId::DECIMAL) {

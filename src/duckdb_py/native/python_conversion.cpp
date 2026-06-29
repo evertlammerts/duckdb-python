@@ -324,7 +324,8 @@ static bool TryTransformPythonLongToHugeInt(py::handle ele, const LogicalType &t
 static Value TransformPythonLongToHugeInt(py::handle ele, const LogicalType &target_type) {
 	Value result;
 	if (!TryTransformPythonLongToHugeInt(ele, target_type, result)) {
-		throw InvalidInputException("Python integer too large for 128-bit integer type: %s", py::cast<std::string>(py::str(ele)));
+		throw InvalidInputException("Python integer too large for 128-bit integer type: %s",
+		                            py::cast<std::string>(py::str(ele)));
 	}
 	return result;
 }
@@ -596,7 +597,7 @@ struct PythonValueConversion {
 			// Extract the internal object and the type from the Value instance
 			auto object = ele.attr("object");
 			py::object type = ele.attr("type");
-			std::shared_ptr<DuckDBPyType> internal_type;
+			std::unique_ptr<DuckDBPyType> internal_type;
 			if (!DuckDBPyType::TryConvert(type, internal_type)) {
 				string actual_type = py::cast<std::string>(py::str((type).type()));
 				throw InvalidInputException("The 'type' of a Value should be of type DuckDBPyType, not '%s'",

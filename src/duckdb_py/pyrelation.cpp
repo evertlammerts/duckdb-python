@@ -96,12 +96,8 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Project(const py::args &args
 	} else {
 		vector<unique_ptr<ParsedExpression>> expressions;
 		for (auto arg : args) {
-			std::shared_ptr<DuckDBPyExpression> py_expr;
-			if (!py::try_cast<std::shared_ptr<DuckDBPyExpression>>(arg, py_expr)) {
-				throw InvalidInputException("Please provide arguments of type Expression!");
-			}
-			auto expr = py_expr->GetExpression().Copy();
-			expressions.push_back(std::move(expr));
+			auto py_expr = DuckDBPyExpression::ToExpression(arg);
+			expressions.push_back(py_expr->GetExpression().Copy());
 		}
 		vector<string> empty_aliases;
 		if (groups.empty()) {
@@ -192,10 +188,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Filter(const py::object &exp
 		string expression = py::cast<std::string>(expr);
 		return FilterFromExpression(expression);
 	}
-	std::shared_ptr<DuckDBPyExpression> expression;
-	if (!py::try_cast(expr, expression)) {
-		throw InvalidInputException("Please provide either a string or a DuckDBPyExpression object to 'filter'");
-	}
+	auto expression = DuckDBPyExpression::ToExpression(expr);
 	auto expr_p = expression->GetExpression().Copy();
 	return DeriveRelation(rel->Filter(std::move(expr_p)));
 }
@@ -217,11 +210,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Sort(const py::args &args) {
 	order_nodes.reserve(args.size());
 
 	for (auto arg : args) {
-		std::shared_ptr<DuckDBPyExpression> py_expr;
-		if (!py::try_cast<std::shared_ptr<DuckDBPyExpression>>(arg, py_expr)) {
-			string actual_type = py::cast<std::string>(py::str((arg).type()));
-			throw InvalidInputException("Expected argument of type Expression, received '%s' instead", actual_type);
-		}
+		auto py_expr = DuckDBPyExpression::ToExpression(arg);
 		auto expr = py_expr->GetExpression().Copy();
 		order_nodes.emplace_back(py_expr->order_type, py_expr->null_order, std::move(expr));
 	}
@@ -236,12 +225,8 @@ vector<unique_ptr<ParsedExpression>> GetExpressions(ClientContext &context, cons
 		vector<unique_ptr<ParsedExpression>> expressions;
 		auto aggregate_list = py::list(expr);
 		for (auto item : aggregate_list) {
-			std::shared_ptr<DuckDBPyExpression> py_expr;
-			if (!py::try_cast<std::shared_ptr<DuckDBPyExpression>>(item, py_expr)) {
-				throw InvalidInputException("Please provide arguments of type Expression!");
-			}
-			auto expr_ = py_expr->GetExpression().Copy();
-			expressions.push_back(std::move(expr_));
+			auto py_expr = DuckDBPyExpression::ToExpression(item);
+			expressions.push_back(py_expr->GetExpression().Copy());
 		}
 		return expressions;
 	} else if (py::isinstance<py::str>(expr)) {
@@ -1227,11 +1212,8 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Join(DuckDBPyRelation *other
 		auto join_relation = make_shared_ptr<JoinRelation>(rel, other->rel, std::move(using_list), join_type);
 		return DeriveRelation(std::move(join_relation));
 	}
-	std::shared_ptr<DuckDBPyExpression> condition_expr;
-	if (!py::try_cast(condition, condition_expr)) {
-		throw InvalidInputException(
-		    "Please provide condition as an expression either in string form or as an Expression object");
-	}
+	// Strings (SQL condition) and lists (USING clause) are handled above; anything else is converted here.
+	auto condition_expr = DuckDBPyExpression::ToExpression(condition);
 	vector<unique_ptr<ParsedExpression>> conditions;
 	conditions.push_back(condition_expr->GetExpression().Copy());
 	return DeriveRelation(rel->Join(other->rel, std::move(conditions), join_type));
@@ -1600,10 +1582,7 @@ void DuckDBPyRelation::Update(const py::object &set_p, const py::object &where) 
 	AssertRelation();
 	unique_ptr<ParsedExpression> condition;
 	if (!py::none().is(where)) {
-		std::shared_ptr<DuckDBPyExpression> py_expr;
-		if (!py::try_cast<std::shared_ptr<DuckDBPyExpression>>(where, py_expr)) {
-			throw InvalidInputException("Please provide an Expression to 'condition'");
-		}
+		auto py_expr = DuckDBPyExpression::ToExpression(where);
 		condition = py_expr->GetExpression().Copy();
 	}
 
@@ -1627,8 +1606,8 @@ void DuckDBPyRelation::Update(const py::object &set_p, const py::object &where) 
 		if (!py::isinstance<py::str>(item_key)) {
 			throw InvalidInputException("Please provide the column name as the key of the dictionary");
 		}
-		std::shared_ptr<DuckDBPyExpression> py_expr;
-		if (!py::try_cast<std::shared_ptr<DuckDBPyExpression>>(item_value, py_expr)) {
+		std::unique_ptr<DuckDBPyExpression> py_expr;
+		if (!DuckDBPyExpression::TryToExpression(item_value, py_expr)) {
 			string actual_type = py::cast<std::string>(py::str((item_value).type()));
 			throw InvalidInputException("Please provide an object of type Expression as the value, not %s",
 			                            actual_type);

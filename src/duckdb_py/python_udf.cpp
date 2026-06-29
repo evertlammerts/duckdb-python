@@ -333,8 +333,9 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 						contains_null = true;
 						break;
 					}
-					PyTuple_SET_ITEM(bundled_parameters.ptr(), (Py_ssize_t)i,
-					                 PythonObject::FromValue(value, column.GetType(), client_properties).release().ptr());
+					PyTuple_SET_ITEM(
+					    bundled_parameters.ptr(), (Py_ssize_t)i,
+					    PythonObject::FromValue(value, column.GetType(), client_properties).release().ptr());
 				}
 				if (contains_null) {
 					// Immediately insert None, no need to call the function
@@ -431,11 +432,18 @@ public:
 		}
 	}
 
-	void OverrideReturnType(const std::shared_ptr<DuckDBPyType> &type) {
-		if (!type) {
+	void OverrideReturnType(const py::object &type) {
+		// None means "infer the return type" -- leave return_type untouched. Otherwise convert here: a
+		// const DuckDBPyType& parameter can't model None, so the binding passes the object through unconverted
+		// (matching how the Expression refactor handled None-accepting params).
+		if (py::none().is(type)) {
 			return;
 		}
-		return_type = type->Type();
+		std::unique_ptr<DuckDBPyType> converted;
+		if (!DuckDBPyType::TryConvert(type, converted)) {
+			throw InvalidInputException("Could not convert the provided 'return_type' to a DuckDBPyType");
+		}
+		return_type = converted->Type();
 	}
 
 	void OverrideParameters(const py::object &parameters_p) {
@@ -459,7 +467,7 @@ public:
 		}
 		idx_t i = 0;
 		for (auto param : params) {
-			std::shared_ptr<DuckDBPyType> type;
+			std::unique_ptr<DuckDBPyType> type;
 			if (!DuckDBPyType::TryConvert(py::borrow<py::object>(param), type)) {
 				throw InvalidInputException("Could not convert a provided parameter to a DuckDBPyType");
 			}
@@ -485,7 +493,7 @@ public:
 		auto return_annotation = signature.attr("return_annotation");
 		auto empty = py::module_::import_("inspect").attr("Signature").attr("empty");
 		if (!py::none().is(return_annotation) && !empty.is(return_annotation)) {
-			std::shared_ptr<DuckDBPyType> pytype;
+			std::unique_ptr<DuckDBPyType> pytype;
 			if (DuckDBPyType::TryConvert(py::borrow<py::object>(return_annotation), pytype)) {
 				return_type = pytype->Type();
 			}
@@ -498,7 +506,7 @@ public:
 		params.update(sig_params);
 		for (auto item : params) {
 			auto value = item.second;
-			std::shared_ptr<DuckDBPyType> pytype;
+			std::unique_ptr<DuckDBPyType> pytype;
 			if (DuckDBPyType::TryConvert(py::borrow<py::object>(value.attr("annotation")), pytype)) {
 				parameters.push_back(pytype->Type());
 			} else {
@@ -551,9 +559,8 @@ public:
 } // namespace
 
 ScalarFunction DuckDBPyConnection::CreateScalarUDF(const string &name, const py::callable &udf,
-                                                   const py::object &parameters,
-                                                   const std::shared_ptr<DuckDBPyType> &return_type, bool vectorized,
-                                                   FunctionNullHandling null_handling,
+                                                   const py::object &parameters, const py::object &return_type,
+                                                   bool vectorized, FunctionNullHandling null_handling,
                                                    PythonExceptionHandling exception_handling, bool side_effects) {
 	PythonUDFData data(name, vectorized, null_handling);
 	auto &connection = con.GetConnection();

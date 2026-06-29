@@ -237,23 +237,22 @@ public:
 	    const Optional<py::object> &union_by_name = py::none(), const Optional<py::object> &hive_types = py::none(),
 	    const Optional<py::object> &hive_types_autocast = py::none());
 
-	std::shared_ptr<DuckDBPyType> MapType(const std::shared_ptr<DuckDBPyType> &key_type,
-	                                      const std::shared_ptr<DuckDBPyType> &value_type);
-	std::shared_ptr<DuckDBPyType> StructType(const py::object &fields);
-	std::shared_ptr<DuckDBPyType> ListType(const std::shared_ptr<DuckDBPyType> &type);
-	std::shared_ptr<DuckDBPyType> ArrayType(const std::shared_ptr<DuckDBPyType> &type, idx_t size);
-	std::shared_ptr<DuckDBPyType> UnionType(const py::object &members);
-	std::shared_ptr<DuckDBPyType> EnumType(const string &name, const std::shared_ptr<DuckDBPyType> &type,
-	                                       const py::list &values_p);
-	std::shared_ptr<DuckDBPyType> DecimalType(int width, int scale);
-	std::shared_ptr<DuckDBPyType> StringType(const string &collation = string());
-	std::shared_ptr<DuckDBPyType> Type(const string &type_str);
+	std::unique_ptr<DuckDBPyType> MapType(const DuckDBPyType &key_type, const DuckDBPyType &value_type);
+	std::unique_ptr<DuckDBPyType> StructType(const py::object &fields);
+	std::unique_ptr<DuckDBPyType> ListType(const DuckDBPyType &type);
+	std::unique_ptr<DuckDBPyType> ArrayType(const DuckDBPyType &type, idx_t size);
+	std::unique_ptr<DuckDBPyType> UnionType(const py::object &members);
+	std::unique_ptr<DuckDBPyType> EnumType(const string &name, const DuckDBPyType &type, const py::list &values_p);
+	std::unique_ptr<DuckDBPyType> DecimalType(int width, int scale);
+	std::unique_ptr<DuckDBPyType> StringType(const string &collation = string());
+	std::unique_ptr<DuckDBPyType> Type(const string &type_str);
 
-	std::shared_ptr<DuckDBPyConnection> RegisterScalarUDF(
-	    const string &name, const py::callable &udf, const py::object &arguments = py::none(),
-	    const std::shared_ptr<DuckDBPyType> &return_type = nullptr, PythonUDFType type = PythonUDFType::NATIVE,
-	    FunctionNullHandling null_handling = FunctionNullHandling::DEFAULT_NULL_HANDLING,
-	    PythonExceptionHandling exception_handling = PythonExceptionHandling::FORWARD_ERROR, bool side_effects = false);
+	std::shared_ptr<DuckDBPyConnection>
+	RegisterScalarUDF(const string &name, const py::callable &udf, const py::object &arguments = py::none(),
+	                  const py::object &return_type = py::none(), PythonUDFType type = PythonUDFType::NATIVE,
+	                  FunctionNullHandling null_handling = FunctionNullHandling::DEFAULT_NULL_HANDLING,
+	                  PythonExceptionHandling exception_handling = PythonExceptionHandling::FORWARD_ERROR,
+	                  bool side_effects = false);
 
 	std::shared_ptr<DuckDBPyConnection> UnregisterUDF(const string &name);
 
@@ -373,9 +372,8 @@ private:
 	std::unique_ptr<DuckDBPyRelation> CreateRelation(std::shared_ptr<DuckDBPyResult> result);
 	PathLike GetPathLike(const py::object &object);
 	ScalarFunction CreateScalarUDF(const string &name, const py::callable &udf, const py::object &parameters,
-	                               const std::shared_ptr<DuckDBPyType> &return_type, bool vectorized,
-	                               FunctionNullHandling null_handling, PythonExceptionHandling exception_handling,
-	                               bool side_effects);
+	                               const py::object &return_type, bool vectorized, FunctionNullHandling null_handling,
+	                               PythonExceptionHandling exception_handling, bool side_effects);
 	vector<unique_ptr<SQLStatement>> GetStatements(const py::object &query);
 
 	static void DetectEnvironment();
