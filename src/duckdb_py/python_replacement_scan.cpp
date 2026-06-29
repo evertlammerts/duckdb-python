@@ -86,7 +86,8 @@ static void CreateArrowScan(const string &name, py::object entry, TableFunctionR
 
 static void ThrowScanFailureError(const py::object &entry, const string &name, const string &location = "") {
 	string error;
-	auto py_object_type = py::cast<std::string>(py::str((entry).type().attr("__name__")));
+	// py::object wrap: py::str() of a bare .attr() accessor is an ambiguous overload on MSVC.
+	auto py_object_type = py::cast<std::string>(py::str(py::object((entry).type().attr("__name__"))));
 	error += StringUtil::Format("Python Object \"%s\" of type \"%s\"", name, py_object_type);
 	if (!location.empty()) {
 		error += StringUtil::Format(" found on line \"%s\"", location);

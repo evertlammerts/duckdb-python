@@ -261,7 +261,8 @@ static LogicalType FromGenericAlias(const py::object &obj) {
 	py::module_ types = py::module_::import_("types");
 	auto generic_alias = types.attr("GenericAlias");
 	D_ASSERT(py::isinstance(obj, generic_alias));
-	auto origin = obj.attr("__origin__");
+	// py::object (not auto, which deduces an accessor): py::str(accessor) is an ambiguous overload on MSVC.
+	py::object origin = obj.attr("__origin__");
 	py::tuple args = obj.attr("__args__");
 
 	if (origin.is(builtins.attr("list"))) {

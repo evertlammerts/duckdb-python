@@ -45,15 +45,16 @@ interval_t PyTimeDelta::ToInterval() {
 }
 
 int64_t PyTimeDelta::GetDays(py::handle &obj) {
-	return py::cast<int64_t>(py::int_(obj.attr("days")));
+	// py::object wrap: py::int_() of a bare .attr() accessor is an ambiguous overload on MSVC.
+	return py::cast<int64_t>(py::int_(py::object(obj.attr("days"))));
 }
 
 int64_t PyTimeDelta::GetSeconds(py::handle &obj) {
-	return py::cast<int64_t>(py::int_(obj.attr("seconds")));
+	return py::cast<int64_t>(py::int_(py::object(obj.attr("seconds"))));
 }
 
 int64_t PyTimeDelta::GetMicros(py::handle &obj) {
-	return py::cast<int64_t>(py::int_(obj.attr("microseconds")));
+	return py::cast<int64_t>(py::int_(py::object(obj.attr("microseconds"))));
 }
 
 PyDecimal::PyDecimal(py::handle &obj) : obj(obj) {

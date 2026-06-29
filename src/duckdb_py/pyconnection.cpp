@@ -339,7 +339,8 @@ void DuckDBPyConnection::RegisterFilesystem(py::object filesystem) {
 
 	auto &fs = database.GetFileSystem();
 
-	auto protocol = filesystem.attr("protocol");
+	// py::object (not auto, which deduces an accessor): py::str(protocol) below is an ambiguous overload on MSVC.
+	py::object protocol = filesystem.attr("protocol");
 	if (protocol.is_none() || py::str("abstract").equal(protocol)) {
 		throw InvalidInputException("Must provide concrete fsspec implementation");
 	}
@@ -1843,7 +1844,8 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::FromArrow(py::object &arro
 	auto &connection = con.GetConnection();
 	string name = "arrow_object_" + StringUtil::GenerateRandomName();
 	if (!IsAcceptedArrowObject(arrow_object)) {
-		auto py_object_type = py::cast<std::string>(py::str((arrow_object).type().attr("__name__")));
+		// py::object wrap: py::str() of a bare .attr() accessor is an ambiguous overload on MSVC.
+		auto py_object_type = py::cast<std::string>(py::str(py::object((arrow_object).type().attr("__name__"))));
 		throw InvalidInputException("Python Object Type %s is not an accepted Arrow Object.", py_object_type);
 	}
 	auto tableref = PythonReplacementScan::ReplacementObject(arrow_object, name, *connection.context, true);

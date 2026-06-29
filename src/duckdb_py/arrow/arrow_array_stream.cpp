@@ -188,7 +188,8 @@ unique_ptr<ArrowArrayStreamWrapper> PythonTableArrowArrayStreamFactory::Produce(
 		break;
 	}
 	default: {
-		auto py_object_type = py::cast<std::string>(py::str((arrow_obj_handle).type().attr("__name__")));
+		// py::object wrap: py::str() of a bare .attr() accessor is an ambiguous overload on MSVC.
+		auto py_object_type = py::cast<std::string>(py::str(py::object((arrow_obj_handle).type().attr("__name__"))));
 		throw InvalidInputException("Object of type '%s' is not a recognized Arrow object", py_object_type);
 	}
 	}
