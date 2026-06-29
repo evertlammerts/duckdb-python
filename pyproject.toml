@@ -475,6 +475,11 @@ before-build = ["yum install -y ccache"]
 
 [tool.cibuildwheel.macos]
 before-build = ["brew install ccache"]
+# nanobind uses C++17 aligned new/delete (std::align_val_t), which the runtime only provides on macOS 10.13+.
+# cp310/cp311's framework defaults to a 10.9 deployment target (used for the x86_64 slice of x86_64/universal2
+# wheels), so nanobind fails to compile there; cp312+ frameworks already target 10.13+. Pin 10.14 so every CPython
+# version builds (arm64 slices are 11.0 regardless).
+environment = { MACOSX_DEPLOYMENT_TARGET = "10.14" }
 
 [tool.cibuildwheel.windows]
 before-build = ["choco install ccache"]
