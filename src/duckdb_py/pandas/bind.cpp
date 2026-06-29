@@ -63,10 +63,19 @@ static LogicalType BindColumn(ClientContext &context, PandasBindColumn &column_p
 		D_ASSERT(py::hasattr(column.attr("cat"), "categories"));
 		NumpyArray categories(column.attr("cat").attr("categories"));
 		auto categories_pd_type = ConvertNumpyType(categories.GetArray().attr("dtype"));
-		if (categories_pd_type.type == NumpyNullableType::OBJECT) {
+		// Legacy categories are backed by an `object` dtype; pandas >= 3.0 backs string categories with the new
+		// StringDtype (reported as "str"), so treat both as string categories -> ENUM.
+		if (categories_pd_type.type == NumpyNullableType::OBJECT ||
+		    categories_pd_type.type == NumpyNullableType::STRING) {
 			// Let's hope the object type is a string.
 			bind_data.numpy_type.type = NumpyNullableType::CATEGORY;
-			vector<string> enum_entries = py::cast<vector<string>>(categories.GetArray());
+			// str()-ify each category individually: pandas >= 3.0 categories are a StringArray whose elements are
+			// numpy str scalars, which nanobind's vector<string>/string casters reject (py::cast<vector<string>>
+			// on the array throws). Iterating + py::str handles both that and the legacy object[str] case.
+			vector<string> enum_entries;
+			for (auto category : categories.GetArray()) {
+				enum_entries.push_back(py::cast<std::string>(py::str(category)));
+			}
 			idx_t size = enum_entries.size();
 			Vector enum_entries_vec(LogicalType::VARCHAR, size);
 			auto enum_entries_ptr = FlatVector::GetDataMutable<string_t>(enum_entries_vec);
@@ -75,8 +84,11 @@ static LogicalType BindColumn(ClientContext &context, PandasBindColumn &column_p
 			}
 			D_ASSERT(py::hasattr(column.attr("cat"), "codes"));
 			column_type = LogicalType::ENUM(enum_entries_vec, size);
-			NumpyArray pandas_col(column.attr("cat").attr("codes"));
-			bind_data.internal_categorical_type = py::cast<std::string>(py::str(pandas_col.GetArray().attr("dtype")));
+			// .to_numpy(): pandas >= 3.0 returns cat.codes as a Series (no .strides/.ctypes), but the scan needs a
+			// real ndarray backing buffer; materialize it. (Older pandas returned an ndarray here directly.)
+			NumpyArray pandas_col(column.attr("cat").attr("codes").attr("to_numpy")());
+			bind_data.internal_categorical_type =
+			    py::cast<std::string>(py::str(py::object(pandas_col.GetArray().attr("dtype"))));
 			bind_data.pandas_col = std::make_unique<PandasNumpyColumn>(std::move(pandas_col));
 		} else {
 			NumpyArray pandas_col(column.attr("to_numpy")());

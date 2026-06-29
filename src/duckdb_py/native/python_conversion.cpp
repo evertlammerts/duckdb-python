@@ -61,7 +61,9 @@ vector<Identifier> TransformStructKeys(py::handle keys, idx_t size, const Logica
 	vector<Identifier> res;
 	res.reserve(size);
 	for (idx_t i = 0; i < size; i++) {
-		res.emplace_back(Identifier(py::cast<std::string>(keys.attr("__getitem__")(i))));
+		// Stringify via str() so non-string keys (e.g. the integer keys of a hashable-key MAP, which DuckDB
+		// produces as a plain {1: 10} dict) are accepted -- nanobind's nb::cast<std::string> rejects non-str.
+		res.emplace_back(Identifier(py::cast<std::string>(py::str(keys.attr("__getitem__")(i)))));
 	}
 	return res;
 }
@@ -1037,8 +1039,12 @@ void TransformPythonObjectInternal(optional_ptr<ClientContext> context, py::hand
 		break;
 	}
 	case PythonObjectType::Bytes: {
-		const string &ele_string = py::cast<string>(ele);
-		OP::HandleBlob(result, param, const_data_ptr_t(ele_string.data()), ele_string.size());
+		// Read the buffer directly (mirrors the ByteArray branch above): nanobind's nb::cast<std::string> rejects
+		// a bytes object (pybind11 accepted it), so go through the CPython API instead.
+		char *bytes_buffer;
+		Py_ssize_t bytes_length;
+		PyBytes_AsStringAndSize(ele.ptr(), &bytes_buffer, &bytes_length); // NOLINT
+		OP::HandleBlob(result, param, const_data_ptr_cast(bytes_buffer), idx_t(bytes_length));
 		break;
 	}
 	case PythonObjectType::NdArray:

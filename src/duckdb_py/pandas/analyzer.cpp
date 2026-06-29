@@ -337,8 +337,10 @@ LogicalType PandasAnalyzer::DictToStruct(const PyDictionary &dict, bool &can_con
 	for (idx_t i = 0; i < dict.len; i++) {
 		auto dict_key = dict.keys.attr("__getitem__")(i);
 
-		//! Have to already transform here because the child_list needs a string as key
-		auto key = Identifier(py::cast<std::string>(dict_key));
+		//! Have to already transform here because the child_list needs a string as key. Stringify via str() so
+		//! non-string keys (e.g. the integer keys of a hashable-key MAP, produced as a plain {1: 10} dict) are
+		//! accepted -- nanobind's nb::cast<std::string> rejects non-str objects, whereas pybind11 stringified them.
+		auto key = Identifier(py::cast<std::string>(py::str(dict_key)));
 
 		auto dict_val = dict.values.attr("__getitem__")(i);
 		auto val = GetItemType(dict_val, can_convert);
