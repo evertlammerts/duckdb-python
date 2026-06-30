@@ -6,6 +6,44 @@
 
 namespace duckdb {
 
+namespace {
+
+// Binary operators take their operand as py::object (not Expression) so that None can bind: nanobind rejects None for a
+// bound-type parameter before the registered implicit conversion runs, so `expr == None` / `expr + None` would never
+// reach the None -> SQL NULL conversion otherwise. We convert explicitly via TryToExpression (an existing Expression is
+// copied, a str becomes a column reference, any other value -- including None -- becomes a constant). On a genuinely
+// unconvertible operand we return Py_NotImplemented so Python falls back to the reflected operator / identity
+// comparison, exactly as the is_operator() overload did under pybind11 (keeps e.g. `expr == object()` returning False
+// instead of raising).
+template <typename Build>
+py::object ExpressionBinaryOp(const py::object &other, Build &&build) {
+	std::unique_ptr<DuckDBPyExpression> converted;
+	if (!DuckDBPyExpression::TryToExpression(other, converted)) {
+		return py::borrow(py::handle(Py_NotImplemented));
+	}
+	return py::cast(build(*converted));
+}
+
+} // namespace
+
+// Forward binary operator __op__: self <op> other (other converted via ExpressionBinaryOp, so None -> SQL NULL).
+#define DUCKDB_EXPR_BINARY_OP(PYNAME, METHOD)                                                                          \
+	m.def(                                                                                                             \
+	    PYNAME,                                                                                                        \
+	    [](DuckDBPyExpression &self, const py::object &other) {                                                        \
+		    return ExpressionBinaryOp(other, [&](const DuckDBPyExpression &rhs) { return self.METHOD(rhs); });         \
+	    },                                                                                                             \
+	    py::arg("expr").none(), docs, py::is_operator())
+
+// Reflected binary operator __rop__: other <op> self (other is the left operand, also accepts None).
+#define DUCKDB_EXPR_REFLECTED_OP(PYNAME, METHOD)                                                                       \
+	m.def(                                                                                                             \
+	    PYNAME,                                                                                                        \
+	    [](DuckDBPyExpression &self, const py::object &other) {                                                        \
+		    return ExpressionBinaryOp(other, [&](const DuckDBPyExpression &lhs) { return lhs.METHOD(self); });         \
+	    },                                                                                                             \
+	    py::arg("expr").none(), docs, py::is_operator())
+
 void InitializeStaticMethods(py::module_ &m) {
 	const char *docs;
 
@@ -62,10 +100,8 @@ static void InitializeDunderMethods(py::class_<DuckDBPyExpression> &m) {
 			FunctionExpression: self '+' expr
 	)";
 
-	m.def("__add__", &DuckDBPyExpression::Add, py::arg("expr"), docs, py::is_operator());
-	m.def(
-	    "__radd__", [](const DuckDBPyExpression &a, const DuckDBPyExpression &b) { return b.Add(a); }, docs,
-	    py::is_operator());
+	DUCKDB_EXPR_BINARY_OP("__add__", Add);
+	DUCKDB_EXPR_REFLECTED_OP("__radd__", Add);
 
 	docs = R"(
 		Negate the expression.
@@ -84,10 +120,8 @@ static void InitializeDunderMethods(py::class_<DuckDBPyExpression> &m) {
 		Returns:
 			FunctionExpression: self '-' expr
 	)";
-	m.def("__sub__", &DuckDBPyExpression::Subtract, docs, py::is_operator());
-	m.def(
-	    "__rsub__", [](const DuckDBPyExpression &a, const DuckDBPyExpression &b) { return b.Subtract(a); }, docs,
-	    py::is_operator());
+	DUCKDB_EXPR_BINARY_OP("__sub__", Subtract);
+	DUCKDB_EXPR_REFLECTED_OP("__rsub__", Subtract);
 
 	docs = R"(
 		Multiply self by expr
@@ -98,10 +132,8 @@ static void InitializeDunderMethods(py::class_<DuckDBPyExpression> &m) {
 		Returns:
 			FunctionExpression: self '*' expr
 	)";
-	m.def("__mul__", &DuckDBPyExpression::Multiply, docs, py::is_operator());
-	m.def(
-	    "__rmul__", [](const DuckDBPyExpression &a, const DuckDBPyExpression &b) { return b.Multiply(a); }, docs,
-	    py::is_operator());
+	DUCKDB_EXPR_BINARY_OP("__mul__", Multiply);
+	DUCKDB_EXPR_REFLECTED_OP("__rmul__", Multiply);
 
 	docs = R"(
 		Divide self by expr
@@ -112,15 +144,11 @@ static void InitializeDunderMethods(py::class_<DuckDBPyExpression> &m) {
 		Returns:
 			FunctionExpression: self '/' expr
 	)";
-	m.def("__div__", &DuckDBPyExpression::Division, docs, py::is_operator());
-	m.def(
-	    "__rdiv__", [](const DuckDBPyExpression &a, const DuckDBPyExpression &b) { return b.Division(a); }, docs,
-	    py::is_operator());
+	DUCKDB_EXPR_BINARY_OP("__div__", Division);
+	DUCKDB_EXPR_REFLECTED_OP("__rdiv__", Division);
 
-	m.def("__truediv__", &DuckDBPyExpression::Division, docs, py::is_operator());
-	m.def(
-	    "__rtruediv__", [](const DuckDBPyExpression &a, const DuckDBPyExpression &b) { return b.Division(a); }, docs,
-	    py::is_operator());
+	DUCKDB_EXPR_BINARY_OP("__truediv__", Division);
+	DUCKDB_EXPR_REFLECTED_OP("__rtruediv__", Division);
 
 	docs = R"(
 		(Floor) Divide self by expr
@@ -131,10 +159,8 @@ static void InitializeDunderMethods(py::class_<DuckDBPyExpression> &m) {
 		Returns:
 			FunctionExpression: self '//' expr
 	)";
-	m.def("__floordiv__", &DuckDBPyExpression::FloorDivision, docs, py::is_operator());
-	m.def(
-	    "__rfloordiv__", [](const DuckDBPyExpression &a, const DuckDBPyExpression &b) { return b.FloorDivision(a); },
-	    docs, py::is_operator());
+	DUCKDB_EXPR_BINARY_OP("__floordiv__", FloorDivision);
+	DUCKDB_EXPR_REFLECTED_OP("__rfloordiv__", FloorDivision);
 
 	docs = R"(
 		Modulo self by expr
@@ -145,10 +171,8 @@ static void InitializeDunderMethods(py::class_<DuckDBPyExpression> &m) {
 		Returns:
 			FunctionExpression: self '%' expr
 	)";
-	m.def("__mod__", &DuckDBPyExpression::Modulo, docs, py::is_operator());
-	m.def(
-	    "__rmod__", [](const DuckDBPyExpression &a, const DuckDBPyExpression &b) { return b.Modulo(a); }, docs,
-	    py::is_operator());
+	DUCKDB_EXPR_BINARY_OP("__mod__", Modulo);
+	DUCKDB_EXPR_REFLECTED_OP("__rmod__", Modulo);
 
 	docs = R"(
 		Power self by expr
@@ -159,10 +183,8 @@ static void InitializeDunderMethods(py::class_<DuckDBPyExpression> &m) {
 		Returns:
 			FunctionExpression: self '**' expr
 	)";
-	m.def("__pow__", &DuckDBPyExpression::Power, docs, py::is_operator());
-	m.def(
-	    "__rpow__", [](const DuckDBPyExpression &a, const DuckDBPyExpression &b) { return b.Power(a); }, docs,
-	    py::is_operator());
+	DUCKDB_EXPR_BINARY_OP("__pow__", Power);
+	DUCKDB_EXPR_REFLECTED_OP("__rpow__", Power);
 
 	docs = R"(
 		Create an equality expression between two expressions
@@ -173,7 +195,7 @@ static void InitializeDunderMethods(py::class_<DuckDBPyExpression> &m) {
 		Returns:
 			FunctionExpression: self '=' expr
 	)";
-	m.def("__eq__", &DuckDBPyExpression::Equality, docs, py::is_operator());
+	DUCKDB_EXPR_BINARY_OP("__eq__", Equality);
 
 	docs = R"(
 		Create an inequality expression between two expressions
@@ -184,7 +206,7 @@ static void InitializeDunderMethods(py::class_<DuckDBPyExpression> &m) {
 		Returns:
 			FunctionExpression: self '!=' expr
 	)";
-	m.def("__ne__", &DuckDBPyExpression::Inequality, docs, py::is_operator());
+	DUCKDB_EXPR_BINARY_OP("__ne__", Inequality);
 
 	docs = R"(
 		Create a greater than expression between two expressions
@@ -195,7 +217,7 @@ static void InitializeDunderMethods(py::class_<DuckDBPyExpression> &m) {
 		Returns:
 			FunctionExpression: self '>' expr
 	)";
-	m.def("__gt__", &DuckDBPyExpression::GreaterThan, docs, py::is_operator());
+	DUCKDB_EXPR_BINARY_OP("__gt__", GreaterThan);
 
 	docs = R"(
 		Create a greater than or equal expression between two expressions
@@ -206,7 +228,7 @@ static void InitializeDunderMethods(py::class_<DuckDBPyExpression> &m) {
 		Returns:
 			FunctionExpression: self '>=' expr
 	)";
-	m.def("__ge__", &DuckDBPyExpression::GreaterThanOrEqual, docs, py::is_operator());
+	DUCKDB_EXPR_BINARY_OP("__ge__", GreaterThanOrEqual);
 
 	docs = R"(
 		Create a less than expression between two expressions
@@ -217,7 +239,7 @@ static void InitializeDunderMethods(py::class_<DuckDBPyExpression> &m) {
 		Returns:
 			FunctionExpression: self '<' expr
 	)";
-	m.def("__lt__", &DuckDBPyExpression::LessThan, docs, py::is_operator());
+	DUCKDB_EXPR_BINARY_OP("__lt__", LessThan);
 
 	docs = R"(
 		Create a less than or equal expression between two expressions
@@ -228,7 +250,7 @@ static void InitializeDunderMethods(py::class_<DuckDBPyExpression> &m) {
 		Returns:
 			FunctionExpression: self '<=' expr
 	)";
-	m.def("__le__", &DuckDBPyExpression::LessThanOrEqual, docs, py::is_operator());
+	DUCKDB_EXPR_BINARY_OP("__le__", LessThanOrEqual);
 
 	// AND, NOT and OR
 
@@ -241,7 +263,7 @@ static void InitializeDunderMethods(py::class_<DuckDBPyExpression> &m) {
 		Returns:
 			FunctionExpression: self '&' expr
 	)";
-	m.def("__and__", &DuckDBPyExpression::And, docs, py::is_operator());
+	DUCKDB_EXPR_BINARY_OP("__and__", And);
 
 	docs = R"(
 		Binary-or self together with expr
@@ -252,7 +274,7 @@ static void InitializeDunderMethods(py::class_<DuckDBPyExpression> &m) {
 		Returns:
 			FunctionExpression: self '|' expr
 	)";
-	m.def("__or__", &DuckDBPyExpression::Or, docs, py::is_operator());
+	DUCKDB_EXPR_BINARY_OP("__or__", Or);
 
 	docs = R"(
 		Create a binary-not expression from self
@@ -271,9 +293,7 @@ static void InitializeDunderMethods(py::class_<DuckDBPyExpression> &m) {
 		Returns:
 			FunctionExpression: expr '&' self
 	)";
-	m.def(
-	    "__rand__", [](const DuckDBPyExpression &a, const DuckDBPyExpression &b) { return b.And(a); }, docs,
-	    py::is_operator());
+	DUCKDB_EXPR_REFLECTED_OP("__rand__", And);
 
 	docs = R"(
 		Binary-or self together with expr
@@ -284,10 +304,11 @@ static void InitializeDunderMethods(py::class_<DuckDBPyExpression> &m) {
 		Returns:
 			FunctionExpression: expr '|' self
 	)";
-	m.def(
-	    "__ror__", [](const DuckDBPyExpression &a, const DuckDBPyExpression &b) { return b.Or(a); }, docs,
-	    py::is_operator());
+	DUCKDB_EXPR_REFLECTED_OP("__ror__", Or);
 }
+
+#undef DUCKDB_EXPR_BINARY_OP
+#undef DUCKDB_EXPR_REFLECTED_OP
 
 static void InitializeImplicitConversion(py::class_<DuckDBPyExpression> &m) {
 	m.def(py::new_([](const string &name) {
@@ -425,7 +446,12 @@ void DuckDBPyExpression::Initialize(py::module_ &m) {
 	expression.def("cast", &DuckDBPyExpression::Cast, py::arg("type"), docs);
 
 	docs = "";
-	expression.def("between", &DuckDBPyExpression::Between, py::arg("lower"), py::arg("upper"), docs);
+	expression.def(
+	    "between",
+	    [](DuckDBPyExpression &self, const py::object &lower, const py::object &upper) {
+		    return self.Between(*DuckDBPyExpression::ToExpression(lower), *DuckDBPyExpression::ToExpression(upper));
+	    },
+	    py::arg("lower").none(), py::arg("upper").none(), docs);
 
 	docs = "";
 	expression.def("collate", &DuckDBPyExpression::Collate, py::arg("collation"), docs);

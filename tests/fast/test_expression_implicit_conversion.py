@@ -91,8 +91,77 @@ CONSTANT_VALUES = {
 def test_binary_operator_constant_rhs(rel, value, column):
     """Expression == <constant> should work for every constant type."""
     expr = ColumnExpression(column) == value
+    # `==` must build a SQL Expression, never fall back to a Python bool: a bool RHS would still let
+    # select() yield one row, masking a None/operator regression -- so assert the type explicitly.
+    assert isinstance(expr, duckdb.Expression)
     result = rel.select(expr).fetchall()
     assert len(result) == 1
+
+
+# ---------------------------------------------------------------------------
+# 1b. None operand: None is a meaningful value (SQL NULL), not "argument absent".
+#     nanobind gates None for bound-type params before implicit conversion, so the
+#     operators/between take py::object + route None through ToExpression -> NULL constant.
+#     These guard the P0 (`== None` -> Python bool) and P1 (operators/between raise on None).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda c: c == None,  # noqa: E711
+        lambda c: c != None,  # noqa: E711
+        lambda c: c + None,
+        lambda c: c - None,
+        lambda c: c * None,
+        lambda c: c < None,
+        lambda c: c > None,
+        lambda c: c & None,
+        lambda c: c | None,
+        lambda c: c.between(None, 5),
+        lambda c: c.between(1, None),
+        lambda c: None + c,  # reflected (__radd__)
+        lambda c: None & c,  # reflected (__rand__)
+    ],
+    ids=[
+        "eq",
+        "ne",
+        "add",
+        "sub",
+        "mul",
+        "lt",
+        "gt",
+        "and",
+        "or",
+        "between_lower",
+        "between_upper",
+        "reflected_add",
+        "reflected_and",
+    ],
+)
+def test_none_operand_builds_sql_null_expression(build):
+    """A None operand becomes a SQL NULL constant on every operator/between, yielding a real Expression."""
+    expr = build(ColumnExpression("a"))
+    assert isinstance(expr, duckdb.Expression)
+    assert "NULL" in str(expr)
+
+
+def test_none_filter_keeps_no_rows():
+    """`col != None` builds `(col != NULL)`: SQL NULL semantics keep no rows (a Python-bool True kept all)."""
+    rel = duckdb.connect().sql("SELECT * FROM (VALUES (1), (NULL), (3)) t(a)")
+    assert rel.filter(ColumnExpression("a") != None).fetchall() == []  # noqa: E711
+
+
+def test_unconvertible_operand_preserves_notimplemented():
+    """An unconvertible operand must still yield NotImplemented so Python falls back.
+
+    `expr == object()` stays a bool, `expr + object()` raises TypeError -- not a thrown duckdb error.
+    """
+    a = ColumnExpression("a")
+    assert (a == object()) is False
+    assert (a != object()) is True
+    with pytest.raises(TypeError):
+        a + object()
 
 
 # ---------------------------------------------------------------------------
