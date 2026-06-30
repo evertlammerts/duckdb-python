@@ -424,7 +424,7 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::UnregisterUDF(const stri
 		auto &catalog = Catalog::GetCatalog(context, SYSTEM_CATALOG);
 		DropInfo info;
 		info.type = CatalogType::SCALAR_FUNCTION_ENTRY;
-		info.NameMutable() = Identifier(name);
+		info.SetName(Identifier(name));
 		info.allow_drop_internal = true;
 		info.cascade = false;
 		info.if_not_found = OnEntryNotFound::THROW_EXCEPTION;
@@ -1664,7 +1664,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::Table(const string &tname)
 	auto &connection = con.GetConnection();
 	auto qualified_name = QualifiedName::Parse(tname);
 	if (qualified_name.Schema().empty()) {
-		qualified_name.SchemaMutable() = DEFAULT_SCHEMA;
+		qualified_name = QualifiedName(qualified_name.Catalog(), DEFAULT_SCHEMA, qualified_name.Name());
 	}
 	try {
 		return CreateRelation(

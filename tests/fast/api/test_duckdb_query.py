@@ -57,7 +57,7 @@ class TestDuckDBQuery:
         duckdb_cursor.execute(query, params)
 
         results = duckdb_cursor.fetchall()
-        assert "EXPLAIN_ANALYZE" in results[0][1]
+        assert "Total Time" in results[0][1]
 
     def test_named_param(self):
         con = duckdb.connect()

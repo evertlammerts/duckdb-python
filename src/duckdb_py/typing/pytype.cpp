@@ -51,7 +51,7 @@ bool DuckDBPyType::EqualsString(const string &type_str) const {
 
 std::shared_ptr<DuckDBPyType> DuckDBPyType::GetAttribute(const string &name) const {
 	auto name_identifier = Identifier(name);
-	if (type.id() == LogicalTypeId::STRUCT || type.id() == LogicalTypeId::UNION) {
+	if (type.id() == LogicalTypeId::STRUCT || type.id() == LogicalTypeId::TUPLE || type.id() == LogicalTypeId::UNION) {
 		auto &children = StructType::GetChildTypes(type);
 		for (idx_t i = 0; i < children.size(); i++) {
 			auto &child = children[i];
@@ -372,6 +372,7 @@ py::list DuckDBPyType::Children() const {
 	switch (type.id()) {
 	case LogicalTypeId::LIST:
 	case LogicalTypeId::STRUCT:
+	case LogicalTypeId::TUPLE:
 	case LogicalTypeId::UNION:
 	case LogicalTypeId::MAP:
 	case LogicalTypeId::ARRAY:
@@ -403,7 +404,7 @@ py::list DuckDBPyType::Children() const {
 		children.append(py::make_tuple("values", strings_list));
 		return children;
 	}
-	if (id == LogicalTypeId::STRUCT || id == LogicalTypeId::UNION) {
+	if (id == LogicalTypeId::STRUCT || id == LogicalTypeId::TUPLE || id == LogicalTypeId::UNION) {
 		auto &struct_children = StructType::GetChildTypes(type);
 		for (idx_t i = 0; i < struct_children.size(); i++) {
 			auto &child = struct_children[i];

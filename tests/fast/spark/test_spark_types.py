@@ -135,5 +135,10 @@ class TestTypes:
                 ),
                 StructField("map", MapType(StringType(), StringType(), True), True),
                 StructField("time_ns", TimeNSType(), True),
+                StructField(
+                    "tuple",
+                    StructType([StructField("", IntegerType(), True), StructField("", StringType(), True)]),
+                    True,
+                ),
             ]
         )
