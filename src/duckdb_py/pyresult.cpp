@@ -136,21 +136,18 @@ Optional<py::tuple> DuckDBPyResult::Fetchone() {
 	if (!current_chunk || current_chunk->size() == 0) {
 		return py::none();
 	}
-	// nanobind tuples are immutable (no pre-sized ctor / indexed assignment); build a list sequentially
-	// and convert to a tuple at the end. Only py-object refcounts move here, no heavy C++ data is copied.
-	py::list res;
-
+	py::tuple_builder row(result->types.size());
 	for (idx_t col_idx = 0; col_idx < result->types.size(); col_idx++) {
 		auto &mask = FlatVector::Validity(current_chunk->data[col_idx]);
 		if (!mask.RowIsValid(chunk_offset)) {
-			res.append(py::none());
-			continue;
+			row.append(py::none());
+		} else {
+			auto val = current_chunk->data[col_idx].GetValue(chunk_offset);
+			row.append(PythonObject::FromValue(val, result->types[col_idx], result->client_properties));
 		}
-		auto val = current_chunk->data[col_idx].GetValue(chunk_offset);
-		res.append(PythonObject::FromValue(val, result->types[col_idx], result->client_properties));
 	}
 	chunk_offset++;
-	return py::tuple(res);
+	return row.take();
 }
 
 py::list DuckDBPyResult::Fetchmany(idx_t size) {

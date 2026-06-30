@@ -331,9 +331,7 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 
 			py::object ret;
 			if (input.ColumnCount() > 0) {
-				// nanobind tuples are immutable; build a pre-sized tuple with the raw CPython API (SET_ITEM steals a
-				// reference) so the per-row UDF path keeps pybind11's allocation profile (no list-then-convert copy).
-				auto bundled_parameters = py::steal<py::tuple>(PyTuple_New((Py_ssize_t)input.ColumnCount()));
+				py::tuple_builder parameter_builder(input.ColumnCount());
 				bool contains_null = false;
 				for (idx_t i = 0; i < input.ColumnCount(); i++) {
 					// Fill the tuple with the arguments for this row
@@ -343,9 +341,7 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 						contains_null = true;
 						break;
 					}
-					PyTuple_SET_ITEM(
-					    bundled_parameters.ptr(), (Py_ssize_t)i,
-					    PythonObject::FromValue(value, column.GetType(), client_properties).release().ptr());
+					parameter_builder.append(PythonObject::FromValue(value, column.GetType(), client_properties));
 				}
 				if (contains_null) {
 					// Immediately insert None, no need to call the function
@@ -353,6 +349,7 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 					continue;
 				}
 				// Call the function
+				auto bundled_parameters = parameter_builder.take();
 				ret = py::steal<py::object>(PyObject_CallObject(function, bundled_parameters.ptr()));
 			} else {
 				ret = py::steal<py::object>(PyObject_CallObject(function, nullptr));

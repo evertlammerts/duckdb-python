@@ -18,6 +18,7 @@
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/detail/nb_list.h>
 #include <nanobind/operators.h>
+#include <cassert>
 
 // nanobind has no PYBIND11_NAMESPACE; the custom type_caster specializations below (and in the
 // conversion headers) live in `namespace nanobind`. Point the legacy macro at it so those headers
@@ -108,13 +109,8 @@ bool try_cast(const handle &object, T &result) {
 	return true;
 }
 
-// pybind11's std::string caster accepted str (as-is) and bytes (decoded UTF-8) and stringified scalars; nanobind's
-// nb::cast<std::string> is stricter and surfaces a raw std::bad_cast for non-str input. This helper restores the
-// lenient behavior for the identifier / parameter-key / separator sites that relied on it:
-//   str   -> the string as-is
-//   bytes -> UTF-8 decoded (so read_csv(sep=b"|") and byte-string identifiers keep working)
-//   else  -> str(obj) (so e.g. an int parameter-dict key stringifies to "1", matching pybind11)
-// It never throws std::bad_cast.
+// Lenient string conversion matching pybind11 (nanobind's cast<std::string> rejects bytes/scalars with std::bad_cast):
+// str stays as is, bytes are UTF-8 decoded, anything else goes through str(). For identifier/param-key/separator sites.
 inline std::string cast_to_string(handle obj) {
 	// Use check_ directly: an unqualified isinstance<> here is ambiguous between this namespace's override and
 	// nanobind's (pulled in by the using-directive above).
@@ -126,6 +122,36 @@ inline std::string cast_to_string(handle obj) {
 	}
 	return cast<std::string>(str(obj));
 }
+
+// Fills a tuple of known size via PyTuple_SET_ITEM (nanobind's py::tuple is immutable). Cheaper than building a
+// py::list then copying it to a tuple. Fill every slot with append()/set_item(), then take().
+class tuple_builder {
+public:
+	explicit tuple_builder(size_t size)
+	    : tuple_(steal<tuple>(PyTuple_New(static_cast<Py_ssize_t>(size)))), size_(size) {
+	}
+	// Append to the next slot (steals item's ref).
+	void append(object item) {
+		assert(index_ < size_);
+		PyTuple_SET_ITEM(tuple_.ptr(), static_cast<Py_ssize_t>(index_++), item.release().ptr());
+	}
+	// Set slot `index` (steals item's ref).
+	void set_item(size_t index, object item) {
+		assert(index < size_);
+		PyTuple_SET_ITEM(tuple_.ptr(), static_cast<Py_ssize_t>(index), item.release().ptr());
+	}
+	size_t size() const {
+		return size_;
+	}
+	tuple take() {
+		return std::move(tuple_);
+	}
+
+private:
+	tuple tuple_;
+	size_t size_;
+	size_t index_ = 0;
+};
 
 // pybind11 compatibility shim: pybind11's py::register_exception<T>(scope, name[, base]) maps to nanobind's
 // nb::exception<T>(scope, name[, base]) (which both creates the Python exception type and registers a C++->Python

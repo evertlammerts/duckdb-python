@@ -393,17 +393,14 @@ py::object PythonObject::FromStruct(const Value &val, const LogicalType &type,
 
 	auto &child_types = StructType::GetChildTypes(type);
 	if (StructType::IsUnnamed(type)) {
-		// nanobind tuples are immutable; build the pre-sized tuple via the raw CPython API (SET_ITEM steals
-		// the reference) to keep the hot FromValue path allocation-light.
-		auto py_tuple = py::steal<py::tuple>(PyTuple_New((Py_ssize_t)struct_values.size()));
+		py::tuple_builder py_tuple(struct_values.size());
 		for (idx_t i = 0; i < struct_values.size(); i++) {
 			auto &child_entry = child_types[i];
 			D_ASSERT(child_entry.first.empty());
 			auto &child_type = child_entry.second;
-			PyTuple_SET_ITEM(py_tuple.ptr(), (Py_ssize_t)i,
-			                 FromValue(struct_values[i], child_type, client_properties).release().ptr());
+			py_tuple.append(FromValue(struct_values[i], child_type, client_properties));
 		}
-		return std::move(py_tuple);
+		return py_tuple.take();
 	} else {
 		py::dict py_struct;
 		for (idx_t i = 0; i < struct_values.size(); i++) {
@@ -672,13 +669,11 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 		// because the return type of ArrayType::GetSize is idx_t,
 		// which is typedef'd to uint64_t and ssize_t is 4 bytes with Emscripten
 		// and pybind11 requires that the input be castable to ssize_t
-		auto arr = py::steal<py::tuple>(PyTuple_New(static_cast<Py_ssize_t>(array_size)));
-
+		py::tuple_builder arr(array_size);
 		for (idx_t elem_idx = 0; elem_idx < array_size; elem_idx++) {
-			PyTuple_SET_ITEM(arr.ptr(), (Py_ssize_t)elem_idx,
-			                 FromValue(array_values[elem_idx], child_type, client_properties).release().ptr());
+			arr.append(FromValue(array_values[elem_idx], child_type, client_properties));
 		}
-		return std::move(arr);
+		return arr.take();
 	}
 	case LogicalTypeId::MAP: {
 		auto &list_values = ListValue::GetChildren(val);
