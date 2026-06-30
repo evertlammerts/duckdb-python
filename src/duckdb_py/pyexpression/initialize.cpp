@@ -325,7 +325,8 @@ static void InitializeImplicitConversion(py::class_<DuckDBPyExpression> &m) {
 }
 
 void DuckDBPyExpression::Initialize(py::module_ &m) {
-	auto expression = py::class_<DuckDBPyExpression>(m, "Expression");
+	// Weak-referenceable like pybind11 (nanobind requires the explicit opt-in).
+	auto expression = py::class_<DuckDBPyExpression>(m, "Expression", py::is_weak_referenceable());
 
 	InitializeStaticMethods(m);
 	InitializeDunderMethods(expression);

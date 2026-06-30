@@ -278,7 +278,8 @@ static void InitializeMetaQueries(py::class_<DuckDBPyRelation> &m) {
 }
 
 void DuckDBPyRelation::Initialize(py::handle &m) {
-	auto relation_module = py::class_<DuckDBPyRelation>(m, "DuckDBPyRelation");
+	// Weak-referenceable like pybind11 (nanobind requires the explicit opt-in).
+	auto relation_module = py::class_<DuckDBPyRelation>(m, "DuckDBPyRelation", py::is_weak_referenceable());
 	InitializeReadOnlyProperties(relation_module);
 	InitializeAggregates(relation_module);
 	InitializeWindowOperators(relation_module);

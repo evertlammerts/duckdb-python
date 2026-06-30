@@ -352,7 +352,8 @@ bool DuckDBPyType::TryConvert(const py::object &object, std::unique_ptr<DuckDBPy
 }
 
 void DuckDBPyType::Initialize(py::handle &m) {
-	auto type_module = py::class_<DuckDBPyType>(m, "DuckDBPyType");
+	// Weak-referenceable like pybind11 (nanobind requires the explicit opt-in).
+	auto type_module = py::class_<DuckDBPyType>(m, "DuckDBPyType", py::is_weak_referenceable());
 
 	type_module.def("__repr__", &DuckDBPyType::ToString, "Stringified representation of the type object");
 	type_module.def("__eq__", &DuckDBPyType::Equals, "Compare two types for equality", py::arg("other"),

@@ -477,7 +477,9 @@ DuckDBPyConnection::RegisterScalarUDF(const string &name, const py::callable &ud
 }
 
 void DuckDBPyConnection::Initialize(py::handle &m) {
-	auto connection_module = py::class_<DuckDBPyConnection>(m, "DuckDBPyConnection");
+	// Weak-referenceable like pybind11 (which set tp_weaklistoffset by default); nanobind requires the opt-in,
+	// otherwise weakref.ref/proxy/finalize on a connection raises TypeError.
+	auto connection_module = py::class_<DuckDBPyConnection>(m, "DuckDBPyConnection", py::is_weak_referenceable());
 
 	connection_module.def("__enter__", &DuckDBPyConnection::Enter)
 	    .def(
