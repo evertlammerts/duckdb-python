@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.29)
 
-project(duckdb_py LANGUAGES CXX)
+project(duckdb_python LANGUAGES CXX)
 
 # Always use C++17
 set(CMAKE_CXX_STANDARD 17)
@@ -72,8 +72,7 @@ target_link_libraries(_duckdb_dependencies INTERFACE nanobind-static
 # Also add include directory
 target_include_directories(
   _duckdb_dependencies
-  INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/duckdb_py/include>
-)
+  INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/include>)
 
 # We link duckdb_static. Without this define, duckdb.h marks C API symbols
 # __declspec(dllimport) on Windows, producing unresolvable __imp_* references at
@@ -99,7 +98,7 @@ endif()
 # ────────────────────────────────────────────
 # Descend into the real DuckDB‑Python sources
 # ────────────────────────────────────────────
-add_subdirectory(src/duckdb_py)
+add_subdirectory(src)
 
 nanobind_add_module(
   _duckdb
