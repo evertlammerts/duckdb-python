@@ -37,7 +37,7 @@ static child_list_t<LogicalType> GetChildList(const py::object &container) {
 		for (auto item : fields) {
 			auto name_p = item.first;
 			auto type_p = item.second;
-			auto name = Identifier(py::cast<std::string>(name_p));
+			auto name = Identifier(py::cast_to_string(name_p));
 			std::unique_ptr<DuckDBPyType> pytype;
 			if (!DuckDBPyType::TryConvert(py::borrow<py::object>(type_p), pytype)) {
 				string actual_type = py::cast<std::string>(py::str((type_p).type()));

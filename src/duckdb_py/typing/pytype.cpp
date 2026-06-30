@@ -292,7 +292,7 @@ static LogicalType FromDictionary(const py::object &obj) {
 	for (auto item : dict) {
 		auto &name_p = item.first;
 		auto type_p = py::borrow<py::object>(item.second);
-		auto name = Identifier(py::cast<std::string>(name_p));
+		auto name = Identifier(py::cast_to_string(name_p));
 		auto type = FromObject(type_p);
 		children.push_back(std::make_pair(name, std::move(type)));
 	}

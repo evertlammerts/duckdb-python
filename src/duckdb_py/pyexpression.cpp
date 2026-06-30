@@ -352,6 +352,10 @@ bool DuckDBPyExpression::TryToExpression(py::handle obj, std::unique_ptr<DuckDBP
 		} else if (py::isinstance<py::str>(obj)) {
 			// A str becomes a column reference, mirrors the registered str constructor.
 			result = ColumnExpression(py::cast<py::args>(py::make_tuple(obj)));
+		} else if (py::isinstance<py::bytes>(obj)) {
+			// pybind11 decoded bytes as UTF-8 and (like str) treated them as a column reference; preserve that
+			// so e.g. rel.project(b"col") references column "col" instead of silently building a BLOB constant.
+			result = ColumnExpression(py::cast<py::args>(py::make_tuple(obj.attr("decode")("utf-8"))));
 		} else {
 			// Anything else, including None, becomes a constant -- mirrors the registered object constructor
 			// (None -> NULL constant; TransformPythonValue throws on genuinely unsupported types).

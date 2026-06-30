@@ -177,6 +177,18 @@ def test_binary_operator_str_rhs(rel):
     assert result == [(True,)]
 
 
+def test_binary_operator_bytes_rhs(rel):
+    """Bytes on the RHS is decoded as UTF-8 and (like str) becomes a ColumnExpression (column reference)."""
+    expr = ColumnExpression("i") == b"i"
+    assert isinstance(expr, duckdb.Expression)
+    assert rel.select(expr).fetchall() == [(True,)]
+
+
+def test_project_with_bytes_column_name(rel):
+    """rel.select(b'col') references the column (bytes decoded), not a silent BLOB constant (regression guard)."""
+    assert rel.select(b"i").fetchall() == [(42,)]
+
+
 # ---------------------------------------------------------------------------
 # 3. Reflected operators: <value> + col
 # ---------------------------------------------------------------------------

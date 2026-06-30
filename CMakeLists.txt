@@ -80,6 +80,22 @@ target_include_directories(
 # link time. No-op on non-Windows.
 target_compile_definitions(_duckdb_dependencies INTERFACE DUCKDB_STATIC_BUILD)
 
+# Optional AddressSanitizer instrumentation of the Python binding objects ONLY.
+# Every binding object library consumes _duckdb_dependencies (for headers) and
+# _duckdb links it, so adding the flag here instruments the bindings and links
+# the ASAN runtime, while the engine target (duckdb_target, which does NOT
+# consume this) stays uninstrumented and keeps hitting the sccache cache. ASAN's
+# allocator is process-global, so heap errors involving the instrumented binding
+# code are still caught. OFF by default; enable with -DDUCKDB_PY_ASAN=ON.
+option(DUCKDB_PY_ASAN
+       "Instrument the Python binding objects with AddressSanitizer" OFF)
+if(DUCKDB_PY_ASAN)
+  target_compile_options(
+    _duckdb_dependencies INTERFACE -fsanitize=address -fno-omit-frame-pointer
+                                   -g)
+  target_link_options(_duckdb_dependencies INTERFACE -fsanitize=address)
+endif()
+
 # ────────────────────────────────────────────
 # Descend into the real DuckDB‑Python sources
 # ────────────────────────────────────────────

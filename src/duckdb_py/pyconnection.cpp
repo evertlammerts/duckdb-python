@@ -573,7 +573,7 @@ py::list TransformNamedParameters(const case_insensitive_map_t<idx_t> &named_par
 	}
 
 	for (auto item : params) {
-		const std::string &item_name = py::cast<std::string>(item.first);
+		const std::string &item_name = py::cast_to_string(item.first);
 		auto entry = named_param_map.find(item_name);
 		if (entry == named_param_map.end()) {
 			throw InvalidInputException(
@@ -1297,9 +1297,9 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadCSV(const py::object &
 		throw InvalidInputException("read_csv takes either 'delimiter' or 'sep', not both");
 	}
 	if (has_sep) {
-		bind_parameters["delim"] = Value(py::cast<std::string>(sep));
+		bind_parameters["delim"] = Value(py::cast_to_string(sep));
 	} else if (has_delimiter) {
-		bind_parameters["delim"] = Value(py::cast<std::string>(delimiter));
+		bind_parameters["delim"] = Value(py::cast_to_string(delimiter));
 	}
 
 	if (!py::none().is(files_to_sniff)) {
@@ -2317,7 +2317,7 @@ identifier_map_t<BoundParameterData> DuckDBPyConnection::TransformPythonParamDic
 	for (auto pair : params) {
 		auto &key = pair.first;
 		auto &value = pair.second;
-		args[Identifier(py::cast<std::string>(key))] =
+		args[Identifier(py::cast_to_string(key))] =
 		    BoundParameterData(TransformPythonValue(context, value, LogicalType::UNKNOWN, false));
 	}
 	return args;

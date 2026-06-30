@@ -108,6 +108,25 @@ bool try_cast(const handle &object, T &result) {
 	return true;
 }
 
+// pybind11's std::string caster accepted str (as-is) and bytes (decoded UTF-8) and stringified scalars; nanobind's
+// nb::cast<std::string> is stricter and surfaces a raw std::bad_cast for non-str input. This helper restores the
+// lenient behavior for the identifier / parameter-key / separator sites that relied on it:
+//   str   -> the string as-is
+//   bytes -> UTF-8 decoded (so read_csv(sep=b"|") and byte-string identifiers keep working)
+//   else  -> str(obj) (so e.g. an int parameter-dict key stringifies to "1", matching pybind11)
+// It never throws std::bad_cast.
+inline std::string cast_to_string(handle obj) {
+	// Use check_ directly: an unqualified isinstance<> here is ambiguous between this namespace's override and
+	// nanobind's (pulled in by the using-directive above).
+	if (bytes::check_(obj)) {
+		return cast<std::string>(obj.attr("decode")("utf-8"));
+	}
+	if (str::check_(obj)) {
+		return cast<std::string>(obj);
+	}
+	return cast<std::string>(str(obj));
+}
+
 // pybind11 compatibility shim: pybind11's py::register_exception<T>(scope, name[, base]) maps to nanobind's
 // nb::exception<T>(scope, name[, base]) (which both creates the Python exception type and registers a C++->Python
 // translator). Returns the exception object so callers can set .attr()/.doc().
