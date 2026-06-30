@@ -461,6 +461,7 @@ static bool KeyIsHashable(const LogicalType &type) {
 		return true;
 	}
 	case LogicalTypeId::STRUCT:
+	case LogicalTypeId::TUPLE:
 		return false;
 	case LogicalTypeId::SQLNULL:
 		// A SQLNULL key is always NULL, and Python's None is hashable.
@@ -692,7 +693,8 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 		}
 		return std::move(py_struct);
 	}
-	case LogicalTypeId::STRUCT: {
+	case LogicalTypeId::STRUCT:
+	case LogicalTypeId::TUPLE: {
 		return FromStruct(val, type, client_properties);
 	}
 	case LogicalTypeId::UUID: {

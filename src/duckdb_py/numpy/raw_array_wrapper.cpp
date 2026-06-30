@@ -58,6 +58,7 @@ static idx_t GetNumpyTypeWidth(const LogicalType &type) {
 	case LogicalTypeId::LIST:
 	case LogicalTypeId::MAP:
 	case LogicalTypeId::STRUCT:
+	case LogicalTypeId::TUPLE:
 	case LogicalTypeId::UNION:
 	case LogicalTypeId::UUID:
 	case LogicalTypeId::ARRAY:
@@ -124,6 +125,7 @@ string RawArrayWrapper::DuckDBToNumpyDtype(const LogicalType &type) {
 	case LogicalTypeId::LIST:
 	case LogicalTypeId::MAP:
 	case LogicalTypeId::STRUCT:
+	case LogicalTypeId::TUPLE:
 	case LogicalTypeId::UNION:
 	case LogicalTypeId::UUID:
 	case LogicalTypeId::ARRAY:
