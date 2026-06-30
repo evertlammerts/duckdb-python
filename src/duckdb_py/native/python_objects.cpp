@@ -603,7 +603,7 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 			time = val.GetValueUnsafe<dtime_t>();
 		} else {
 			// Python's datetime doesn't support nanoseconds, we convert to micros.
-			time = val.GetValueUnsafe<dtime_ns_t>().time();
+			time = dtime_t(val.GetValueUnsafe<dtime_ns_t>().value / 1000);
 		}
 		duckdb::Time::Convert(time, hour, min, sec, usec);
 		try {
