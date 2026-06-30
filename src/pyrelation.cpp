@@ -1,4 +1,4 @@
-#include "duckdb_python/pybind11/pybind_wrapper.hpp"
+#include "duckdb_python/nb/casters.hpp"
 #include "duckdb_python/pyrelation.hpp"
 #include "duckdb_python/pyconnection/pyconnection.hpp"
 #include "duckdb_python/pytype.hpp"

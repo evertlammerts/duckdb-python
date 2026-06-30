@@ -1,7 +1,6 @@
 # this is used for clang-tidy checks
 add_subdirectory(pyrelation)
 add_subdirectory(pyexpression)
-add_subdirectory(pybind11)
 add_subdirectory(numpy)
 add_subdirectory(native)
 add_subdirectory(jupyter)
@@ -25,6 +24,7 @@ add_library(
   pyrelation.cpp
   pyresult.cpp
   pystatement.cpp
+  pyutil.cpp
   python_dependency.cpp
   python_import_cache.cpp
   python_replacement_scan.cpp

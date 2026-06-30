@@ -8,7 +8,7 @@
 
 #pragma once
 
-#include "duckdb_python/pybind11/pybind_wrapper.hpp"
+#include "duckdb_python/nb/casters.hpp"
 #include "duckdb_python/numpy/numpy_array.hpp"
 #include "duckdb.hpp"
 

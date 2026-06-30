@@ -8,13 +8,13 @@
 
 #pragma once
 
-#include "duckdb_python/pybind11/pybind_wrapper.hpp"
+#include "duckdb_python/nb/casters.hpp"
 #include "duckdb.hpp"
 #include "duckdb_python/arrow/arrow_array_stream.hpp"
 #include "duckdb_python/numpy/numpy_type.hpp"
 #include "duckdb_python/pyresult.hpp"
-#include "duckdb_python/pybind11/conversions/render_mode_enum.hpp"
-#include "duckdb_python/pybind11/dataframe.hpp"
+#include "duckdb_python/nb/conversions/render_mode_enum.hpp"
+#include "duckdb_python/dataframe.hpp"
 #include "duckdb_python/python_objects.hpp"
 
 namespace duckdb {

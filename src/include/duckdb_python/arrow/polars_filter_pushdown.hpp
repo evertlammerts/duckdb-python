@@ -10,7 +10,7 @@
 
 #include "duckdb/planner/table_filter_set.hpp"
 #include "duckdb/main/client_properties.hpp"
-#include "duckdb_python/pybind11/pybind_wrapper.hpp"
+#include "duckdb_python/nb/casters.hpp"
 
 namespace duckdb {
 

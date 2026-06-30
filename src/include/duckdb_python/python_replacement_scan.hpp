@@ -4,7 +4,7 @@
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/parser/tableref.hpp"
 #include "duckdb/function/replacement_scan.hpp"
-#include "duckdb_python/pybind11/pybind_wrapper.hpp"
+#include "duckdb_python/nb/casters.hpp"
 
 namespace duckdb {
 

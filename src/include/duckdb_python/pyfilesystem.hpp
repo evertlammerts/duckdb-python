@@ -2,7 +2,7 @@
 
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb_python/pybind11/pybind_wrapper.hpp"
+#include "duckdb_python/nb/casters.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 

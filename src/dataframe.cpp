@@ -1,4 +1,4 @@
-#include "duckdb_python/pybind11/dataframe.hpp"
+#include "duckdb_python/dataframe.hpp"
 #include "duckdb_python/pyconnection/pyconnection.hpp"
 
 namespace duckdb {

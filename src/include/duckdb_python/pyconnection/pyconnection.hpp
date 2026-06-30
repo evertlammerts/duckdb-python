@@ -9,7 +9,7 @@
 #pragma once
 #include "duckdb_python/arrow/arrow_array_stream.hpp"
 #include "duckdb.hpp"
-#include "duckdb_python/pybind11/pybind_wrapper.hpp"
+#include "duckdb_python/nb/casters.hpp"
 #include "duckdb_python/import_cache/python_import_cache.hpp"
 #include "duckdb_python/numpy/numpy_type.hpp"
 #include "duckdb_python/pyrelation.hpp"
@@ -17,11 +17,11 @@
 #include "duckdb_python/path_like.hpp"
 #include "duckdb/execution/operator/csv_scanner/csv_reader_options.hpp"
 #include "duckdb_python/pyfilesystem.hpp"
-#include "duckdb_python/pybind11/registered_py_object.hpp"
+#include "duckdb_python/registered_py_object.hpp"
 #include "duckdb_python/python_dependency.hpp"
 #include "duckdb/function/scalar_function.hpp"
-#include "duckdb_python/pybind11/conversions/exception_handling_enum.hpp"
-#include "duckdb_python/pybind11/conversions/python_udf_type_enum.hpp"
+#include "duckdb_python/nb/conversions/exception_handling_enum.hpp"
+#include "duckdb_python/nb/conversions/python_udf_type_enum.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 
 namespace duckdb {

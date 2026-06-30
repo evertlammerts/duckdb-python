@@ -8,15 +8,14 @@
 // Reusable nanobind type_caster macros for "string / integer or enum" arguments
 //===----------------------------------------------------------------------===//
 //
-// Several DuckDB enums are exposed to Python so that a binding parameter typed as
-// the enum accepts a string (and, for most, an integer) naming one of its values.
-// These enums are NOT registered as Python types (no nb::enum_), so the caster only
-// needs the str/int -> enum direction; there is no registered-instance to delegate to.
+// Several DuckDB enums are registered as Python types via nb::enum_ AND given this caster, so a binding
+// parameter typed as the enum also accepts a string (and, for most, an integer) naming one of its values.
+// The caster handles three inputs: a str, an int, or a registered enum instance (read via its .value).
 //
 // The macros collapse the boilerplate into one invocation per enum, so the caster
 // rewrite is a single-place change. nanobind requires from_python()/from_cpp() to be
 // noexcept, so the DuckDB *FromString/*FromInteger calls (which throw on bad input)
-// are wrapped — a bad value reports a generic conversion failure rather than the
+// are wrapped: a bad value reports a generic conversion failure rather than the
 // original InvalidInputException message (acceptable; refine post-cutover if needed).
 //
 // Invoke at GLOBAL scope (outside any namespace); each expands to a full

@@ -8,7 +8,7 @@
 
 #pragma once
 
-#include "duckdb_python/pybind11/pybind_wrapper.hpp"
+#include "duckdb_python/nb/casters.hpp"
 #include "duckdb/common/progress_bar/progress_bar_display.hpp"
 #include "duckdb/common/helper.hpp"
 

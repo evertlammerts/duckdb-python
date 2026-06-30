@@ -33,7 +33,7 @@
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb_python/python_objects.hpp"
 #include "duckdb/function/function.hpp"
-#include "duckdb_python/pybind11/conversions/exception_handling_enum.hpp"
+#include "duckdb_python/nb/conversions/exception_handling_enum.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/main/pending_query_result.hpp"
 #include "duckdb_python/python_replacement_scan.hpp"
@@ -43,7 +43,7 @@
 #include "duckdb/main/relation/materialized_relation.hpp"
 #include "duckdb/parser/statement/load_statement.hpp"
 #include "duckdb_python/expression/pyexpression.hpp"
-#include "duckdb_python/pybind11/conversions/python_csv_line_terminator_enum.hpp"
+#include "duckdb_python/nb/conversions/python_csv_line_terminator_enum.hpp"
 
 namespace duckdb {
 

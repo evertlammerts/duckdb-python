@@ -15,7 +15,7 @@
 #include "duckdb/function/table/arrow.hpp"
 #include "duckdb/main/client_config.hpp"
 #include "duckdb/main/config.hpp"
-#include "duckdb_python/pybind11/pybind_wrapper.hpp"
+#include "duckdb_python/nb/casters.hpp"
 
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/vector.hpp"

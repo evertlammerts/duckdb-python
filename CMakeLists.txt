@@ -111,7 +111,6 @@ nanobind_add_module(
   $<TARGET_OBJECTS:python_native>
   $<TARGET_OBJECTS:python_numpy>
   $<TARGET_OBJECTS:python_pandas>
-  $<TARGET_OBJECTS:python_pybind11>
   $<TARGET_OBJECTS:python_connection>
   $<TARGET_OBJECTS:python_expression>
   $<TARGET_OBJECTS:python_relation>

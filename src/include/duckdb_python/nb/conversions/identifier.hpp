@@ -1,5 +1,5 @@
 #pragma once
-#include "duckdb_python/pybind11/pybind_wrapper.hpp"
+#include "duckdb_python/nb/casters.hpp"
 #include "duckdb/common/identifier.hpp"
 
 namespace nanobind {

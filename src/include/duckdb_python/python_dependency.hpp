@@ -4,8 +4,8 @@
 #include "duckdb/common/unique_ptr.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/main/external_dependencies.hpp"
-#include "duckdb_python/pybind11/pybind_wrapper.hpp"
-#include "duckdb_python/pybind11/registered_py_object.hpp"
+#include "duckdb_python/nb/casters.hpp"
+#include "duckdb_python/registered_py_object.hpp"
 
 namespace duckdb {
 

@@ -4,7 +4,7 @@
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb_python/pybind11/conversions/enum_string_caster.hpp"
+#include "duckdb_python/nb/conversions/enum_string_caster.hpp"
 
 namespace duckdb {
 
@@ -31,7 +31,6 @@ inline FunctionNullHandling FunctionNullHandlingFromInteger(int64_t value) {
 
 } // namespace duckdb
 
-//! See enum_string_caster.hpp for why this owns its value and delegates the enum case to a local base caster
-//! instead of inheriting type_caster_base. Must stay visible in every TU (included from pybind_wrapper.hpp).
+//! See enum_string_caster.hpp for the rationale. Must stay visible in every TU (included from casters.hpp).
 DUCKDB_PY_ENUM_STRING_INT_CASTER(duckdb::FunctionNullHandling, duckdb::FunctionNullHandlingFromString,
                                  duckdb::FunctionNullHandlingFromInteger, "FunctionNullHandling")

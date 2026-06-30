@@ -1,5 +1,5 @@
 #include "duckdb_python/python_conversion.hpp"
-#include "duckdb_python/pybind11/pybind_wrapper.hpp"
+#include "duckdb_python/nb/casters.hpp"
 #include "duckdb_python/pytype.hpp"
 
 #include "duckdb_python/pyrelation.hpp"

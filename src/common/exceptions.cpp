@@ -1,10 +1,10 @@
-#include "duckdb_python/pybind11/exceptions.hpp"
+#include "duckdb_python/exceptions.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/exception/list.hpp"
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb_python/pybind11/pybind_wrapper.hpp"
+#include "duckdb_python/nb/casters.hpp"
 
 namespace nb = nanobind;
 

@@ -1,7 +1,7 @@
 #include "duckdb_python/pyrelation.hpp"
 #include "duckdb_python/pyconnection/pyconnection.hpp"
 #include "duckdb_python/pyresult.hpp"
-#include "duckdb_python/pybind11/conversions/explain_enum.hpp"
+#include "duckdb_python/nb/conversions/explain_enum.hpp"
 #include "duckdb/parser/qualified_name.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb_python/numpy/numpy_type.hpp"

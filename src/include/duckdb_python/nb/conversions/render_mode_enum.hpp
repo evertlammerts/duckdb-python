@@ -5,7 +5,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/box_renderer.hpp"
 #include "duckdb/common/enum_util.hpp"
-#include "duckdb_python/pybind11/conversions/enum_string_caster.hpp"
+#include "duckdb_python/nb/conversions/enum_string_caster.hpp"
 
 namespace duckdb {
 
@@ -25,6 +25,6 @@ inline RenderMode RenderModeFromInteger(int64_t value) {
 
 } // namespace duckdb
 
-//! See enum_string_caster.hpp for the rationale (composition over inheritance, umbrella visibility).
+//! See enum_string_caster.hpp for the rationale (tri-modal str/int/enum input, umbrella visibility).
 DUCKDB_PY_ENUM_STRING_INT_CASTER(duckdb::RenderMode, duckdb::RenderModeFromString, duckdb::RenderModeFromInteger,
                                  "RenderMode")

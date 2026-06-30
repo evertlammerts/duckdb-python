@@ -5,9 +5,9 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb_python/pandas/column/pandas_numpy_column.hpp"
 #include "duckdb_python/pandas/pandas_scan.hpp"
-#include "duckdb_python/pybind11/dataframe.hpp"
+#include "duckdb_python/dataframe.hpp"
 #include "duckdb_python/pytype.hpp"
-#include "duckdb_python/pybind11/dataframe.hpp"
+#include "duckdb_python/dataframe.hpp"
 #include "duckdb_python/pyconnection/pyconnection.hpp"
 
 namespace duckdb {
