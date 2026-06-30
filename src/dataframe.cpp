@@ -2,7 +2,7 @@
 #include "duckdb_python/pyconnection/pyconnection.hpp"
 
 namespace duckdb {
-bool PolarsDataFrame::IsDataFrame(const py::handle &object) {
+bool PolarsDataFrame::IsDataFrame(const nb::handle &object) {
 	if (!ModuleIsLoaded<PolarsCacheItem>()) {
 		return false;
 	}
@@ -10,7 +10,7 @@ bool PolarsDataFrame::IsDataFrame(const py::handle &object) {
 	return duckdb::PyUtil::IsInstance(object, import_cache.polars.DataFrame());
 }
 
-bool PolarsDataFrame::IsLazyFrame(const py::handle &object) {
+bool PolarsDataFrame::IsLazyFrame(const nb::handle &object) {
 	if (!ModuleIsLoaded<PolarsCacheItem>()) {
 		return false;
 	}
@@ -18,7 +18,7 @@ bool PolarsDataFrame::IsLazyFrame(const py::handle &object) {
 	return duckdb::PyUtil::IsInstance(object, import_cache.polars.LazyFrame());
 }
 
-bool PandasDataFrame::check_(const py::handle &object) { // NOLINT
+bool PandasDataFrame::check_(const nb::handle &object) { // NOLINT
 	if (!ModuleIsLoaded<PandasCacheItem>()) {
 		return false;
 	}
@@ -26,16 +26,16 @@ bool PandasDataFrame::check_(const py::handle &object) { // NOLINT
 	return duckdb::PyUtil::IsInstance(object, import_cache.pandas.DataFrame());
 }
 
-bool PandasDataFrame::IsPyArrowBacked(const py::handle &df) {
+bool PandasDataFrame::IsPyArrowBacked(const nb::handle &df) {
 	if (!PandasDataFrame::check_(df)) {
 		return false;
 	}
 
 	auto &import_cache = *DuckDBPyConnection::ImportCache();
-	// df.dtypes is a pandas Series, NOT a list -- under nanobind assigning it to py::list would reinterpret
+	// df.dtypes is a pandas Series, NOT a list -- under nanobind assigning it to nb::list would reinterpret
 	// (borrow) the Series as a list and crash on list ops. Iterate it as a generic (iterable) object instead.
-	py::object dtypes = df.attr("dtypes");
-	if (py::len(dtypes) == 0) {
+	nb::object dtypes = df.attr("dtypes");
+	if (nb::len(dtypes) == 0) {
 		return false;
 	}
 
@@ -48,11 +48,11 @@ bool PandasDataFrame::IsPyArrowBacked(const py::handle &df) {
 	return false;
 }
 
-py::object PandasDataFrame::ToArrowTable(const py::object &df) {
+nb::object PandasDataFrame::ToArrowTable(const nb::object &df) {
 	D_ASSERT(duckdb::PyUtil::GilCheck());
 	try {
-		return py::module_::import_("pyarrow").attr("lib").attr("Table").attr("from_pandas")(df);
-	} catch (py::python_error &) {
+		return nb::module_::import_("pyarrow").attr("lib").attr("Table").attr("from_pandas")(df);
+	} catch (nb::python_error &) {
 		// We don't fetch the original Python exception because it can cause a segfault
 		// The cause of this is not known yet, for now we just side-step the issue.
 		throw InvalidInputException(
@@ -60,7 +60,7 @@ py::object PandasDataFrame::ToArrowTable(const py::object &df) {
 	}
 }
 
-bool PolarsDataFrame::check_(const py::handle &object) { // NOLINT
+bool PolarsDataFrame::check_(const nb::handle &object) { // NOLINT
 	auto &import_cache = *DuckDBPyConnection::ImportCache();
 	return duckdb::PyUtil::IsInstance(object, import_cache.polars.DataFrame());
 }

@@ -23,30 +23,30 @@ public:
 	~DuckDBPyResult();
 
 public:
-	Optional<py::tuple> Fetchone();
+	Optional<nb::tuple> Fetchone();
 
-	py::list Fetchmany(idx_t size);
+	nb::list Fetchmany(idx_t size);
 
-	py::list Fetchall();
+	nb::list Fetchall();
 
-	py::dict FetchNumpy();
+	nb::dict FetchNumpy();
 
-	py::dict FetchNumpyInternal(bool stream = false, idx_t vectors_per_chunk = 1,
+	nb::dict FetchNumpyInternal(bool stream = false, idx_t vectors_per_chunk = 1,
 	                            std::unique_ptr<NumpyResultConversion> conversion = nullptr);
 
 	PandasDataFrame FetchDF(bool date_as_object);
 
 	PandasDataFrame FetchDFChunk(const idx_t vectors_per_chunk = 1, bool date_as_object = false);
 
-	py::dict FetchPyTorch();
+	nb::dict FetchPyTorch();
 
-	py::dict FetchTF();
+	nb::dict FetchTF();
 
 	duckdb::pyarrow::Table FetchArrowTable(idx_t rows_per_batch, bool to_polars);
 	duckdb::pyarrow::RecordBatchReader FetchRecordBatchReader(idx_t rows_per_batch = 1000000);
-	py::object FetchArrowCapsule(idx_t rows_per_batch = 1000000);
+	nb::object FetchArrowCapsule(idx_t rows_per_batch = 1000000);
 
-	static py::list GetDescription(const vector<string> &names, const vector<LogicalType> &types);
+	static nb::list GetDescription(const vector<string> &names, const vector<LogicalType> &types);
 
 	void Close();
 
@@ -60,9 +60,9 @@ public:
 	ClientProperties GetClientProperties();
 
 private:
-	void FillNumpy(py::dict &res, idx_t col_idx, NumpyResultConversion &conversion, const char *name);
+	void FillNumpy(nb::dict &res, idx_t col_idx, NumpyResultConversion &conversion, const char *name);
 
-	PandasDataFrame FrameFromNumpy(bool date_as_object, const py::handle &o);
+	PandasDataFrame FrameFromNumpy(bool date_as_object, const nb::handle &o);
 
 	void ConvertDateTimeTypes(PandasDataFrame &df, bool date_as_object) const;
 	unique_ptr<DataChunk> FetchNext(QueryResult &result);
@@ -88,9 +88,9 @@ private:
 	unique_ptr<QueryResult> result;
 	unique_ptr<DataChunk> current_chunk;
 	// Holds the categories of Categorical/ENUM types
-	unordered_map<idx_t, py::list> categories;
+	unordered_map<idx_t, nb::list> categories;
 	// Holds the categorical type of Categorical/ENUM types
-	unordered_map<idx_t, py::object> categories_type;
+	unordered_map<idx_t, nb::object> categories_type;
 	bool result_closed = false;
 };
 

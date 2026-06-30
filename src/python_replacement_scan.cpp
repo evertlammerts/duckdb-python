@@ -17,7 +17,7 @@
 
 namespace duckdb {
 
-static void CreateArrowScan(const string &name, py::object entry, TableFunctionRef &table_function,
+static void CreateArrowScan(const string &name, nb::object entry, TableFunctionRef &table_function,
                             vector<unique_ptr<ParsedExpression>> &children, ClientProperties &client_properties,
                             PyArrowObjectType type, DatabaseInstance &db) {
 	shared_ptr<ExternalDependency> external_dependency = make_shared_ptr<ExternalDependency>();
@@ -28,22 +28,22 @@ static void CreateArrowScan(const string &name, py::object entry, TableFunctionR
 			    "with \"INSTALL nanoarrow FROM community;\". \n Then you can load it with \"LOAD nanoarrow;\"");
 		}
 		vector<Value> values;
-		py::list stream_messages;
+		nb::list stream_messages;
 		while (true) {
 			try {
-				py::object message = entry.attr("read_next_message")();
+				nb::object message = entry.attr("read_next_message")();
 				if (message.is_none()) {
 					break;
 				}
 				stream_messages.append(message.attr("serialize")());
 				const auto buffer_address =
-				    py::cast<int64_t>(stream_messages[stream_messages.size() - 1].attr("address"));
-				const auto buffer_size = py::cast<uint32_t>(stream_messages[stream_messages.size() - 1].attr("size"));
+				    nb::cast<int64_t>(stream_messages[stream_messages.size() - 1].attr("address"));
+				const auto buffer_size = nb::cast<uint32_t>(stream_messages[stream_messages.size() - 1].attr("size"));
 				child_list_t<Value> buffer_values;
 				buffer_values.push_back({"ptr", Value::POINTER(buffer_address)});
 				buffer_values.push_back({"size", Value::UBIGINT(buffer_size)});
 				values.push_back(Value::STRUCT(buffer_values));
-			} catch (const py::python_error &e) {
+			} catch (const nb::python_error &e) {
 				break;
 			}
 		}
@@ -84,10 +84,10 @@ static void CreateArrowScan(const string &name, py::object entry, TableFunctionR
 	table_function.external_dependency = std::move(external_dependency);
 }
 
-static void ThrowScanFailureError(const py::object &entry, const string &name, const string &location = "") {
+static void ThrowScanFailureError(const nb::object &entry, const string &name, const string &location = "") {
 	string error;
-	// py::object wrap: py::str() of a bare .attr() accessor is an ambiguous overload on MSVC.
-	auto py_object_type = py::cast<std::string>(py::str(py::object((entry).type().attr("__name__"))));
+	// nb::object wrap: nb::str() of a bare .attr() accessor is an ambiguous overload on MSVC.
+	auto py_object_type = nb::cast<std::string>(nb::str(nb::object((entry).type().attr("__name__"))));
 	error += StringUtil::Format("Python Object \"%s\" of type \"%s\"", name, py_object_type);
 	if (!location.empty()) {
 		error += StringUtil::Format(" found on line \"%s\"", location);
@@ -100,7 +100,7 @@ static void ThrowScanFailureError(const py::object &entry, const string &name, c
 	throw InvalidInputException(error);
 }
 
-unique_ptr<TableRef> PythonReplacementScan::ReplacementObject(const py::object &entry, const string &name,
+unique_ptr<TableRef> PythonReplacementScan::ReplacementObject(const nb::object &entry, const string &name,
                                                               ClientContext &context, bool relation) {
 	auto replacement = TryReplacementObject(entry, name, context, relation);
 	if (!replacement) {
@@ -109,7 +109,7 @@ unique_ptr<TableRef> PythonReplacementScan::ReplacementObject(const py::object &
 	return replacement;
 }
 
-unique_ptr<TableRef> PythonReplacementScan::TryReplacementObject(const py::object &entry, const string &name,
+unique_ptr<TableRef> PythonReplacementScan::TryReplacementObject(const nb::object &entry, const string &name,
                                                                  ClientContext &context, bool relation) {
 	auto client_properties = context.GetClientProperties();
 	auto table_function = make_uniq<TableFunctionRef>();
@@ -132,7 +132,7 @@ unique_ptr<TableRef> PythonReplacementScan::TryReplacementObject(const py::objec
 			table_function->external_dependency = std::move(dependency);
 		}
 	} else if (DuckDBPyRelation::IsRelation(entry)) {
-		auto pyrel = py::cast<DuckDBPyRelation *>(entry);
+		auto pyrel = nb::cast<DuckDBPyRelation *>(entry);
 		if (!pyrel->CanBeRegisteredBy(context)) {
 			throw InvalidInputException(
 			    "Python Object \"%s\" of type \"DuckDBPyRelation\" not suitable for replacement scan.\nThe object was "
@@ -163,7 +163,7 @@ unique_ptr<TableRef> PythonReplacementScan::TryReplacementObject(const py::objec
 	} else if (DuckDBPyConnection::IsAcceptedNumpyObject(entry) != NumpyObjectType::INVALID) {
 		numpytype = DuckDBPyConnection::IsAcceptedNumpyObject(entry);
 		string np_name = "np_" + StringUtil::GenerateRandomName();
-		py::dict data; // we will convert all the supported format to dict{"key": np.array(value)}.
+		nb::dict data; // we will convert all the supported format to dict{"key": np.array(value)}.
 		size_t idx = 0;
 		switch (numpytype) {
 		case NumpyObjectType::NDARRAY1D:
@@ -180,13 +180,13 @@ unique_ptr<TableRef> PythonReplacementScan::TryReplacementObject(const py::objec
 		}
 		case NumpyObjectType::LIST:
 			idx = 0;
-			for (auto item : py::cast<py::list>(entry)) {
+			for (auto item : nb::cast<nb::list>(entry)) {
 				data[("column" + std::to_string(idx)).c_str()] = item;
 				idx++;
 			}
 			break;
 		case NumpyObjectType::DICT:
-			data = py::cast<py::dict>(entry);
+			data = nb::cast<nb::dict>(entry);
 			break;
 		default:
 			throw NotImplementedException("Unsupported Numpy object");
@@ -205,19 +205,19 @@ unique_ptr<TableRef> PythonReplacementScan::TryReplacementObject(const py::objec
 	return std::move(table_function);
 }
 
-static bool IsBuiltinFunction(const py::object &object) {
+static bool IsBuiltinFunction(const nb::object &object) {
 	auto &import_cache_py = *DuckDBPyConnection::ImportCache();
 	return duckdb::PyUtil::IsInstance(object, import_cache_py.types.BuiltinFunctionType());
 }
 
-static unique_ptr<TableRef> TryReplacement(py::dict &dict, const string &name, ClientContext &context,
-                                           py::object &current_frame) {
-	auto table_name = py::str(name.c_str(), name.size());
+static unique_ptr<TableRef> TryReplacement(nb::dict &dict, const string &name, ClientContext &context,
+                                           nb::object &current_frame) {
+	auto table_name = nb::str(name.c_str(), name.size());
 	if (!dict.contains(table_name)) {
 		// not present in the globals
 		return nullptr;
 	}
-	const py::object &entry = dict[table_name];
+	const nb::object &entry = dict[table_name];
 
 	if (IsBuiltinFunction(entry)) {
 		return nullptr;
@@ -225,21 +225,21 @@ static unique_ptr<TableRef> TryReplacement(py::dict &dict, const string &name, C
 
 	auto result = PythonReplacementScan::TryReplacementObject(entry, name, context);
 	if (!result) {
-		std::string location = py::cast<std::string>(current_frame.attr("f_code").attr("co_filename"));
+		std::string location = nb::cast<std::string>(current_frame.attr("f_code").attr("co_filename"));
 		location += ":";
-		location += py::cast<std::string>(py::str(py::object(current_frame.attr("f_lineno"))));
+		location += nb::cast<std::string>(nb::str(nb::object(current_frame.attr("f_lineno"))));
 		ThrowScanFailureError(entry, name, location);
 	}
 	return result;
 }
 
-// Materialize a real py::dict from a frame's f_locals/f_globals. f_globals is already a dict (borrow it);
+// Materialize a real nb::dict from a frame's f_locals/f_globals. f_globals is already a dict (borrow it);
 // f_locals can be a FrameLocalsProxy on Python 3.13+ (PEP 667), which is a mapping but not a dict -- copy it.
-static py::dict FrameDictToDict(const py::object &frame_dict) {
+static nb::dict FrameDictToDict(const nb::object &frame_dict) {
 	if (PyDict_Check(frame_dict.ptr())) {
-		return py::borrow<py::dict>(frame_dict);
+		return nb::borrow<nb::dict>(frame_dict);
 	}
-	py::dict materialized;
+	nb::dict materialized;
 	materialized.update(frame_dict);
 	return materialized;
 }
@@ -258,11 +258,11 @@ static unique_ptr<TableRef> ReplaceInternal(ClientContext &context, const string
 	D_ASSERT((bool)lookup_result);
 	auto scan_all_frames = result.GetValue<bool>();
 
-	py::gil_scoped_acquire acquire;
-	py::object current_frame;
+	nb::gil_scoped_acquire acquire;
+	nb::object current_frame;
 	try {
-		current_frame = py::module_::import_("inspect").attr("currentframe")();
-	} catch (py::python_error &e) {
+		current_frame = nb::module_::import_("inspect").attr("currentframe")();
+	} catch (nb::python_error &e) {
 		//! Likely no call stack exists, just safely return
 		return nullptr;
 	}
@@ -270,34 +270,34 @@ static unique_ptr<TableRef> ReplaceInternal(ClientContext &context, const string
 	bool has_locals = false;
 	bool has_globals = false;
 	do {
-		if (py::none().is(current_frame)) {
+		if (nb::none().is(current_frame)) {
 			break;
 		}
 
-		py::object local_dict_p;
+		nb::object local_dict_p;
 		try {
 			local_dict_p = current_frame.attr("f_locals");
-		} catch (py::python_error &e) {
+		} catch (nb::python_error &e) {
 			return nullptr;
 		}
-		has_locals = !py::none().is(local_dict_p);
+		has_locals = !nb::none().is(local_dict_p);
 		if (has_locals) {
 			// search local dictionary. On Python 3.13+ (PEP 667) frame.f_locals is a FrameLocalsProxy, not a
-			// dict, so reinterpreting/cast<py::dict> would fail; materialize a real dict from the mapping
-			// (pybind11's cast<py::dict> did the equivalent dict(obj) conversion).
+			// dict, so reinterpreting/cast<nb::dict> would fail; materialize a real dict from the mapping
+			// (pybind11's cast<nb::dict> did the equivalent dict(obj) conversion).
 			auto local_dict = FrameDictToDict(local_dict_p);
 			auto result = TryReplacement(local_dict, table_name, context, current_frame);
 			if (result) {
 				return result;
 			}
 		}
-		py::object global_dict_p;
+		nb::object global_dict_p;
 		try {
 			global_dict_p = current_frame.attr("f_globals");
-		} catch (py::python_error &e) {
+		} catch (nb::python_error &e) {
 			return nullptr;
 		}
-		has_globals = !py::none().is(global_dict_p);
+		has_globals = !nb::none().is(global_dict_p);
 		if (has_globals) {
 			auto global_dict = FrameDictToDict(global_dict_p);
 			// search global dictionary
@@ -308,7 +308,7 @@ static unique_ptr<TableRef> ReplaceInternal(ClientContext &context, const string
 		}
 		try {
 			current_frame = current_frame.attr("f_back");
-		} catch (py::python_error &e) {
+		} catch (nb::python_error &e) {
 			return nullptr;
 		}
 	} while (scan_all_frames && (has_locals || has_globals));

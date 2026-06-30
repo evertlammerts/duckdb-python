@@ -33,17 +33,17 @@ public:
 	                            OrderByNullType null_order = OrderByNullType::ORDER_DEFAULT);
 
 public:
-	static void Initialize(py::module_ &m);
+	static void Initialize(nb::module_ &m);
 
 	//! Convert an arbitrary Python object into an owned expression, applying the same implicit conversions as a
 	//! by-value Expression parameter: an existing Expression is copied, a str becomes a column reference, and
 	//! anything else (including None) becomes a constant. Used by the variadic (*args / list) call-sites which
 	//! iterate handles manually and so cannot lean on nanobind's automatic argument conversion. Throws a generic
 	//! "arguments of type Expression" error if the object cannot be converted.
-	static std::unique_ptr<DuckDBPyExpression> ToExpression(py::handle obj);
+	static std::unique_ptr<DuckDBPyExpression> ToExpression(nb::handle obj);
 	//! Non-throwing variant: returns false (clearing any pending Python error) if `obj` cannot be converted, so a
 	//! caller can raise a context-specific message. This reproduces the old try_cast<>() control flow without a caster.
-	static bool TryToExpression(py::handle obj, std::unique_ptr<DuckDBPyExpression> &result);
+	static bool TryToExpression(nb::handle obj, std::unique_ptr<DuckDBPyExpression> &result);
 
 	string Type() const;
 
@@ -69,10 +69,10 @@ public:
 	std::unique_ptr<DuckDBPyExpression> LessThanOrEqual(const DuckDBPyExpression &other);
 
 	std::unique_ptr<DuckDBPyExpression> SetAlias(const string &alias) const;
-	// `value` is py::object (not Expression) so it accepts None: nanobind rejects None for bound-type params
+	// `value` is nb::object (not Expression) so it accepts None: nanobind rejects None for bound-type params
 	// before implicit conversion runs, so None->NULL-constant has to go through ToExpression explicitly.
-	std::unique_ptr<DuckDBPyExpression> When(const DuckDBPyExpression &condition, const py::object &value);
-	std::unique_ptr<DuckDBPyExpression> Else(const py::object &value);
+	std::unique_ptr<DuckDBPyExpression> When(const DuckDBPyExpression &condition, const nb::object &value);
+	std::unique_ptr<DuckDBPyExpression> Else(const nb::object &value);
 
 	std::unique_ptr<DuckDBPyExpression> Cast(const DuckDBPyType &type) const;
 	std::unique_ptr<DuckDBPyExpression> Between(const DuckDBPyExpression &lower, const DuckDBPyExpression &upper);
@@ -91,9 +91,9 @@ public:
 
 	// IN / NOT IN
 
-	std::unique_ptr<DuckDBPyExpression> CreateCompareExpression(ExpressionType compare_type, const py::args &args);
-	std::unique_ptr<DuckDBPyExpression> In(const py::args &args);
-	std::unique_ptr<DuckDBPyExpression> NotIn(const py::args &args);
+	std::unique_ptr<DuckDBPyExpression> CreateCompareExpression(ExpressionType compare_type, const nb::args &args);
+	std::unique_ptr<DuckDBPyExpression> In(const nb::args &args);
+	std::unique_ptr<DuckDBPyExpression> NotIn(const nb::args &args);
 
 	// Order modifiers
 
@@ -110,15 +110,15 @@ public:
 	std::unique_ptr<DuckDBPyExpression> Copy() const;
 
 public:
-	static std::unique_ptr<DuckDBPyExpression> StarExpression(py::object exclude = py::none());
-	static std::unique_ptr<DuckDBPyExpression> ColumnExpression(const py::args &column_name);
+	static std::unique_ptr<DuckDBPyExpression> StarExpression(nb::object exclude = nb::none());
+	static std::unique_ptr<DuckDBPyExpression> ColumnExpression(const nb::args &column_name);
 	static std::unique_ptr<DuckDBPyExpression> DefaultExpression();
-	static std::unique_ptr<DuckDBPyExpression> ConstantExpression(const py::object &value);
-	static std::unique_ptr<DuckDBPyExpression> LambdaExpression(const py::object &lhs, const DuckDBPyExpression &rhs);
+	static std::unique_ptr<DuckDBPyExpression> ConstantExpression(const nb::object &value);
+	static std::unique_ptr<DuckDBPyExpression> LambdaExpression(const nb::object &lhs, const DuckDBPyExpression &rhs);
 	static std::unique_ptr<DuckDBPyExpression> CaseExpression(const DuckDBPyExpression &condition,
-	                                                          const py::object &value);
-	static std::unique_ptr<DuckDBPyExpression> FunctionExpression(const string &function_name, const py::args &args);
-	static std::unique_ptr<DuckDBPyExpression> Coalesce(const py::args &args);
+	                                                          const nb::object &value);
+	static std::unique_ptr<DuckDBPyExpression> FunctionExpression(const string &function_name, const nb::args &args);
+	static std::unique_ptr<DuckDBPyExpression> Coalesce(const nb::args &args);
 	static std::unique_ptr<DuckDBPyExpression> SQLExpression(string sql);
 
 public:

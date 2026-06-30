@@ -15,7 +15,7 @@
 namespace duckdb {
 
 struct PolarsFilterPushdown {
-	static py::object TransformFilter(const TableFilterSet &filter_collection, unordered_map<idx_t, string> &columns,
+	static nb::object TransformFilter(const TableFilterSet &filter_collection, unordered_map<idx_t, string> &columns,
 	                                  const unordered_map<idx_t, idx_t> &filter_to_col,
 	                                  const ClientProperties &client_properties);
 };

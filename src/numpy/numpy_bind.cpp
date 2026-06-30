@@ -9,27 +9,27 @@
 
 namespace duckdb {
 
-void NumpyBind::Bind(ClientContext &context, py::handle df, vector<PandasColumnBindData> &bind_columns,
+void NumpyBind::Bind(ClientContext &context, nb::handle df, vector<PandasColumnBindData> &bind_columns,
                      vector<LogicalType> &return_types, vector<string> &names) {
 
-	auto df_columns = py::list(df.attr("keys")());
-	auto df_types = py::list();
-	for (auto item : py::cast<py::dict>(df)) {
-		if (py::cast<std::string>(py::str(py::object(item.second.attr("dtype").attr("char")))) == "U") {
-			df_types.attr("append")(py::str("string"));
+	auto df_columns = nb::list(df.attr("keys")());
+	auto df_types = nb::list();
+	for (auto item : nb::cast<nb::dict>(df)) {
+		if (nb::cast<std::string>(nb::str(nb::object(item.second.attr("dtype").attr("char")))) == "U") {
+			df_types.attr("append")(nb::str("string"));
 			continue;
 		}
-		df_types.attr("append")(py::str(py::object(item.second.attr("dtype"))));
+		df_types.attr("append")(nb::str(nb::object(item.second.attr("dtype"))));
 	}
 	auto get_fun = df.attr("__getitem__");
-	if (py::len(df_columns) == 0 || py::len(df_types) == 0 || py::len(df_columns) != py::len(df_types)) {
+	if (nb::len(df_columns) == 0 || nb::len(df_types) == 0 || nb::len(df_columns) != nb::len(df_types)) {
 		throw InvalidInputException("Need a DataFrame with at least one column");
 	}
-	for (idx_t col_idx = 0; col_idx < py::len(df_columns); col_idx++) {
+	for (idx_t col_idx = 0; col_idx < nb::len(df_columns); col_idx++) {
 		LogicalType duckdb_col_type;
 		PandasColumnBindData bind_data;
 
-		names.emplace_back(py::cast<std::string>(df_columns[col_idx]));
+		names.emplace_back(nb::cast<std::string>(df_columns[col_idx]));
 		bind_data.numpy_type = ConvertNumpyType(df_types[col_idx]);
 
 		auto column = get_fun(df_columns[col_idx]);
@@ -43,8 +43,8 @@ void NumpyBind::Bind(ClientContext &context, py::handle df, vector<PandasColumnB
 			// here we call numpy.unique
 			// this function call will return the unique values of a given array
 			// together with the indices to reconstruct the given array
-			auto uniq = py::cast<py::tuple>(py::module_::import_("numpy").attr("unique")(column, false, true));
-			vector<string> enum_entries = py::cast<vector<string>>(uniq.attr("__getitem__")(0));
+			auto uniq = nb::cast<nb::tuple>(nb::module_::import_("numpy").attr("unique")(column, false, true));
+			vector<string> enum_entries = nb::cast<vector<string>>(uniq.attr("__getitem__")(0));
 			idx_t size = enum_entries.size();
 			Vector enum_entries_vec(LogicalType::VARCHAR, size);
 			auto enum_entries_ptr = FlatVector::GetDataMutable<string_t>(enum_entries_vec);
@@ -53,7 +53,7 @@ void NumpyBind::Bind(ClientContext &context, py::handle df, vector<PandasColumnB
 			}
 			duckdb_col_type = LogicalType::ENUM(enum_entries_vec, size);
 			auto pandas_col = uniq.attr("__getitem__")(1);
-			bind_data.internal_categorical_type = py::cast<std::string>(py::str(py::object(pandas_col.attr("dtype"))));
+			bind_data.internal_categorical_type = nb::cast<std::string>(nb::str(nb::object(pandas_col.attr("dtype"))));
 			bind_data.pandas_col = std::make_unique<PandasNumpyColumn>(NumpyArray(pandas_col));
 		} else {
 			bind_data.pandas_col = std::make_unique<PandasNumpyColumn>(NumpyArray(column));

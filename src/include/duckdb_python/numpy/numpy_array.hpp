@@ -16,7 +16,7 @@ namespace duckdb {
 //! Thin façade over the numpy array representation.
 //!
 //! This class is the SINGLE place in the codebase that owns the underlying numpy-array
-//! object. Under nanobind there is no `py::array` (and no `py::dtype`); the array is held
+//! object. Under nanobind there is no `nb::array` (and no `nb::dtype`); the array is held
 //! as a plain `nb::object` and the few buffer operations go through numpy directly.
 //!
 //! Performance note: `Data()`/`MutableData()` are on the HOT path — the numpy scan calls
@@ -27,7 +27,7 @@ namespace duckdb {
 //! parallel scan. We therefore compute the pointer ONCE, eagerly, in the constructor (always
 //! invoked single-threaded with the GIL held at bind/result time) and cache it; `Data()` then
 //! becomes a plain pointer read with no Python call and no GIL — matching pybind11's
-//! `py::array.data()`. The cache is invalidated (and recomputed) by `Resize()`, the only
+//! `nb::array.data()`. The cache is invalidated (and recomputed) by `Resize()`, the only
 //! operation that reallocates the buffer. `ctypes.data` is also dtype-agnostic (works for the
 //! `object` dtype that DLPack/`nb::ndarray` cannot represent).
 //!
@@ -40,7 +40,7 @@ public:
 	NumpyArray() = default;
 	//! Wrap an existing numpy array object (no copy; the object is moved in). The buffer pointer is
 	//! computed eagerly here (GIL held) so the hot scan path never makes a Python call.
-	explicit NumpyArray(py::object arr) : array(std::move(arr)) {
+	explicit NumpyArray(nb::object arr) : array(std::move(arr)) {
 		EnsurePointer();
 	}
 
@@ -52,16 +52,16 @@ public:
 public:
 	//! Allocate a fresh, contiguous 1-D numpy array of `count` elements with the given numpy
 	//! dtype string (e.g. "int64", "float32", "object", "datetime64[us]"). Uninitialized —
-	//! callers fill it immediately, matching the previous `py::array(py::dtype(d), count)`.
+	//! callers fill it immediately, matching the previous `nb::array(nb::dtype(d), count)`.
 	static NumpyArray Allocate(const string &dtype, idx_t count) {
-		auto numpy = py::module_::import_("numpy");
+		auto numpy = nb::module_::import_("numpy");
 		return NumpyArray(numpy.attr("empty")(count, dtype));
 	}
 
 	//! Produce a numpy array from an arbitrary Python object (np.asarray semantics: no copy
 	//! when `obj` already is an ndarray). The object is moved into the call.
-	static NumpyArray FromObject(py::object obj) {
-		auto numpy = py::module_::import_("numpy");
+	static NumpyArray FromObject(nb::object obj) {
+		auto numpy = nb::module_::import_("numpy");
 		return NumpyArray(numpy.attr("asarray")(std::move(obj)));
 	}
 
@@ -79,17 +79,17 @@ public:
 	//! pointer is invalidated and recomputed (GIL is held -- this only runs on the single-threaded
 	//! result-materialization path).
 	void Resize(idx_t count) {
-		array.attr("resize")(count, py::arg("refcheck") = false);
+		array.attr("resize")(count, nb::arg("refcheck") = false);
 		cached_data_ = nullptr;
 		EnsurePointer();
 	}
 
 	//! Access the underlying array, e.g. for `.attr(...)` calls, iteration, or to hand it
 	//! back to Python. Returned by reference -- never copied.
-	py::object &GetArray() {
+	nb::object &GetArray() {
 		return array;
 	}
-	const py::object &GetArray() const {
+	const nb::object &GetArray() const {
 		return array;
 	}
 
@@ -101,13 +101,13 @@ private:
 		// Only numpy ndarrays expose `ctypes`; some NumpyArray wrappers hold other objects (e.g. a pandas Index)
 		// whose buffer pointer is never read. Guard the eager compute so constructing such a wrapper doesn't raise
 		// (the original lazy code only touched `ctypes` if Data()/MutableData() was actually called).
-		if (!cached_data_ && array.ptr() != nullptr && py::hasattr(array, "ctypes")) {
-			cached_data_ = reinterpret_cast<void *>(py::cast<uintptr_t>(array.attr("ctypes").attr("data")));
+		if (!cached_data_ && array.ptr() != nullptr && nb::hasattr(array, "ctypes")) {
+			cached_data_ = reinterpret_cast<void *>(nb::cast<uintptr_t>(array.attr("ctypes").attr("data")));
 		}
 	}
 
-	//! The owned numpy array (formerly `py::array`).
-	py::object array;
+	//! The owned numpy array (formerly `nb::array`).
+	nb::object array;
 	//! Cached buffer start address; see the class-level performance note.
 	void *cached_data_ = nullptr;
 };

@@ -11,7 +11,7 @@ public:
 	DuckDBPyTyping() = delete;
 
 public:
-	static void Initialize(py::module_ &m);
+	static void Initialize(nb::module_ &m);
 };
 
 } // namespace duckdb

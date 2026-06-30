@@ -25,27 +25,27 @@ namespace duckdb {
 
 namespace pyarrow {
 
-class RecordBatchReader : public py::object {
+class RecordBatchReader : public nb::object {
 public:
-	RecordBatchReader(const py::object &o) : py::object(o, py::detail::borrow_t {}) {
+	RecordBatchReader(const nb::object &o) : nb::object(o, nb::detail::borrow_t {}) {
 	}
-	using py::object::object;
+	using nb::object::object;
 
 public:
-	static bool check_(const py::handle &object) {
-		return !py::none().is(object);
+	static bool check_(const nb::handle &object) {
+		return !nb::none().is(object);
 	}
 };
 
-class Table : public py::object {
+class Table : public nb::object {
 public:
-	Table(const py::object &o) : py::object(o, py::detail::borrow_t {}) {
+	Table(const nb::object &o) : nb::object(o, nb::detail::borrow_t {}) {
 	}
-	using py::object::object;
+	using nb::object::object;
 
 public:
-	static bool check_(const py::handle &object) {
-		return !py::none().is(object);
+	static bool check_(const nb::handle &object) {
+		return !nb::none().is(object);
 	}
 };
 
@@ -62,9 +62,9 @@ enum class PyArrowObjectType {
 	PolarsLazyFrame
 };
 
-void TransformDuckToArrowChunk(py::object pyarrow_schema, ArrowArray &data, py::list &batches);
+void TransformDuckToArrowChunk(nb::object pyarrow_schema, ArrowArray &data, nb::list &batches);
 
-PyArrowObjectType GetArrowType(const py::handle &obj);
+PyArrowObjectType GetArrowType(const nb::handle &obj);
 
 class PythonTableArrowArrayStreamFactory {
 public:
@@ -76,8 +76,8 @@ public:
 
 	~PythonTableArrowArrayStreamFactory() {
 		if (cached_arrow_table.ptr() != nullptr) {
-			py::gil_scoped_acquire acquire;
-			cached_arrow_table = py::object();
+			nb::gil_scoped_acquire acquire;
+			cached_arrow_table = nb::object();
 		}
 		if (cached_schema.release) {
 			cached_schema.release(&cached_schema);
@@ -88,7 +88,7 @@ public:
 	static unique_ptr<ArrowArrayStreamWrapper> Produce(uintptr_t factory, ArrowStreamParameters &parameters);
 
 	//! Get the schema of the arrow object
-	static void GetSchemaInternal(py::handle arrow_object, ArrowSchemaWrapper &schema);
+	static void GetSchemaInternal(nb::handle arrow_object, ArrowSchemaWrapper &schema);
 	static void GetSchema(uintptr_t factory_ptr, ArrowSchemaWrapper &schema);
 
 	//! Arrow Object (i.e., Scanner, Record Batch Reader, Table, Dataset)
@@ -99,13 +99,13 @@ public:
 
 	//! Cached Arrow table from an unfiltered .collect().to_arrow() on a LazyFrame.
 	//! Avoids re-reading from source and re-converting on repeated scans without filters.
-	py::object cached_arrow_table;
+	nb::object cached_arrow_table;
 
 private:
 	ArrowSchema cached_schema;
 	bool schema_cached = false;
 
-	static py::object ProduceScanner(py::object &arrow_scanner, py::handle &arrow_obj_handle,
+	static nb::object ProduceScanner(nb::object &arrow_scanner, nb::handle &arrow_obj_handle,
 	                                 ArrowStreamParameters &parameters, const ClientProperties &client_properties);
 };
 } // namespace duckdb

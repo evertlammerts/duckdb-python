@@ -30,7 +30,7 @@ private:
 	void Initialize();
 
 private:
-	py::object progress_bar;
+	nb::object progress_bar;
 };
 
 } // namespace duckdb

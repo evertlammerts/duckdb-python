@@ -13,27 +13,27 @@
 
 namespace duckdb {
 
-class PandasDataFrame : public py::object {
+class PandasDataFrame : public nb::object {
 public:
-	PandasDataFrame(const py::object &o) : py::object(o, py::detail::borrow_t {}) {
+	PandasDataFrame(const nb::object &o) : nb::object(o, nb::detail::borrow_t {}) {
 	}
-	using py::object::object;
+	using nb::object::object;
 
 public:
-	static bool check_(const py::handle &object); // NOLINT
-	static bool IsPyArrowBacked(const py::handle &df);
-	static py::object ToArrowTable(const py::object &df);
+	static bool check_(const nb::handle &object); // NOLINT
+	static bool IsPyArrowBacked(const nb::handle &df);
+	static nb::object ToArrowTable(const nb::object &df);
 };
 
-class PolarsDataFrame : public py::object {
+class PolarsDataFrame : public nb::object {
 public:
-	PolarsDataFrame(const py::object &o) : py::object(o, py::detail::borrow_t {}) {
+	PolarsDataFrame(const nb::object &o) : nb::object(o, nb::detail::borrow_t {}) {
 	}
-	using py::object::object;
+	using nb::object::object;
 
 public:
-	static bool IsDataFrame(const py::handle &object);
-	static bool IsLazyFrame(const py::handle &object);
-	static bool check_(const py::handle &object); // NOLINT
+	static bool IsDataFrame(const nb::handle &object);
+	static bool IsLazyFrame(const nb::handle &object);
+	static bool check_(const nb::handle &object); // NOLINT
 };
 } // namespace duckdb

@@ -14,12 +14,12 @@
 namespace duckdb {
 
 struct PandasScanFunctionData : public TableFunctionData {
-	PandasScanFunctionData(py::handle df, idx_t row_count, vector<PandasColumnBindData> pandas_bind_data,
+	PandasScanFunctionData(nb::handle df, idx_t row_count, vector<PandasColumnBindData> pandas_bind_data,
 	                       vector<LogicalType> sql_types, shared_ptr<DependencyItem> dependency)
 	    : df(df), row_count(row_count), lines_read(0), pandas_bind_data(std::move(pandas_bind_data)),
 	      sql_types(std::move(sql_types)), copied_df(std::move(dependency)) {
 	}
-	py::handle df;
+	nb::handle df;
 	idx_t row_count;
 	atomic<idx_t> lines_read;
 	vector<PandasColumnBindData> pandas_bind_data;
@@ -28,7 +28,7 @@ struct PandasScanFunctionData : public TableFunctionData {
 
 	~PandasScanFunctionData() override {
 		try {
-			py::gil_scoped_acquire acquire;
+			nb::gil_scoped_acquire acquire;
 			pandas_bind_data.clear();
 		} catch (...) { // NOLINT
 		}
@@ -81,18 +81,18 @@ OperatorPartitionData PandasScanFunction::PandasScanGetPartitionData(ClientConte
 
 unique_ptr<FunctionData> PandasScanFunction::PandasScanBind(ClientContext &context, TableFunctionBindInput &input,
                                                             vector<LogicalType> &return_types, vector<string> &names) {
-	py::gil_scoped_acquire acquire;
-	py::handle df(reinterpret_cast<PyObject *>(input.inputs[0].GetPointer()));
+	nb::gil_scoped_acquire acquire;
+	nb::handle df(reinterpret_cast<PyObject *>(input.inputs[0].GetPointer()));
 
 	vector<PandasColumnBindData> pandas_bind_data;
 
-	auto is_py_dict = py::isinstance<py::dict>(df);
+	auto is_py_dict = nb::isinstance<nb::dict>(df);
 	if (is_py_dict) {
 		NumpyBind::Bind(context, df, pandas_bind_data, return_types, names);
 	} else {
 		Pandas::Bind(context, df, pandas_bind_data, return_types, names);
 	}
-	auto df_columns = py::list(df.attr("keys")());
+	auto df_columns = nb::list(df.attr("keys")());
 
 	auto &ref = input.ref;
 
@@ -107,7 +107,7 @@ unique_ptr<FunctionData> PandasScanFunction::PandasScanBind(ClientContext &conte
 	}
 
 	auto get_fun = df.attr("__getitem__");
-	idx_t row_count = py::len(get_fun(df_columns[0]));
+	idx_t row_count = nb::len(get_fun(df_columns[0]));
 	return make_uniq<PandasScanFunctionData>(df, row_count, std::move(pandas_bind_data), return_types, dependency_item);
 }
 
@@ -213,19 +213,19 @@ unique_ptr<NodeStatistics> PandasScanFunction::PandasScanCardinality(ClientConte
 	return make_uniq<NodeStatistics>(data.row_count, data.row_count);
 }
 
-py::object PandasScanFunction::PandasReplaceCopiedNames(const py::object &original_df) {
-	py::object copy_df = original_df.attr("copy")(false);
-	auto df_columns = py::list(py::object(original_df.attr("columns")));
+nb::object PandasScanFunction::PandasReplaceCopiedNames(const nb::object &original_df) {
+	nb::object copy_df = original_df.attr("copy")(false);
+	auto df_columns = nb::list(nb::object(original_df.attr("columns")));
 	vector<string> columns;
 	for (const auto &str : df_columns) {
-		columns.push_back(py::cast<std::string>(py::str(str)));
+		columns.push_back(nb::cast<std::string>(nb::str(str)));
 	}
 	QueryResult::DeduplicateColumns(columns);
 
-	// nanobind py::list has no pre-sized ctor; pre-fill with None so the indexed assignment below works
-	py::list new_columns;
+	// nanobind nb::list has no pre-sized ctor; pre-fill with None so the indexed assignment below works
+	nb::list new_columns;
 	for (idx_t i = 0; i < columns.size(); i++) {
-		new_columns.append(py::none());
+		new_columns.append(nb::none());
 	}
 	for (idx_t i = 0; i < columns.size(); i++) {
 		new_columns[i] = std::move(columns[i]);

@@ -17,24 +17,24 @@ namespace duckdb {
 
 namespace pyarrow {
 
-py::object ToPyArrowSchema(const ArrowSchema &schema) {
-	py::gil_scoped_acquire acquire;
+nb::object ToPyArrowSchema(const ArrowSchema &schema) {
+	nb::gil_scoped_acquire acquire;
 
-	auto pyarrow_lib_module = py::module_::import_("pyarrow").attr("lib");
+	auto pyarrow_lib_module = nb::module_::import_("pyarrow").attr("lib");
 	auto schema_import_func = pyarrow_lib_module.attr("Schema").attr("_import_from_c");
 	return schema_import_func(reinterpret_cast<uint64_t>(&schema));
 }
 
-py::object ToArrowTable(const py::list &batches, py::object pyarrow_schema) {
-	py::gil_scoped_acquire acquire;
+nb::object ToArrowTable(const nb::list &batches, nb::object pyarrow_schema) {
+	nb::gil_scoped_acquire acquire;
 
-	auto pyarrow_lib_module = py::module_::import_("pyarrow").attr("lib");
+	auto pyarrow_lib_module = nb::module_::import_("pyarrow").attr("lib");
 	auto from_batches_func = pyarrow_lib_module.attr("Table").attr("from_batches");
 
-	return py::cast<duckdb::pyarrow::Table>(from_batches_func(batches, pyarrow_schema));
+	return nb::cast<duckdb::pyarrow::Table>(from_batches_func(batches, pyarrow_schema));
 }
 
-py::object ToArrowTable(const vector<LogicalType> &types, const vector<string> &names, const py::list &batches,
+nb::object ToArrowTable(const vector<LogicalType> &types, const vector<string> &names, const nb::list &batches,
                         ClientProperties &options) {
 	ArrowSchema schema;
 	ArrowConverter::ToArrowSchema(&schema, types, names, options);

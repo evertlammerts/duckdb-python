@@ -26,8 +26,8 @@ struct MapFunctionData : public TableFunctionData {
 	vector<Identifier> in_names, out_names;
 };
 
-static py::object FunctionCall(NumpyResultConversion &conversion, const vector<Identifier> &names, PyObject *function) {
-	py::dict in_numpy_dict;
+static nb::object FunctionCall(NumpyResultConversion &conversion, const vector<Identifier> &names, PyObject *function) {
+	nb::dict in_numpy_dict;
 	for (idx_t col_idx = 0; col_idx < names.size(); col_idx++) {
 		in_numpy_dict[names[col_idx].c_str()] = conversion.ToArray(col_idx);
 	}
@@ -44,15 +44,15 @@ static py::object FunctionCall(NumpyResultConversion &conversion, const vector<I
 		throw InvalidInputException("Python error. See above for a stack trace.");
 	}
 
-	auto df = py::steal<py::object>(df_obj);
+	auto df = nb::steal<nb::object>(df_obj);
 	if (df.is_none()) { // no return, probably modified in place
 		throw InvalidInputException("No return value from Python function");
 	}
 
-	if (!py::isinstance<PandasDataFrame>(df)) {
+	if (!nb::isinstance<PandasDataFrame>(df)) {
 		throw InvalidInputException(
 		    "Expected the UDF to return an object of type 'pandas.DataFrame', found '%s' instead",
-		    py::cast<std::string>(py::str(py::object(df.attr("__class__")))));
+		    nb::cast<std::string>(nb::str(nb::object(df.attr("__class__")))));
 	}
 	if (PandasDataFrame::IsPyArrowBacked(df)) {
 		throw InvalidInputException(
@@ -102,11 +102,11 @@ unique_ptr<FunctionData> BindExplicitSchema(unique_ptr<MapFunctionData> function
                                             vector<LogicalType> &types, vector<string> &names) {
 	D_ASSERT(schema_p != Py_None);
 
-	auto schema_object = py::borrow<py::dict>(schema_p);
-	if (!py::isinstance<py::dict>(schema_object)) {
+	auto schema_object = nb::borrow<nb::dict>(schema_p);
+	if (!nb::isinstance<nb::dict>(schema_object)) {
 		throw InvalidInputException("'schema' should be given as a Dict[str, DuckDBType]");
 	}
-	auto schema = py::cast<py::dict>(schema_object);
+	auto schema = nb::cast<nb::dict>(schema_object);
 
 	auto column_count = schema.size();
 
@@ -115,12 +115,12 @@ unique_ptr<FunctionData> BindExplicitSchema(unique_ptr<MapFunctionData> function
 	for (auto item : schema) { // nanobind dict iteration yields std::pair<handle,handle> by value
 		auto name = item.first;
 		auto type_p = item.second;
-		names.push_back(py::cast<std::string>(py::str(name)));
+		names.push_back(nb::cast<std::string>(nb::str(name)));
 		// TryConvert applies the same implicit conversions a DuckDBPyType parameter would (DuckDBPyType instance,
 		// a type string, or a Python type object), and reports a clear error instead of a raw cast failure.
 		std::unique_ptr<DuckDBPyType> type;
-		if (!DuckDBPyType::TryConvert(py::borrow<py::object>(type_p), type)) {
-			string actual_type = py::cast<std::string>(py::str((type_p).type()));
+		if (!DuckDBPyType::TryConvert(nb::borrow<nb::object>(type_p), type)) {
+			string actual_type = nb::cast<std::string>(nb::str((type_p).type()));
 			throw InvalidInputException("'schema' value could not be converted to a DuckDBPyType, got '%s'",
 			                            actual_type);
 		}
@@ -139,7 +139,7 @@ unique_ptr<FunctionData> BindExplicitSchema(unique_ptr<MapFunctionData> function
 // they better not change in the actual execution ^^
 unique_ptr<FunctionData> MapFunction::MapFunctionBind(ClientContext &context, TableFunctionBindInput &input,
                                                       vector<LogicalType> &return_types, vector<string> &names) {
-	py::gil_scoped_acquire acquire;
+	nb::gil_scoped_acquire acquire;
 
 	auto data_uptr = make_uniq<MapFunctionData>();
 	auto &data = *data_uptr;
@@ -176,7 +176,7 @@ static string TypeVectorToString(const vector<LogicalType> &types) {
 
 OperatorResultType MapFunction::MapFunctionExec(ExecutionContext &context, TableFunctionInput &data_p, DataChunk &input,
                                                 DataChunk &output) {
-	py::gil_scoped_acquire acquire;
+	nb::gil_scoped_acquire acquire;
 
 	if (input.size() == 0) {
 		return OperatorResultType::NEED_MORE_INPUT;
@@ -212,10 +212,10 @@ OperatorResultType MapFunction::MapFunctionExec(ExecutionContext &context, Table
 		                            StringUtil::Join(data.out_names, ", "), StringUtil::Join(pandas_names, ", "));
 	}
 
-	auto df_columns = py::list(py::object(df.attr("columns")));
+	auto df_columns = nb::list(nb::object(df.attr("columns")));
 	auto get_fun = df.attr("__getitem__");
 
-	idx_t row_count = py::len(get_fun(df_columns[0]));
+	idx_t row_count = nb::len(get_fun(df_columns[0]));
 	if (row_count > STANDARD_VECTOR_SIZE) {
 		throw InvalidInputException("UDF returned more than %llu rows, which is not allowed.", STANDARD_VECTOR_SIZE);
 	}

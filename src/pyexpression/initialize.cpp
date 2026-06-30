@@ -8,7 +8,7 @@ namespace duckdb {
 
 namespace {
 
-// Binary operators take their operand as py::object (not Expression) so that None can bind: nanobind rejects None for a
+// Binary operators take their operand as nb::object (not Expression) so that None can bind: nanobind rejects None for a
 // bound-type parameter before the registered implicit conversion runs, so `expr == None` / `expr + None` would never
 // reach the None -> SQL NULL conversion otherwise. We convert explicitly via TryToExpression (an existing Expression is
 // copied, a str becomes a column reference, any other value -- including None -- becomes a constant). On a genuinely
@@ -16,12 +16,12 @@ namespace {
 // comparison, exactly as the is_operator() overload did under pybind11 (keeps e.g. `expr == object()` returning False
 // instead of raising).
 template <typename Build>
-py::object ExpressionBinaryOp(const py::object &other, Build &&build) {
+nb::object ExpressionBinaryOp(const nb::object &other, Build &&build) {
 	std::unique_ptr<DuckDBPyExpression> converted;
 	if (!DuckDBPyExpression::TryToExpression(other, converted)) {
-		return py::borrow(py::handle(Py_NotImplemented));
+		return nb::borrow(nb::handle(Py_NotImplemented));
 	}
-	return py::cast(build(*converted));
+	return nb::cast(build(*converted));
 }
 
 } // namespace
@@ -30,26 +30,26 @@ py::object ExpressionBinaryOp(const py::object &other, Build &&build) {
 #define DUCKDB_EXPR_BINARY_OP(PYNAME, METHOD)                                                                          \
 	m.def(                                                                                                             \
 	    PYNAME,                                                                                                        \
-	    [](DuckDBPyExpression &self, const py::object &other) {                                                        \
+	    [](DuckDBPyExpression &self, const nb::object &other) {                                                        \
 		    return ExpressionBinaryOp(other, [&](const DuckDBPyExpression &rhs) { return self.METHOD(rhs); });         \
 	    },                                                                                                             \
-	    py::arg("expr").none(), docs, py::is_operator())
+	    nb::arg("expr").none(), docs, nb::is_operator())
 
 // Reflected binary operator __rop__: other <op> self (other is the left operand, also accepts None).
 #define DUCKDB_EXPR_REFLECTED_OP(PYNAME, METHOD)                                                                       \
 	m.def(                                                                                                             \
 	    PYNAME,                                                                                                        \
-	    [](DuckDBPyExpression &self, const py::object &other) {                                                        \
+	    [](DuckDBPyExpression &self, const nb::object &other) {                                                        \
 		    return ExpressionBinaryOp(other, [&](const DuckDBPyExpression &lhs) { return lhs.METHOD(self); });         \
 	    },                                                                                                             \
-	    py::arg("expr").none(), docs, py::is_operator())
+	    nb::arg("expr").none(), docs, nb::is_operator())
 
-void InitializeStaticMethods(py::module_ &m) {
+void InitializeStaticMethods(nb::module_ &m) {
 	const char *docs;
 
 	// Constant Expression
 	docs = "Create a constant expression from the provided value";
-	m.def("ConstantExpression", &DuckDBPyExpression::ConstantExpression, py::arg("value").none(),
+	m.def("ConstantExpression", &DuckDBPyExpression::ConstantExpression, nb::arg("value").none(),
 	      docs); // None accepted (lit(None))
 
 	// ColumnRef Expression
@@ -62,17 +62,17 @@ void InitializeStaticMethods(py::module_ &m) {
 
 	// Case Expression
 	docs = "";
-	m.def("CaseExpression", &DuckDBPyExpression::CaseExpression, py::arg("condition"), py::arg("value").none(), docs);
+	m.def("CaseExpression", &DuckDBPyExpression::CaseExpression, nb::arg("condition"), nb::arg("value").none(), docs);
 
 	// Star Expression
 	docs = "";
-	m.def("StarExpression", &DuckDBPyExpression::StarExpression, py::kw_only(), py::arg("exclude") = py::none(), docs);
+	m.def("StarExpression", &DuckDBPyExpression::StarExpression, nb::kw_only(), nb::arg("exclude") = nb::none(), docs);
 	m.def("StarExpression", []() { return DuckDBPyExpression::StarExpression(); }, docs);
 
 	// Function Expression
 	docs = "";
 	m.def("FunctionExpression", &DuckDBPyExpression::FunctionExpression,
-	      docs); // nanobind: cannot name a positional before py::args
+	      docs); // nanobind: cannot name a positional before nb::args
 
 	// Coalesce Operator
 	docs = "";
@@ -80,14 +80,14 @@ void InitializeStaticMethods(py::module_ &m) {
 
 	// Lambda Expression
 	docs = "";
-	m.def("LambdaExpression", &DuckDBPyExpression::LambdaExpression, py::arg("lhs"), py::arg("rhs"), docs);
+	m.def("LambdaExpression", &DuckDBPyExpression::LambdaExpression, nb::arg("lhs"), nb::arg("rhs"), docs);
 
 	// SQL Expression
 	docs = "";
-	m.def("SQLExpression", &DuckDBPyExpression::SQLExpression, docs, py::arg("expression"));
+	m.def("SQLExpression", &DuckDBPyExpression::SQLExpression, docs, nb::arg("expression"));
 }
 
-static void InitializeDunderMethods(py::class_<DuckDBPyExpression> &m) {
+static void InitializeDunderMethods(nb::class_<DuckDBPyExpression> &m) {
 	const char *docs;
 
 	docs = R"(
@@ -109,7 +109,7 @@ static void InitializeDunderMethods(py::class_<DuckDBPyExpression> &m) {
 		Returns:
 			FunctionExpression: -self
 	)";
-	m.def("__neg__", &DuckDBPyExpression::Negate, docs, py::is_operator());
+	m.def("__neg__", &DuckDBPyExpression::Negate, docs, nb::is_operator());
 
 	docs = R"(
 		Subtract expr from self
@@ -282,7 +282,7 @@ static void InitializeDunderMethods(py::class_<DuckDBPyExpression> &m) {
 		Returns:
 			FunctionExpression: ~self
 	)";
-	m.def("__invert__", &DuckDBPyExpression::Not, docs, py::is_operator());
+	m.def("__invert__", &DuckDBPyExpression::Not, docs, nb::is_operator());
 
 	docs = R"(
 		Binary-and self together with expr
@@ -310,23 +310,23 @@ static void InitializeDunderMethods(py::class_<DuckDBPyExpression> &m) {
 #undef DUCKDB_EXPR_BINARY_OP
 #undef DUCKDB_EXPR_REFLECTED_OP
 
-static void InitializeImplicitConversion(py::class_<DuckDBPyExpression> &m) {
-	m.def(py::new_([](const string &name) {
-		auto names = py::cast<py::args>(py::make_tuple(py::str(name.c_str(), name.size())));
+static void InitializeImplicitConversion(nb::class_<DuckDBPyExpression> &m) {
+	m.def(nb::new_([](const string &name) {
+		auto names = nb::cast<nb::args>(nb::make_tuple(nb::str(name.c_str(), name.size())));
 		return DuckDBPyExpression::ColumnExpression(names);
 	}));
-	m.def(py::new_([](const py::object &obj) {
+	m.def(nb::new_([](const nb::object &obj) {
 		      auto val = TransformPythonValue(nullptr, obj);
 		      return DuckDBPyExpression::InternalConstantExpression(std::move(val));
 	      }),
-	      py::arg("value").none()); // accept None -> NULL constant (nanobind rejects None for py::object otherwise)
-	py::implicitly_convertible<py::str, DuckDBPyExpression>();
-	py::implicitly_convertible<py::object, DuckDBPyExpression>();
+	      nb::arg("value").none()); // accept None -> NULL constant (nanobind rejects None for nb::object otherwise)
+	nb::implicitly_convertible<nb::str, DuckDBPyExpression>();
+	nb::implicitly_convertible<nb::object, DuckDBPyExpression>();
 }
 
-void DuckDBPyExpression::Initialize(py::module_ &m) {
+void DuckDBPyExpression::Initialize(nb::module_ &m) {
 	// Weak-referenceable like pybind11 (nanobind requires the explicit opt-in).
-	auto expression = py::class_<DuckDBPyExpression>(m, "Expression", py::is_weak_referenceable());
+	auto expression = nb::class_<DuckDBPyExpression>(m, "Expression", nb::is_weak_referenceable());
 
 	InitializeStaticMethods(m);
 	InitializeDunderMethods(expression);
@@ -422,7 +422,7 @@ void DuckDBPyExpression::Initialize(py::module_ &m) {
 		Returns:
 			CaseExpression: self with an additional WHEN clause.
 	)";
-	expression.def("when", &DuckDBPyExpression::When, py::arg("condition"), py::arg("value").none(), docs);
+	expression.def("when", &DuckDBPyExpression::When, nb::arg("condition"), nb::arg("value").none(), docs);
 
 	docs = R"(
 		Add an ELSE <value> clause to the CaseExpression.
@@ -433,7 +433,7 @@ void DuckDBPyExpression::Initialize(py::module_ &m) {
 		Returns:
 			CaseExpression: self with an ELSE clause.
 	)";
-	expression.def("otherwise", &DuckDBPyExpression::Else, py::arg("value").none(), docs);
+	expression.def("otherwise", &DuckDBPyExpression::Else, nb::arg("value").none(), docs);
 
 	docs = R"(
 		Create a CastExpression to type from self
@@ -444,18 +444,18 @@ void DuckDBPyExpression::Initialize(py::module_ &m) {
 		Returns:
 			CastExpression: self::type
 	)";
-	expression.def("cast", &DuckDBPyExpression::Cast, py::arg("type"), docs);
+	expression.def("cast", &DuckDBPyExpression::Cast, nb::arg("type"), docs);
 
 	docs = "";
 	expression.def(
 	    "between",
-	    [](DuckDBPyExpression &self, const py::object &lower, const py::object &upper) {
+	    [](DuckDBPyExpression &self, const nb::object &lower, const nb::object &upper) {
 		    return self.Between(*DuckDBPyExpression::ToExpression(lower), *DuckDBPyExpression::ToExpression(upper));
 	    },
-	    py::arg("lower").none(), py::arg("upper").none(), docs);
+	    nb::arg("lower").none(), nb::arg("upper").none(), docs);
 
 	docs = "";
-	expression.def("collate", &DuckDBPyExpression::Collate, py::arg("collation"), docs);
+	expression.def("collate", &DuckDBPyExpression::Collate, nb::arg("collation"), docs);
 }
 
 } // namespace duckdb

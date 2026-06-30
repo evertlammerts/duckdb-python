@@ -14,7 +14,7 @@ public:
 	}
 
 public:
-	void AddFile(const py::object &object);
+	void AddFile(const nb::object &object);
 	PathLike Finalize();
 
 protected:
@@ -34,15 +34,15 @@ public:
 	vector<string> fs_files;
 };
 
-void PathLikeProcessor::AddFile(const py::object &object) {
-	if (py::isinstance<py::str>(object)) {
-		all_files.push_back(py::cast<std::string>(py::str(object)));
+void PathLikeProcessor::AddFile(const nb::object &object) {
+	if (nb::isinstance<nb::str>(object)) {
+		all_files.push_back(nb::cast<std::string>(nb::str(object)));
 		return;
 	}
-	if (py::isinstance<py::bytes>(object) || py::hasattr(object, "__fspath__")) {
+	if (nb::isinstance<nb::bytes>(object) || nb::hasattr(object, "__fspath__")) {
 		// A bytes path or an os.PathLike object (e.g. pathlib.Path) - decode it to a string
-		auto fsdecode = py::module_::import_("os").attr("fsdecode");
-		all_files.push_back(py::cast<std::string>(py::str(fsdecode(object))));
+		auto fsdecode = nb::module_::import_("os").attr("fsdecode");
+		all_files.push_back(nb::cast<std::string>(nb::str(fsdecode(object))));
 		return;
 	}
 	// This is (assumed to be) a file-like object
@@ -78,12 +78,12 @@ PathLike PathLikeProcessor::Finalize() {
 	return result;
 }
 
-PathLike PathLike::Create(const py::object &object, DuckDBPyConnection &connection) {
+PathLike PathLike::Create(const nb::object &object, DuckDBPyConnection &connection) {
 	PathLikeProcessor processor(connection);
-	if (py::isinstance<py::list>(object)) {
-		auto list = py::list(object);
+	if (nb::isinstance<nb::list>(object)) {
+		auto list = nb::list(object);
 		for (auto item : list) { // nanobind list iteration yields temporary handles; bind by value (cheap handle)
-			processor.AddFile(py::borrow<py::object>(item));
+			processor.AddFile(nb::borrow<nb::object>(item));
 		}
 	} else {
 		// Single object

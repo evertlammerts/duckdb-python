@@ -10,37 +10,37 @@ namespace {
 
 struct PandasBindColumn {
 public:
-	PandasBindColumn(py::handle name, py::handle type, py::object column)
+	PandasBindColumn(nb::handle name, nb::handle type, nb::object column)
 	    : name(name), type(type), handle(std::move(column)) {
 	}
 
 public:
-	py::handle name;
-	py::handle type;
-	py::object handle;
+	nb::handle name;
+	nb::handle type;
+	nb::object handle;
 };
 
 struct PandasDataFrameBind {
 public:
-	explicit PandasDataFrameBind(py::handle &df) {
-		names = py::list(py::object(df.attr("columns")));
-		types = py::list(py::object(df.attr("dtypes")));
+	explicit PandasDataFrameBind(nb::handle &df) {
+		names = nb::list(nb::object(df.attr("columns")));
+		types = nb::list(nb::object(df.attr("dtypes")));
 		getter = df.attr("__getitem__");
 	}
 	PandasBindColumn operator[](idx_t index) const {
 		D_ASSERT(index < names.size());
-		auto column = py::borrow<py::object>(getter(names[index]));
+		auto column = nb::borrow<nb::object>(getter(names[index]));
 		auto type = types[index];
 		auto name = names[index];
 		return PandasBindColumn(name, type, column);
 	}
 
 public:
-	py::list names;
-	py::list types;
+	nb::list names;
+	nb::list types;
 
 private:
-	py::object getter;
+	nb::object getter;
 };
 
 }; // namespace
@@ -50,7 +50,7 @@ static LogicalType BindColumn(ClientContext &context, PandasBindColumn &column_p
 	auto &column = column_p.handle;
 
 	bind_data.numpy_type = ConvertNumpyType(column_p.type);
-	bool column_has_mask = py::hasattr(column.attr("array"), "_mask");
+	bool column_has_mask = nb::hasattr(column.attr("array"), "_mask");
 
 	if (column_has_mask) {
 		// masked object, fetch the internal data and mask array
@@ -59,8 +59,8 @@ static LogicalType BindColumn(ClientContext &context, PandasBindColumn &column_p
 
 	if (bind_data.numpy_type.type == NumpyNullableType::CATEGORY) {
 		// for category types, we create an ENUM type for string or use the converted numpy type for the rest
-		D_ASSERT(py::hasattr(column, "cat"));
-		D_ASSERT(py::hasattr(column.attr("cat"), "categories"));
+		D_ASSERT(nb::hasattr(column, "cat"));
+		D_ASSERT(nb::hasattr(column.attr("cat"), "categories"));
 		NumpyArray categories(column.attr("cat").attr("categories"));
 		auto categories_pd_type = ConvertNumpyType(categories.GetArray().attr("dtype"));
 		// Legacy categories are backed by an `object` dtype; pandas >= 3.0 backs string categories with the new
@@ -70,11 +70,11 @@ static LogicalType BindColumn(ClientContext &context, PandasBindColumn &column_p
 			// Let's hope the object type is a string.
 			bind_data.numpy_type.type = NumpyNullableType::CATEGORY;
 			// str()-ify each category individually: pandas >= 3.0 categories are a StringArray whose elements are
-			// numpy str scalars, which nanobind's vector<string>/string casters reject (py::cast<vector<string>>
-			// on the array throws). Iterating + py::str handles both that and the legacy object[str] case.
+			// numpy str scalars, which nanobind's vector<string>/string casters reject (nb::cast<vector<string>>
+			// on the array throws). Iterating + nb::str handles both that and the legacy object[str] case.
 			vector<string> enum_entries;
 			for (auto category : categories.GetArray()) {
-				enum_entries.push_back(py::cast<std::string>(py::str(category)));
+				enum_entries.push_back(nb::cast<std::string>(nb::str(category)));
 			}
 			idx_t size = enum_entries.size();
 			Vector enum_entries_vec(LogicalType::VARCHAR, size);
@@ -82,13 +82,13 @@ static LogicalType BindColumn(ClientContext &context, PandasBindColumn &column_p
 			for (idx_t i = 0; i < size; i++) {
 				enum_entries_ptr[i] = StringVector::AddStringOrBlob(enum_entries_vec, enum_entries[i]);
 			}
-			D_ASSERT(py::hasattr(column.attr("cat"), "codes"));
+			D_ASSERT(nb::hasattr(column.attr("cat"), "codes"));
 			column_type = LogicalType::ENUM(enum_entries_vec, size);
 			// .to_numpy(): pandas >= 3.0 returns cat.codes as a Series (no .strides/.ctypes), but the scan needs a
 			// real ndarray backing buffer; materialize it. (Older pandas returned an ndarray here directly.)
 			NumpyArray pandas_col(column.attr("cat").attr("codes").attr("to_numpy")());
 			bind_data.internal_categorical_type =
-			    py::cast<std::string>(py::str(py::object(pandas_col.GetArray().attr("dtype"))));
+			    nb::cast<std::string>(nb::str(nb::object(pandas_col.GetArray().attr("dtype"))));
 			bind_data.pandas_col = std::make_unique<PandasNumpyColumn>(std::move(pandas_col));
 		} else {
 			NumpyArray pandas_col(column.attr("to_numpy")());
@@ -105,10 +105,10 @@ static LogicalType BindColumn(ClientContext &context, PandasBindColumn &column_p
 		column_type = NumpyToLogicalType(bind_data.numpy_type);
 	} else {
 		auto pandas_array = column.attr("array");
-		if (py::hasattr(pandas_array, "_data")) {
+		if (nb::hasattr(pandas_array, "_data")) {
 			// This means we can access the numpy array directly
 			bind_data.pandas_col = std::make_unique<PandasNumpyColumn>(NumpyArray(column.attr("array").attr("_data")));
-		} else if (py::hasattr(pandas_array, "asi8")) {
+		} else if (nb::hasattr(pandas_array, "asi8")) {
 			// This is a datetime object, has the option to get the array as int64_t's
 			bind_data.pandas_col = std::make_unique<PandasNumpyColumn>(NumpyArray(pandas_array.attr("asi8")));
 		} else {
@@ -127,12 +127,12 @@ static LogicalType BindColumn(ClientContext &context, PandasBindColumn &column_p
 	return column_type;
 }
 
-void Pandas::Bind(ClientContext &context, py::handle df_p, vector<PandasColumnBindData> &bind_columns,
+void Pandas::Bind(ClientContext &context, nb::handle df_p, vector<PandasColumnBindData> &bind_columns,
                   vector<LogicalType> &return_types, vector<string> &names) {
 
 	PandasDataFrameBind df(df_p);
-	idx_t column_count = py::len(df.names);
-	if (column_count == 0 || py::len(df.types) == 0 || column_count != py::len(df.types)) {
+	idx_t column_count = nb::len(df.names);
+	if (column_count == 0 || nb::len(df.types) == 0 || column_count != nb::len(df.types)) {
 		throw InvalidInputException("Need a DataFrame with at least one column");
 	}
 
@@ -150,7 +150,7 @@ void Pandas::Bind(ClientContext &context, py::handle df_p, vector<PandasColumnBi
 	for (idx_t col_idx = 0; col_idx < column_count; col_idx++) {
 		PandasColumnBindData bind_data;
 
-		names.emplace_back(py::cast<std::string>(df.names[col_idx]));
+		names.emplace_back(nb::cast<std::string>(df.names[col_idx]));
 		auto column = df[col_idx];
 		auto column_type = BindColumn(context, column, bind_data);
 

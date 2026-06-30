@@ -21,12 +21,12 @@ public:
 	//! Create a copy of the wrapped statement
 	unique_ptr<SQLStatement> GetStatement();
 	string Query() const;
-	py::set NamedParameters() const;
+	nb::set NamedParameters() const;
 	StatementType Type() const;
-	py::list ExpectedResultType() const;
+	nb::list ExpectedResultType() const;
 
 public:
-	static void Initialize(py::handle &m);
+	static void Initialize(nb::handle &m);
 
 private:
 	unique_ptr<SQLStatement> statement;

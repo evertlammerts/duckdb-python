@@ -8,30 +8,30 @@
 
 namespace duckdb {
 
-class ModifiedMemoryFileSystem : public py::object {
+class ModifiedMemoryFileSystem : public nb::object {
 public:
-	using py::object::object;
-	ModifiedMemoryFileSystem(py::object object) : py::object(object) {
+	using nb::object::object;
+	ModifiedMemoryFileSystem(nb::object object) : nb::object(object) {
 	}
 
 public:
-	static bool check_(const py::handle &object) {
+	static bool check_(const nb::handle &object) {
 		return duckdb::PyUtil::IsInstance(object,
-		                                  py::module_::import_("duckdb.filesystem").attr("ModifiedMemoryFileSystem"));
+		                                  nb::module_::import_("duckdb.filesystem").attr("ModifiedMemoryFileSystem"));
 	}
 };
 
-class AbstractFileSystem : public py::object {
+class AbstractFileSystem : public nb::object {
 public:
-	using py::object::object;
+	using nb::object::object;
 
 public:
-	static bool check_(const py::handle &object) {
+	static bool check_(const nb::handle &object) {
 		// Non-throwing: if fsspec isn't installed, nothing is an AbstractFileSystem. nanobind invokes check_ from
 		// noexcept contexts (argument casters, isinstance), so a thrown import error would std::terminate rather
 		// than propagate. register_filesystem() re-imports fsspec in a throwing context to surface ModuleNotFoundError.
 		try {
-			return duckdb::PyUtil::IsInstance(object, py::module_::import_("fsspec").attr("AbstractFileSystem"));
+			return duckdb::PyUtil::IsInstance(object, nb::module_::import_("fsspec").attr("AbstractFileSystem"));
 		} catch (...) {
 			return false;
 		}
@@ -40,14 +40,14 @@ public:
 
 class PythonFileHandle : public FileHandle {
 public:
-	PythonFileHandle(FileSystem &file_system, const string &path, const py::object &handle, FileOpenFlags flags);
+	PythonFileHandle(FileSystem &file_system, const string &path, const nb::object &handle, FileOpenFlags flags);
 	~PythonFileHandle() override;
 	void Close() override;
 
-	static const py::object &GetHandle(const FileHandle &handle);
+	static const nb::object &GetHandle(const FileHandle &handle);
 
 private:
-	py::object handle;
+	nb::object handle;
 };
 
 class PythonFilesystem : public FileSystem {

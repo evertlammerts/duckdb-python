@@ -55,7 +55,7 @@ ResolvedColumn ResolveColumn(const Expression &expr, const vector<Identifier> &r
 	return inner;
 }
 
-py::object EmitCompare(FilterBackend &backend, ExpressionType op, py::object col, const Value &constant,
+nb::object EmitCompare(FilterBackend &backend, ExpressionType op, nb::object col, const Value &constant,
                        const ArrowType *arrow_type, const string &timezone_config) {
 	if (ValueIsNan(constant)) {
 		return backend.NaNCompare(op, std::move(col));
@@ -66,7 +66,7 @@ py::object EmitCompare(FilterBackend &backend, ExpressionType op, py::object col
 
 } // anonymous namespace
 
-py::object TransformExpression(const Expression &expression, const vector<Identifier> &column_path,
+nb::object TransformExpression(const Expression &expression, const vector<Identifier> &column_path,
                                FilterBackend &backend, const ArrowType *arrow_type, const string &timezone_config) {
 	auto expression_class = expression.GetExpressionClass();
 	auto expression_type = expression.GetExpressionType();
@@ -122,12 +122,12 @@ py::object TransformExpression(const Expression &expression, const vector<Identi
 				}
 			}
 			if (!child) {
-				return py::none();
+				return nb::none();
 			}
 			try {
 				return TransformExpression(*child, column_path, backend, arrow_type, timezone_config);
 			} catch (const NotImplementedException &) {
-				return py::none();
+				return nb::none();
 			}
 		}
 
@@ -135,7 +135,7 @@ py::object TransformExpression(const Expression &expression, const vector<Identi
 		// static pyarrow/polars equivalent. They are not required for correctness (the
 		// engine applies them above the scan), so skip them.
 		if (TableFilterFunctions::IsTableFilterFunction(func_name)) {
-			return py::none();
+			return nb::none();
 		}
 	}
 
@@ -168,11 +168,11 @@ py::object TransformExpression(const Expression &expression, const vector<Identi
 		if (expression_type == ExpressionType::CONJUNCTION_OR || expression_type == ExpressionType::CONJUNCTION_AND) {
 			const bool is_and = expression_type == ExpressionType::CONJUNCTION_AND;
 			auto &conj_expr = expression.Cast<BoundConjunctionExpression>();
-			py::object result = py::none();
+			nb::object result = nb::none();
 			for (idx_t i = 0; i < conj_expr.GetChildren().size(); i++) {
-				py::object child_expression =
+				nb::object child_expression =
 				    TransformExpression(*conj_expr.GetChildren()[i], column_path, backend, arrow_type, timezone_config);
-				if (child_expression.is(py::none())) {
+				if (child_expression.is(nb::none())) {
 					if (is_and) {
 						// A conjunct we can't push can simply be dropped: the remaining AND
 						// terms still form a correct (if weaker) filter, and the engine
@@ -182,9 +182,9 @@ py::object TransformExpression(const Expression &expression, const vector<Identi
 					// An OR branch that can't be translated (e.g. a dynamic filter) would
 					// make the pushed-down predicate stricter than the engine intends —
 					// fall back to no pushdown for the whole disjunction.
-					return py::none();
+					return nb::none();
 				}
-				if (result.is(py::none())) {
+				if (result.is(nb::none())) {
 					result = std::move(child_expression);
 				} else if (is_and) {
 					result = backend.And(std::move(result), std::move(child_expression));
@@ -200,7 +200,7 @@ py::object TransformExpression(const Expression &expression, const vector<Identi
 	                              ExpressionClassToString(expression_class));
 }
 
-py::object TransformFilter(const TableFilter &filter, const vector<Identifier> &column_path, FilterBackend &backend,
+nb::object TransformFilter(const TableFilter &filter, const vector<Identifier> &column_path, FilterBackend &backend,
                            const ArrowType *arrow_type, const string &timezone_config) {
 	switch (filter.filter_type) {
 	case TableFilterType::EXPRESSION_FILTER: {

@@ -26,15 +26,15 @@ public:
 	~DuckDBPyRelation();
 
 public:
-	static void Initialize(py::handle &m);
+	static void Initialize(nb::handle &m);
 
-	py::list Description();
+	nb::list Description();
 
 	void Close();
 
 	std::unique_ptr<DuckDBPyRelation> GetAttribute(const string &name);
 
-	py::str GetAlias();
+	nb::str GetAlias();
 
 	static std::unique_ptr<DuckDBPyRelation> EmptyResult(const shared_ptr<ClientContext> &context,
 	                                                     const vector<LogicalType> &types, vector<string> names);
@@ -42,15 +42,15 @@ public:
 	std::unique_ptr<DuckDBPyRelation> SetAlias(const string &expr);
 
 	std::unique_ptr<DuckDBPyRelation> ProjectFromExpression(const string &expr);
-	std::unique_ptr<DuckDBPyRelation> ProjectFromTypes(const py::object &types);
-	std::unique_ptr<DuckDBPyRelation> Project(const py::args &args, const string &groups = "");
-	std::unique_ptr<DuckDBPyRelation> Filter(const py::object &expr);
+	std::unique_ptr<DuckDBPyRelation> ProjectFromTypes(const nb::object &types);
+	std::unique_ptr<DuckDBPyRelation> Project(const nb::args &args, const string &groups = "");
+	std::unique_ptr<DuckDBPyRelation> Filter(const nb::object &expr);
 	std::unique_ptr<DuckDBPyRelation> FilterFromExpression(const string &expr);
 	std::unique_ptr<DuckDBPyRelation> Limit(int64_t n, int64_t offset = 0);
 	std::unique_ptr<DuckDBPyRelation> Order(const string &expr);
-	std::unique_ptr<DuckDBPyRelation> Sort(const py::args &args);
+	std::unique_ptr<DuckDBPyRelation> Sort(const nb::args &args);
 
-	std::unique_ptr<DuckDBPyRelation> Aggregate(const py::object &expr, const string &groups = "");
+	std::unique_ptr<DuckDBPyRelation> Aggregate(const nb::object &expr, const string &groups = "");
 
 	std::unique_ptr<DuckDBPyRelation> GenericAggregator(const string &function_name, const string &aggregated_columns,
 	                                                    const string &groups = "",
@@ -74,8 +74,8 @@ public:
 	                                        const string &window_spec = "", const string &projected_columns = "");
 	std::unique_ptr<DuckDBPyRelation> BitXor(const string &column, const string &groups = "",
 	                                         const string &window_spec = "", const string &projected_columns = "");
-	std::unique_ptr<DuckDBPyRelation> BitStringAgg(const string &column, const Optional<py::object> &min,
-	                                               const Optional<py::object> &max, const string &groups = "",
+	std::unique_ptr<DuckDBPyRelation> BitStringAgg(const string &column, const Optional<nb::object> &min,
+	                                               const Optional<nb::object> &max, const string &groups = "",
 	                                               const string &window_spec = "",
 	                                               const string &projected_columns = "");
 	std::unique_ptr<DuckDBPyRelation> BoolAnd(const string &column, const string &groups = "",
@@ -116,10 +116,10 @@ public:
 	                                         const string &window_spec = "", const string &projected_columns = "");
 	std::unique_ptr<DuckDBPyRelation> Mode(const string &column, const string &groups = "",
 	                                       const string &window_spec = "", const string &projected_columns = "");
-	std::unique_ptr<DuckDBPyRelation> QuantileCont(const string &column, const py::object &q, const string &groups = "",
+	std::unique_ptr<DuckDBPyRelation> QuantileCont(const string &column, const nb::object &q, const string &groups = "",
 	                                               const string &window_spec = "",
 	                                               const string &projected_columns = "");
-	std::unique_ptr<DuckDBPyRelation> QuantileDisc(const string &column, const py::object &q, const string &groups = "",
+	std::unique_ptr<DuckDBPyRelation> QuantileDisc(const string &column, const nb::object &q, const string &groups = "",
 	                                               const string &window_spec = "",
 	                                               const string &projected_columns = "");
 	std::unique_ptr<DuckDBPyRelation> StdPop(const string &column, const string &groups = "",
@@ -139,7 +139,7 @@ public:
 
 	idx_t Length();
 
-	py::tuple Shape();
+	nb::tuple Shape();
 
 	std::unique_ptr<DuckDBPyRelation> Unique(const string &aggr_columns);
 
@@ -174,19 +174,19 @@ public:
 
 	PandasDataFrame FetchDF(bool date_as_object);
 
-	Optional<py::tuple> FetchOne();
+	Optional<nb::tuple> FetchOne();
 
-	py::list FetchAll();
+	nb::list FetchAll();
 
-	py::list FetchMany(idx_t size);
+	nb::list FetchMany(idx_t size);
 
-	py::dict FetchNumpy();
+	nb::dict FetchNumpy();
 
-	py::dict FetchPyTorch();
+	nb::dict FetchPyTorch();
 
-	py::dict FetchTF();
+	nb::dict FetchTF();
 
-	py::dict FetchNumpyInternal(bool stream = false, idx_t vectors_per_chunk = 1);
+	nb::dict FetchNumpyInternal(bool stream = false, idx_t vectors_per_chunk = 1);
 
 	PandasDataFrame FetchDFChunk(const idx_t vectors_per_chunk = 1, bool date_as_object = false);
 
@@ -196,7 +196,7 @@ public:
 
 	PolarsDataFrame ToPolars(idx_t batch_size, bool lazy);
 
-	py::object ToArrowCapsule(const py::object &requested_schema = py::none());
+	nb::object ToArrowCapsule(const nb::object &requested_schema = nb::none());
 
 	duckdb::pyarrow::RecordBatchReader ToRecordBatch(idx_t batch_size);
 
@@ -206,27 +206,27 @@ public:
 
 	std::unique_ptr<DuckDBPyRelation> Intersect(DuckDBPyRelation *other);
 
-	std::unique_ptr<DuckDBPyRelation> Map(py::callable fun, Optional<py::object> schema);
+	std::unique_ptr<DuckDBPyRelation> Map(nb::callable fun, Optional<nb::object> schema);
 
-	std::unique_ptr<DuckDBPyRelation> Join(DuckDBPyRelation *other, const py::object &condition, const string &type);
+	std::unique_ptr<DuckDBPyRelation> Join(DuckDBPyRelation *other, const nb::object &condition, const string &type);
 	std::unique_ptr<DuckDBPyRelation> Cross(DuckDBPyRelation *other);
 
-	void ToParquet(const string &filename, const py::object &compression = py::none(),
-	               const py::object &field_ids = py::none(), const py::object &row_group_size_bytes = py::none(),
-	               const py::object &row_group_size = py::none(), const py::object &overwrite = py::none(),
-	               const py::object &per_thread_output = py::none(), const py::object &use_tmp_file = py::none(),
-	               const py::object &partition_by = py::none(), const py::object &write_partition_columns = py::none(),
-	               const py::object &append = py::none(), const py::object &filename_pattern = py::none(),
-	               const py::object &file_size_bytes = py::none());
+	void ToParquet(const string &filename, const nb::object &compression = nb::none(),
+	               const nb::object &field_ids = nb::none(), const nb::object &row_group_size_bytes = nb::none(),
+	               const nb::object &row_group_size = nb::none(), const nb::object &overwrite = nb::none(),
+	               const nb::object &per_thread_output = nb::none(), const nb::object &use_tmp_file = nb::none(),
+	               const nb::object &partition_by = nb::none(), const nb::object &write_partition_columns = nb::none(),
+	               const nb::object &append = nb::none(), const nb::object &filename_pattern = nb::none(),
+	               const nb::object &file_size_bytes = nb::none());
 
-	void ToCSV(const string &filename, const py::object &sep = py::none(), const py::object &na_rep = py::none(),
-	           const py::object &header = py::none(), const py::object &quotechar = py::none(),
-	           const py::object &escapechar = py::none(), const py::object &date_format = py::none(),
-	           const py::object &timestamp_format = py::none(), const py::object &quoting = py::none(),
-	           const py::object &encoding = py::none(), const py::object &compression = py::none(),
-	           const py::object &overwrite = py::none(), const py::object &per_thread_output = py::none(),
-	           const py::object &use_tmp_file = py::none(), const py::object &partition_by = py::none(),
-	           const py::object &write_partition_columns = py::none());
+	void ToCSV(const string &filename, const nb::object &sep = nb::none(), const nb::object &na_rep = nb::none(),
+	           const nb::object &header = nb::none(), const nb::object &quotechar = nb::none(),
+	           const nb::object &escapechar = nb::none(), const nb::object &date_format = nb::none(),
+	           const nb::object &timestamp_format = nb::none(), const nb::object &quoting = nb::none(),
+	           const nb::object &encoding = nb::none(), const nb::object &compression = nb::none(),
+	           const nb::object &overwrite = nb::none(), const nb::object &per_thread_output = nb::none(),
+	           const nb::object &use_tmp_file = nb::none(), const nb::object &partition_by = nb::none(),
+	           const nb::object &write_partition_columns = nb::none());
 
 	// should this return a rel with the new view?
 	std::unique_ptr<DuckDBPyRelation> CreateView(const string &view_name, bool replace = true);
@@ -238,23 +238,23 @@ public:
 
 	void InsertInto(const string &table);
 
-	void Insert(const py::object &params = py::list()) const;
-	void Update(const py::object &set, const py::object &where = py::none());
+	void Insert(const nb::object &params = nb::list()) const;
+	void Update(const nb::object &set, const nb::object &where = nb::none());
 
 	void Create(const string &table);
 
-	py::str Type();
-	py::list Columns();
-	py::list ColumnTypes();
+	nb::str Type();
+	nb::list Columns();
+	nb::list ColumnTypes();
 
 	string ToString();
-	void Print(const Optional<py::int_> &max_width, const Optional<py::int_> &max_rows,
-	           const Optional<py::int_> &max_col_width, const Optional<py::str> &null_value,
-	           const py::object &render_mode);
+	void Print(const Optional<nb::int_> &max_width, const Optional<nb::int_> &max_rows,
+	           const Optional<nb::int_> &max_col_width, const Optional<nb::str> &null_value,
+	           const nb::object &render_mode);
 
 	string Explain(ExplainType type, const string &format = "");
 
-	static bool IsRelation(const py::object &object);
+	static bool IsRelation(const nb::object &object);
 
 	bool CanBeRegisteredBy(Connection &con);
 	bool CanBeRegisteredBy(ClientContext &context);
@@ -264,7 +264,7 @@ public:
 
 	bool ContainsColumnByName(const string &name) const;
 
-	void SetConnectionOwner(py::object owner);
+	void SetConnectionOwner(nb::object owner);
 	std::unique_ptr<DuckDBPyRelation> DeriveRelation(shared_ptr<Relation> new_rel);
 	std::unique_ptr<DuckDBPyRelation> DeriveRelation(std::shared_ptr<DuckDBPyResult> result);
 
@@ -292,7 +292,7 @@ private:
 private:
 	//! Prevents GC of the parent DuckDBPyConnection.
 	//! Declared first so it is destroyed last (reverse declaration order).
-	py::object connection_owner;
+	nb::object connection_owner;
 	//! Whether the relation has been executed at least once
 	bool executed;
 	shared_ptr<Relation> rel;

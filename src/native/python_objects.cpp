@@ -17,14 +17,14 @@
 
 namespace duckdb {
 
-PyDictionary::PyDictionary(py::object dict) {
-	keys = py::list(dict.attr("keys")());
-	values = py::list(dict.attr("values")());
-	len = py::len(keys);
+PyDictionary::PyDictionary(nb::object dict) {
+	keys = nb::list(dict.attr("keys")());
+	values = nb::list(dict.attr("values")());
+	len = nb::len(keys);
 	this->dict = std::move(dict);
 }
 
-PyTimeDelta::PyTimeDelta(py::handle &obj) {
+PyTimeDelta::PyTimeDelta(nb::handle &obj) {
 	days = PyTimeDelta::GetDays(obj);
 	seconds = PyTimeDelta::GetSeconds(obj);
 	microseconds = PyTimeDelta::GetMicros(obj);
@@ -44,33 +44,33 @@ interval_t PyTimeDelta::ToInterval() {
 	return result;
 }
 
-int64_t PyTimeDelta::GetDays(py::handle &obj) {
-	// py::object wrap: py::int_() of a bare .attr() accessor is an ambiguous overload on MSVC.
-	return py::cast<int64_t>(py::int_(py::object(obj.attr("days"))));
+int64_t PyTimeDelta::GetDays(nb::handle &obj) {
+	// nb::object wrap: nb::int_() of a bare .attr() accessor is an ambiguous overload on MSVC.
+	return nb::cast<int64_t>(nb::int_(nb::object(obj.attr("days"))));
 }
 
-int64_t PyTimeDelta::GetSeconds(py::handle &obj) {
-	return py::cast<int64_t>(py::int_(py::object(obj.attr("seconds"))));
+int64_t PyTimeDelta::GetSeconds(nb::handle &obj) {
+	return nb::cast<int64_t>(nb::int_(nb::object(obj.attr("seconds"))));
 }
 
-int64_t PyTimeDelta::GetMicros(py::handle &obj) {
-	return py::cast<int64_t>(py::int_(py::object(obj.attr("microseconds"))));
+int64_t PyTimeDelta::GetMicros(nb::handle &obj) {
+	return nb::cast<int64_t>(nb::int_(nb::object(obj.attr("microseconds"))));
 }
 
-PyDecimal::PyDecimal(py::handle &obj) : obj(obj) {
+PyDecimal::PyDecimal(nb::handle &obj) : obj(obj) {
 	auto as_tuple = obj.attr("as_tuple")();
 
-	py::object exponent = as_tuple.attr("exponent");
+	nb::object exponent = as_tuple.attr("exponent");
 	SetExponent(exponent);
 
-	auto sign = py::cast<int8_t>(as_tuple.attr("sign"));
+	auto sign = nb::cast<int8_t>(as_tuple.attr("sign"));
 	signed_value = sign != 0;
 
-	py::object decimal_digits = as_tuple.attr("digits");
-	auto width = py::len(decimal_digits);
+	nb::object decimal_digits = as_tuple.attr("digits");
+	auto width = nb::len(decimal_digits);
 	digits.reserve(width);
 	for (auto digit : decimal_digits) {
-		digits.push_back(py::cast<uint8_t>(digit));
+		digits.push_back(nb::cast<uint8_t>(digit));
 	}
 }
 
@@ -115,9 +115,9 @@ static void ExponentNotRecognized() {
 }
 // LCOV_EXCL_STOP
 
-void PyDecimal::SetExponent(py::handle &exponent) {
-	if (py::isinstance<py::int_>(exponent)) {
-		this->exponent_value = py::cast<int32_t>(exponent);
+void PyDecimal::SetExponent(nb::handle &exponent) {
+	if (nb::isinstance<nb::int_>(exponent)) {
+		this->exponent_value = nb::cast<int32_t>(exponent);
 		if (this->exponent_value >= 0) {
 			exponent_type = PyDecimalExponentType::EXPONENT_POWER;
 			return;
@@ -126,8 +126,8 @@ void PyDecimal::SetExponent(py::handle &exponent) {
 		exponent_type = PyDecimalExponentType::EXPONENT_SCALE;
 		return;
 	}
-	if (py::isinstance<py::str>(exponent)) {
-		string exponent_string = py::cast<std::string>(py::str(exponent));
+	if (nb::isinstance<nb::str>(exponent)) {
+		string exponent_string = nb::cast<std::string>(nb::str(exponent));
 		if (exponent_string == "n") {
 			exponent_type = PyDecimalExponentType::EXPONENT_NAN;
 			return;
@@ -161,8 +161,8 @@ Value PyDecimalCastSwitch(PyDecimal &decimal, uint8_t width, uint8_t scale) {
 }
 
 // Wont fit in a DECIMAL, fall back to DOUBLE
-static Value CastToDouble(py::handle &obj) {
-	string converted = py::cast<std::string>(py::str(obj));
+static Value CastToDouble(nb::handle &obj) {
+	string converted = nb::cast<std::string>(nb::str(obj));
 	string_t decimal_string(converted);
 	double double_val;
 	bool try_cast = TryCast::Operation<string_t, double>(decimal_string, double_val, true);
@@ -210,7 +210,7 @@ Value PyDecimal::ToDuckValue() {
 	}
 }
 
-PyTime::PyTime(py::handle &obj) : obj(obj) {
+PyTime::PyTime(nb::handle &obj) : obj(obj) {
 	hour = PyTime::GetHours(obj);          // NOLINT
 	minute = PyTime::GetMinutes(obj);      // NOLINT
 	second = PyTime::GetSeconds(obj);      // NOLINT
@@ -223,44 +223,44 @@ dtime_t PyTime::ToDuckTime() {
 
 Value PyTime::ToDuckValue() {
 	auto duckdb_time = this->ToDuckTime();
-	if (!py::none().is(this->timezone_obj)) {
+	if (!nb::none().is(this->timezone_obj)) {
 		auto seconds = PyTimezone::GetUTCOffsetSeconds(this->timezone_obj);
 		return Value::TIMETZ(dtime_tz_t(duckdb_time, seconds));
 	}
 	return Value::TIME(duckdb_time);
 }
 
-int32_t PyTime::GetHours(py::handle &obj) {
+int32_t PyTime::GetHours(nb::handle &obj) {
 	return PyDateTime_TIME_GET_HOUR(obj.ptr()); // NOLINT
 }
 
-int32_t PyTime::GetMinutes(py::handle &obj) {
+int32_t PyTime::GetMinutes(nb::handle &obj) {
 	return PyDateTime_TIME_GET_MINUTE(obj.ptr()); // NOLINT
 }
 
-int32_t PyTime::GetSeconds(py::handle &obj) {
+int32_t PyTime::GetSeconds(nb::handle &obj) {
 	return PyDateTime_TIME_GET_SECOND(obj.ptr()); // NOLINT
 }
 
-int32_t PyTime::GetMicros(py::handle &obj) {
+int32_t PyTime::GetMicros(nb::handle &obj) {
 	return PyDateTime_TIME_GET_MICROSECOND(obj.ptr()); // NOLINT
 }
 
-py::object PyTime::GetTZInfo(py::handle &obj) {
+nb::object PyTime::GetTZInfo(nb::handle &obj) {
 	// The object returned is borrowed, there is no reference to steal
-	return py::borrow<py::object>(PyDateTime_TIME_GET_TZINFO(obj.ptr())); // NOLINT
+	return nb::borrow<nb::object>(PyDateTime_TIME_GET_TZINFO(obj.ptr())); // NOLINT
 }
 
-interval_t PyTimezone::GetUTCOffset(py::handle &datetime, py::handle &tzone_obj) {
+interval_t PyTimezone::GetUTCOffset(nb::handle &datetime, nb::handle &tzone_obj) {
 	// The datetime object is provided because the utcoffset could be ambiguous
 	auto res = tzone_obj.attr("utcoffset")(datetime);
 	auto timedelta = PyTimeDelta(res);
 	return timedelta.ToInterval();
 }
 
-int32_t PyTimezone::GetUTCOffsetSeconds(py::handle &tzone_obj) {
+int32_t PyTimezone::GetUTCOffsetSeconds(nb::handle &tzone_obj) {
 	// We should be able to use None here, the tzone_obj of a datetime.time should never be ambiguous
-	auto res = tzone_obj.attr("utcoffset")(py::none());
+	auto res = tzone_obj.attr("utcoffset")(nb::none());
 	auto timedelta = PyTimeDelta(res);
 	if (timedelta.days != 0) {
 		throw InvalidInputException(
@@ -273,7 +273,7 @@ int32_t PyTimezone::GetUTCOffsetSeconds(py::handle &tzone_obj) {
 	return timedelta.seconds;
 }
 
-PyDateTime::PyDateTime(py::handle &obj) : obj(obj) {
+PyDateTime::PyDateTime(nb::handle &obj) : obj(obj) {
 	year = PyDateTime::GetYears(obj);
 	month = PyDateTime::GetMonths(obj);
 	day = PyDateTime::GetDays(obj);
@@ -292,7 +292,7 @@ timestamp_t PyDateTime::ToTimestamp() {
 
 Value PyDateTime::ToDuckValue(const LogicalType &target_type) {
 	auto timestamp = ToTimestamp();
-	if (!py::none().is(tzone_obj)) {
+	if (!nb::none().is(tzone_obj)) {
 		auto utc_offset = PyTimezone::GetUTCOffset(obj, tzone_obj);
 		// Need to subtract the UTC offset, so we invert the interval
 		utc_offset = Interval::Invert(utc_offset);
@@ -323,40 +323,40 @@ dtime_t PyDateTime::ToDuckTime() {
 	return Time::FromTime(hour, minute, second, micros);
 }
 
-int32_t PyDateTime::GetYears(py::handle &obj) {
+int32_t PyDateTime::GetYears(nb::handle &obj) {
 	return PyDateTime_GET_YEAR(obj.ptr()); // NOLINT
 }
 
-int32_t PyDateTime::GetMonths(py::handle &obj) {
+int32_t PyDateTime::GetMonths(nb::handle &obj) {
 	return PyDateTime_GET_MONTH(obj.ptr()); // NOLINT
 }
 
-int32_t PyDateTime::GetDays(py::handle &obj) {
+int32_t PyDateTime::GetDays(nb::handle &obj) {
 	return PyDateTime_GET_DAY(obj.ptr()); // NOLINT
 }
 
-int32_t PyDateTime::GetHours(py::handle &obj) {
+int32_t PyDateTime::GetHours(nb::handle &obj) {
 	return PyDateTime_DATE_GET_HOUR(obj.ptr()); // NOLINT
 }
 
-int32_t PyDateTime::GetMinutes(py::handle &obj) {
+int32_t PyDateTime::GetMinutes(nb::handle &obj) {
 	return PyDateTime_DATE_GET_MINUTE(obj.ptr()); // NOLINT
 }
 
-int32_t PyDateTime::GetSeconds(py::handle &obj) {
+int32_t PyDateTime::GetSeconds(nb::handle &obj) {
 	return PyDateTime_DATE_GET_SECOND(obj.ptr()); // NOLINT
 }
 
-int32_t PyDateTime::GetMicros(py::handle &obj) {
+int32_t PyDateTime::GetMicros(nb::handle &obj) {
 	return PyDateTime_DATE_GET_MICROSECOND(obj.ptr()); // NOLINT
 }
 
-py::object PyDateTime::GetTZInfo(py::handle &obj) {
+nb::object PyDateTime::GetTZInfo(nb::handle &obj) {
 	// The object returned is borrowed, there is no reference to steal
-	return py::borrow<py::object>(PyDateTime_DATE_GET_TZINFO(obj.ptr())); // NOLINT
+	return nb::borrow<nb::object>(PyDateTime_DATE_GET_TZINFO(obj.ptr())); // NOLINT
 }
 
-PyDate::PyDate(py::handle &ele) {
+PyDate::PyDate(nb::handle &ele) {
 	year = PyDateTime::GetYears(ele);
 	month = PyDateTime::GetMonths(ele);
 	day = PyDateTime::GetDays(ele);
@@ -387,7 +387,7 @@ InfinityType GetTimestampInfinityType(timestamp_t &timestamp) {
 	return InfinityType::NONE;
 }
 
-py::object PythonObject::FromStruct(const Value &val, const LogicalType &type,
+nb::object PythonObject::FromStruct(const Value &val, const LogicalType &type,
                                     const ClientProperties &client_properties) {
 	auto &struct_values = StructValue::GetChildren(val);
 
@@ -402,7 +402,7 @@ py::object PythonObject::FromStruct(const Value &val, const LogicalType &type,
 		}
 		return py_tuple.take();
 	} else {
-		py::dict py_struct;
+		nb::dict py_struct;
 		for (idx_t i = 0; i < struct_values.size(); i++) {
 			auto &child_entry = child_types[i];
 			auto &child_name = child_entry.first;
@@ -471,56 +471,56 @@ static bool KeyIsHashable(const LogicalType &type) {
 	}
 }
 
-py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
+nb::object PythonObject::FromValue(const Value &val, const LogicalType &type,
                                    const ClientProperties &client_properties) {
 	auto &import_cache = *DuckDBPyConnection::ImportCache();
 	if (val.IsNull()) {
-		return py::none();
+		return nb::none();
 	}
 	switch (type.id()) {
 	case LogicalTypeId::BOOLEAN:
-		return py::cast(val.GetValue<bool>());
+		return nb::cast(val.GetValue<bool>());
 	case LogicalTypeId::TINYINT:
-		return py::cast(val.GetValue<int8_t>());
+		return nb::cast(val.GetValue<int8_t>());
 	case LogicalTypeId::SMALLINT:
-		return py::cast(val.GetValue<int16_t>());
+		return nb::cast(val.GetValue<int16_t>());
 	case LogicalTypeId::INTEGER:
-		return py::cast(val.GetValue<int32_t>());
+		return nb::cast(val.GetValue<int32_t>());
 	case LogicalTypeId::BIGINT:
-		return py::cast(val.GetValue<int64_t>());
+		return nb::cast(val.GetValue<int64_t>());
 	case LogicalTypeId::UTINYINT:
-		return py::cast(val.GetValue<uint8_t>());
+		return nb::cast(val.GetValue<uint8_t>());
 	case LogicalTypeId::USMALLINT:
-		return py::cast(val.GetValue<uint16_t>());
+		return nb::cast(val.GetValue<uint16_t>());
 	case LogicalTypeId::UINTEGER:
-		return py::cast(val.GetValue<uint32_t>());
+		return nb::cast(val.GetValue<uint32_t>());
 	case LogicalTypeId::UBIGINT:
-		return py::cast(val.GetValue<uint64_t>());
+		return nb::cast(val.GetValue<uint64_t>());
 	case LogicalTypeId::HUGEINT:
-		return py::steal<py::object>(PyLong_FromString(val.GetValue<string>().c_str(), nullptr, 10));
+		return nb::steal<nb::object>(PyLong_FromString(val.GetValue<string>().c_str(), nullptr, 10));
 	case LogicalTypeId::UHUGEINT:
-		return py::steal<py::object>(PyLong_FromString(val.GetValue<string>().c_str(), nullptr, 10));
+		return nb::steal<nb::object>(PyLong_FromString(val.GetValue<string>().c_str(), nullptr, 10));
 	case LogicalTypeId::FLOAT:
-		return py::cast(val.GetValue<float>());
+		return nb::cast(val.GetValue<float>());
 	case LogicalTypeId::DOUBLE:
-		return py::cast(val.GetValue<double>());
+		return nb::cast(val.GetValue<double>());
 	case LogicalTypeId::DECIMAL: {
 		return import_cache.decimal.Decimal()(val.ToString());
 	}
 	case LogicalTypeId::ENUM:
-		return py::cast(EnumType::GetValue(val));
+		return nb::cast(EnumType::GetValue(val));
 	case LogicalTypeId::UNION: {
 		return PythonObject::FromValue(UnionValue::GetValue(val), UnionValue::GetType(val), client_properties);
 	}
 	case LogicalTypeId::VARCHAR:
-		return py::cast(StringValue::Get(val));
+		return nb::cast(StringValue::Get(val));
 	case LogicalTypeId::BLOB:
 	case LogicalTypeId::GEOMETRY: {
 		auto &blob = StringValue::Get(val);
-		return py::bytes(blob.data(), blob.size());
+		return nb::bytes(blob.data(), blob.size());
 	}
 	case LogicalTypeId::BIT:
-		return py::cast(Bit::ToString(StringValue::Get(val)));
+		return nb::cast(Bit::ToString(StringValue::Get(val)));
 	case LogicalTypeId::TIMESTAMP:
 	case LogicalTypeId::TIMESTAMP_MS:
 	case LogicalTypeId::TIMESTAMP_NS:
@@ -532,10 +532,10 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 
 		InfinityType infinity = GetTimestampInfinityType(timestamp);
 		if (infinity == InfinityType::POSITIVE) {
-			return py::borrow<py::object>(import_cache.datetime.datetime.max());
+			return nb::borrow<nb::object>(import_cache.datetime.datetime.max());
 		}
 		if (infinity == InfinityType::NEGATIVE) {
-			return py::borrow<py::object>(import_cache.datetime.datetime.min());
+			return nb::borrow<nb::object>(import_cache.datetime.datetime.min());
 		}
 
 		if (type.id() == LogicalTypeId::TIMESTAMP_MS) {
@@ -552,17 +552,17 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 		Timestamp::Convert(timestamp, date, time);
 		Date::Convert(date, year, month, day);
 		Time::Convert(time, hour, min, sec, micros);
-		py::object py_timestamp;
+		nb::object py_timestamp;
 		try {
 			auto python_conversion = PyDateTime_FromDateAndTime(year, month, day, hour, min, sec, micros);
 			if (!python_conversion) {
-				throw py::python_error();
+				throw nb::python_error();
 			}
-			py_timestamp = py::steal<py::object>(python_conversion);
-		} catch (py::python_error &e) {
+			py_timestamp = nb::steal<nb::object>(python_conversion);
+		} catch (nb::python_error &e) {
 			// Failed to convert, fall back to str
 			auto fallback_str = val.ToString();
-			return py::str(fallback_str.c_str(), fallback_str.size());
+			return nb::str(fallback_str.c_str(), fallback_str.size());
 		}
 		if (type.id() == LogicalTypeId::TIMESTAMP_TZ || type.id() == LogicalTypeId::TIMESTAMP_TZ_NS) {
 			// We have to add the timezone info
@@ -580,20 +580,20 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 		auto time = time_tz.time();
 		auto offset = time_tz.offset();
 		duckdb::Time::Convert(time, hour, min, sec, microsec);
-		py::object py_time;
+		nb::object py_time;
 		try {
 			auto python_conversion = PyTime_FromTime(hour, min, sec, microsec);
 			if (!python_conversion) {
-				throw py::python_error();
+				throw nb::python_error();
 			}
-			py_time = py::steal<py::object>(python_conversion);
-		} catch (py::python_error &e) {
+			py_time = nb::steal<nb::object>(python_conversion);
+		} catch (nb::python_error &e) {
 			// Failed to convert, fall back to str
 			auto fallback_str = val.ToString();
-			return py::str(fallback_str.c_str(), fallback_str.size());
+			return nb::str(fallback_str.c_str(), fallback_str.size());
 		}
 		// We have to add the timezone info
-		auto timedelta = import_cache.datetime.timedelta()(py::arg("seconds") = offset);
+		auto timedelta = import_cache.datetime.timedelta()(nb::arg("seconds") = offset);
 		auto timezone_offset = import_cache.datetime.timezone()(timedelta);
 		auto tmp_datetime = import_cache.datetime.datetime.min();
 		auto tmp_datetime_with_tz = import_cache.datetime.datetime.combine()(tmp_datetime, py_time, timezone_offset);
@@ -614,13 +614,13 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 		try {
 			auto pytime = PyTime_FromTime(hour, min, sec, usec);
 			if (!pytime) {
-				throw py::python_error();
+				throw nb::python_error();
 			}
-			return py::steal<py::object>(pytime);
-		} catch (py::python_error &e) {
+			return nb::steal<nb::object>(pytime);
+		} catch (nb::python_error &e) {
 			{
 				auto fallback = val.ToString();
-				return py::str(fallback.c_str(), fallback.size());
+				return nb::str(fallback.c_str(), fallback.size());
 			}
 		}
 	}
@@ -630,28 +630,28 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 		int32_t year, month, day;
 		if (!Value::IsFinite(date)) {
 			if (date == date_t::infinity()) {
-				return py::borrow<py::object>(import_cache.datetime.date.max());
+				return nb::borrow<nb::object>(import_cache.datetime.date.max());
 			}
-			return py::borrow<py::object>(import_cache.datetime.date.min());
+			return nb::borrow<nb::object>(import_cache.datetime.date.min());
 		}
 		duckdb::Date::Convert(date, year, month, day);
 		try {
 			auto pydate = PyDate_FromDate(year, month, day);
 			if (!pydate) {
-				throw py::python_error();
+				throw nb::python_error();
 			}
-			return py::steal<py::object>(pydate);
-		} catch (py::python_error &e) {
+			return nb::steal<nb::object>(pydate);
+		} catch (nb::python_error &e) {
 			{
 				auto fallback = val.ToString();
-				return py::str(fallback.c_str(), fallback.size());
+				return nb::str(fallback.c_str(), fallback.size());
 			}
 		}
 	}
 	case LogicalTypeId::LIST: {
 		auto &list_values = ListValue::GetChildren(val);
 
-		py::list list;
+		nb::list list;
 		for (auto &list_elem : list_values) {
 			list.append(FromValue(list_elem, ListType::GetChildType(type), client_properties));
 		}
@@ -681,7 +681,7 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 		auto &key_type = MapType::KeyType(type);
 		auto &val_type = MapType::ValueType(type);
 
-		py::dict py_struct;
+		nb::dict py_struct;
 		if (KeyIsHashable(key_type)) {
 			for (auto &list_elem : list_values) {
 				auto &struct_children = StructValue::GetChildren(list_elem);
@@ -690,8 +690,8 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 				py_struct[std::move(key)] = std::move(value);
 			}
 		} else {
-			py::list keys;
-			py::list values;
+			nb::list keys;
+			nb::list values;
 			for (auto &list_elem : list_values) {
 				auto &struct_children = StructValue::GetChildren(list_elem);
 				keys.append(PythonObject::FromValue(struct_children[0], key_type, client_properties));
@@ -712,13 +712,13 @@ py::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 	case LogicalTypeId::BIGNUM: {
 		auto bignum_value = val.GetValueUnsafe<bignum_t>();
 		auto bignum_str = Bignum::BignumToVarchar(bignum_value);
-		return py::str(bignum_str.c_str(), bignum_str.size());
+		return nb::str(bignum_str.c_str(), bignum_str.size());
 	}
 	case LogicalTypeId::INTERVAL: {
 		auto interval_value = val.GetValueUnsafe<interval_t>();
 		int64_t days = duckdb::Interval::DAYS_PER_MONTH * interval_value.months + interval_value.days;
-		return import_cache.datetime.timedelta()(py::arg("days") = days,
-		                                         py::arg("microseconds") = interval_value.micros);
+		return import_cache.datetime.timedelta()(nb::arg("days") = days,
+		                                         nb::arg("microseconds") = interval_value.micros);
 	}
 	case LogicalTypeId::VARIANT: {
 		Vector tmp(val, count_t(1));

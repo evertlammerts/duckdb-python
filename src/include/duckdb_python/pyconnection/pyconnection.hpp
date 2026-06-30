@@ -34,7 +34,7 @@ struct DuckDBPyRelation;
 class RegisteredArrow : public RegisteredObject {
 
 public:
-	RegisteredArrow(unique_ptr<PythonTableArrowArrayStreamFactory> arrow_factory_p, py::object obj_p)
+	RegisteredArrow(unique_ptr<PythonTableArrowArrayStreamFactory> arrow_factory_p, nb::object obj_p)
 	    : RegisteredObject(std::move(obj_p)), arrow_factory(std::move(arrow_factory_p)) {};
 	unique_ptr<PythonTableArrowArrayStreamFactory> arrow_factory;
 };
@@ -172,7 +172,7 @@ public:
 	public:
 		explicit ConnectionLockGuard(DuckDBPyConnection &conn) : lock_(conn.py_connection_lock, std::defer_lock) {
 			D_ASSERT(duckdb::PyUtil::GilCheck());
-			py::gil_scoped_release release;
+			nb::gil_scoped_release release;
 			lock_.lock();
 		}
 
@@ -201,13 +201,13 @@ public:
 	~DuckDBPyConnection();
 
 public:
-	static void Initialize(py::handle &m);
+	static void Initialize(nb::handle &m);
 	static void Cleanup();
 
 	std::shared_ptr<DuckDBPyConnection> Enter();
 
-	static void Exit(DuckDBPyConnection &self, const py::object &exc_type, const py::object &exc,
-	                 const py::object &traceback);
+	static void Exit(DuckDBPyConnection &self, const nb::object &exc_type, const nb::object &exc,
+	                 const nb::object &traceback);
 
 	static bool DetectAndGetEnvironment();
 	static bool IsJupyter();
@@ -217,84 +217,84 @@ public:
 	static PythonImportCache *ImportCache();
 	static bool IsInteractive();
 
-	std::unique_ptr<DuckDBPyRelation> ReadCSV(const py::object &name, py::kwargs &kwargs);
+	std::unique_ptr<DuckDBPyRelation> ReadCSV(const nb::object &name, nb::kwargs &kwargs);
 
-	py::list ExtractStatements(const string &query);
+	nb::list ExtractStatements(const string &query);
 
 	std::unique_ptr<DuckDBPyRelation> ReadJSON(
-	    const py::object &name, const Optional<py::object> &columns = py::none(),
-	    const Optional<py::object> &sample_size = py::none(), const Optional<py::object> &maximum_depth = py::none(),
-	    const Optional<py::str> &records = py::none(), const Optional<py::str> &format = py::none(),
-	    const Optional<py::object> &date_format = py::none(), const Optional<py::object> &timestamp_format = py::none(),
-	    const Optional<py::object> &compression = py::none(),
-	    const Optional<py::object> &maximum_object_size = py::none(),
-	    const Optional<py::object> &ignore_errors = py::none(),
-	    const Optional<py::object> &convert_strings_to_integers = py::none(),
-	    const Optional<py::object> &field_appearance_threshold = py::none(),
-	    const Optional<py::object> &map_inference_threshold = py::none(),
-	    const Optional<py::object> &maximum_sample_files = py::none(),
-	    const Optional<py::object> &filename = py::none(), const Optional<py::object> &hive_partitioning = py::none(),
-	    const Optional<py::object> &union_by_name = py::none(), const Optional<py::object> &hive_types = py::none(),
-	    const Optional<py::object> &hive_types_autocast = py::none());
+	    const nb::object &name, const Optional<nb::object> &columns = nb::none(),
+	    const Optional<nb::object> &sample_size = nb::none(), const Optional<nb::object> &maximum_depth = nb::none(),
+	    const Optional<nb::str> &records = nb::none(), const Optional<nb::str> &format = nb::none(),
+	    const Optional<nb::object> &date_format = nb::none(), const Optional<nb::object> &timestamp_format = nb::none(),
+	    const Optional<nb::object> &compression = nb::none(),
+	    const Optional<nb::object> &maximum_object_size = nb::none(),
+	    const Optional<nb::object> &ignore_errors = nb::none(),
+	    const Optional<nb::object> &convert_strings_to_integers = nb::none(),
+	    const Optional<nb::object> &field_appearance_threshold = nb::none(),
+	    const Optional<nb::object> &map_inference_threshold = nb::none(),
+	    const Optional<nb::object> &maximum_sample_files = nb::none(),
+	    const Optional<nb::object> &filename = nb::none(), const Optional<nb::object> &hive_partitioning = nb::none(),
+	    const Optional<nb::object> &union_by_name = nb::none(), const Optional<nb::object> &hive_types = nb::none(),
+	    const Optional<nb::object> &hive_types_autocast = nb::none());
 
 	std::unique_ptr<DuckDBPyType> MapType(const DuckDBPyType &key_type, const DuckDBPyType &value_type);
-	std::unique_ptr<DuckDBPyType> StructType(const py::object &fields);
+	std::unique_ptr<DuckDBPyType> StructType(const nb::object &fields);
 	std::unique_ptr<DuckDBPyType> ListType(const DuckDBPyType &type);
 	std::unique_ptr<DuckDBPyType> ArrayType(const DuckDBPyType &type, idx_t size);
-	std::unique_ptr<DuckDBPyType> UnionType(const py::object &members);
-	std::unique_ptr<DuckDBPyType> EnumType(const string &name, const DuckDBPyType &type, const py::list &values_p);
+	std::unique_ptr<DuckDBPyType> UnionType(const nb::object &members);
+	std::unique_ptr<DuckDBPyType> EnumType(const string &name, const DuckDBPyType &type, const nb::list &values_p);
 	std::unique_ptr<DuckDBPyType> DecimalType(int width, int scale);
 	std::unique_ptr<DuckDBPyType> StringType(const string &collation = string());
 	std::unique_ptr<DuckDBPyType> Type(const string &type_str);
 
 	std::shared_ptr<DuckDBPyConnection>
-	RegisterScalarUDF(const string &name, const py::callable &udf, const py::object &arguments = py::none(),
-	                  const py::object &return_type = py::none(), PythonUDFType type = PythonUDFType::NATIVE,
+	RegisterScalarUDF(const string &name, const nb::callable &udf, const nb::object &arguments = nb::none(),
+	                  const nb::object &return_type = nb::none(), PythonUDFType type = PythonUDFType::NATIVE,
 	                  FunctionNullHandling null_handling = FunctionNullHandling::DEFAULT_NULL_HANDLING,
 	                  PythonExceptionHandling exception_handling = PythonExceptionHandling::FORWARD_ERROR,
 	                  bool side_effects = false);
 
 	std::shared_ptr<DuckDBPyConnection> UnregisterUDF(const string &name);
 
-	std::shared_ptr<DuckDBPyConnection> ExecuteMany(const py::object &query, py::object params = py::list());
+	std::shared_ptr<DuckDBPyConnection> ExecuteMany(const nb::object &query, nb::object params = nb::list());
 
 	void ExecuteImmediately(vector<unique_ptr<SQLStatement>> statements);
 	unique_ptr<PreparedStatement> PrepareQuery(unique_ptr<SQLStatement> statement);
-	unique_ptr<QueryResult> ExecuteInternal(PreparedStatement &prep, py::object params = py::list());
+	unique_ptr<QueryResult> ExecuteInternal(PreparedStatement &prep, nb::object params = nb::list());
 	unique_ptr<QueryResult> PrepareAndExecuteInternal(unique_ptr<SQLStatement> statement,
-	                                                  py::object params = py::list());
+	                                                  nb::object params = nb::list());
 
-	std::shared_ptr<DuckDBPyConnection> Execute(const py::object &query, py::object params = py::list());
+	std::shared_ptr<DuckDBPyConnection> Execute(const nb::object &query, nb::object params = nb::list());
 	std::shared_ptr<DuckDBPyConnection> ExecuteFromString(const string &query);
 
 	std::shared_ptr<DuckDBPyConnection> Append(const string &name, const PandasDataFrame &value, bool by_name);
 
-	std::shared_ptr<DuckDBPyConnection> RegisterPythonObject(const string &name, const py::object &python_object);
+	std::shared_ptr<DuckDBPyConnection> RegisterPythonObject(const string &name, const nb::object &python_object);
 
 	void InstallExtension(const string &extension, bool force_install = false,
-	                      const py::object &repository = py::none(), const py::object &repository_url = py::none(),
-	                      const py::object &version = py::none());
+	                      const nb::object &repository = nb::none(), const nb::object &repository_url = nb::none(),
+	                      const nb::object &version = nb::none());
 
 	void LoadExtension(const string &extension);
 
-	std::unique_ptr<DuckDBPyRelation> RunQuery(const py::object &query, string alias = "",
-	                                           py::object params = py::list());
+	std::unique_ptr<DuckDBPyRelation> RunQuery(const nb::object &query, string alias = "",
+	                                           nb::object params = nb::list());
 
 	std::unique_ptr<DuckDBPyRelation> Table(const string &tname);
 
-	std::unique_ptr<DuckDBPyRelation> Values(const py::args &params);
+	std::unique_ptr<DuckDBPyRelation> Values(const nb::args &params);
 
 	std::unique_ptr<DuckDBPyRelation> View(const string &vname);
 
-	std::unique_ptr<DuckDBPyRelation> TableFunction(const string &fname, py::object params = py::list());
+	std::unique_ptr<DuckDBPyRelation> TableFunction(const string &fname, nb::object params = nb::list());
 
 	std::unique_ptr<DuckDBPyRelation> FromDF(const PandasDataFrame &value);
 
-	std::unique_ptr<DuckDBPyRelation> FromParquet(const py::object &path_or_buffer, bool binary_as_string,
+	std::unique_ptr<DuckDBPyRelation> FromParquet(const nb::object &path_or_buffer, bool binary_as_string,
 	                                              bool file_row_number, bool filename, bool hive_partitioning,
-	                                              bool union_by_name, const py::object &compression = py::none());
+	                                              bool union_by_name, const nb::object &compression = nb::none());
 
-	std::unique_ptr<DuckDBPyRelation> FromArrow(py::object &arrow_object);
+	std::unique_ptr<DuckDBPyRelation> FromArrow(nb::object &arrow_object);
 
 	unordered_set<string> GetTableNames(const string &query, bool qualified);
 
@@ -319,72 +319,72 @@ public:
 	// cursor() is stupid
 	std::shared_ptr<DuckDBPyConnection> Cursor();
 
-	Optional<py::list> GetDescription();
+	Optional<nb::list> GetDescription();
 
 	int GetRowcount();
 
 	// these should be functions on the result but well
-	Optional<py::tuple> FetchOne();
+	Optional<nb::tuple> FetchOne();
 
-	py::list FetchMany(idx_t size);
+	nb::list FetchMany(idx_t size);
 
-	py::list FetchAll();
+	nb::list FetchAll();
 
-	py::dict FetchNumpy();
+	nb::dict FetchNumpy();
 	PandasDataFrame FetchDF(bool date_as_object);
 	PandasDataFrame FetchDFChunk(const idx_t vectors_per_chunk = 1, bool date_as_object = false);
 
 	duckdb::pyarrow::Table FetchArrow(idx_t rows_per_batch);
 	PolarsDataFrame FetchPolars(idx_t rows_per_batch, bool lazy);
 
-	py::dict FetchPyTorch();
+	nb::dict FetchPyTorch();
 
-	py::dict FetchTF();
+	nb::dict FetchTF();
 
 	duckdb::pyarrow::RecordBatchReader FetchRecordBatchReader(const idx_t rows_per_batch);
 
-	static std::shared_ptr<DuckDBPyConnection> Connect(const py::object &database, bool read_only,
-	                                                   const py::dict &config);
+	static std::shared_ptr<DuckDBPyConnection> Connect(const nb::object &database, bool read_only,
+	                                                   const nb::dict &config);
 
-	static vector<Value> TransformPythonParamList(ClientContext &context, const py::handle &params);
+	static vector<Value> TransformPythonParamList(ClientContext &context, const nb::handle &params);
 	static identifier_map_t<BoundParameterData> TransformPythonParamDict(ClientContext &context,
-	                                                                     const py::dict &params);
+	                                                                     const nb::dict &params);
 
-	// Takes py::object (not AbstractFileSystem) so the binding can accept None: nanobind's .none() does not bypass a
-	// py::object-subclass wrapper's check_(). The body imports fsspec and validates the instance explicitly.
-	void RegisterFilesystem(py::object filesystem);
-	void UnregisterFilesystem(const py::str &name);
-	py::list ListFilesystems();
+	// Takes nb::object (not AbstractFileSystem) so the binding can accept None: nanobind's .none() does not bypass a
+	// nb::object-subclass wrapper's check_(). The body imports fsspec and validates the instance explicitly.
+	void RegisterFilesystem(nb::object filesystem);
+	void UnregisterFilesystem(const nb::str &name);
+	nb::list ListFilesystems();
 	bool FileSystemIsRegistered(const string &name);
 
 	// Profiling info
-	py::str GetProfilingInformation(const string &format = "json");
+	nb::str GetProfilingInformation(const string &format = "json");
 	void EnableProfiling();
 	void DisableProfiling();
 
-	static bool IsPandasDataframe(const py::object &object);
-	static PyArrowObjectType GetArrowType(const py::handle &obj);
-	static bool IsAcceptedArrowObject(const py::object &object);
-	static NumpyObjectType IsAcceptedNumpyObject(const py::object &object);
+	static bool IsPandasDataframe(const nb::object &object);
+	static PyArrowObjectType GetArrowType(const nb::handle &obj);
+	static bool IsAcceptedArrowObject(const nb::object &object);
+	static NumpyObjectType IsAcceptedNumpyObject(const nb::object &object);
 
 	static unique_ptr<QueryResult> CompletePendingQuery(PendingQueryResult &pending_query);
 
 private:
 	std::unique_ptr<DuckDBPyRelation> CreateRelation(shared_ptr<Relation> rel);
 	std::unique_ptr<DuckDBPyRelation> CreateRelation(std::shared_ptr<DuckDBPyResult> result);
-	PathLike GetPathLike(const py::object &object);
-	ScalarFunction CreateScalarUDF(const string &name, const py::callable &udf, const py::object &parameters,
-	                               const py::object &return_type, bool vectorized, FunctionNullHandling null_handling,
+	PathLike GetPathLike(const nb::object &object);
+	ScalarFunction CreateScalarUDF(const string &name, const nb::callable &udf, const nb::object &parameters,
+	                               const nb::object &return_type, bool vectorized, FunctionNullHandling null_handling,
 	                               PythonExceptionHandling exception_handling, bool side_effects);
-	vector<unique_ptr<SQLStatement>> GetStatements(const py::object &query);
+	vector<unique_ptr<SQLStatement>> GetStatements(const nb::object &query);
 
 	static void DetectEnvironment();
 };
 
 template <typename T>
 static bool ModuleIsLoaded() {
-	auto dict = py::cast<py::dict>(py::module_::import_("sys").attr("modules"));
-	return dict.contains(py::str(T::Name));
+	auto dict = nb::cast<nb::dict>(nb::module_::import_("sys").attr("modules"));
+	return dict.contains(nb::str(T::Name));
 }
 
 } // namespace duckdb

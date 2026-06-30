@@ -10,7 +10,7 @@ namespace duckdb {
 struct DuckDBPyConnection;
 
 struct PathLike {
-	static PathLike Create(const py::object &object, DuckDBPyConnection &connection);
+	static PathLike Create(const nb::object &object, DuckDBPyConnection &connection);
 	// The file(s) extracted from object
 	vector<string> files;
 	shared_ptr<ExternalDependency> dependency;

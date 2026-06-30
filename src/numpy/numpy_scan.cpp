@@ -184,7 +184,7 @@ void NumpyScan::ScanObjectColumn(ClientContext &context, PyObject **col, idx_t s
                                  Vector &out) {
 	// numpy_col is a sequential list of objects, that make up one "column" (Vector)
 	out.SetVectorType(VectorType::FLAT_VECTOR);
-	py::gil_scoped_acquire gil; // We're creating python objects here, so we need the GIL
+	nb::gil_scoped_acquire gil; // We're creating python objects here, so we need the GIL
 
 	if (stride == sizeof(PyObject *)) {
 		auto src_ptr = col + offset;
@@ -363,7 +363,7 @@ void NumpyScan::Scan(ClientContext &context, PandasColumnBindData &bind_data, id
 		// Get the data pointer and the validity mask of the result vector
 		auto tgt_ptr = FlatVector::GetDataMutable<string_t>(out);
 		auto &out_mask = FlatVector::ValidityMutable(out);
-		std::unique_ptr<py::gil_scoped_acquire> gil;
+		std::unique_ptr<nb::gil_scoped_acquire> gil;
 		auto &import_cache = *DuckDBPyConnection::ImportCache();
 
 		// Loop over every row of the arrays contents
@@ -373,14 +373,14 @@ void NumpyScan::Scan(ClientContext &context, PandasColumnBindData &bind_data, id
 
 			// Get the pointer to the object
 			PyObject *val = src_ptr[source_idx];
-			if (!py::isinstance<py::str>(val)) {
+			if (!nb::isinstance<nb::str>(val)) {
 				if (val == Py_None) {
 					out_mask.SetInvalid(row);
 					continue;
 				}
 				if (import_cache.pandas.NaT(false)) {
 					// If pandas is imported, check if this is pandas.NaT
-					py::handle value(val);
+					nb::handle value(val);
 					if (value.is(import_cache.pandas.NaT())) {
 						out_mask.SetInvalid(row);
 						continue;
@@ -388,28 +388,28 @@ void NumpyScan::Scan(ClientContext &context, PandasColumnBindData &bind_data, id
 				}
 				if (import_cache.pandas.NA(false)) {
 					// If pandas is imported, check if this is pandas.NA
-					py::handle value(val);
+					nb::handle value(val);
 					if (value.is(import_cache.pandas.NA())) {
 						out_mask.SetInvalid(row);
 						continue;
 					}
 				}
-				if (py::isinstance<py::float_>(val) && std::isnan(PyFloat_AsDouble(val))) {
+				if (nb::isinstance<nb::float_>(val) && std::isnan(PyFloat_AsDouble(val))) {
 					out_mask.SetInvalid(row);
 					continue;
 				}
-				if (!py::isinstance<py::str>(val)) {
+				if (!nb::isinstance<nb::str>(val)) {
 					if (!gil) {
-						gil = std::make_unique<py::gil_scoped_acquire>();
+						gil = std::make_unique<nb::gil_scoped_acquire>();
 					}
-					bind_data.object_str_val.Push(std::move(py::str(val)));
+					bind_data.object_str_val.Push(std::move(nb::str(val)));
 					val = reinterpret_cast<PyObject *>(bind_data.object_str_val.LastAddedObject().ptr());
 				}
 			}
 			// Python 3 string representation:
 			// https://github.com/python/cpython/blob/3a8fdb28794b2f19f6c8464378fb8b46bce1f5f4/Include/cpython/unicodeobject.h#L79
-			py::handle val_handle(val);
-			if (!py::isinstance<py::str>(val_handle)) {
+			nb::handle val_handle(val);
+			if (!nb::isinstance<nb::str>(val_handle)) {
 				out_mask.SetInvalid(row);
 				continue;
 			}

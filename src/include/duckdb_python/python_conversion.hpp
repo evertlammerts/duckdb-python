@@ -43,13 +43,13 @@ enum class PythonObjectType {
 	Value
 };
 
-PythonObjectType GetPythonObjectType(py::handle &ele);
+PythonObjectType GetPythonObjectType(nb::handle &ele);
 
-LogicalType SniffPythonIntegerType(py::handle ele);
+LogicalType SniffPythonIntegerType(nb::handle ele);
 bool DictionaryHasMapFormat(const PyDictionary &dict);
-void TransformPythonObject(optional_ptr<ClientContext> context, py::handle ele, Vector &vector, idx_t result_offset,
+void TransformPythonObject(optional_ptr<ClientContext> context, nb::handle ele, Vector &vector, idx_t result_offset,
                            bool nan_as_null = true);
-Value TransformPythonValue(optional_ptr<ClientContext> context, py::handle ele,
+Value TransformPythonValue(optional_ptr<ClientContext> context, nb::handle ele,
                            const LogicalType &target_type = LogicalType::UNKNOWN, bool nan_as_null = true);
 
 } // namespace duckdb

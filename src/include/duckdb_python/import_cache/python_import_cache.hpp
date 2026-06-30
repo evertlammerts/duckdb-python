@@ -40,10 +40,10 @@ public:
 	CollectionsCacheItem collections;
 
 public:
-	py::handle AddCache(py::object item);
+	nb::handle AddCache(nb::object item);
 
 private:
-	vector<py::object> owned_objects;
+	vector<nb::object> owned_objects;
 };
 
 } // namespace duckdb

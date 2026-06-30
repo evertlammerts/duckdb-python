@@ -13,9 +13,9 @@ void JupyterProgressBarDisplay::Initialize() {
 	auto float_progress_attr = import_cache.ipywidgets.FloatProgress();
 	D_ASSERT(float_progress_attr.ptr() != nullptr);
 	// Initialize the progress bar
-	py::dict style;
+	nb::dict style;
 	style["bar_color"] = "black";
-	progress_bar = float_progress_attr((py::arg("min") = 0, py::arg("max") = 100, py::arg("style") = style));
+	progress_bar = float_progress_attr((nb::arg("min") = 0, nb::arg("max") = 100, nb::arg("style") = style));
 
 	progress_bar.attr("layout").attr("width") = "auto";
 
@@ -30,12 +30,12 @@ JupyterProgressBarDisplay::JupyterProgressBarDisplay() : ProgressBarDisplay() {
 }
 
 void JupyterProgressBarDisplay::Update(double progress) {
-	py::gil_scoped_acquire gil;
+	nb::gil_scoped_acquire gil;
 	if (progress_bar.ptr() == nullptr) {
 		// First print, we first need to initialize the display
 		Initialize();
 	}
-	progress_bar.attr("value") = py::cast(progress);
+	progress_bar.attr("value") = nb::cast(progress);
 }
 
 void JupyterProgressBarDisplay::Finish() {

@@ -13,10 +13,10 @@ public:
 	static unique_ptr<TableRef> Replace(ClientContext &context, ReplacementScanInput &input,
 	                                    optional_ptr<ReplacementScanData> data);
 	//! Try to perform a replacement, returns NULL on error
-	static unique_ptr<TableRef> TryReplacementObject(const py::object &entry, const string &name,
+	static unique_ptr<TableRef> TryReplacementObject(const nb::object &entry, const string &name,
 	                                                 ClientContext &context, bool relation = false);
 	//! Perform a replacement or throw if it failed
-	static unique_ptr<TableRef> ReplacementObject(const py::object &entry, const string &name, ClientContext &context,
+	static unique_ptr<TableRef> ReplacementObject(const nb::object &entry, const string &name, ClientContext &context,
 	                                              bool relation = false);
 };
 

@@ -27,23 +27,23 @@ public:
 	}
 
 public:
-	LogicalType GetListType(py::object &ele, bool &can_convert);
+	LogicalType GetListType(nb::object &ele, bool &can_convert);
 	LogicalType DictToMap(const PyDictionary &dict, bool &can_convert);
 	LogicalType DictToStruct(const PyDictionary &dict, bool &can_convert);
-	LogicalType GetItemType(py::object ele, bool &can_convert);
-	bool Analyze(py::object column);
+	LogicalType GetItemType(nb::object ele, bool &can_convert);
+	bool Analyze(nb::object column);
 	LogicalType AnalyzedType() {
 		return analyzed_type;
 	}
 
 private:
-	LogicalType InnerAnalyze(py::object column, bool &can_convert, idx_t increment);
+	LogicalType InnerAnalyze(nb::object column, bool &can_convert, idx_t increment);
 	uint64_t GetSampleIncrement(idx_t rows);
 
 private:
 	uint64_t sample_size;
 	//! Holds the gil to allow python object creation/destruction
-	py::gil_scoped_acquire gil;
+	nb::gil_scoped_acquire gil;
 	//! The resulting analyzed type
 	LogicalType analyzed_type;
 	ClientContext &context;

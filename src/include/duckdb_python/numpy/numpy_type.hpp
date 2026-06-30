@@ -64,7 +64,7 @@ enum class NumpyObjectType : uint8_t {
 	DICT,      //! dict of numpy arrays of shape (n,)
 };
 
-NumpyType ConvertNumpyType(const py::handle &col_type);
+NumpyType ConvertNumpyType(const nb::handle &col_type);
 LogicalType NumpyToLogicalType(const NumpyType &col_type);
 
 } // namespace duckdb

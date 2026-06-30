@@ -48,10 +48,10 @@ int64_t ConvertTimestampTZValue(int64_t base_value, ArrowDateTimeType datetime_t
 // Build a pyarrow.dataset scalar matching the given DuckDB Value and (optionally) ArrowType.
 // The ArrowType is needed for timestamp unit / decimal precision / blob-view disambiguation; the
 // DuckDB Value alone is not sufficient.
-py::object MakePyArrowScalar(const Value &constant, const string &timezone_config, const ArrowType *arrow_type) {
+nb::object MakePyArrowScalar(const Value &constant, const string &timezone_config, const ArrowType *arrow_type) {
 	auto &import_cache = *DuckDBPyConnection::ImportCache();
 	auto scalar = import_cache.pyarrow.scalar();
-	py::handle dataset_scalar = import_cache.pyarrow.dataset().attr("scalar");
+	nb::handle dataset_scalar = import_cache.pyarrow.dataset().attr("scalar");
 
 	switch (constant.type().id()) {
 	case LogicalTypeId::BOOLEAN:
@@ -65,11 +65,11 @@ py::object MakePyArrowScalar(const Value &constant, const string &timezone_confi
 	case LogicalTypeId::BIGINT:
 		return dataset_scalar(constant.GetValue<int64_t>());
 	case LogicalTypeId::DATE: {
-		py::handle date_type = import_cache.pyarrow.date32();
+		nb::handle date_type = import_cache.pyarrow.date32();
 		return dataset_scalar(scalar(constant.GetValue<int32_t>(), date_type()));
 	}
 	case LogicalTypeId::TIME: {
-		py::handle date_type = import_cache.pyarrow.time64();
+		nb::handle date_type = import_cache.pyarrow.time64();
 		return dataset_scalar(scalar(constant.GetValue<int64_t>(), date_type("us")));
 	}
 	case LogicalTypeId::TIME_NS: {
@@ -81,23 +81,23 @@ py::object MakePyArrowScalar(const Value &constant, const string &timezone_confi
 		// GetValueUnsafe<dtime_ns_t>() which reads `value_.time_ns` from the union
 		// directly. The `dtime_ns_t.micros` field name is a misnomer — it actually holds
 		// nanoseconds (see arrow_conversion.cpp:432).
-		py::handle date_type = import_cache.pyarrow.time64();
+		nb::handle date_type = import_cache.pyarrow.time64();
 		return dataset_scalar(scalar(constant.GetValueUnsafe<dtime_ns_t>().micros, date_type("ns")));
 	}
 	case LogicalTypeId::TIMESTAMP: {
-		py::handle date_type = import_cache.pyarrow.timestamp();
+		nb::handle date_type = import_cache.pyarrow.timestamp();
 		return dataset_scalar(scalar(constant.GetValue<int64_t>(), date_type("us")));
 	}
 	case LogicalTypeId::TIMESTAMP_MS: {
-		py::handle date_type = import_cache.pyarrow.timestamp();
+		nb::handle date_type = import_cache.pyarrow.timestamp();
 		return dataset_scalar(scalar(constant.GetValue<int64_t>(), date_type("ms")));
 	}
 	case LogicalTypeId::TIMESTAMP_NS: {
-		py::handle date_type = import_cache.pyarrow.timestamp();
+		nb::handle date_type = import_cache.pyarrow.timestamp();
 		return dataset_scalar(scalar(constant.GetValue<int64_t>(), date_type("ns")));
 	}
 	case LogicalTypeId::TIMESTAMP_SEC: {
-		py::handle date_type = import_cache.pyarrow.timestamp();
+		nb::handle date_type = import_cache.pyarrow.timestamp();
 		return dataset_scalar(scalar(constant.GetValue<int64_t>(), date_type("s")));
 	}
 	case LogicalTypeId::TIMESTAMP_TZ: {
@@ -109,28 +109,28 @@ py::object MakePyArrowScalar(const Value &constant, const string &timezone_confi
 		auto arrow_datetime_type = datetime_info.GetDateTimeType();
 		auto time_unit_string = ConvertTimestampUnit(arrow_datetime_type);
 		auto converted_value = ConvertTimestampTZValue(base_value, arrow_datetime_type);
-		py::handle date_type = import_cache.pyarrow.timestamp();
-		return dataset_scalar(scalar(converted_value, date_type(time_unit_string, py::arg("tz") = timezone_config)));
+		nb::handle date_type = import_cache.pyarrow.timestamp();
+		return dataset_scalar(scalar(converted_value, date_type(time_unit_string, nb::arg("tz") = timezone_config)));
 	}
 	case LogicalTypeId::TIMESTAMP_TZ_NS: {
-		py::handle date_type = import_cache.pyarrow.timestamp();
+		nb::handle date_type = import_cache.pyarrow.timestamp();
 		auto converted_value = Timestamp::GetEpochNanoSeconds(timestamp_t(constant.GetValue<int64_t>()));
-		return dataset_scalar(scalar(converted_value, date_type("ns", py::arg("tz") = timezone_config)));
+		return dataset_scalar(scalar(converted_value, date_type("ns", nb::arg("tz") = timezone_config)));
 	}
 	case LogicalTypeId::UTINYINT: {
-		py::handle integer_type = import_cache.pyarrow.uint8();
+		nb::handle integer_type = import_cache.pyarrow.uint8();
 		return dataset_scalar(scalar(constant.GetValue<uint8_t>(), integer_type()));
 	}
 	case LogicalTypeId::USMALLINT: {
-		py::handle integer_type = import_cache.pyarrow.uint16();
+		nb::handle integer_type = import_cache.pyarrow.uint16();
 		return dataset_scalar(scalar(constant.GetValue<uint16_t>(), integer_type()));
 	}
 	case LogicalTypeId::UINTEGER: {
-		py::handle integer_type = import_cache.pyarrow.uint32();
+		nb::handle integer_type = import_cache.pyarrow.uint32();
 		return dataset_scalar(scalar(constant.GetValue<uint32_t>(), integer_type()));
 	}
 	case LogicalTypeId::UBIGINT: {
-		py::handle integer_type = import_cache.pyarrow.uint64();
+		nb::handle integer_type = import_cache.pyarrow.uint64();
 		return dataset_scalar(scalar(constant.GetValue<uint64_t>(), integer_type()));
 	}
 	case LogicalTypeId::FLOAT:
@@ -141,22 +141,22 @@ py::object MakePyArrowScalar(const Value &constant, const string &timezone_confi
 		return dataset_scalar(constant.ToString());
 	case LogicalTypeId::BLOB: {
 		if (arrow_type && arrow_type->GetTypeInfo<ArrowStringInfo>().GetSizeType() == ArrowVariableSizeType::VIEW) {
-			py::handle binary_view_type = import_cache.pyarrow.binary_view();
+			nb::handle binary_view_type = import_cache.pyarrow.binary_view();
 			{
 				auto blob = constant.GetValueUnsafe<string>();
-				return dataset_scalar(scalar(py::bytes(blob.data(), blob.size()), binary_view_type()));
+				return dataset_scalar(scalar(nb::bytes(blob.data(), blob.size()), binary_view_type()));
 			}
 		}
 		{
 			auto blob = constant.GetValueUnsafe<string>();
-			return dataset_scalar(py::bytes(blob.data(), blob.size()));
+			return dataset_scalar(nb::bytes(blob.data(), blob.size()));
 		}
 	}
 	case LogicalTypeId::DECIMAL: {
 		if (!arrow_type) {
 			throw NotImplementedException("Cannot push down DECIMAL filter without an arrow type");
 		}
-		py::handle decimal_type;
+		nb::handle decimal_type;
 		auto &decimal_info = arrow_type->GetTypeInfo<ArrowDecimalInfo>();
 		auto bit_width = decimal_info.GetBitWidth();
 		switch (bit_width) {
@@ -178,7 +178,7 @@ py::object MakePyArrowScalar(const Value &constant, const string &timezone_confi
 		constant.type().GetDecimalProperties(width, scale);
 		auto val = import_cache.decimal.Decimal()(constant.ToString());
 		return dataset_scalar(
-		    scalar(std::move(val), decimal_type(py::arg("precision") = width, py::arg("scale") = scale)));
+		    scalar(std::move(val), decimal_type(nb::arg("precision") = width, nb::arg("scale") = scale)));
 	}
 	default:
 		throw NotImplementedException("Unimplemented type \"%s\" for Arrow Filter Pushdown",
@@ -193,18 +193,18 @@ struct PyArrowBackend : public FilterBackend {
 		dataset_scalar = import_cache.pyarrow.dataset().attr("scalar");
 	}
 
-	py::object MakeColumnRef(const vector<Identifier> &path) override {
+	nb::object MakeColumnRef(const vector<Identifier> &path) override {
 		vector<string> str_path;
 		std::transform(path.begin(), path.end(), std::back_inserter(str_path),
 		               [](const Identifier &segment) { return segment.GetIdentifierName(); });
-		return field_factory(py::tuple(py::cast(str_path)));
+		return field_factory(nb::tuple(nb::cast(str_path)));
 	}
 
-	py::object MakeScalar(const Value &v, const ArrowType *arrow_type, const string &timezone_config) override {
+	nb::object MakeScalar(const Value &v, const ArrowType *arrow_type, const string &timezone_config) override {
 		return MakePyArrowScalar(v, timezone_config, arrow_type);
 	}
 
-	py::object Compare(ExpressionType op, py::object col, py::object scalar) override {
+	nb::object Compare(ExpressionType op, nb::object col, nb::object scalar) override {
 		switch (op) {
 		case ExpressionType::COMPARE_EQUAL:
 			return col.attr("__eq__")(scalar);
@@ -224,7 +224,7 @@ struct PyArrowBackend : public FilterBackend {
 		}
 	}
 
-	py::object NaNCompare(ExpressionType op, py::object col) override {
+	nb::object NaNCompare(ExpressionType op, nb::object col) override {
 		switch (op) {
 		case ExpressionType::COMPARE_EQUAL:
 		case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
@@ -244,49 +244,49 @@ struct PyArrowBackend : public FilterBackend {
 		}
 	}
 
-	py::object IsNull(py::object col) override {
+	nb::object IsNull(nb::object col) override {
 		return col.attr("is_null")();
 	}
 
-	py::object IsNotNull(py::object col) override {
+	nb::object IsNotNull(nb::object col) override {
 		return col.attr("is_valid")();
 	}
 
-	py::object IsIn(py::object col, const vector<Value> &values, const LogicalType &col_logical_type,
+	nb::object IsIn(nb::object col, const vector<Value> &values, const LogicalType &col_logical_type,
 	                const string &timezone_config) override {
 		// PyArrow accepts a plain Python list of Python-typed scalars; type
 		// coercion happens inside the scanner. We don't need the column type.
 		(void)col_logical_type;
 		(void)timezone_config;
-		py::list py_values;
+		nb::list py_values;
 		for (auto &val : values) {
 			py_values.append(PythonObject::FromValue(val, val.type(), client_properties));
 		}
 		return col.attr("isin")(std::move(py_values));
 	}
 
-	py::object And(py::object a, py::object b) override {
+	nb::object And(nb::object a, nb::object b) override {
 		return a.attr("__and__")(b);
 	}
 
-	py::object Or(py::object a, py::object b) override {
+	nb::object Or(nb::object a, nb::object b) override {
 		return a.attr("__or__")(b);
 	}
 
 private:
 	const ClientProperties &client_properties;
-	py::object field_factory;
-	py::object dataset_scalar;
+	nb::object field_factory;
+	nb::object dataset_scalar;
 };
 
 } // anonymous namespace
 
-py::object PyArrowFilterPushdown::TransformFilter(TableFilterSet &filter_collection,
+nb::object PyArrowFilterPushdown::TransformFilter(TableFilterSet &filter_collection,
                                                   unordered_map<idx_t, string> &columns,
                                                   unordered_map<idx_t, idx_t> filter_to_col,
                                                   const ClientProperties &config, const ArrowTableSchema &arrow_table) {
 	PyArrowBackend backend(config);
-	py::object expression = py::none();
+	nb::object expression = nb::none();
 	for (auto &entry : filter_collection) {
 		auto column_idx = entry.GetIndex();
 		auto &column_name = columns[column_idx];
@@ -294,12 +294,12 @@ py::object PyArrowFilterPushdown::TransformFilter(TableFilterSet &filter_collect
 
 		vector<Identifier> column_path = {Identifier(column_name)};
 		auto &arrow_type = arrow_table.GetColumns().at(filter_to_col.at(column_idx));
-		py::object child_expression = duckdb::TransformFilter(entry.Filter(), std::move(column_path), backend,
+		nb::object child_expression = duckdb::TransformFilter(entry.Filter(), std::move(column_path), backend,
 		                                                      arrow_type.get(), config.time_zone);
-		if (child_expression.is(py::none())) {
+		if (child_expression.is(nb::none())) {
 			continue;
 		}
-		if (expression.is(py::none())) {
+		if (expression.is(nb::none())) {
 			expression = std::move(child_expression);
 		} else {
 			expression = expression.attr("__and__")(child_expression);

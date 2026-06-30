@@ -9,7 +9,7 @@ static std::unique_ptr<DuckDBPyType> MakeType(LogicalType type) {
 	return make_uniq<DuckDBPyType>(std::move(type));
 }
 
-static void DefineBaseTypes(py::handle &m) {
+static void DefineBaseTypes(nb::handle &m) {
 	m.attr("SQLNULL") = MakeType(LogicalType::SQLNULL);
 	m.attr("BOOLEAN") = MakeType(LogicalType::BOOLEAN);
 	m.attr("TINYINT") = MakeType(LogicalType::TINYINT);
@@ -46,7 +46,7 @@ static void DefineBaseTypes(py::handle &m) {
 	m.attr("VARIANT") = MakeType(LogicalType::VARIANT());
 }
 
-void DuckDBPyTyping::Initialize(py::module_ &parent) {
+void DuckDBPyTyping::Initialize(nb::module_ &parent) {
 	auto m = parent.def_submodule("_sqltypes", "This module contains classes and methods related to typing");
 	DuckDBPyType::Initialize(m);
 

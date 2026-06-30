@@ -9,7 +9,7 @@ namespace duckdb {
 // PythonImportCacheItem (SUPER CLASS)
 //===--------------------------------------------------------------------===//
 
-py::handle PythonImportCacheItem::operator()(bool load) {
+nb::handle PythonImportCacheItem::operator()(bool load) {
 	if (IsLoaded()) {
 		return object;
 	}
@@ -31,16 +31,16 @@ inline bool PythonImportCacheItem::IsLoaded() const {
 	return object.ptr() != nullptr;
 }
 
-py::handle PythonImportCacheItem::AddCache(PythonImportCache &cache, py::object object) {
+nb::handle PythonImportCacheItem::AddCache(PythonImportCache &cache, nb::object object) {
 	return cache.AddCache(std::move(object));
 }
 
 void PythonImportCacheItem::LoadModule(PythonImportCache &cache) {
 	try {
 		duckdb::PyUtil::GilAssert();
-		object = AddCache(cache, std::move(py::module_::import_(name.c_str())));
+		object = AddCache(cache, std::move(nb::module_::import_(name.c_str())));
 		load_succeeded = true;
-	} catch (py::python_error &e) {
+	} catch (nb::python_error &e) {
 		if (IsRequired()) {
 			throw InvalidInputException(
 			    "Required module '%s' failed to import, due to the following Python exception:\n%s", name, e.what());
@@ -50,15 +50,15 @@ void PythonImportCacheItem::LoadModule(PythonImportCache &cache) {
 	}
 }
 
-void PythonImportCacheItem::LoadAttribute(PythonImportCache &cache, py::handle source) {
-	if (py::hasattr(source, name.c_str())) {
+void PythonImportCacheItem::LoadAttribute(PythonImportCache &cache, nb::handle source) {
+	if (nb::hasattr(source, name.c_str())) {
 		object = AddCache(cache, std::move(source.attr(name.c_str())));
 	} else {
 		object = nullptr;
 	}
 }
 
-py::handle PythonImportCacheItem::Load(PythonImportCache &cache, py::handle source, bool load) {
+nb::handle PythonImportCacheItem::Load(PythonImportCache &cache, nb::handle source, bool load) {
 	if (IsLoaded()) {
 		return object;
 	}
@@ -80,13 +80,13 @@ py::handle PythonImportCacheItem::Load(PythonImportCache &cache, py::handle sour
 
 PythonImportCache::~PythonImportCache() {
 	try {
-		py::gil_scoped_acquire acquire;
+		nb::gil_scoped_acquire acquire;
 		owned_objects.clear();
 	} catch (...) { // NOLINT
 	}
 }
 
-py::handle PythonImportCache::AddCache(py::object item) {
+nb::handle PythonImportCache::AddCache(nb::object item) {
 	auto object_ptr = item.ptr();
 	owned_objects.push_back(std::move(item));
 	return object_ptr;

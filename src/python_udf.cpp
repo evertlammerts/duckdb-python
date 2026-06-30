@@ -24,19 +24,19 @@ namespace duckdb {
 //! Format a caught Python error as "TypeName: message" (e.g. "AttributeError: error"), matching pybind11's
 //! error_already_set::what(). nanobind's python_error::what() returns the full multi-line traceback (including
 //! interpreter/pytest frames), which is far too noisy to embed verbatim in the DuckDB error message.
-static string FormatUDFPythonError(py::python_error &error) {
-	auto type_name = py::cast<std::string>(py::str(py::object(error.type().attr("__name__"))));
-	auto message = py::cast<std::string>(py::str(error.value()));
+static string FormatUDFPythonError(nb::python_error &error) {
+	auto type_name = nb::cast<std::string>(nb::str(nb::object(error.type().attr("__name__"))));
+	auto message = nb::cast<std::string>(nb::str(error.value()));
 	return type_name + ": " + message;
 }
 
-static py::list ConvertToSingleBatch(vector<LogicalType> &types, vector<string> &names, DataChunk &input,
+static nb::list ConvertToSingleBatch(vector<LogicalType> &types, vector<string> &names, DataChunk &input,
                                      ClientProperties &options, ClientContext &context) {
 	ArrowSchema schema;
 	ArrowConverter::ToArrowSchema(&schema, types, names, options);
 	auto pyarrow_schema = pyarrow::ToPyArrowSchema(schema);
 
-	py::list single_batch;
+	nb::list single_batch;
 	ArrowAppender appender(types, STANDARD_VECTOR_SIZE, options,
 	                       ArrowTypeExtensionData::GetExtensionTypes(context, types));
 	appender.Append(input, 0, input.size(), input.size());
@@ -45,7 +45,7 @@ static py::list ConvertToSingleBatch(vector<LogicalType> &types, vector<string> 
 	return single_batch;
 }
 
-static py::object ConvertDataChunkToPyArrowTable(DataChunk &input, ClientProperties &options, ClientContext &context) {
+static nb::object ConvertDataChunkToPyArrowTable(DataChunk &input, ClientProperties &options, ClientContext &context) {
 	auto types = input.GetTypes();
 	vector<string> names;
 	names.reserve(types.size());
@@ -78,11 +78,11 @@ void AreExtensionsRegistered(const LogicalType &arrow_type, const LogicalType &d
 		}
 	}
 }
-static void ConvertArrowTableToVector(const py::object &table, Vector &out, ClientContext &context, idx_t count) {
+static void ConvertArrowTableToVector(const nb::object &table, Vector &out, ClientContext &context, idx_t count) {
 	// Create the stream factory from the Table object
 	auto ptr = table.ptr();
 	D_ASSERT(duckdb::PyUtil::GilCheck());
-	py::gil_scoped_release gil;
+	nb::gil_scoped_release gil;
 
 	auto stream_factory =
 	    make_uniq<PythonTableArrowArrayStreamFactory>(ptr, context.GetClientProperties(), PyArrowObjectType::Table);
@@ -180,12 +180,12 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 	// Through the capture of the lambda, we have access to the function pointer
 	// We just need to make sure that it doesn't get garbage collected
 	scalar_function_t func = [=](DataChunk &input, ExpressionState &state, Vector &result) -> void {
-		py::gil_scoped_acquire gil;
+		nb::gil_scoped_acquire gil;
 
 		const bool default_null_handling = null_handling == FunctionNullHandling::DEFAULT_NULL_HANDLING;
 
 		// owning references
-		py::object python_object;
+		nb::object python_object;
 		// Convert the input datachunk to pyarrow
 		//		ClientProperties options;
 
@@ -225,8 +225,8 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 		auto pyarrow_table = ConvertDataChunkToPyArrowTable(input, options, state.GetContext());
 		// pyarrow Table.columns is a list; PyObject_CallObject below needs a real tuple. nanobind's accessor->tuple
 		// only reinterprets (borrows), so convert explicitly via the tuple(handle) ctor (PySequence_Tuple).
-		py::object columns_obj = pyarrow_table.attr("columns");
-		py::tuple column_list(columns_obj);
+		nb::object columns_obj = pyarrow_table.attr("columns");
+		nb::tuple column_list(columns_obj);
 
 		auto count = input.size();
 
@@ -236,31 +236,31 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 		if (ret == nullptr && PyErr_Occurred()) {
 			exception_occurred = true;
 			if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
-				auto exception = py::python_error();
+				auto exception = nb::python_error();
 				throw InvalidInputException("Python exception occurred while executing the UDF: %s",
 				                            FormatUDFPythonError(exception));
 			} else if (exception_handling == PythonExceptionHandling::RETURN_NULL) {
 				PyErr_Clear();
-				python_object = py::module_::import_("pyarrow").attr("nulls")(count);
+				python_object = nb::module_::import_("pyarrow").attr("nulls")(count);
 			} else {
 				throw NotImplementedException("Exception handling type not implemented");
 			}
 		} else {
-			python_object = py::steal<py::object>(ret);
+			python_object = nb::steal<nb::object>(ret);
 		}
-		if (!duckdb::PyUtil::IsInstance(python_object, py::module_::import_("pyarrow").attr("lib").attr("Table"))) {
+		if (!duckdb::PyUtil::IsInstance(python_object, nb::module_::import_("pyarrow").attr("lib").attr("Table"))) {
 			// Try to convert into a table
-			py::list single_array;
-			single_array.append(py::none());
-			py::list single_name;
-			single_name.append(py::none());
+			nb::list single_array;
+			single_array.append(nb::none());
+			nb::list single_name;
+			single_name.append(nb::none());
 
 			single_array[0] = python_object;
 			single_name[0] = "c0";
 			try {
-				python_object = py::module_::import_("pyarrow").attr("lib").attr("Table").attr("from_arrays")(
-				    single_array, py::arg("names") = single_name);
-			} catch (py::python_error &) {
+				python_object = nb::module_::import_("pyarrow").attr("lib").attr("Table").attr("from_arrays")(
+				    single_array, nb::arg("names") = single_name);
+			} catch (nb::python_error &) {
 				throw InvalidInputException("Could not convert the result into an Arrow Table");
 			}
 		}
@@ -323,13 +323,13 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 	// Through the capture of the lambda, we have access to the function pointer
 	// We just need to make sure that it doesn't get garbage collected
 	scalar_function_t func = [=](DataChunk &input, ExpressionState &state, Vector &result) -> void { // NOLINT
-		py::gil_scoped_acquire gil;
+		nb::gil_scoped_acquire gil;
 
 		const bool default_null_handling = null_handling == FunctionNullHandling::DEFAULT_NULL_HANDLING;
 
 		for (idx_t row = 0; row < input.size(); row++) {
 
-			py::object ret;
+			nb::object ret;
 			if (input.ColumnCount() > 0) {
 				duckdb::PyUtil::TupleBuilder parameter_builder(input.ColumnCount());
 				bool contains_null = false;
@@ -350,15 +350,15 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 				}
 				// Call the function
 				auto bundled_parameters = parameter_builder.take();
-				ret = py::steal<py::object>(PyObject_CallObject(function, bundled_parameters.ptr()));
+				ret = nb::steal<nb::object>(PyObject_CallObject(function, bundled_parameters.ptr()));
 			} else {
-				ret = py::steal<py::object>(PyObject_CallObject(function, nullptr));
+				ret = nb::steal<nb::object>(PyObject_CallObject(function, nullptr));
 			}
 
 			if (!ret || ret.is_none()) {
 				if (PyErr_Occurred()) {
 					if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
-						auto exception = py::python_error();
+						auto exception = nb::python_error();
 						throw InvalidInputException("Python exception occurred while executing the UDF: %s",
 						                            FormatUDFPythonError(exception));
 					}
@@ -404,11 +404,11 @@ struct ParameterKind {
 	}
 };
 
-static bool NumpyDeprecatesAccessToCore(const py::tuple &numpy_version) {
+static bool NumpyDeprecatesAccessToCore(const nb::tuple &numpy_version) {
 	if (numpy_version.empty()) {
 		return false;
 	}
-	if (py::cast<std::string>(py::str(py::object(numpy_version[0]))) == string("2")) {
+	if (nb::cast<std::string>(nb::str(nb::object(numpy_version[0]))) == string("2")) {
 		//! Starting with numpy version 2.0.0 the use of 'core' is deprecated.
 		return true;
 	}
@@ -439,11 +439,11 @@ public:
 		}
 	}
 
-	void OverrideReturnType(const py::object &type) {
+	void OverrideReturnType(const nb::object &type) {
 		// None means "infer the return type" -- leave return_type untouched. Otherwise convert here: a
 		// const DuckDBPyType& parameter can't model None, so the binding passes the object through unconverted
 		// (matching how the Expression refactor handled None-accepting params).
-		if (py::none().is(type)) {
+		if (nb::none().is(type)) {
 			return;
 		}
 		std::unique_ptr<DuckDBPyType> converted;
@@ -453,15 +453,15 @@ public:
 		return_type = converted->Type();
 	}
 
-	void OverrideParameters(const py::object &parameters_p) {
-		if (py::none().is(parameters_p)) {
+	void OverrideParameters(const nb::object &parameters_p) {
+		if (nb::none().is(parameters_p)) {
 			return;
 		}
-		if (!py::isinstance<py::list>(parameters_p)) {
+		if (!nb::isinstance<nb::list>(parameters_p)) {
 			throw InvalidInputException("Either leave 'parameters' empty, or provide a list of DuckDBPyType objects");
 		}
 
-		auto params = py::list(parameters_p);
+		auto params = nb::list(parameters_p);
 		if (params.size() != param_count) {
 			throw InvalidInputException("%d types provided, but the provided function takes %d parameters",
 			                            params.size(), param_count);
@@ -475,49 +475,49 @@ public:
 		idx_t i = 0;
 		for (auto param : params) {
 			std::unique_ptr<DuckDBPyType> type;
-			if (!DuckDBPyType::TryConvert(py::borrow<py::object>(param), type)) {
+			if (!DuckDBPyType::TryConvert(nb::borrow<nb::object>(param), type)) {
 				throw InvalidInputException("Could not convert a provided parameter to a DuckDBPyType");
 			}
 			parameters[i++] = type->Type();
 		}
 	}
 
-	py::object GetSignature(const py::object &udf) {
+	nb::object GetSignature(const nb::object &udf) {
 		const int32_t PYTHON_3_10_HEX = 0x030a00f0;
 		auto python_version = PY_VERSION_HEX;
 
-		auto signature_func = py::module_::import_("inspect").attr("signature");
+		auto signature_func = nb::module_::import_("inspect").attr("signature");
 		if (python_version >= PYTHON_3_10_HEX) {
-			return signature_func(udf, py::arg("eval_str") = true);
+			return signature_func(udf, nb::arg("eval_str") = true);
 		} else {
 			return signature_func(udf);
 		}
 	}
 
-	void AnalyzeSignature(const py::object &udf) {
+	void AnalyzeSignature(const nb::object &udf) {
 		auto signature = GetSignature(udf);
-		py::object sig_params = signature.attr("parameters");
+		nb::object sig_params = signature.attr("parameters");
 		auto return_annotation = signature.attr("return_annotation");
-		auto empty = py::module_::import_("inspect").attr("Signature").attr("empty");
-		if (!py::none().is(return_annotation) && !empty.is(return_annotation)) {
+		auto empty = nb::module_::import_("inspect").attr("Signature").attr("empty");
+		if (!nb::none().is(return_annotation) && !empty.is(return_annotation)) {
 			std::unique_ptr<DuckDBPyType> pytype;
-			if (DuckDBPyType::TryConvert(py::borrow<py::object>(return_annotation), pytype)) {
+			if (DuckDBPyType::TryConvert(nb::borrow<nb::object>(return_annotation), pytype)) {
 				return_type = pytype->Type();
 			}
 		}
-		param_count = py::len(sig_params);
+		param_count = nb::len(sig_params);
 		parameters.reserve(param_count);
 		// inspect.Signature.parameters is a mappingproxy, not a dict; materialize a real dict (nanobind's
-		// cast<py::dict> would reject the proxy, unlike pybind11's converting py::dict).
-		py::dict params;
+		// cast<nb::dict> would reject the proxy, unlike pybind11's converting nb::dict).
+		nb::dict params;
 		params.update(sig_params);
 		for (auto item : params) {
 			auto value = item.second;
 			std::unique_ptr<DuckDBPyType> pytype;
-			if (DuckDBPyType::TryConvert(py::borrow<py::object>(value.attr("annotation")), pytype)) {
+			if (DuckDBPyType::TryConvert(nb::borrow<nb::object>(value.attr("annotation")), pytype)) {
 				parameters.push_back(pytype->Type());
 			} else {
-				std::string kind = py::cast<std::string>(value.attr("kind").attr("name"));
+				std::string kind = nb::cast<std::string>(value.attr("kind").attr("name"));
 				auto parameter_kind = ParameterKind::FromString(kind);
 				if (parameter_kind == ParameterKind::Type::VAR_POSITIONAL) {
 					varargs = LogicalType::ANY;
@@ -527,21 +527,21 @@ public:
 		}
 	}
 
-	ScalarFunction GetFunction(const py::callable &udf, PythonExceptionHandling exception_handling, bool side_effects,
+	ScalarFunction GetFunction(const nb::callable &udf, PythonExceptionHandling exception_handling, bool side_effects,
 	                           const ClientProperties &client_properties) {
 
 		// Import this module, because importing this from a non-main thread causes a segfault
 
 		auto &import_cache = *DuckDBPyConnection::ImportCache();
-		py::handle core;
+		nb::handle core;
 		auto numpy = import_cache.numpy();
 		if (!numpy) {
 			throw InvalidInputException("'numpy' is required for this operation, but it wasn't installed");
 		}
-		// numpy.__version__ is a string; pybind11's cast<py::tuple> converted it to a tuple of characters
-		// (PySequence_Tuple). nanobind's cast<py::tuple> would reject a non-tuple, so convert explicitly.
-		py::object numpy_version_str = numpy.attr("__version__");
-		auto numpy_version = py::tuple(numpy_version_str);
+		// numpy.__version__ is a string; pybind11's cast<nb::tuple> converted it to a tuple of characters
+		// (PySequence_Tuple). nanobind's cast<nb::tuple> would reject a non-tuple, so convert explicitly.
+		nb::object numpy_version_str = numpy.attr("__version__");
+		auto numpy_version = nb::tuple(numpy_version_str);
 		if (NumpyDeprecatesAccessToCore(numpy_version)) {
 			core = numpy.attr("_core");
 		} else {
@@ -565,8 +565,8 @@ public:
 
 } // namespace
 
-ScalarFunction DuckDBPyConnection::CreateScalarUDF(const string &name, const py::callable &udf,
-                                                   const py::object &parameters, const py::object &return_type,
+ScalarFunction DuckDBPyConnection::CreateScalarUDF(const string &name, const nb::callable &udf,
+                                                   const nb::object &parameters, const nb::object &return_type,
                                                    bool vectorized, FunctionNullHandling null_handling,
                                                    PythonExceptionHandling exception_handling, bool side_effects) {
 	PythonUDFData data(name, vectorized, null_handling);

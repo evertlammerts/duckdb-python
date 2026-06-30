@@ -18,7 +18,7 @@ namespace duckdb {
 
 struct PythonImporter {
 public:
-	static py::handle Import(stack<reference<PythonImportCacheItem>> &hierarchy, bool load = true);
+	static nb::handle Import(stack<reference<PythonImportCacheItem>> &hierarchy, bool load = true);
 };
 
 } // namespace duckdb

@@ -57,26 +57,26 @@ static Value EmptyMapValue() {
 	return Value::MAP(ListType::GetChildType(map_type), vector<Value>());
 }
 
-vector<Identifier> TransformStructKeys(py::handle keys, idx_t size, const LogicalType &type = LogicalType::UNKNOWN) {
+vector<Identifier> TransformStructKeys(nb::handle keys, idx_t size, const LogicalType &type = LogicalType::UNKNOWN) {
 	vector<Identifier> res;
 	res.reserve(size);
 	for (idx_t i = 0; i < size; i++) {
 		// Stringify via str() so non-string keys (e.g. the integer keys of a hashable-key MAP, which DuckDB
 		// produces as a plain {1: 10} dict) are accepted -- nanobind's nb::cast<std::string> rejects non-str.
-		res.emplace_back(Identifier(py::cast<std::string>(py::str(keys.attr("__getitem__")(i)))));
+		res.emplace_back(Identifier(nb::cast<std::string>(nb::str(keys.attr("__getitem__")(i)))));
 	}
 	return res;
 }
 
-static bool IsValidMapComponent(const py::handle &component) {
+static bool IsValidMapComponent(const nb::handle &component) {
 	// The component is either NULL
-	if (py::none().is(component)) {
+	if (nb::none().is(component)) {
 		return true;
 	}
-	if (!py::hasattr(component, "__getitem__")) {
+	if (!nb::hasattr(component, "__getitem__")) {
 		return false;
 	}
-	if (!py::hasattr(component, "__len__")) {
+	if (!nb::hasattr(component, "__len__")) {
 		return false;
 	}
 	return true;
@@ -88,8 +88,8 @@ bool DictionaryHasMapFormat(const PyDictionary &dict) {
 	}
 
 	//{ 'key': [ .. keys .. ], 'value': [ .. values .. ]}
-	auto keys_key = py::str("key");
-	auto values_key = py::str("value");
+	auto keys_key = nb::str("key");
+	auto values_key = nb::str("value");
 	auto keys = dict[keys_key];
 	auto values = dict[values_key];
 	if (!keys || !values) {
@@ -104,13 +104,13 @@ bool DictionaryHasMapFormat(const PyDictionary &dict) {
 	}
 
 	// If either of the components is NULL, return early
-	if (py::none().is(keys) || py::none().is(values)) {
+	if (nb::none().is(keys) || nb::none().is(values)) {
 		return true;
 	}
 
 	// Verify that both the keys and values are of the same length
-	auto size = py::len(keys);
-	if (size != py::len(values)) {
+	auto size = nb::len(keys);
+	if (size != nb::len(values)) {
 		return false;
 	}
 	return true;
@@ -152,12 +152,12 @@ Value TransformStructFormatDictionaryToMap(optional_ptr<ClientContext> context, 
 		throw InvalidInputException("Please provide a valid target type for transform from Python to Value");
 	}
 
-	if (py::none().is(dict.keys) || py::none().is(dict.values)) {
+	if (nb::none().is(dict.keys) || nb::none().is(dict.values)) {
 		return Value(LogicalType::MAP(LogicalTypeId::SQLNULL, LogicalTypeId::SQLNULL));
 	}
 
-	auto size = py::len(dict.keys);
-	D_ASSERT(size == py::len(dict.values));
+	auto size = nb::len(dict.keys);
+	D_ASSERT(size == nb::len(dict.values));
 
 	auto key_target = MapType::KeyType(target_type);
 	auto value_target = MapType::ValueType(target_type);
@@ -202,13 +202,13 @@ Value TransformDictionaryToMap(optional_ptr<ClientContext> context, const PyDict
 	auto keys = dict.values.attr("__getitem__")(0);
 	auto values = dict.values.attr("__getitem__")(1);
 
-	if (py::none().is(keys) || py::none().is(values)) {
+	if (nb::none().is(keys) || nb::none().is(values)) {
 		// Either 'key' or 'value' is None, return early with a NULL value
 		return Value(LogicalType::MAP(LogicalTypeId::SQLNULL, LogicalTypeId::SQLNULL));
 	}
 
-	auto key_size = py::len(keys);
-	D_ASSERT(key_size == py::len(values));
+	auto key_size = nb::len(keys);
+	D_ASSERT(key_size == nb::len(values));
 	if (key_size == 0) {
 		// dict == { 'key': [], 'value': [] }
 		return EmptyMapValue();
@@ -250,10 +250,10 @@ Value TransformDictionaryToMap(optional_ptr<ClientContext> context, const PyDict
 	return Value::MAP(ListType::GetChildType(map_type), std::move(elements));
 }
 
-Value TransformTupleToStruct(optional_ptr<ClientContext> context, py::handle ele,
+Value TransformTupleToStruct(optional_ptr<ClientContext> context, nb::handle ele,
                              const LogicalType &target_type = LogicalType::UNKNOWN) {
-	auto tuple = py::cast<py::tuple>(ele);
-	auto size = py::len(tuple);
+	auto tuple = nb::cast<nb::tuple>(ele);
+	auto size = nb::len(tuple);
 
 	D_ASSERT(target_type.id() == LogicalTypeId::STRUCT);
 	auto child_types = StructType::GetChildTypes(target_type);
@@ -267,7 +267,7 @@ Value TransformTupleToStruct(optional_ptr<ClientContext> context, py::handle ele
 	for (idx_t i = 0; i < child_count; i++) {
 		auto &type = child_types[i].second;
 		auto &name = StructType::GetChildName(target_type, i);
-		auto element = py::handle(tuple[i]);
+		auto element = nb::handle(tuple[i]);
 		auto converted_value = TransformPythonValue(context, element, type);
 		children.emplace_back(make_pair(name, std::move(converted_value)));
 	}
@@ -278,7 +278,7 @@ Value TransformTupleToStruct(optional_ptr<ClientContext> context, py::handle ele
 // Tries to convert a Python integer that overflows int64/uint64 into a HUGEINT or UHUGEINT Value
 // by decomposing it into upper and lower 64-bit components. Tries HUGEINT first; falls back to
 // UHUGEINT for large positive values. Returns false if the value doesn't fit in 128 bits.
-static bool TryTransformPythonLongToHugeInt(py::handle ele, const LogicalType &target_type, Value &result) {
+static bool TryTransformPythonLongToHugeInt(nb::handle ele, const LogicalType &target_type, Value &result) {
 	auto ptr = ele.ptr();
 
 	// Extract lower 64 bits (two's complement, works for negative values too)
@@ -289,8 +289,8 @@ static bool TryTransformPythonLongToHugeInt(py::handle ele, const LogicalType &t
 	}
 
 	// Extract upper bits by right-shifting by 64
-	py::int_ shift_amount(64);
-	py::object upper_obj = py::steal<py::object>(PyNumber_Rshift(ptr, shift_amount.ptr()));
+	nb::int_ shift_amount(64);
+	nb::object upper_obj = nb::steal<nb::object>(PyNumber_Rshift(ptr, shift_amount.ptr()));
 
 	// Try signed 128-bit (hugeint) first
 	int overflow;
@@ -323,11 +323,11 @@ static bool TryTransformPythonLongToHugeInt(py::handle ele, const LogicalType &t
 }
 
 // Throwing wrapper for contexts that require a result (e.g. prepared statement parameters).
-static Value TransformPythonLongToHugeInt(py::handle ele, const LogicalType &target_type) {
+static Value TransformPythonLongToHugeInt(nb::handle ele, const LogicalType &target_type) {
 	Value result;
 	if (!TryTransformPythonLongToHugeInt(ele, target_type, result)) {
 		throw InvalidInputException("Python integer too large for 128-bit integer type: %s",
-		                            py::cast<std::string>(py::str(ele)));
+		                            nb::cast<std::string>(nb::str(ele)));
 	}
 	return result;
 }
@@ -343,7 +343,7 @@ static Value SniffIntegerValue(int64_t value) {
 // Sniffs the tightest DuckDB integer type for a Python integer.
 // Progressively widens: int64 → uint64 → hugeint → uhugeint.
 // Returns SQLNULL if the value doesn't fit in any DuckDB integer type (> 128-bit).
-LogicalType SniffPythonIntegerType(py::handle ele) {
+LogicalType SniffPythonIntegerType(nb::handle ele) {
 	auto ptr = ele.ptr();
 
 	// Step 1: Try int64
@@ -399,7 +399,7 @@ Value TransformDictionary(optional_ptr<ClientContext> context, const PyDictionar
 	return TransformDictionaryToStruct(context, dict);
 }
 
-PythonObjectType GetPythonObjectType(py::handle &ele) {
+PythonObjectType GetPythonObjectType(nb::handle &ele) {
 	auto &import_cache = *DuckDBPyConnection::ImportCache();
 
 	if (ele.is_none()) {
@@ -408,11 +408,11 @@ PythonObjectType GetPythonObjectType(py::handle &ele) {
 		return PythonObjectType::None;
 	} else if (ele.is(import_cache.pandas.NA())) {
 		return PythonObjectType::None;
-	} else if (py::isinstance<py::bool_>(ele)) {
+	} else if (nb::isinstance<nb::bool_>(ele)) {
 		return PythonObjectType::Bool;
-	} else if (py::isinstance<py::int_>(ele)) {
+	} else if (nb::isinstance<nb::int_>(ele)) {
 		return PythonObjectType::Integer;
-	} else if (py::isinstance<py::float_>(ele)) {
+	} else if (nb::isinstance<nb::float_>(ele)) {
 		return PythonObjectType::Float;
 	} else if (duckdb::PyUtil::IsInstance(ele, import_cache.decimal.Decimal())) {
 		return PythonObjectType::Decimal;
@@ -426,19 +426,19 @@ PythonObjectType GetPythonObjectType(py::handle &ele) {
 		return PythonObjectType::Date;
 	} else if (duckdb::PyUtil::IsInstance(ele, import_cache.datetime.timedelta())) {
 		return PythonObjectType::Timedelta;
-	} else if (py::isinstance<py::str>(ele)) {
+	} else if (nb::isinstance<nb::str>(ele)) {
 		return PythonObjectType::String;
-	} else if (py::isinstance<py::bytearray>(ele)) {
+	} else if (nb::isinstance<nb::bytearray>(ele)) {
 		return PythonObjectType::ByteArray;
-	} else if (py::isinstance<py::memoryview>(ele)) {
+	} else if (nb::isinstance<nb::memoryview>(ele)) {
 		return PythonObjectType::MemoryView;
-	} else if (py::isinstance<py::bytes>(ele)) {
+	} else if (nb::isinstance<nb::bytes>(ele)) {
 		return PythonObjectType::Bytes;
-	} else if (py::isinstance<py::list>(ele)) {
+	} else if (nb::isinstance<nb::list>(ele)) {
 		return PythonObjectType::List;
-	} else if (py::isinstance<py::tuple>(ele)) {
+	} else if (nb::isinstance<nb::tuple>(ele)) {
 		return PythonObjectType::Tuple;
-	} else if (py::isinstance<py::dict>(ele)) {
+	} else if (nb::isinstance<nb::dict>(ele)) {
 		return PythonObjectType::Dict;
 	} else if (ele.is(import_cache.numpy.ma.masked())) {
 		return PythonObjectType::None;
@@ -484,7 +484,7 @@ struct PythonValueConversion {
 			break;
 		}
 	}
-	static void HandleLongOverflow(Value &result, const LogicalType &target_type, py::handle ele) {
+	static void HandleLongOverflow(Value &result, const LogicalType &target_type, nb::handle ele) {
 		result = TransformPythonLongToHugeInt(ele, target_type);
 	}
 	static void HandleUnsignedBigint(Value &result, const LogicalType &target_type, uint64_t val) {
@@ -535,7 +535,7 @@ struct PythonValueConversion {
 	}
 
 	static void HandleList(optional_ptr<ClientContext> context, Value &result, const LogicalType &target_type,
-	                       py::handle ele, idx_t list_size) {
+	                       nb::handle ele, idx_t list_size) {
 		vector<Value> values;
 		values.reserve(list_size);
 
@@ -561,7 +561,7 @@ struct PythonValueConversion {
 	}
 
 	static void HandleTuple(optional_ptr<ClientContext> context, Value &result, const LogicalType &target_type,
-	                        py::handle ele, idx_t list_size) {
+	                        nb::handle ele, idx_t list_size) {
 		if (target_type.id() == LogicalTypeId::STRUCT) {
 			result = TransformTupleToStruct(context, ele, target_type);
 			return;
@@ -569,7 +569,7 @@ struct PythonValueConversion {
 		HandleList(context, result, target_type, ele, list_size);
 	}
 
-	static Value HandleObjectInternal(optional_ptr<ClientContext> context, py::handle ele, PythonObjectType object_type,
+	static Value HandleObjectInternal(optional_ptr<ClientContext> context, nb::handle ele, PythonObjectType object_type,
 	                                  const LogicalType &target_type, bool nan_as_null) {
 		switch (object_type) {
 		case PythonObjectType::Decimal: {
@@ -577,7 +577,7 @@ struct PythonValueConversion {
 			return decimal.ToDuckValue();
 		}
 		case PythonObjectType::Uuid: {
-			auto string_val = py::cast<string>(py::str(ele));
+			auto string_val = nb::cast<string>(nb::str(ele));
 			return Value::UUID(string_val);
 		}
 		case PythonObjectType::Timedelta: {
@@ -585,7 +585,7 @@ struct PythonValueConversion {
 			return Value::INTERVAL(timedelta.ToInterval());
 		}
 		case PythonObjectType::Dict: {
-			PyDictionary dict = PyDictionary(py::borrow<py::object>(ele));
+			PyDictionary dict = PyDictionary(nb::borrow<nb::object>(ele));
 			switch (target_type.id()) {
 			case LogicalTypeId::STRUCT:
 				return TransformDictionaryToStruct(context, dict, target_type);
@@ -598,10 +598,10 @@ struct PythonValueConversion {
 		case PythonObjectType::Value: {
 			// Extract the internal object and the type from the Value instance
 			auto object = ele.attr("object");
-			py::object type = ele.attr("type");
+			nb::object type = ele.attr("type");
 			std::unique_ptr<DuckDBPyType> internal_type;
 			if (!DuckDBPyType::TryConvert(type, internal_type)) {
-				string actual_type = py::cast<std::string>(py::str((type).type()));
+				string actual_type = nb::cast<std::string>(nb::str((type).type()));
 				throw InvalidInputException("The 'type' of a Value should be of type DuckDBPyType, not '%s'",
 				                            actual_type);
 			}
@@ -611,7 +611,7 @@ struct PythonValueConversion {
 			throw InternalException("Unsupported fallback");
 		}
 	}
-	static void HandleObject(optional_ptr<ClientContext> context, py::handle ele, PythonObjectType object_type,
+	static void HandleObject(optional_ptr<ClientContext> context, nb::handle ele, PythonObjectType object_type,
 	                         Value &result, const LogicalType &target_type, bool nan_as_null) {
 		result = HandleObjectInternal(context, ele, object_type, target_type, nan_as_null);
 	}
@@ -647,7 +647,7 @@ struct PythonVectorConversion {
 			break;
 		}
 	}
-	static void HandleLongOverflow(Vector &result, const idx_t &result_offset, py::handle ele) {
+	static void HandleLongOverflow(Vector &result, const idx_t &result_offset, nb::handle ele) {
 		Value result_val = TransformPythonLongToHugeInt(ele, result.GetType());
 		FallbackValueConversion(result, result_offset, std::move(result_val));
 	}
@@ -816,7 +816,7 @@ struct PythonVectorConversion {
 
 	template <bool IS_LIST>
 	static void HandleListFast(optional_ptr<ClientContext> context, Vector &result, const idx_t &result_offset,
-	                           py::handle ele, idx_t list_size) {
+	                           nb::handle ele, idx_t list_size) {
 		auto &result_type = result.GetType();
 		if (result_type.id() == LogicalTypeId::ARRAY) {
 			idx_t array_size = ArrayType::GetSize(result_type);
@@ -856,7 +856,7 @@ struct PythonVectorConversion {
 	}
 
 	static void HandleList(optional_ptr<ClientContext> context, Vector &result, const idx_t &result_offset,
-	                       py::handle ele, idx_t list_size) {
+	                       nb::handle ele, idx_t list_size) {
 		auto &result_type = result.GetType();
 		if (result_type.id() == LogicalTypeId::ARRAY || result_type.id() == LogicalTypeId::LIST) {
 			HandleListFast<true>(context, result, result_offset, ele, list_size);
@@ -869,7 +869,7 @@ struct PythonVectorConversion {
 	}
 
 	static void ConvertTupleToStruct(optional_ptr<ClientContext> context, Vector &result, const idx_t &result_offset,
-	                                 py::handle ele, idx_t size) {
+	                                 nb::handle ele, idx_t size) {
 		auto &child_types = StructType::GetChildTypes(result.GetType());
 		auto child_count = child_types.size();
 		if (size != child_count) {
@@ -886,7 +886,7 @@ struct PythonVectorConversion {
 	}
 
 	static void HandleTuple(optional_ptr<ClientContext> context, Vector &result, const idx_t &result_offset,
-	                        py::handle ele, idx_t tuple_size) {
+	                        nb::handle ele, idx_t tuple_size) {
 		auto &result_type = result.GetType();
 		switch (result_type.id()) {
 		case LogicalTypeId::STRUCT:
@@ -904,7 +904,7 @@ struct PythonVectorConversion {
 	static void FallbackValueConversion(Vector &result, const idx_t &result_offset, Value val) {
 		result.SetValue(result_offset, val);
 	}
-	static void HandleObject(optional_ptr<ClientContext> context, py::handle ele, PythonObjectType object_type,
+	static void HandleObject(optional_ptr<ClientContext> context, nb::handle ele, PythonObjectType object_type,
 	                         Vector &result, const idx_t &result_offset, bool nan_as_null) {
 		Value result_val;
 		PythonValueConversion::HandleObject(context, ele, object_type, result_val, result.GetType(), nan_as_null);
@@ -913,7 +913,7 @@ struct PythonVectorConversion {
 };
 
 template <class OP, class A, class B>
-void TransformPythonObjectInternal(optional_ptr<ClientContext> context, py::handle ele, A &result, const B &param,
+void TransformPythonObjectInternal(optional_ptr<ClientContext> context, nb::handle ele, A &result, const B &param,
                                    bool nan_as_null) {
 	auto object_type = GetPythonObjectType(ele);
 
@@ -922,14 +922,14 @@ void TransformPythonObjectInternal(optional_ptr<ClientContext> context, py::hand
 		OP::HandleNull(result, param);
 		break;
 	case PythonObjectType::Bool:
-		OP::HandleBoolean(result, param, py::cast<bool>(ele));
+		OP::HandleBoolean(result, param, nb::cast<bool>(ele));
 		break;
 	case PythonObjectType::Float:
 		if (nan_as_null && std::isnan(PyFloat_AsDouble(ele.ptr()))) {
 			OP::HandleNull(result, param);
 			break;
 		}
-		OP::HandleDouble(result, param, py::cast<double>(ele));
+		OP::HandleDouble(result, param, nb::cast<double>(ele));
 		break;
 	case PythonObjectType::Integer: {
 		auto ptr = ele.ptr();
@@ -976,12 +976,12 @@ void TransformPythonObjectInternal(optional_ptr<ClientContext> context, py::hand
 		break;
 	}
 	case PythonObjectType::List: {
-		auto list_size = py::len(ele);
+		auto list_size = nb::len(ele);
 		OP::HandleList(context, result, param, ele, list_size);
 		break;
 	}
 	case PythonObjectType::Tuple: {
-		auto list_size = py::len(ele);
+		auto list_size = nb::len(ele);
 		auto &conversion_target = OP::ConversionTarget(result, param);
 		switch (conversion_target.id()) {
 		case LogicalTypeId::STRUCT:
@@ -996,7 +996,7 @@ void TransformPythonObjectInternal(optional_ptr<ClientContext> context, py::hand
 		break;
 	}
 	case PythonObjectType::String: {
-		auto stringified = py::cast<string>(ele);
+		auto stringified = nb::cast<string>(ele);
 		OP::HandleString(result, param, stringified);
 		break;
 	}
@@ -1005,7 +1005,7 @@ void TransformPythonObjectInternal(optional_ptr<ClientContext> context, py::hand
 		bool is_nat = false;
 		if (import_cache.pandas.isnull(false)) {
 			auto isnull_result = import_cache.pandas.isnull()(ele);
-			is_nat = py::cast<std::string>(py::str(isnull_result)) == "True";
+			is_nat = nb::cast<std::string>(nb::str(isnull_result)) == "True";
 		}
 		if (is_nat) {
 			OP::HandleNull(result, param);
@@ -1033,7 +1033,7 @@ void TransformPythonObjectInternal(optional_ptr<ClientContext> context, py::hand
 		break;
 	}
 	case PythonObjectType::MemoryView: {
-		py::memoryview py_view = py::cast<py::memoryview>(ele);
+		nb::memoryview py_view = nb::cast<nb::memoryview>(ele);
 		Py_buffer *py_buf = PyUtil::PyMemoryViewGetBuffer(py_view); // NOLINT
 		OP::HandleBlob(result, param, const_data_ptr_t(py_buf->buf), idx_t(py_buf->len));
 		break;
@@ -1061,18 +1061,18 @@ void TransformPythonObjectInternal(optional_ptr<ClientContext> context, py::hand
 	}
 	case PythonObjectType::Other:
 		throw NotImplementedException("Unable to transform python value of type '%s' to DuckDB LogicalType",
-		                              py::cast<string>(py::str((ele).type())));
+		                              nb::cast<string>(nb::str((ele).type())));
 	default:
 		throw InternalException("Object type recognized but not implemented!");
 	}
 }
 
-void TransformPythonObject(optional_ptr<ClientContext> context, py::handle ele, Vector &vector, idx_t result_offset,
+void TransformPythonObject(optional_ptr<ClientContext> context, nb::handle ele, Vector &vector, idx_t result_offset,
                            bool nan_as_null) {
 	TransformPythonObjectInternal<PythonVectorConversion>(context, ele, vector, result_offset, nan_as_null);
 }
 
-Value TransformPythonValue(optional_ptr<ClientContext> context, py::handle ele, const LogicalType &target_type,
+Value TransformPythonValue(optional_ptr<ClientContext> context, nb::handle ele, const LogicalType &target_type,
                            bool nan_as_null) {
 	Value result;
 	TransformPythonObjectInternal<PythonValueConversion>(context, ele, result, target_type, nan_as_null);

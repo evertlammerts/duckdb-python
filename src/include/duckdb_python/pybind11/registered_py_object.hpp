@@ -13,14 +13,14 @@ namespace duckdb {
 
 class RegisteredObject {
 public:
-	explicit RegisteredObject(py::object obj_p) : obj(std::move(obj_p)) {
+	explicit RegisteredObject(nb::object obj_p) : obj(std::move(obj_p)) {
 	}
 	virtual ~RegisteredObject() {
-		py::gil_scoped_acquire acquire;
-		obj = py::none();
+		nb::gil_scoped_acquire acquire;
+		obj = nb::none();
 	}
 
-	py::object obj;
+	nb::object obj;
 };
 
 } // namespace duckdb

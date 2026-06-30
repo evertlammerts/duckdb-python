@@ -7,11 +7,11 @@ PythonDependencyItem::PythonDependencyItem(unique_ptr<RegisteredObject> &&object
 }
 
 PythonDependencyItem::~PythonDependencyItem() { // NOLINT - cannot throw in exception
-	py::gil_scoped_acquire gil;
+	nb::gil_scoped_acquire gil;
 	object.reset();
 }
 
-shared_ptr<DependencyItem> PythonDependencyItem::Create(py::object object) {
+shared_ptr<DependencyItem> PythonDependencyItem::Create(nb::object object) {
 	auto registered_object = make_uniq<RegisteredObject>(std::move(object));
 	return make_shared_ptr<PythonDependencyItem>(std::move(registered_object));
 }

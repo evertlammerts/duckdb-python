@@ -41,6 +41,9 @@
 // Python interop helpers (raw CPython accessors, guarded isinstance, string coercion, tuple builder, GIL/collection).
 #include "duckdb_python/pyutil.hpp"
 
+// Canonical short alias for nanobind, used throughout the bindings.
+namespace nb = nanobind;
+
 namespace nanobind {
 
 namespace detail {
@@ -52,33 +55,6 @@ struct type_caster<duckdb::vector<Type, SAFE>> : list_caster<duckdb::vector<Type
 } // namespace nanobind
 
 namespace duckdb {
-namespace py {
-
-// We include everything from nanobind
-using namespace nanobind;
-
-// But we have the option to override certain functions
-template <typename T, std::enable_if_t<std::is_base_of<object, T>::value, int> = 0>
-bool isinstance(handle obj) {
-	return T::check_(obj);
-}
-
-template <typename T, std::enable_if_t<!std::is_base_of<object, T>::value, int> = 0>
-bool isinstance(handle obj) {
-	return nanobind::isinstance<T>(obj);
-}
-
-template <class T>
-bool try_cast(const handle &object, T &result) {
-	try {
-		result = cast<T>(object);
-	} catch (cast_error &) {
-		return false;
-	}
-	return true;
-}
-
-} // namespace py
 
 template <class T, typename... ARGS>
 void DefineMethod(std::vector<const char *> aliases, T &mod, ARGS &&...args) {

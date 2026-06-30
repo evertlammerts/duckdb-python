@@ -49,7 +49,7 @@ public:
 	                                                        TableFunctionGetPartitionInput &input);
 
 	// Helper function that transform pandas df names to make them work with our binder
-	static py::object PandasReplaceCopiedNames(const py::object &original_df);
+	static nb::object PandasReplaceCopiedNames(const nb::object &original_df);
 
 	static void PandasBackendScanSwitch(ClientContext &context, PandasColumnBindData &bind_data, idx_t count,
 	                                    idx_t offset, Vector &out);

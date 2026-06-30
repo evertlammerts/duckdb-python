@@ -15,7 +15,7 @@ public:
 	~PythonDependencyItem() override;
 
 public:
-	static shared_ptr<DependencyItem> Create(py::object object);
+	static shared_ptr<DependencyItem> Create(nb::object object);
 	static shared_ptr<DependencyItem> Create(unique_ptr<RegisteredObject> &&object);
 
 public:

@@ -14,9 +14,9 @@
 
 namespace duckdb {
 
-void TransformDuckToArrowChunk(py::object pyarrow_schema, ArrowArray &data, py::list &batches) {
+void TransformDuckToArrowChunk(nb::object pyarrow_schema, ArrowArray &data, nb::list &batches) {
 	duckdb::PyUtil::GilAssert();
-	auto pyarrow_lib_module = py::module_::import_("pyarrow").attr("lib");
+	auto pyarrow_lib_module = nb::module_::import_("pyarrow").attr("lib");
 	auto batch_import_func = pyarrow_lib_module.attr("RecordBatch").attr("_import_from_c");
 	batches.append(batch_import_func(reinterpret_cast<uint64_t>(&data), pyarrow_schema));
 }
@@ -28,10 +28,10 @@ void VerifyArrowDatasetLoaded() {
 	}
 }
 
-py::object PythonTableArrowArrayStreamFactory::ProduceScanner(py::object &arrow_scanner, py::handle &arrow_obj_handle,
+nb::object PythonTableArrowArrayStreamFactory::ProduceScanner(nb::object &arrow_scanner, nb::handle &arrow_obj_handle,
                                                               ArrowStreamParameters &parameters,
                                                               const ClientProperties &client_properties) {
-	D_ASSERT(!py::isinstance<py::capsule>(arrow_obj_handle));
+	D_ASSERT(!nb::isinstance<nb::capsule>(arrow_obj_handle));
 	ArrowSchemaWrapper schema;
 	PythonTableArrowArrayStreamFactory::GetSchemaInternal(arrow_obj_handle, schema);
 	ArrowTableSchema arrow_table;
@@ -41,10 +41,10 @@ py::object PythonTableArrowArrayStreamFactory::ProduceScanner(py::object &arrow_
 	auto filters = parameters.filters;
 	auto &column_list = parameters.projected_columns.columns;
 	auto &filter_to_col = parameters.projected_columns.filter_to_col;
-	py::list projection_list(py::cast(column_list));
+	nb::list projection_list(nb::cast(column_list));
 
 	bool has_filter = filters && filters->HasFilters();
-	py::dict kwargs;
+	nb::dict kwargs;
 	if (!column_list.empty()) {
 		kwargs["columns"] = projection_list;
 	}
@@ -52,7 +52,7 @@ py::object PythonTableArrowArrayStreamFactory::ProduceScanner(py::object &arrow_
 	if (has_filter) {
 		auto filter = PyArrowFilterPushdown::TransformFilter(*filters, parameters.projected_columns.projection_map,
 		                                                     filter_to_col, client_properties, arrow_table);
-		if (!filter.is(py::none())) {
+		if (!filter.is(nb::none())) {
 			kwargs["filter"] = filter;
 		}
 	}
@@ -61,20 +61,20 @@ py::object PythonTableArrowArrayStreamFactory::ProduceScanner(py::object &arrow_
 
 unique_ptr<ArrowArrayStreamWrapper> PythonTableArrowArrayStreamFactory::Produce(uintptr_t factory_ptr,
                                                                                 ArrowStreamParameters &parameters) {
-	py::gil_scoped_acquire acquire;
+	nb::gil_scoped_acquire acquire;
 	auto factory = static_cast<PythonTableArrowArrayStreamFactory *>(reinterpret_cast<void *>(factory_ptr)); // NOLINT
 	D_ASSERT(factory->arrow_object);
-	py::handle arrow_obj_handle(factory->arrow_object);
+	nb::handle arrow_obj_handle(factory->arrow_object);
 	auto arrow_object_type = factory->cached_arrow_type;
 
 	if (arrow_object_type == PyArrowObjectType::PolarsLazyFrame) {
-		py::object lf = py::borrow<py::object>(arrow_obj_handle);
+		nb::object lf = nb::borrow<nb::object>(arrow_obj_handle);
 
 		auto filters = parameters.filters;
 		bool filters_pushed = false;
 
 		// Translate DuckDB filters to Polars expressions and push into the lazy plan.
-		// The walker only fails (throws / returns py::none()) for filters that are not
+		// The walker only fails (throws / returns nb::none()) for filters that are not
 		// required for correctness — optional/runtime wrappers it skips, or shapes the
 		// optimizer keeps above the scan. A throw here would mean the optimizer fully
 		// pushed something we can't translate (a correctness bug), so we let it surface
@@ -84,7 +84,7 @@ unique_ptr<ArrowArrayStreamWrapper> PythonTableArrowArrayStreamFactory::Produce(
 			auto filter_expr = PolarsFilterPushdown::TransformFilter(
 			    *filters, parameters.projected_columns.projection_map, parameters.projected_columns.filter_to_col,
 			    factory->client_properties);
-			if (!filter_expr.is(py::none())) {
+			if (!filter_expr.is(nb::none())) {
 				lf = lf.attr("filter")(filter_expr);
 				filters_pushed = true;
 			}
@@ -92,7 +92,7 @@ unique_ptr<ArrowArrayStreamWrapper> PythonTableArrowArrayStreamFactory::Produce(
 
 		// If no filters were pushed and we have a cached Arrow table, reuse it. This avoids re-reading from source and
 		// re-converting on repeated unfiltered scans.
-		py::object arrow_table;
+		nb::object arrow_table;
 		if (!filters_pushed && factory->cached_arrow_table.ptr() != nullptr) {
 			arrow_table = factory->cached_arrow_table;
 		} else {
@@ -106,11 +106,11 @@ unique_ptr<ArrowArrayStreamWrapper> PythonTableArrowArrayStreamFactory::Produce(
 		// Apply column projection
 		auto &column_list = parameters.projected_columns.columns;
 		if (!column_list.empty()) {
-			arrow_table = arrow_table.attr("select")(py::cast(column_list));
+			arrow_table = arrow_table.attr("select")(nb::cast(column_list));
 		}
 
 		auto capsule_obj = arrow_table.attr("__arrow_c_stream__")();
-		auto capsule = py::borrow<py::capsule>(capsule_obj);
+		auto capsule = nb::borrow<nb::capsule>(capsule_obj);
 		auto stream = reinterpret_cast<ArrowArrayStream *>(capsule.data());
 		auto res = make_uniq<ArrowArrayStreamWrapper>();
 		res->arrow_array_stream = *stream;
@@ -119,8 +119,8 @@ unique_ptr<ArrowArrayStreamWrapper> PythonTableArrowArrayStreamFactory::Produce(
 	}
 
 	if (arrow_object_type == PyArrowObjectType::PyCapsuleInterface || arrow_object_type == PyArrowObjectType::Table) {
-		py::object capsule_obj = arrow_obj_handle.attr("__arrow_c_stream__")();
-		auto capsule = py::borrow<py::capsule>(capsule_obj);
+		nb::object capsule_obj = arrow_obj_handle.attr("__arrow_c_stream__")();
+		auto capsule = nb::borrow<nb::capsule>(capsule_obj);
 		auto stream = reinterpret_cast<ArrowArrayStream *>(capsule.data());
 		if (!stream->release) {
 			throw InvalidInputException(
@@ -133,14 +133,14 @@ unique_ptr<ArrowArrayStreamWrapper> PythonTableArrowArrayStreamFactory::Produce(
 		if (import_cache_check.pyarrow.dataset()) {
 			// Tier A: full pushdown via pyarrow.dataset
 			// Import as RecordBatchReader, feed through Scanner.from_batches for projection/filter pushdown.
-			auto pyarrow_lib_module = py::module_::import_("pyarrow").attr("lib");
+			auto pyarrow_lib_module = nb::module_::import_("pyarrow").attr("lib");
 			auto import_func = pyarrow_lib_module.attr("RecordBatchReader").attr("_import_from_c");
-			py::object reader = import_func(reinterpret_cast<uint64_t>(stream));
+			nb::object reader = import_func(reinterpret_cast<uint64_t>(stream));
 			// _import_from_c takes ownership of the stream; null out to prevent capsule double-free
 			stream->release = nullptr;
 			auto &import_cache = *DuckDBPyConnection::ImportCache();
-			py::object arrow_batch_scanner = import_cache.pyarrow.dataset.Scanner().attr("from_batches");
-			py::handle reader_handle = reader;
+			nb::object arrow_batch_scanner = import_cache.pyarrow.dataset.Scanner().attr("from_batches");
+			nb::handle reader_handle = reader;
 			auto scanner = ProduceScanner(arrow_batch_scanner, reader_handle, parameters, factory->client_properties);
 			auto record_batches = scanner.attr("to_reader")();
 			auto res = make_uniq<ArrowArrayStreamWrapper>();
@@ -159,7 +159,7 @@ unique_ptr<ArrowArrayStreamWrapper> PythonTableArrowArrayStreamFactory::Produce(
 
 	if (arrow_object_type == PyArrowObjectType::PyCapsule) {
 		auto res = make_uniq<ArrowArrayStreamWrapper>();
-		auto capsule = py::borrow<py::capsule>(arrow_obj_handle);
+		auto capsule = nb::borrow<nb::capsule>(arrow_obj_handle);
 		auto stream = reinterpret_cast<ArrowArrayStream *>(capsule.data());
 		if (!stream->release) {
 			throw InvalidInputException("This ArrowArrayStream has already been consumed and cannot be scanned again.");
@@ -172,8 +172,8 @@ unique_ptr<ArrowArrayStreamWrapper> PythonTableArrowArrayStreamFactory::Produce(
 	// Scanner and Dataset: require pyarrow.dataset for pushdown
 	VerifyArrowDatasetLoaded();
 	auto &import_cache = *DuckDBPyConnection::ImportCache();
-	py::object scanner;
-	py::object arrow_batch_scanner = import_cache.pyarrow.dataset.Scanner().attr("from_batches");
+	nb::object scanner;
+	nb::object arrow_batch_scanner = import_cache.pyarrow.dataset.Scanner().attr("from_batches");
 	switch (arrow_object_type) {
 	case PyArrowObjectType::Scanner: {
 		// If it's a scanner we have to turn it to a record batch reader, and then a scanner again since we can't stack
@@ -183,13 +183,13 @@ unique_ptr<ArrowArrayStreamWrapper> PythonTableArrowArrayStreamFactory::Produce(
 		break;
 	}
 	case PyArrowObjectType::Dataset: {
-		py::object arrow_scanner = arrow_obj_handle.attr("__class__").attr("scanner");
+		nb::object arrow_scanner = arrow_obj_handle.attr("__class__").attr("scanner");
 		scanner = ProduceScanner(arrow_scanner, arrow_obj_handle, parameters, factory->client_properties);
 		break;
 	}
 	default: {
-		// py::object wrap: py::str() of a bare .attr() accessor is an ambiguous overload on MSVC.
-		auto py_object_type = py::cast<std::string>(py::str(py::object((arrow_obj_handle).type().attr("__name__"))));
+		// nb::object wrap: nb::str() of a bare .attr() accessor is an ambiguous overload on MSVC.
+		auto py_object_type = nb::cast<std::string>(nb::str(nb::object((arrow_obj_handle).type().attr("__name__"))));
 		throw InvalidInputException("Object of type '%s' is not a recognized Arrow object", py_object_type);
 	}
 	}
@@ -201,10 +201,10 @@ unique_ptr<ArrowArrayStreamWrapper> PythonTableArrowArrayStreamFactory::Produce(
 	return res;
 }
 
-void PythonTableArrowArrayStreamFactory::GetSchemaInternal(py::handle arrow_obj_handle, ArrowSchemaWrapper &schema) {
+void PythonTableArrowArrayStreamFactory::GetSchemaInternal(nb::handle arrow_obj_handle, ArrowSchemaWrapper &schema) {
 	// PyCapsule (from bare capsule Produce path)
-	if (py::isinstance<py::capsule>(arrow_obj_handle)) {
-		auto capsule = py::borrow<py::capsule>(arrow_obj_handle);
+	if (nb::isinstance<nb::capsule>(arrow_obj_handle)) {
+		auto capsule = nb::borrow<nb::capsule>(arrow_obj_handle);
 		auto stream = reinterpret_cast<ArrowArrayStream *>(capsule.data());
 		if (!stream->release) {
 			throw InvalidInputException("This ArrowArrayStream has already been consumed and cannot be scanned again.");
@@ -238,9 +238,9 @@ void PythonTableArrowArrayStreamFactory::GetSchema(uintptr_t factory_ptr, ArrowS
 		return;
 	}
 
-	py::gil_scoped_acquire acquire;
+	nb::gil_scoped_acquire acquire;
 	D_ASSERT(factory->arrow_object);
-	py::handle arrow_obj_handle(factory->arrow_object);
+	nb::handle arrow_obj_handle(factory->arrow_object);
 
 	auto type = factory->cached_arrow_type;
 	if (type == PyArrowObjectType::PolarsLazyFrame) {
@@ -248,7 +248,7 @@ void PythonTableArrowArrayStreamFactory::GetSchema(uintptr_t factory_ptr, ArrowS
 		// collect_schema() would give Polars-native types (e.g. string_view) that don't match the actual export.
 		const auto empty_arrow = arrow_obj_handle.attr("head")(0).attr("collect")().attr("to_arrow")();
 		const auto schema_capsule = empty_arrow.attr("schema").attr("__arrow_c_schema__")();
-		const auto capsule = py::borrow<py::capsule>(schema_capsule);
+		const auto capsule = nb::borrow<nb::capsule>(schema_capsule);
 		const auto arrow_schema = reinterpret_cast<ArrowSchema *>(capsule.data());
 		factory->cached_schema = *arrow_schema;
 		arrow_schema->release = nullptr;
@@ -259,9 +259,9 @@ void PythonTableArrowArrayStreamFactory::GetSchema(uintptr_t factory_ptr, ArrowS
 	}
 	if (type == PyArrowObjectType::PyCapsuleInterface || type == PyArrowObjectType::Table) {
 		// Get __arrow_c_schema__ if it exists
-		if (py::hasattr(arrow_obj_handle, "__arrow_c_schema__")) {
+		if (nb::hasattr(arrow_obj_handle, "__arrow_c_schema__")) {
 			auto schema_capsule = arrow_obj_handle.attr("__arrow_c_schema__")();
-			auto capsule = py::borrow<py::capsule>(schema_capsule);
+			auto capsule = nb::borrow<nb::capsule>(schema_capsule);
 			auto arrow_schema = reinterpret_cast<ArrowSchema *>(capsule.data());
 			factory->cached_schema = *arrow_schema; // factory takes ownership
 			arrow_schema->release = nullptr;
@@ -271,16 +271,16 @@ void PythonTableArrowArrayStreamFactory::GetSchema(uintptr_t factory_ptr, ArrowS
 			return;
 		}
 		// Otherwise try to use .schema with _export_to_c
-		if (py::hasattr(arrow_obj_handle, "schema")) {
+		if (nb::hasattr(arrow_obj_handle, "schema")) {
 			auto obj_schema = arrow_obj_handle.attr("schema");
-			if (py::hasattr(obj_schema, "_export_to_c")) {
+			if (nb::hasattr(obj_schema, "_export_to_c")) {
 				obj_schema.attr("_export_to_c")(reinterpret_cast<uint64_t>(&schema.arrow_schema));
 				return;
 			}
 		}
 		// Fallback: create a temporary stream just for the schema (consumes single-use streams!)
 		auto stream_capsule = arrow_obj_handle.attr("__arrow_c_stream__")();
-		auto capsule = py::borrow<py::capsule>(stream_capsule);
+		auto capsule = nb::borrow<nb::capsule>(stream_capsule);
 		auto stream = reinterpret_cast<ArrowArrayStream *>(capsule.data());
 		if (stream->get_schema(stream, &schema.arrow_schema)) {
 			throw InvalidInputException("Failed to get Arrow schema from stream: %s",
