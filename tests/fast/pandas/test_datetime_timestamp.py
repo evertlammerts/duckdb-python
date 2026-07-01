@@ -1,8 +1,9 @@
 import datetime
 
-import pandas as pd
 import pytest
 from packaging.version import Version
+
+import pandas as pd
 
 
 class TestDateTimeTimeStamp:

@@ -2,9 +2,8 @@ import importlib
 import os
 import tempfile
 
-import pandas as pd
-
 import duckdb
+import pandas as pd
 
 
 class TestNonDefaultConn:

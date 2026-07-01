@@ -3,11 +3,11 @@ import queue as Queue
 import threading
 from pathlib import Path
 
-import numpy as np
-import pandas as pd
 import pytest
 
 import duckdb
+import numpy as np
+import pandas as pd
 
 pytestmark = pytest.mark.xfail(
     condition=platform.system() == "Emscripten",

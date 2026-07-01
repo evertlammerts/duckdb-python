@@ -4,9 +4,10 @@ _ = pytest.importorskip("duckdb.experimental.spark")
 
 import math
 
-import numpy as np
 from spark_namespace.sql import functions as sf
 from spark_namespace.sql.types import Row
+
+import numpy as np
 
 
 class TestSparkFunctionsNumeric:

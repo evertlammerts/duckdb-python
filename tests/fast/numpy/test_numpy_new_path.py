@@ -4,10 +4,10 @@ Therefore, we only test the new codes and exec paths.
 
 from datetime import timedelta
 
-import numpy as np
 import pytest
 
 import duckdb
+import numpy as np
 
 
 class TestScanNumpy:

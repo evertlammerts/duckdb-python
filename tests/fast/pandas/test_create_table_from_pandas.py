@@ -1,6 +1,5 @@
-import pandas as pd
-
 import duckdb
+import pandas as pd
 
 
 def assert_create(internal_data, expected_result, data_type):

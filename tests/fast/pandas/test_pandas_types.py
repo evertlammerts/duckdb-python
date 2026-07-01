@@ -2,12 +2,12 @@ import string
 import warnings
 from contextlib import suppress
 
-import numpy
-import pandas as pd
 import pytest
 from packaging import version
 
 import duckdb
+import numpy
+import pandas as pd
 
 
 def round_trip(data, pandas_type):

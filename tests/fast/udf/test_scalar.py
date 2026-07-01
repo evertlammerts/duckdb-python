@@ -3,10 +3,10 @@ import datetime
 import uuid
 from typing import Any, NoReturn
 
-import numpy as np
 import pytest
 
 import duckdb
+import numpy as np
 from duckdb.sqltypes import (
     BIGINT,
     BLOB,

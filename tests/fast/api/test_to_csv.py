@@ -3,11 +3,11 @@ import datetime
 import os
 import tempfile
 
-import pandas as pd
 import pytest
 from conftest import getTimeSeriesData
 
 import duckdb
+import pandas as pd
 
 
 class TestToCSV:

@@ -5,10 +5,10 @@ Issue #171: Dictionary key case sensitivity not respected for parameter bindings
 Issue #330: Integers >64-bit lose precision via double conversion
 """
 
-import numpy as np
 import pytest
 
 import duckdb
+import numpy as np
 from duckdb.sqltypes import BIGINT, DOUBLE, FLOAT, HUGEINT, UHUGEINT, VARCHAR, DuckDBPyType
 
 

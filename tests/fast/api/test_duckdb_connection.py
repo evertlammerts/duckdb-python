@@ -1,9 +1,9 @@
 import re
 
-import pandas as pd
 import pytest
 
 import duckdb
+import pandas as pd
 
 pa = pytest.importorskip("pyarrow")
 
@@ -387,9 +387,8 @@ class TestDuckDBConnection:
         assert duckdb.interrupt is not None
 
     def test_wrap_shadowing(self):
-        import pandas as pd_local
-
         import duckdb
+        import pandas as pd_local
 
         df = pd_local.DataFrame({"a": [1, 2, 3]})  # noqa: F841
         res = duckdb.sql("from df").fetchall()

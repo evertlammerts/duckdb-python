@@ -1,9 +1,8 @@
 import datetime
 
+import duckdb
 import numpy as np
 import pandas as pd
-
-import duckdb
 
 
 class TestPandasObject:

@@ -1,9 +1,9 @@
 import importlib.util
 
-import pandas as pd
 import pytest
 
 import duckdb
+import pandas as pd
 
 
 @pytest.mark.parametrize(

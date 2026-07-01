@@ -1,8 +1,7 @@
 import datetime
 
-import numpy as np
-
 import duckdb
+import numpy as np
 
 
 class TestNumpyDatetime64:

@@ -1,7 +1,7 @@
-import numpy as np
 import pytest
 
 import duckdb
+import numpy as np
 
 
 class TestVariantFetchall:

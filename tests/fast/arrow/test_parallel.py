@@ -3,9 +3,10 @@ from pathlib import Path
 import duckdb
 
 try:
-    import numpy as np
     import pyarrow
     import pyarrow.parquet
+
+    import numpy as np
 
     can_run = True
 except Exception:

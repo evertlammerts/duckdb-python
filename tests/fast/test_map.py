@@ -2,10 +2,10 @@ import re
 from datetime import date, timedelta
 from typing import NoReturn
 
-import pandas as pd
 import pytest
 
 import duckdb
+import pandas as pd
 
 
 # column count differs from bind

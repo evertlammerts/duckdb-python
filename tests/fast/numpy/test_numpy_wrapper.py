@@ -19,11 +19,11 @@ The wrapper is C++-internal, so it is verified through its observable behaviour
 rather than directly. These checks are backend-agnostic (pybind11 or nanobind).
 """
 
-import numpy as np
-import pandas as pd
 import pytest
 
 import duckdb
+import numpy as np
+import pandas as pd
 
 
 @pytest.fixture

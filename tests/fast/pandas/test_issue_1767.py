@@ -1,8 +1,7 @@
 #!/usr/bin/env python
 
-import pandas as pd
-
 import duckdb
+import pandas as pd
 
 
 # Join from pandas not matching identical strings #1767

@@ -1,8 +1,8 @@
-import pandas as pd
 import pytest
 from pandas.testing import assert_frame_equal
 
 import duckdb
+import pandas as pd
 
 pa = pytest.importorskip("pyarrow")
 

@@ -1,11 +1,11 @@
 import datetime
 import tempfile
 
-import numpy
-import pandas
 import pytest
 
 import duckdb
+import numpy
+import pandas
 
 pa = pytest.importorskip("pyarrow")
 

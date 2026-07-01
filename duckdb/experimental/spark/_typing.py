@@ -19,8 +19,9 @@
 from collections.abc import Callable, Iterable, Sized
 from typing import Literal, TypeVar
 
-from numpy import float32, float64, int32, int64, ndarray
 from typing_extensions import Protocol, Self
+
+from numpy import float32, float64, int32, int64, ndarray
 
 F = TypeVar("F", bound=Callable)
 T_co = TypeVar("T_co", covariant=True)

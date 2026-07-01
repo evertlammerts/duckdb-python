@@ -6,12 +6,12 @@ import platform
 import re
 from decimal import Decimal
 
-import numpy as np
-import pandas as pd
 import pytest
 from conftest import is_string_dtype
 
 import duckdb
+import numpy as np
+import pandas as pd
 
 standard_vector_size = duckdb.__standard_vector_size__
 

@@ -1,8 +1,8 @@
-import pandas as pd
 import pytest
 from packaging.version import Version
 
 import duckdb
+import pandas as pd
 
 
 @pytest.mark.skipif(

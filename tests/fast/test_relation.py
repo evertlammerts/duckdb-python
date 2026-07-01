@@ -4,11 +4,11 @@ import gc
 import os
 import tempfile
 
-import numpy as np
-import pandas as pd
 import pytest
 
 import duckdb
+import numpy as np
+import pandas as pd
 from duckdb import ColumnExpression
 from duckdb.sqltypes import BIGINT, BOOLEAN, TINYINT, VARCHAR
 

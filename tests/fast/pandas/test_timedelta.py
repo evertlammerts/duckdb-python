@@ -1,10 +1,10 @@
 import datetime
 import platform
 
-import pandas as pd
 import pytest
 
 import duckdb
+import pandas as pd
 
 
 class TestTimedelta:
