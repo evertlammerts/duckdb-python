@@ -1,0 +1,29 @@
+# Frozen, exact pins for the CodSpeed benchmark suite (.github/workflows/codspeed.yml).
+#
+# WHY a committed pin file (and NOT the gitignored uv.lock, and NOT a re-resolving `>=` group): CodSpeed
+# compares instruction counts across runs. If a data lib (numpy/pandas/pyarrow/polars) changed version between
+# the baseline run and a later run, that delta would be misattributed to the binding. These pins freeze the data
+# libs so the ONLY cross-run delta is the binding. Regenerate this file DELIBERATELY, together with the baseline.
+#
+# SOURCE OF TRUTH: the human-readable `[dependency-groups] bench` list in pyproject.toml. Regenerate with:
+#   uv pip compile pyproject.toml --group bench \
+#     --python-version 3.13 --python-platform x86_64-unknown-linux-gnu \
+#     --no-annotate --no-header -o benchmarks/requirements-bench.txt
+# (py3.13 / linux-x86_64 is the CI target.) torch/tensorflow are deliberately absent (local-only via importorskip).
+iniconfig==2.3.0
+markdown-it-py==4.2.0
+mdurl==0.1.2
+numpy==2.5.0
+packaging==26.2
+pandas==3.0.3
+pluggy==1.6.0
+polars==1.42.1
+polars-runtime-32==1.42.1
+pyarrow==24.0.0
+pygments==2.20.0
+pytest==9.1.1
+pytest-codspeed==5.0.3
+python-dateutil==2.9.0.post0
+pytz==2026.2
+rich==15.0.0
+six==1.17.0

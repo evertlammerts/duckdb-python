@@ -17,24 +17,21 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
-
-import duckdb
+from _scale import scaled
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-
     from pytest_codspeed import BenchmarkFixture
 
-EXECMANY_N = 20_000  # executemany re-binds + executes per row, keep moderate
-WIDE_N = 10_000  # values() builds a 1-row x N-col relation; cap N so the binder stays sane
+    import duckdb
 
+# env-gated (INFRA-4): full N locally, shrunk under BENCH_SCALE in the CI Callgrind sweep.
+EXECMANY_N = scaled(20_000)  # executemany re-binds + executes per row, keep moderate
+WIDE_N = scaled(10_000)  # values() builds a 1-row x N-col relation; cap N so the binder stays sane
 
-@pytest.fixture
-def con() -> Iterator[duckdb.DuckDBPyConnection]:
-    """Yield a fresh connection, closed on teardown."""
-    c = duckdb.connect()
-    yield c
-    c.close()
+# gate: native ingest eagerly transforms every cell (TransformPythonValue) / re-binds per row (executemany);
+# the engine side (a trivial INSERT or a 1-row-wide fetchall drain) is negligible -> binding-dominated, GIL-held,
+# deterministic under Callgrind. `con` fixture + threads=1 live in conftest.py.
+pytestmark = pytest.mark.gate
 
 
 @pytest.fixture(scope="module")

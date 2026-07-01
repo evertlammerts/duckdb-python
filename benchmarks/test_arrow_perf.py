@@ -17,25 +17,26 @@ from typing import TYPE_CHECKING
 
 import pyarrow as pa
 import pytest
+from _scale import scaled
 
-import duckdb
+import numpy as np
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-
     from pytest_codspeed import BenchmarkFixture
 
-N = 500_000
-WRITE_Q_NUM = "SELECT i::BIGINT AS a, (i * 1.5)::DOUBLE AS b FROM range(500000) t(i)"
-WRITE_Q_STR = "SELECT ('str_value_' || i) AS s FROM range(500000) t(i)"
+    import duckdb
 
+N = scaled(500_000)  # env-gated: full N locally, shrunk under BENCH_SCALE in the CI Callgrind sweep (INFRA-4)
+DICT_UNIQUE = [2, 1_000, 50_000]  # cardinality sweep: UNIQUE-value counts (not row counts) -> NOT scaled
+WRITE_Q_NUM = f"SELECT i::BIGINT AS a, (i * 1.5)::DOUBLE AS b FROM range({N}) t(i)"
+WRITE_Q_STR = f"SELECT ('str_value_' || i) AS s FROM range({N}) t(i)"
 
-@pytest.fixture
-def con() -> Iterator[duckdb.DuckDBPyConnection]:
-    """Yield a fresh connection, closed on teardown."""
-    c = duckdb.connect()
-    yield c
-    c.close()
+# informational: every benchmark here is engine-parallel or library/streaming dominated -> reported, not gated.
+#   READ (sum over registered arrow) -> engine aggregate dominates; the near-zero-copy scan is a small fraction.
+#   WRITE to_arrow_table/to_arrow_reader/pl() -> PromoteMaterializedToArrow re-runs the query GIL-released
+#   (engine-parallel), and pl() also runs polars library code. Their counts would trip on engine/submodule
+#   bumps, not binding regressions. `con` fixture + threads=1 live in conftest.py.
+pytestmark = pytest.mark.informational
 
 
 @pytest.fixture(scope="module")
@@ -62,6 +63,18 @@ def arrow_numeric_batches(arrow_numeric: pa.Table) -> tuple[pa.Schema, list[pa.R
     return arrow_numeric.schema, arrow_numeric.to_batches(max_chunksize=50_000)
 
 
+@pytest.fixture(scope="module")
+def arrow_dict_tables() -> dict[int, pa.Table]:
+    """Return dictionary-encoded arrow tables keyed by number of unique values (a cardinality sweep)."""
+    # deterministic indices (i % U) so the instruction count is reproducible (no PRNG)
+    tables = {}
+    for u in DICT_UNIQUE:
+        uniques = pa.array([f"category_value_{i}" for i in range(u)], type=pa.string())
+        idx = pa.array(np.arange(N, dtype="int32") % u, type=pa.int32())
+        tables[u] = pa.table({"c": pa.DictionaryArray.from_arrays(idx, uniques)})
+    return tables
+
+
 # --------------------------------------------------------------------------- #
 # READ: arrow -> duckdb. The engine must scan every value (sum/length force it).
 # --------------------------------------------------------------------------- #
@@ -72,12 +85,14 @@ def test_read_arrow_numeric(
 ) -> None:
     """Benchmark scanning a numeric arrow table."""
     con.register("t_num", arrow_numeric)
+    con.execute("SELECT sum(a), sum(b) FROM t_num").fetchall()  # warm (MEAS-3)
     benchmark(lambda: con.execute("SELECT sum(a), sum(b) FROM t_num").fetchall())
 
 
 def test_read_arrow_string(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, arrow_string: pa.Table) -> None:
     """Benchmark scanning a string arrow table."""
     con.register("t_str", arrow_string)
+    con.execute("SELECT count(s), sum(length(s)) FROM t_str").fetchall()  # warm (MEAS-3)
     benchmark(lambda: con.execute("SELECT count(s), sum(length(s)) FROM t_str").fetchall())
 
 
@@ -101,6 +116,21 @@ def test_read_arrow_reader_numeric(
 
     run()  # warm
     benchmark(run)
+
+
+# ADDED (COV-4): dictionary-encoded arrow ingest, cardinality sweep (unique in {2, 1k, high}). Mirrors core's
+# test_arrow_dictionaries_scan. The engine aggregate dominates (hence informational), but the per-value
+# dictionary DECODE in the arrow scan is the binding interest, and its cost slopes with the unique count.
+
+
+@pytest.mark.parametrize("unique", DICT_UNIQUE)
+def test_read_arrow_dictionary(
+    benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, arrow_dict_tables: dict[int, pa.Table], unique: int
+) -> None:
+    """Benchmark scanning a dictionary-encoded arrow column at a given cardinality."""
+    con.register("t_dict", arrow_dict_tables[unique])
+    con.execute("SELECT count(c), sum(length(c)) FROM t_dict").fetchall()  # warm
+    benchmark(lambda: con.execute("SELECT count(c), sum(length(c)) FROM t_dict").fetchall())
 
 
 # --------------------------------------------------------------------------- #

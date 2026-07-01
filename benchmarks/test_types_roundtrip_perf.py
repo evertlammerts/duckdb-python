@@ -18,15 +18,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
-
-import duckdb
+from _scale import scaled
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-
     from pytest_codspeed import BenchmarkFixture
 
-N = 100_000
+    import duckdb
+
+N = scaled(100_000)  # env-gated: full N locally, shrunk under BENCH_SCALE in the CI Callgrind sweep (INFRA-4)
 
 # one logical type per column; long-varchar is intentionally > 64 chars
 TYPE_EXPR = {
@@ -34,6 +33,8 @@ TYPE_EXPR = {
     "double": "(i * 1.5)::DOUBLE",
     "varchar_short": "('str_' || i)",
     "varchar_long": "('row_' || i || '_' || repeat('payload ', 9))",
+    "date": "DATE '2020-01-01' + (i % 3650)::INTEGER",
+    "bool": "(i % 2 = 0)",
     "timestamp": "TIMESTAMP '2020-01-01' + (i * INTERVAL 1 SECOND)",
     "decimal64": "((i::DECIMAL(18, 3)) / 1000)",
     "decimal128": "((i * 1.5)::DECIMAL(28, 6))",
@@ -45,18 +46,12 @@ TYPE_EXPR = {
 TYPES = list(TYPE_EXPR)
 
 
-@pytest.fixture
-def con() -> Iterator[duckdb.DuckDBPyConnection]:
-    """Yield a fresh connection, closed on teardown."""
-    c = duckdb.connect()
-    yield c
-    c.close()
-
-
+# `con` fixture + threads=1 live in conftest.py.
 def _query(type_name: str) -> str:
     return f"SELECT {TYPE_EXPR[type_name]} AS c FROM range({N}) t(i)"
 
 
+@pytest.mark.gate  # OUT-row fetchall -> binding-dominated per-type dispatch
 @pytest.mark.parametrize("type_name", TYPES)
 def test_out_row_fetchall(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, type_name: str) -> None:
     """Benchmark fetchall of one logical type per column."""
@@ -65,6 +60,7 @@ def test_out_row_fetchall(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConne
     benchmark(lambda: con.execute(q).fetchall())
 
 
+@pytest.mark.gate  # OUT-col df() -> binding-dominated ArrayWrapper fill per type
 @pytest.mark.parametrize("type_name", TYPES)
 def test_out_col_df(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, type_name: str) -> None:
     """Benchmark df() of one logical type per column."""
@@ -73,6 +69,7 @@ def test_out_col_df(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection,
     benchmark(lambda: con.sql(q).df())
 
 
+@pytest.mark.informational  # to_arrow_table re-runs the query GIL-released (engine-parallel) -> not gated
 @pytest.mark.parametrize("type_name", TYPES)
 def test_out_arrow_table(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, type_name: str) -> None:
     """Benchmark to_arrow_table() of one logical type per column (informational only)."""

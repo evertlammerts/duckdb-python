@@ -18,20 +18,21 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
+from _scale import scaled
 
-import duckdb
 import numpy as np
 import pandas as pd
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-
     from pytest_codspeed import BenchmarkFixture
 
-N = 500_000
-ANALYZER_N = 200_000
+    import duckdb
 
-# Module-global for the replacement-scan-from-variable path (frame resolution finds f_globals reliably).
+# env-gated (INFRA-4): scaling changes ONLY the row count, never the mixed ASCII+non-ASCII+null pattern below.
+N = scaled(500_000)
+ANALYZER_N = scaled(200_000)
+
+# Registered explicitly via con.register (MEAS-3) rather than resolved by replacement-scan frame inspection.
 NPDICT = {"a": np.arange(N, dtype="int64"), "b": np.arange(N, dtype="float64") * 1.5}
 
 # Mixed ASCII + non-ASCII + null sentinel -> forces the transcode + null-detection ladder (NOT ASCII-only).
@@ -42,12 +43,9 @@ _MIXED_STRINGS = [None if _MIXED[i % 5] is None else f"{_MIXED[i % 5]}{i}" for i
 _MIXED_TYPES = [(i if i % 3 == 0 else (float(i) if i % 3 == 1 else f"s{i}")) for i in range(ANALYZER_N)]
 
 
-@pytest.fixture
-def con() -> Iterator[duckdb.DuckDBPyConnection]:
-    """Yield a fresh connection, closed on teardown."""
-    c = duckdb.connect()
-    yield c
-    c.close()
+# `con` fixture + threads=1 live in conftest.py. READ benchmarks (`sum()`/`sum(length())` over a registered
+# frame) are engine-aggregate dominated -> informational. The analyzer BIND (count(*), no scan) is a pure
+# per-bind binding cost -> gate.
 
 
 @pytest.fixture(scope="module")
@@ -84,32 +82,42 @@ def df_object_mixed_types() -> pd.DataFrame:
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.informational
 def test_read_numpy_dict_numeric(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
-    """Benchmark scanning a numpy-dict replacement scan."""
-    benchmark(lambda: con.sql("SELECT sum(a), sum(b) FROM NPDICT").fetchall())
+    """Benchmark scanning a registered numpy dict-of-arrays."""
+    # MEAS-3: register explicitly (not frame-inspection replacement scan) and warm the query before measuring.
+    con.register("npdict", NPDICT)
+    con.execute("SELECT sum(a), sum(b) FROM npdict").fetchall()  # warm
+    benchmark(lambda: con.execute("SELECT sum(a), sum(b) FROM npdict").fetchall())
 
 
+@pytest.mark.informational
 def test_read_numpy_double_with_nan(
     benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, df_double_with_nan: pd.DataFrame
 ) -> None:
     """Benchmark scanning a numpy double column with NaNs."""
     con.register("t", df_double_with_nan)
+    con.execute("SELECT sum(a) FROM t").fetchall()  # warm (MEAS-3)
     benchmark(lambda: con.execute("SELECT sum(a) FROM t").fetchall())
 
 
+@pytest.mark.informational
 def test_read_numpy_masked_int(
     benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, df_masked_int: pd.DataFrame
 ) -> None:
     """Benchmark scanning a masked nullable-int column."""
     con.register("t", df_masked_int)
+    con.execute("SELECT sum(a) FROM t").fetchall()  # warm (MEAS-3)
     benchmark(lambda: con.execute("SELECT sum(a) FROM t").fetchall())
 
 
+@pytest.mark.informational
 def test_read_numpy_object_string_mixed(
     benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, df_object_string_mixed: pd.DataFrame
 ) -> None:
     """Benchmark scanning a mixed object-string column."""
     con.register("t", df_object_string_mixed)
+    con.execute("SELECT count(s), sum(length(s)) FROM t").fetchall()  # warm (MEAS-3)
     benchmark(lambda: con.execute("SELECT count(s), sum(length(s)) FROM t").fetchall())
 
 
@@ -119,6 +127,7 @@ def test_read_numpy_object_string_mixed(
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.gate  # count(*) forces no scan -> the measured cost is the PandasAnalyzer per-bind sampling (binding)
 def test_bind_analyzer_object(
     benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, df_object_mixed_types: pd.DataFrame
 ) -> None:

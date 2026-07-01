@@ -1,20 +1,42 @@
-# Perf-regression benchmarks via CodSpeed in instruction-count (simulation) mode: deterministic, so the whole
-# suite is gate-able (no walltime noise, no gated/informational split).
+# Perf-regression benchmarks: instruction-count (Callgrind) gating against a COMMITTED baseline.
 #
-# TOKENLESS: the token is only for uploading to the CodSpeed dashboard. Without it the action still runs every
-# benchmark and reports counts in the job log. For the hosted gate later, create a CodSpeed project and rely on
-# the OIDC id-token permission below (public repo), or add a CODSPEED_TOKEN secret and pass token: to the action.
+# NO CodSpeed account/dashboard/token/runner. pytest-codspeed's hooks call callgrind_dump_stats_at(<uri>) per
+# benchmark, so a self-hosted `valgrind --tool=callgrind` run writes one dump per benchmark, headed by
+# `desc: Trigger: Client Request: <uri>` with the count on `totals:` (events: Ir). benchmarks/compare_baseline.py
+# parses those dumps and diffs each benchmark against benchmarks/baseline.json (the committed instruction-count
+# baseline). Counts are near-deterministic under Callgrind with PYTHONHASHSEED pinned (~0.1% noise observed;
+# often bit-identical), so a 5% default gate threshold sits far above noise. Validated on a Linux+valgrind box.
 #
-# Not yet run in CI; the build mirrors the dev build (CLAUDE.md) and will need a shakeout. Valgrind is slow
-# (~20-50x); trim the largest-N benchmarks if the suite is too slow.
+# TRIGGERS: nightly `schedule` + manual `workflow_dispatch`. No pull_request/push (and no `paths:` -- neither
+# schedule nor dispatch honors it). A dispatch on a feature branch compares that branch's benchmark counts vs the
+# baseline.json committed on the branch (i.e. main's baseline), answering "did my branch regress vs main".
+#
+# MODES (workflow_dispatch input `regen`):
+#   regen=false (default) -> COMPARE: run + diff vs baseline.json, print a report. REPORT-ONLY for now (never
+#                            fails the job); flip compare_baseline.py to --enforce once trusted.
+#   regen=true            -> REGENERATE: run + write a fresh baseline.json (per-bench counts + provenance meta +
+#                            Option-B binding fractions/auto-move) and upload it as an artifact to commit
+#                            deliberately. Bump benchmarks/requirements-bench.txt in a separate commit FIRST if
+#                            the pins should change, then regen so the baseline matches the committed pins.
+#
+# The concurrency module is EXCLUDED from the Callgrind sweep: Callgrind serializes threads, so its signal
+# (wall-clock GIL contention) is meaningless here; it stays a local walltime tool.
+#
+# MEMORY MODE (a second Callgrind sweep for O(rows) produce peak-RSS) is DESIGNED but DEFERRED -- see PLAN.md.
+#
+# Valgrind is slow (~20-50x); timeout-minutes is a conservative guess -- calibrate after the first CI run.
 
 name: Benchmarks
 
 on:
-  pull_request:
-  push:
-    branches: [main]
+  schedule:
+    - cron: "0 3 * * *" # nightly at 03:00 UTC
   workflow_dispatch:
+    inputs:
+      regen:
+        description: "Regenerate benchmarks/baseline.json (upload as artifact) instead of comparing"
+        type: boolean
+        default: false
 
 concurrency:
   group: codspeed-${{ github.ref }}
@@ -23,25 +45,42 @@ concurrency:
 jobs:
   benchmarks:
     runs-on: ubuntu-latest
+    timeout-minutes: 90 # measured: ~25 min Callgrind sweep at BENCH_SCALE=10 (12-core Linux) + cold build ~10 min; margin for CI
     permissions:
       contents: read
-      id-token: write # enables tokenless (OIDC) upload once a CodSpeed project is linked; harmless otherwise
+    env:
+      PYTHONHASHSEED: "0" # pin hash randomization so dict/struct paths give stable instruction counts (INFRA-6)
+      CODSPEED_ENV: "1" # activates pytest-codspeed's instrument hooks (the callgrind_dump_stats_at markers)
+      # env-gated row counts (INFRA-4): shrink the O(rows)/per-row-object benchmarks so the Callgrind sweep fits
+      # under timeout-minutes. Local runs leave this unset -> full N. Recorded in baseline.json meta.bench_scale;
+      # a baseline is only comparable to a run at the SAME scale. Calibrated on a 12-core Linux+valgrind box:
+      # BENCH_SCALE=10 -> ~25 min full sweep, and the Option-B move-list matches full-N (fractions shift slightly
+      # but stay the same side of the cutoff). Most benches floor at 20k rows (_scale.FLOOR), still row-dominated.
+      BENCH_SCALE: "10"
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive # the DuckDB engine submodule is needed to build
           fetch-depth: 0 # setuptools_scm needs history for version detection
 
+      - name: Resolve DuckDB submodule SHA
+        id: duckdb_sha
+        # used for the sccache key AND passed to compare_baseline.py for the engine-bump guard
+        run: echo "sha=$(git rev-parse HEAD:external/duckdb)" >> "$GITHUB_OUTPUT"
+
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.13"
 
+      - name: Install valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+
       - name: Cache sccache
         uses: actions/cache@v4
         with:
           path: ~/.cache/sccache
-          key: sccache-codspeed-${{ hashFiles('external/duckdb') }}
+          key: sccache-codspeed-${{ steps.duckdb_sha.outputs.sha }}
           restore-keys: sccache-codspeed-
 
       - name: Install sccache
@@ -49,19 +88,58 @@ jobs:
           curl -fsSL https://github.com/mozilla/sccache/releases/download/v0.8.2/sccache-v0.8.2-x86_64-unknown-linux-musl.tar.gz \
             | tar -xz --strip-components=1 -C /usr/local/bin sccache-v0.8.2-x86_64-unknown-linux-musl/sccache
 
-      - name: Build the extension (release) + benchmark deps
+      - name: Build the extension (release) + pinned benchmark deps
         env:
           CMAKE_C_COMPILER_LAUNCHER: sccache
           CMAKE_CXX_COMPILER_LAUNCHER: sccache
         run: |
+          # step 1: build deps only (needed for --no-build-isolation), no project
           uv sync --only-group build --no-install-project -p 3.13
-          uv sync --no-build-isolation --no-editable --reinstall -p 3.13
-          # benchmark deps: keep these pinned in lockstep with any baseline you compare against, so the only
-          # cross-run delta is the binding (numpy/pandas/pyarrow/polars/pytz + the codspeed plugin).
-          uv pip install pytest pytest-codspeed numpy pandas pyarrow polars pytz
+          # step 2: build+install the project (release) + build group, WITHOUT the heavy default `dev` group
+          # (torch/tensorflow/pyspark). uv.lock is gitignored, so it is deliberately NOT relied on for bench deps.
+          uv sync --no-build-isolation --no-editable --reinstall --no-default-groups --group build -p 3.13
+          # step 3: install the FROZEN, committed bench pins (exact ==). Regenerated deliberately with the baseline
+          # (source list: pyproject [dependency-groups] bench), so the only cross-run delta is the binding.
+          uv pip install -r benchmarks/requirements-bench.txt
 
-      - name: Run benchmarks (instruction-count)
-        uses: CodSpeedHQ/action@v4
+      - name: Collect gate node-ids
+        # the gate/informational split (conftest markers) classifies which benchmarks are gate-able; regen uses it
+        run: uv run --no-sync pytest benchmarks/ -m gate --collect-only -q -o addopts= -p no:cacheprovider \
+             | grep '::' > gate_list.txt || true
+
+      - name: Run benchmarks under Callgrind (per-benchmark instruction counts)
+        # ONE sweep over all gate+informational benchmarks EXCEPT the concurrency module (Callgrind serializes
+        # threads -> its wall-clock signal is meaningless and it is expensive). Each benchmark emits a callgrind
+        # dump keyed by its uri. The pytest-codspeed hooks obj-skip libpython, so counts are clean.
+        run: |
+          mkdir -p profiles
+          CODSPEED_PROFILE_FOLDER="$PWD/profiles" valgrind --tool=callgrind --instr-atstart=no \
+            --callgrind-out-file="$PWD/profiles/cg.%p.%n" \
+            uv run --no-sync pytest benchmarks/ \
+              --ignore=benchmarks/test_concurrency_perf.py \
+              -m "gate or informational" --codspeed -o addopts= -p no:cacheprovider
+
+      - name: Compare against committed baseline (report-only)
+        if: ${{ !inputs.regen }}
+        # report-only for now: prints the per-benchmark delta table and NEVER fails the job. Add --enforce here
+        # once trusted to fail on a gate regression (informational benches never fail).
+        run: |
+          uv run --no-sync python benchmarks/compare_baseline.py compare \
+            --profiles profiles --baseline benchmarks/baseline.json \
+            --submodule-sha "${{ steps.duckdb_sha.outputs.sha }}" \
+            --pins benchmarks/requirements-bench.txt
+
+      - name: Regenerate baseline (upload artifact to commit deliberately)
+        if: ${{ inputs.regen }}
+        run: |
+          uv run --no-sync python benchmarks/compare_baseline.py regen \
+            --profiles profiles --out benchmarks/baseline.json --gate-list gate_list.txt \
+            --git-commit "${{ github.sha }}" --submodule-sha "${{ steps.duckdb_sha.outputs.sha }}" \
+            --pins benchmarks/requirements-bench.txt
+
+      - name: Upload regenerated baseline
+        if: ${{ inputs.regen }}
+        uses: actions/upload-artifact@v4
         with:
-          mode: simulation
-          run: uv run pytest benchmarks/ --codspeed -o addopts= -p no:cacheprovider
+          name: baseline-update
+          path: benchmarks/baseline.json

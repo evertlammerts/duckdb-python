@@ -20,17 +20,16 @@ import tracemalloc
 from typing import TYPE_CHECKING
 
 import pytest
+from _scale import scaled
 
 import duckdb
 import numpy as np  # noqa: F401  (pinned identically A/B; imported so the env matches the other modules)
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-
     from pytest_codspeed import BenchmarkFixture
 
-N = 500_000
-TYPE_N = 200_000  # wide-internal types (hugeint/uuid/decimal128) are heavier per cell
+N = scaled(500_000)  # env-gated: full N locally, shrunk under BENCH_SCALE in the CI Callgrind sweep (INFRA-4)
+TYPE_N = scaled(200_000)  # wide-internal types (hugeint/uuid/decimal128) are heavier per cell
 
 Q_NUM = f"SELECT i::BIGINT AS a, (i * 1.5)::DOUBLE AS b FROM range({N}) t(i)"
 Q_NUM_NULLS = (
@@ -44,14 +43,8 @@ Q_UUID = f"SELECT gen_random_uuid() AS u FROM range({TYPE_N}) t(i)"
 Q_DEC128 = f"SELECT ((i * 1.5)::DECIMAL(28, 6)) AS d FROM range({TYPE_N}) t(i)"
 
 
-@pytest.fixture
-def con() -> Iterator[duckdb.DuckDBPyConnection]:
-    """Yield a fresh connection, closed on teardown."""
-    c = duckdb.connect()
-    yield c
-    c.close()
-
-
+# gate: df()/fetchnumpy() fully materialize numpy-backed columns -> binding-dominated (ArrayWrapper fill),
+# GIL-held, deterministic under Callgrind. `con` fixture + threads=1 live in conftest.py.
 def _bench_df(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, query: str) -> None:
     con.sql(query).df()  # warm
     benchmark(lambda: con.sql(query).df())
@@ -67,37 +60,44 @@ def _bench_numpy(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, qu
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.gate
 def test_df_numeric(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
     """Benchmark df() of a numeric result."""
     _bench_df(benchmark, con, Q_NUM)
 
 
+@pytest.mark.gate
 def test_df_numeric_with_nulls(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
     """Benchmark df() of a null-heavy numeric result."""
     # REAL nulls -> HAS_NULLS=true -> masked_array build + masked->pd.NA rewrite (the reworked branch)
     _bench_df(benchmark, con, Q_NUM_NULLS)
 
 
+@pytest.mark.gate
 def test_df_string(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
     """Benchmark df() of a string result."""
     _bench_df(benchmark, con, Q_STR)
 
 
+@pytest.mark.gate
 def test_df_timestamp(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
     """Benchmark df() of a timestamp result."""
     _bench_df(benchmark, con, Q_TS)
 
 
+@pytest.mark.gate
 def test_df_hugeint(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
     """Benchmark df() of a hugeint result."""
     _bench_df(benchmark, con, Q_HUGEINT)
 
 
+@pytest.mark.gate
 def test_df_uuid(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
     """Benchmark df() of a uuid result."""
     _bench_df(benchmark, con, Q_UUID)
 
 
+@pytest.mark.gate
 def test_df_decimal128(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
     """Benchmark df() of a 128-bit decimal result."""
     _bench_df(benchmark, con, Q_DEC128)
@@ -108,11 +108,13 @@ def test_df_decimal128(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnecti
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.gate
 def test_fetchnumpy_numeric(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
     """Benchmark fetchnumpy() of a numeric result."""
     _bench_numpy(benchmark, con, Q_NUM)
 
 
+@pytest.mark.gate
 def test_fetchnumpy_numeric_with_nulls(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
     """Benchmark fetchnumpy() of a null-heavy numeric result."""
     _bench_numpy(benchmark, con, Q_NUM_NULLS)
@@ -123,6 +125,7 @@ def test_fetchnumpy_numeric_with_nulls(benchmark: BenchmarkFixture, con: duckdb.
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.informational  # per-chunk streaming drain (GIL-per-chunk) -> walltime-informational, not gated
 def test_fetch_df_chunk_loop(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
     """Benchmark draining a result with fetch_df_chunk()."""
 
@@ -145,6 +148,7 @@ def test_fetch_df_chunk_loop(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyCo
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.informational  # torch is local-only (importorskip -> skipped in CI); torch lib work dilutes it
 def test_torch_numeric(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
     """Benchmark torch() of a numeric result (skipped if torch is absent)."""
     pytest.importorskip("torch")
@@ -172,7 +176,7 @@ def test_torch_numeric(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnecti
 
 def test_mem_df_with_nulls() -> None:
     """Guard the Python-tracked peak allocation of a null-heavy df() call."""
-    con = duckdb.connect()
+    con = duckdb.connect(config={"threads": 1})
     try:
         tracemalloc.start()
         warm = con.sql(Q_NUM_NULLS).df()  # populate one-time import / type caches

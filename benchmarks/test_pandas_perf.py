@@ -18,28 +18,24 @@ from typing import TYPE_CHECKING
 
 import pyarrow as pa
 import pytest
+from _scale import scaled
 
-import duckdb
 import numpy as np
 import pandas as pd
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-
     from pytest_codspeed import BenchmarkFixture
 
-N = 500_000
-WRITE_Q_NUM = "SELECT i::BIGINT AS a, (i * 1.5)::DOUBLE AS b FROM range(500000) t(i)"
-WRITE_Q_STR = "SELECT ('str_value_' || i) AS s FROM range(500000) t(i)"
+    import duckdb
+
+N = scaled(500_000)  # env-gated: full N locally, shrunk under BENCH_SCALE in the CI Callgrind sweep (INFRA-4)
+WRITE_Q_NUM = f"SELECT i::BIGINT AS a, (i * 1.5)::DOUBLE AS b FROM range({N}) t(i)"
+WRITE_Q_STR = f"SELECT ('str_value_' || i) AS s FROM range({N}) t(i)"
 _STRINGS = [f"str_value_{i}" for i in range(N)]
 
-
-@pytest.fixture
-def con() -> Iterator[duckdb.DuckDBPyConnection]:
-    """Yield a fresh connection, closed on teardown."""
-    c = duckdb.connect()
-    yield c
-    c.close()
+# `con` fixture + threads=1 live in conftest.py. READ benchmarks (`sum()` over a registered frame) are
+# engine-aggregate dominated -> informational. Only the NUMPY-backed df() WRITE is binding-dominated -> gate.
+# The arrow-backed WRITE goes through to_arrow_table().to_pandas() (pyarrow library code, MEAS-2) -> informational.
 
 
 @pytest.fixture(scope="module")
@@ -77,35 +73,43 @@ def df_arrow_string() -> pd.DataFrame:
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.informational
 def test_read_pandas_numpy_numeric(
     benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, df_numpy_numeric: pd.DataFrame
 ) -> None:
     """Benchmark scanning a numpy-backed numeric frame."""
     con.register("t", df_numpy_numeric)
+    con.execute("SELECT sum(a), sum(b) FROM t").fetchall()  # warm (MEAS-3)
     benchmark(lambda: con.execute("SELECT sum(a), sum(b) FROM t").fetchall())
 
 
+@pytest.mark.informational
 def test_read_pandas_numpy_string(
     benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, df_numpy_string: pd.DataFrame
 ) -> None:
     """Benchmark scanning a numpy-backed string frame."""
     con.register("t", df_numpy_string)
+    con.execute("SELECT count(s), sum(length(s)) FROM t").fetchall()  # warm (MEAS-3)
     benchmark(lambda: con.execute("SELECT count(s), sum(length(s)) FROM t").fetchall())
 
 
+@pytest.mark.informational
 def test_read_pandas_arrow_numeric(
     benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, df_arrow_numeric: pd.DataFrame
 ) -> None:
     """Benchmark scanning an arrow-backed numeric frame."""
     con.register("t", df_arrow_numeric)
+    con.execute("SELECT sum(a), sum(b) FROM t").fetchall()  # warm (MEAS-3)
     benchmark(lambda: con.execute("SELECT sum(a), sum(b) FROM t").fetchall())
 
 
+@pytest.mark.informational
 def test_read_pandas_arrow_string(
     benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, df_arrow_string: pd.DataFrame
 ) -> None:
     """Benchmark scanning an arrow-backed string frame."""
     con.register("t", df_arrow_string)
+    con.execute("SELECT count(s), sum(length(s)) FROM t").fetchall()  # warm (MEAS-3)
     benchmark(lambda: con.execute("SELECT count(s), sum(length(s)) FROM t").fetchall())
 
 
@@ -116,11 +120,13 @@ def test_read_pandas_arrow_string(
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.gate
 def test_write_pandas_numpy_numeric(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
     """Benchmark materializing a numeric result to a numpy-backed frame."""
     benchmark(lambda: con.sql(WRITE_Q_NUM).df())
 
 
+@pytest.mark.gate
 def test_write_pandas_numpy_string(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
     """Benchmark materializing a string result to a numpy-backed frame."""
     benchmark(lambda: con.sql(WRITE_Q_STR).df())
@@ -131,26 +137,30 @@ def test_write_pandas_numpy_string(benchmark: BenchmarkFixture, con: duckdb.Duck
 # datetime column (TimestampConvert + ConvertDateTimeTypes).
 
 
+@pytest.mark.gate
 def test_write_pandas_numpy_numeric_with_nulls(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
     """Benchmark materializing a null-heavy numeric result to a numpy-backed frame."""
     q = (
         "SELECT CASE WHEN i % 10 = 0 THEN NULL ELSE i::BIGINT END AS a, "
-        "CASE WHEN i % 10 = 0 THEN NULL ELSE (i * 1.5)::DOUBLE END AS b FROM range(500000) t(i)"
+        f"CASE WHEN i % 10 = 0 THEN NULL ELSE (i * 1.5)::DOUBLE END AS b FROM range({N}) t(i)"
     )
     benchmark(lambda: con.sql(q).df())
 
 
+@pytest.mark.gate
 def test_write_pandas_numpy_timestamp(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
     """Benchmark materializing a timestamp result to a numpy-backed frame."""
-    q = "SELECT TIMESTAMP '2020-01-01' + (i * INTERVAL 1 SECOND) AS t FROM range(500000) t(i)"
+    q = f"SELECT TIMESTAMP '2020-01-01' + (i * INTERVAL 1 SECOND) AS t FROM range({N}) t(i)"
     benchmark(lambda: con.sql(q).df())
 
 
+@pytest.mark.informational  # to_arrow_table().to_pandas() -> the to_pandas half is pyarrow library code (MEAS-2)
 def test_write_pandas_arrow_numeric(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
     """Benchmark materializing a numeric result to an arrow-backed frame."""
     benchmark(lambda: con.sql(WRITE_Q_NUM).to_arrow_table().to_pandas(types_mapper=pd.ArrowDtype))
 
 
+@pytest.mark.informational  # to_arrow_table().to_pandas() -> the to_pandas half is pyarrow library code (MEAS-2)
 def test_write_pandas_arrow_string(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
     """Benchmark materializing a string result to an arrow-backed frame."""
     benchmark(lambda: con.sql(WRITE_Q_STR).to_arrow_table().to_pandas(types_mapper=pd.ArrowDtype))

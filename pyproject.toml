@@ -281,6 +281,22 @@ test = [ # dependencies used for running tests
     "numpy>=2; ( sys_platform != 'win32' or platform_machine != 'ARM64' ) and python_version >= '3.12'",
     "numpy>=2.3; sys_platform == 'win32' and platform_machine == 'ARM64' and python_version >= '3.11'",
 ]
+bench = [ # minimal, pinned deps for the CodSpeed benchmark suite (.github/workflows/codspeed.yml). Deliberately
+          # NOT the heavy `test` group (no torch/tensorflow/pyspark/adbc). Pinned via uv.lock and kept in lockstep
+          # with any baseline compared against, so the only cross-run delta is the binding. Constraints mirror the
+          # `test` group so the lockfile resolves identically. torch/tf produce paths are local-only (importorskip).
+    "pytest",
+    "pytest_codspeed",
+    "polars>=1.33.0",
+    "pytz",
+    "numpy<2; ( sys_platform != 'win32' or platform_machine != 'ARM64' ) and python_version < '3.12'",
+    "numpy>=2; ( sys_platform != 'win32' or platform_machine != 'ARM64' ) and python_version >= '3.12'",
+    "numpy>=2.3; sys_platform == 'win32' and platform_machine == 'ARM64' and python_version >= '3.11'",
+    "pandas>=3.0.0; python_version > '3.10'",
+    "pandas<3.0.0; python_version < '3.11'",
+    "pyarrow>=23.0.0; python_version >= '3.10' and (sys_platform != 'win32' or platform_machine != 'ARM64')",
+    "pyarrow>=18.0.0; python_version < '3.10' and (sys_platform != 'win32' or platform_machine != 'ARM64')",
+]
 scripts = [ # dependencies used for running scripts
     "cxxheaderparser",
     "ipython",

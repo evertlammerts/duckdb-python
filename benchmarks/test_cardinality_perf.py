@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
+from _scale import scaled
 
 import duckdb
 
@@ -26,8 +27,10 @@ if TYPE_CHECKING:
 
     from pytest_codspeed import BenchmarkFixture
 
-SRC_ROWS = 200_000
-LIMITS = [100, 1_000, 10_000, 100_000]
+# env-gated (INFRA-4): scale the source rows AND the top-N of the sweep by the same factor, keeping the small-N
+# points fixed and SRC_ROWS >= max(LIMITS). Preserves the LIMIT-no-ORDER-BY early-stop pattern (Do-NOT-regress).
+SRC_ROWS = scaled(200_000)
+LIMITS = [100, 1_000, 10_000, scaled(100_000)]
 
 
 @pytest.fixture(scope="module")
@@ -35,7 +38,7 @@ def con() -> Iterator[duckdb.DuckDBPyConnection]:
     """Yield a connection over a once-materialized source table."""
     # Fixed source materialized ONCE (module-scoped): building it per test would add noise, and it must be
     # identical across the n sweep. `SELECT * FROM src LIMIT n` then reads only the first n rows.
-    c = duckdb.connect()
+    c = duckdb.connect(config={"threads": 1})  # pin engine parallelism (INFRA-6); module-scoped source table
     c.execute(
         "CREATE TABLE src AS "
         f"SELECT i::BIGINT AS a, (i * 1.5)::DOUBLE AS b, ('s_' || i) AS s FROM range({SRC_ROWS}) t(i)"
@@ -50,6 +53,7 @@ def _query(n: int) -> str:
     return f"SELECT a, b, s FROM src LIMIT {n}"
 
 
+@pytest.mark.gate  # fetchall materializes n rows to Python -> binding-dominated; small-n end is the noise-free gate
 @pytest.mark.parametrize("n", LIMITS)
 def test_limit_fetchall(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, n: int) -> None:
     """Benchmark fetchall over a LIMIT n sweep."""
@@ -58,6 +62,7 @@ def test_limit_fetchall(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnect
     benchmark(lambda: con.execute(q).fetchall())
 
 
+@pytest.mark.gate  # df() materializes n rows to numpy columns -> binding-dominated
 @pytest.mark.parametrize("n", LIMITS)
 def test_limit_df(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, n: int) -> None:
     """Benchmark df() over a LIMIT n sweep."""
@@ -66,6 +71,7 @@ def test_limit_df(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, n
     benchmark(lambda: con.sql(q).df())
 
 
+@pytest.mark.informational  # to_arrow_table re-runs the query GIL-released (engine-parallel) -> not gated
 @pytest.mark.parametrize("n", LIMITS)
 def test_limit_to_arrow(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, n: int) -> None:
     """Benchmark to_arrow_table() over a LIMIT n sweep."""

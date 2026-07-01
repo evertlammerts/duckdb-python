@@ -122,20 +122,58 @@ benchmarks/
 ```
 One module per binding subsystem so a CodSpeed report points at one src/ area. torch/tf go in produce_numpy (wrap FetchNumpyInternal); polars stays in arrow (wraps FetchArrowTable).
 
+> **Note (reconciled to the implemented model).** The prose below originally described a per-PR CodSpeed
+> commit-diff gate. That is NOT how the suite works now. The implemented model is: **nightly `schedule` +
+> manual `workflow_dispatch`** (no per-PR trigger, no CodSpeed account/token/runner), a **self-hosted
+> `valgrind --tool=callgrind`** sweep that emits one dump per benchmark, and **`compare_baseline.py`** diffing
+> those counts against a **committed `benchmarks/baseline.json`**. See `.github/workflows/codspeed.yml`.
+
 ### Walltime vs instruction-count
 
 - **Local A/B (macOS arm64): walltime only** (no Valgrind), `--codspeed-mode=walltime`.
-- **CI gate: instruction-count / simulation (Linux + Callgrind)**, deterministic — gate PRs with this.
+- **CI: instruction-count via self-hosted Callgrind (Linux)**, near-deterministic (~0.1% noise with
+  `PYTHONHASHSEED=0`; often bit-identical) — compared against the committed baseline, **report-only** for now
+  (flip `compare_baseline.py` to `--enforce` when trusted).
 
-Instruction-count is ideal AND should gate the GIL-held single-threaded overhead paths: fetchone loop, fetchall/fetchmany, native UDF per-call, native values() ingest, analyzer bind, all per-element converters (FromValue, TransformPythonValue, NumpyScan object/string, ArrayWrapper fill). The historical fetchall regression would be caught cleanly here.
+### Marker split + committed-baseline gate (INFRA-1 / Phase-3)
 
-Noisy under instruction-count — keep walltime-only, informational, do NOT hard-gate:
-- to_arrow_table / pl() on materialized results: PromoteMaterializedToArrow re-runs the query parallel with GIL released (`pyresult.cpp:450-477`).
-- Large 1M+ SELECT sum() ingest reads: engine parallel aggregate dominates.
-- read_csv/parquet/json: engine + I/O dominated.
-- GIL-per-chunk streaming (FetchNextRaw, to_record_batch_reader drain).
+- Every benchmark carries exactly one of `@pytest.mark.gate` / `@pytest.mark.informational` (registered in
+  `conftest.py`). **gate** = binding-dominated, instruction-count-meaningful (fetchone loop, fetchall/fetchmany,
+  df()/fetchnumpy, native UDF per-call, native values()/executemany ingest, analyzer bind, per-element
+  converters). **informational** = engine/library/streaming-diluted, reported but never gated
+  (`to_arrow_table`/`pl()`/`to_pandas` GIL-released re-runs; registered-frame `SELECT sum()` reads;
+  streaming drains; the concurrency module).
+- **Engine floors + Option-B (MEAS-1).** `test_engine_control_perf.py` measures `SELECT sum(...) FROM range(N)`
+  with no Python egress — the engine floor. At baseline **regen**, each mapped numeric-produce gate's binding
+  fraction `= 1 - floor_Ir/bench_Ir` is computed; a gate below the ~25% cutoff is **auto-moved to
+  informational** (a threshold on an engine-diluted total is not meaningful) and the fraction is stored in
+  `baseline.json` for audit. MEAS-1 showed OUT-row fetch and UDFs are ~all binding (stay gate); numeric
+  produce (`df()`/`fetchnumpy`) is a bulk memcpy of ~engine magnitude (auto-move candidate).
+- **Small-N gates are compile+fetch fixed-cost**, not pure fetch (MEAS-1: ~60% compile+engine at `range(2048)`).
+- **Engine-bump guard.** `compare_baseline.py` compares the committed submodule SHA against the baseline's; if
+  they differ, engine-inclusive deltas may reflect the engine bump, so gate deltas are not enforced (regen the
+  baseline for the new engine).
+- **Reproducibility.** `benchmarks/requirements-bench.txt` (frozen `==` pins, from the `[dependency-groups]
+  bench` list) + `benchmarks/baseline.json` are the co-regenerated pair; CI installs the frozen pins (NOT the
+  gitignored `uv.lock`), so the only cross-run delta is the binding.
 
-Gate tactic: pair each large-throughput scenario with a small/1-row variant (e.g. fetchall range(1_000_000) walltime + fetchall range(2048) instruction-count gate) so binding fixed-cost is measured noise-free.
+Still **informational / do NOT gate** (engine/parallel/IO/library dominated):
+- to_arrow_table / pl() on materialized results (PromoteMaterializedToArrow re-runs GIL-released).
+- registered-frame `SELECT sum()` ingest reads (engine aggregate dominates).
+- read_csv/parquet/json; GIL-per-chunk streaming drains.
+
+### New coverage dimensions (beyond the converter surface)
+
+- **Concurrency/GIL** (`test_concurrency_perf.py`, informational/walltime): threads {1,4,8} over a **multi-batch**
+  arrow scan / pandas scan / native + arrow UDF. EXCLUDED from the Callgrind sweep (Callgrind serializes threads
+  → its wall-clock contention signal is meaningless there); it is a local walltime tool.
+- **Sustained-leak guard** (`tests/fast/test_binding_pressure_leak.py`): a plain psutil RSS + object-count
+  ratio test (not a codspeed benchmark) for the object-pinning paths (register/unregister, UDF create/run/remove,
+  executemany). Runs in the normal test suite.
+- **Memory mode (DEFERRED).** A second Callgrind sweep (`--codspeed-mode=memory`) over the O(rows) produce paths
+  for peak-RSS, feeding the same baseline model, is DESIGNED but not implemented this round (roughly doubles the
+  CI cost; nightly-only when added). The `test_mem_df_with_nulls` tracemalloc guard stays as a local signal until
+  then (convert it to an A/B delta when memory mode lands).
 
 ### Two code-grounded gotchas
 - **OUT-col null benchmarks need REAL DuckDB nulls** (`CASE WHEN ... THEN NULL`): the masked-array branch only triggers on an actually-invalid validity bit (`array_wrapper.cpp:396-404,736`); a no-null column silently takes the cheap `std::move` path and measures the wrong thing.

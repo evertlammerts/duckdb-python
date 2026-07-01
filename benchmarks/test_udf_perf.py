@@ -16,30 +16,24 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
+from _scale import scaled
 
-import duckdb
 from duckdb.sqltypes import BIGINT, DOUBLE, VARCHAR
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-
     from pytest_codspeed import BenchmarkFixture
+
+    import duckdb
 
 pa = pytest.importorskip("pyarrow")
 pc = pytest.importorskip("pyarrow.compute")
 
-NATIVE_N = 200_000  # native = one Python call per row, keep moderate
-ARROW_N = 1_000_000  # arrow = one Python call per chunk (vectorized), can be large
+# env-gated (INFRA-4): full N locally, shrunk under BENCH_SCALE in the CI Callgrind sweep.
+NATIVE_N = scaled(200_000)  # native = one Python call per row, keep moderate
+ARROW_N = scaled(1_000_000)  # arrow = one Python call per chunk (vectorized), can be large
 
 
-@pytest.fixture
-def con() -> Iterator[duckdb.DuckDBPyConnection]:
-    """Yield a fresh connection, closed on teardown."""
-    c = duckdb.connect()
-    yield c
-    c.close()
-
-
+# `con` fixture + threads=1 live in conftest.py.
 def _bench(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, query: str) -> None:
     con.execute(query).fetchall()  # warm the engine + import caches before measuring
     benchmark(lambda: con.execute(query).fetchall())
@@ -50,24 +44,28 @@ def _bench(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, query: s
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.gate  # native scalar UDF: one Python call per row dominates; the sum() consume is negligible
 def test_udf_native_int_1arg(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
     """Benchmark a 1-arg native int scalar UDF."""
     con.create_function("add_one", lambda x: x + 1, [BIGINT], BIGINT)
     _bench(benchmark, con, f"SELECT sum(add_one(i::BIGINT)) FROM range({NATIVE_N}) t(i)")
 
 
+@pytest.mark.gate
 def test_udf_native_int_2arg(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
     """Benchmark a 2-arg native int scalar UDF."""
     con.create_function("add2", lambda a, b: a + b, [BIGINT, BIGINT], BIGINT)
     _bench(benchmark, con, f"SELECT sum(add2(i::BIGINT, (i + 1)::BIGINT)) FROM range({NATIVE_N}) t(i)")
 
 
+@pytest.mark.gate
 def test_udf_native_double_1arg(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
     """Benchmark a 1-arg native double scalar UDF."""
     con.create_function("scale", lambda x: x * 1.5, [DOUBLE], DOUBLE)
     _bench(benchmark, con, f"SELECT sum(scale((i * 1.0)::DOUBLE)) FROM range({NATIVE_N}) t(i)")
 
 
+@pytest.mark.gate
 def test_udf_native_string(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
     """Benchmark a native string scalar UDF."""
     con.create_function("up", lambda s: s.upper(), [VARCHAR], VARCHAR)
@@ -78,6 +76,7 @@ def test_udf_native_string(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConn
     )
 
 
+@pytest.mark.gate
 def test_udf_native_null_inputs(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
     """Benchmark the validity short-circuit for NULL inputs to a native UDF."""
     # DEFAULT null handling: NULL inputs short-circuit (SetNull) WITHOUT calling the UDF -- this measures the
@@ -96,18 +95,21 @@ def test_udf_native_null_inputs(benchmark: BenchmarkFixture, con: duckdb.DuckDBP
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.informational  # vectorized arrow UDF: pyarrow.compute lib work + per-chunk conversion + 1M engine
 def test_udf_arrow_int(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
     """Benchmark a vectorized arrow int UDF."""
     con.create_function("arrow_add_one", lambda x: pc.add(x, 1), [BIGINT], BIGINT, type="arrow")
     _bench(benchmark, con, f"SELECT sum(arrow_add_one(i::BIGINT)) FROM range({ARROW_N}) t(i)")
 
 
+@pytest.mark.informational
 def test_udf_arrow_double(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
     """Benchmark a vectorized arrow double UDF."""
     con.create_function("arrow_scale", lambda x: pc.multiply(x, 1.5), [DOUBLE], DOUBLE, type="arrow")
     _bench(benchmark, con, f"SELECT sum(arrow_scale((i * 1.0)::DOUBLE)) FROM range({ARROW_N}) t(i)")
 
 
+@pytest.mark.informational
 def test_udf_arrow_null_inputs(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
     """Benchmark the selvec compaction for NULL inputs to a vectorized arrow UDF."""
     # DEFAULT null handling on the vectorized path: the binding compacts the validity (selvec) before the call
