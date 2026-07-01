@@ -55,6 +55,11 @@ struct FilterBackend {
 	// each operator decomposes into is_nan / ~is_nan / lit(true|false).
 	virtual nb::object NaNCompare(ExpressionType op, nb::object col) = 0;
 
+	// Column-side NaN predicate: `col.is_nan()`. Used to re-include NaN rows for `>` / `>=` against a
+	// finite float constant, since DuckDB orders NaN as the greatest value (so `nan > finite` is TRUE)
+	// while IEEE comparisons make them FALSE.
+	virtual nb::object IsNaN(nb::object col) = 0;
+
 	virtual nb::object IsNull(nb::object col) = 0;
 	virtual nb::object IsNotNull(nb::object col) = 0;
 

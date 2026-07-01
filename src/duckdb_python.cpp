@@ -708,33 +708,36 @@ static void InitializeConnectionMethods(nb::module_ &m) {
 	    "run the query as-is.",
 	    nb::arg("query"), nb::kw_only(), nb::arg("alias") = "", nb::arg("params") = nb::none(),
 	    nb::arg("connection").none() = nb::none());
-	m.def(
-	    "read_csv",
-	    // nb::arg + nb::kwargs can't coexist under nanobind's annotation rules; drop the annotations.
-	    [](const nb::object &name, nb::kwargs &kwargs) {
-		    std::shared_ptr<DuckDBPyConnection> conn;
-		    if (kwargs.contains("conn") && !kwargs["conn"].is_none()) {
-			    conn = nb::cast<std::shared_ptr<DuckDBPyConnection>>(kwargs["conn"]);
-		    }
-		    if (!conn) {
-			    conn = DuckDBPyConnection::DefaultConnection();
-		    }
-		    return conn->ReadCSV(name, kwargs);
-	    },
-	    "Create a relation object from the CSV file in 'name'");
-	m.def(
-	    "from_csv_auto",
-	    [](const nb::object &name, nb::kwargs &kwargs) {
-		    std::shared_ptr<DuckDBPyConnection> conn;
-		    if (kwargs.contains("conn") && !kwargs["conn"].is_none()) {
-			    conn = nb::cast<std::shared_ptr<DuckDBPyConnection>>(kwargs["conn"]);
-		    }
-		    if (!conn) {
-			    conn = DuckDBPyConnection::DefaultConnection();
-		    }
-		    return conn->ReadCSV(name, kwargs);
-	    },
-	    "Create a relation object from the CSV file in 'name'");
+	// nanobind's all-or-nothing nb::arg rule forbids naming just the source parameter alongside **kwargs, so the
+	// module-level read_csv / from_csv_auto take (*args, **kwargs) and recover the advertised keywords by hand:
+	// the source may be positional or passed as `path_or_buffer=`, and the connection as `connection=` / `conn=`.
+	// Each recovered keyword is popped from kwargs so ReadCSV's unknown-parameter check only sees CSV options.
+	// N2: extra positional args (e.g. read_csv("a", "b")) are silently dropped rather than raising; negligible.
+	auto module_read_csv = [](nb::args args, nb::kwargs kwargs) {
+		nb::object name = nb::none();
+		if (args.size() >= 1) {
+			name = nb::object(args[0]);
+		} else if (kwargs.contains("path_or_buffer")) {
+			name = kwargs["path_or_buffer"];
+			PyDict_DelItemString(kwargs.ptr(), "path_or_buffer");
+		}
+		std::shared_ptr<DuckDBPyConnection> conn;
+		for (const char *conn_key : {"connection", "conn"}) {
+			if (kwargs.contains(conn_key)) {
+				nb::object conn_arg = kwargs[conn_key];
+				PyDict_DelItemString(kwargs.ptr(), conn_key);
+				if (!conn && !conn_arg.is_none()) {
+					conn = nb::cast<std::shared_ptr<DuckDBPyConnection>>(conn_arg);
+				}
+			}
+		}
+		if (!conn) {
+			conn = DuckDBPyConnection::DefaultConnection();
+		}
+		return conn->ReadCSV(name, kwargs);
+	};
+	m.def("read_csv", module_read_csv, "Create a relation object from the CSV file in 'name'");
+	m.def("from_csv_auto", module_read_csv, "Create a relation object from the CSV file in 'name'");
 	m.def(
 	    "from_df",
 	    [](const PandasDataFrame &value, std::shared_ptr<DuckDBPyConnection> conn = nullptr) {
@@ -822,9 +825,21 @@ static void InitializeConnectionMethods(nb::module_ &m) {
 	    "Load an installed extension", nb::arg("extension"), nb::kw_only(), nb::arg("connection").none() = nb::none());
 	m.def(
 	    "project",
-	    // nanobind forbids named typed parameters after nb::args; the keyword-only `groups` and `connection`
-	    // are therefore taken from **kwargs (preserving the previous defaults/None-handling).
-	    [](const PandasDataFrame &df, const nb::args &args, const nb::kwargs &kwargs) {
+	    // nanobind forbids named typed parameters after nb::args, so this takes (*args, **kwargs) and recovers the
+	    // advertised signature by hand: `df` may be positional (args[0]) or the `df=` keyword (the stubs advertise
+	    // it as positional-or-keyword); the remaining positionals are projection expressions; `groups` /
+	    // `connection` are keyword-only (pulled from kwargs, preserving the previous defaults/None-handling).
+	    [](const nb::args &args, const nb::kwargs &kwargs) {
+		    nb::object df_obj = nb::none();
+		    nb::args proj_args = nb::steal<nb::args>(PyTuple_New(0));
+		    if (args.size() >= 1) {
+			    df_obj = nb::object(args[0]);
+			    proj_args = nb::steal<nb::args>(PyTuple_GetSlice(args.ptr(), 1, static_cast<Py_ssize_t>(args.size())));
+		    } else if (kwargs.contains("df")) {
+			    df_obj = kwargs["df"];
+			    PyDict_DelItemString(kwargs.ptr(), "df");
+		    }
+		    auto df = nb::cast<PandasDataFrame>(df_obj);
 		    string groups = "";
 		    if (kwargs.contains("groups") && !kwargs["groups"].is_none()) {
 			    groups = nb::cast<std::string>(kwargs["groups"]);
@@ -836,7 +851,7 @@ static void InitializeConnectionMethods(nb::module_ &m) {
 		    if (!conn) {
 			    conn = DuckDBPyConnection::DefaultConnection();
 		    }
-		    return conn->FromDF(df)->Project(args, groups);
+		    return conn->FromDF(df)->Project(proj_args, groups);
 	    },
 	    "Project the relation object by the projection in project_expr");
 	m.def(

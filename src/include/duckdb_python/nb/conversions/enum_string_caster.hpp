@@ -1,6 +1,7 @@
 #pragma once
 
 #include <nanobind/nanobind.h>
+#include <cassert>
 #include <cstdint>
 #include <string>
 
@@ -29,21 +30,25 @@
 	template <>                                                                                                        \
 	struct type_caster<EnumType> {                                                                                     \
 		NB_TYPE_CASTER(EnumType, const_name(NameLiteral))                                                              \
-		bool from_python(handle src, uint8_t, cleanup_list *) noexcept {                                               \
+		bool from_python(handle src, uint8_t flags, cleanup_list *) noexcept {                                         \
+			/* A registered enum instance is an EXACT match and is always accepted. str/int are lossy  */              \
+			/* CONVERSIONS: gate them on cast_flags::convert so the no-convert overload pass can't      */             \
+			/* mis-dispatch (matches nanobind's own enum caster).                                       */             \
+			const bool convert = (flags & (uint8_t)nanobind::detail::cast_flags::convert) != 0;                        \
 			try {                                                                                                      \
-				if (nanobind::isinstance<nanobind::str>(src)) {                                                        \
-					value = FromStringFn(nanobind::cast<std::string>(src));                                            \
-					return true;                                                                                       \
-				}                                                                                                      \
-				if (nanobind::isinstance<nanobind::int_>(src)) {                                                       \
-					value = FromIntegerFn(nanobind::cast<int64_t>(src));                                               \
-					return true;                                                                                       \
-				}                                                                                                      \
 				/* Registered nb::enum_ instances aren't int subclasses, so accept a member  */                        \
 				/* of the registered enum by reading its integer .value.                                         */    \
 				nanobind::handle enum_type = nanobind::type<EnumType>();                                               \
 				if (enum_type.is_valid() && PyObject_IsInstance(src.ptr(), enum_type.ptr()) == 1) {                    \
 					value = FromIntegerFn(nanobind::cast<int64_t>(src.attr("value")));                                 \
+					return true;                                                                                       \
+				}                                                                                                      \
+				if (convert && nanobind::isinstance<nanobind::str>(src)) {                                             \
+					value = FromStringFn(nanobind::cast<std::string>(src));                                            \
+					return true;                                                                                       \
+				}                                                                                                      \
+				if (convert && nanobind::isinstance<nanobind::int_>(src)) {                                            \
+					value = FromIntegerFn(nanobind::cast<int64_t>(src));                                               \
 					return true;                                                                                       \
 				}                                                                                                      \
 			} catch (...) {                                                                                            \
@@ -52,6 +57,20 @@
 			return false;                                                                                              \
 		}                                                                                                              \
 		static handle from_cpp(EnumType src, rv_policy, cleanup_list *) noexcept {                                     \
+			/* Return the registered nb::enum_ member (not a bare int) so a function default renders as  */            \
+			/* `Enum.MEMBER` in help()/stubs. Fall back to a bare int only if the enum type isn't        */            \
+			/* registered yet (e.g. a default materialized before the enum bind ran).                    */            \
+			nanobind::handle enum_type = nanobind::type<EnumType>();                                                   \
+			/* N1: this default is materialized at bind time, so the enum's nb::enum_ registration must  */            \
+			/* run first; a reorder makes type<EnumType>() invalid and silently falls back to a bare int  */           \
+			/* (re-introducing #3). The assert makes that loud in debug; release no-ops + degrades below.  */          \
+			assert(enum_type.is_valid() && "enum type must be registered before its default (finding #3/N1)");         \
+			if (enum_type.is_valid()) {                                                                                \
+				try {                                                                                                  \
+					return enum_type(nanobind::int_((int64_t)src)).release();                                          \
+				} catch (...) {                                                                                        \
+				}                                                                                                      \
+			}                                                                                                          \
 			return nanobind::int_((int64_t)src).release();                                                             \
 		}                                                                                                              \
 	};                                                                                                                 \
@@ -65,17 +84,20 @@
 	template <>                                                                                                        \
 	struct type_caster<EnumType> {                                                                                     \
 		NB_TYPE_CASTER(EnumType, const_name(NameLiteral))                                                              \
-		bool from_python(handle src, uint8_t, cleanup_list *) noexcept {                                               \
+		bool from_python(handle src, uint8_t flags, cleanup_list *) noexcept {                                         \
+			/* Exact registered-enum match is always accepted; the str CONVERSION is gated on          */              \
+			/* cast_flags::convert so the no-convert overload pass can't mis-dispatch.                 */              \
+			const bool convert = (flags & (uint8_t)nanobind::detail::cast_flags::convert) != 0;                        \
 			try {                                                                                                      \
-				if (nanobind::isinstance<nanobind::str>(src)) {                                                        \
-					value = FromStringFn(nanobind::cast<std::string>(src));                                            \
-					return true;                                                                                       \
-				}                                                                                                      \
 				/* Registered nb::enum_ instances aren't int subclasses; accept a member of the registered enum  */    \
 				/* by reading its integer .value (this enum has no FromInteger, so cast the int directly).        */   \
 				nanobind::handle enum_type = nanobind::type<EnumType>();                                               \
 				if (enum_type.is_valid() && PyObject_IsInstance(src.ptr(), enum_type.ptr()) == 1) {                    \
 					value = (EnumType)nanobind::cast<int64_t>(src.attr("value"));                                      \
+					return true;                                                                                       \
+				}                                                                                                      \
+				if (convert && nanobind::isinstance<nanobind::str>(src)) {                                             \
+					value = FromStringFn(nanobind::cast<std::string>(src));                                            \
 					return true;                                                                                       \
 				}                                                                                                      \
 			} catch (...) {                                                                                            \
@@ -84,6 +106,19 @@
 			return false;                                                                                              \
 		}                                                                                                              \
 		static handle from_cpp(EnumType src, rv_policy, cleanup_list *) noexcept {                                     \
+			/* Return the registered nb::enum_ member so defaults render as `Enum.MEMBER` in help()/stubs;   */        \
+			/* fall back to a bare int if the enum type isn't registered yet.                                */        \
+			nanobind::handle enum_type = nanobind::type<EnumType>();                                                   \
+			/* N1: this default is materialized at bind time, so the enum's nb::enum_ registration must  */            \
+			/* run first; a reorder makes type<EnumType>() invalid and silently falls back to a bare int  */           \
+			/* (re-introducing #3). The assert makes that loud in debug; release no-ops + degrades below.  */          \
+			assert(enum_type.is_valid() && "enum type must be registered before its default (finding #3/N1)");         \
+			if (enum_type.is_valid()) {                                                                                \
+				try {                                                                                                  \
+					return enum_type(nanobind::int_((int64_t)src)).release();                                          \
+				} catch (...) {                                                                                        \
+				}                                                                                                      \
+			}                                                                                                          \
 			return nanobind::int_((int64_t)src).release();                                                             \
 		}                                                                                                              \
 	};                                                                                                                 \

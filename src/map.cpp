@@ -38,6 +38,15 @@ static nb::object FunctionCall(NumpyResultConversion &conversion, const vector<I
 	D_ASSERT(in_df.ptr());
 
 	D_ASSERT(function);
+	// NOTE: PyTuple_Pack returns a NEW reference that is intentionally NOT released here. This looks like a
+	// leak (finding #10) but the extra reference to the input DataFrame is load-bearing: ArrayWrapper::ToArray
+	// std::move's each per-column result numpy buffer OUT of the NumpyResultConversion and INTO this input
+	// DataFrame, so `in_df` becomes the sole owner of those buffers. The output conversion (Pandas::Bind +
+	// materialization in the caller) reads them AFTER FunctionCall returns; under pandas 3.0 Copy-on-Write the
+	// unmodified columns stay views over those buffers. Releasing the tuple here frees `in_df` (and its buffers)
+	// too early -> use-after-free / garbage output (regresses tests/fast/test_map.py::test_isse_3237). A correct
+	// leak fix must keep the input DataFrame alive through the output materialization; deferred (pre-existing,
+	// byte-identical to main, not a cutover regression).
 	auto *df_obj = PyObject_CallObject(function, PyTuple_Pack(1, in_df.ptr()));
 	if (!df_obj) {
 		PyErr_PrintEx(1);

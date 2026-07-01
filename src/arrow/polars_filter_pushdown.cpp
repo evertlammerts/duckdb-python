@@ -71,6 +71,10 @@ struct PolarsBackend : public FilterBackend {
 		}
 	}
 
+	nb::object IsNaN(nb::object col) override {
+		return col.attr("is_nan")();
+	}
+
 	nb::object IsNull(nb::object col) override {
 		return col.attr("is_null")();
 	}

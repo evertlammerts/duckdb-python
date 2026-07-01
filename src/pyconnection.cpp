@@ -287,8 +287,19 @@ static void InitializeConnectionMethods(nb::class_<DuckDBPyConnection> &m) {
 	// the source: a typed nb::object param would be rejected by nanobind before ReadCSV's body runs (and .none()
 	// can't combine with nb::kwargs), whereas a nb::args tuple element may be None. ReadCSV itself raises the
 	// "non file-like object" error for a None/invalid source.
+	//
+	// The pre-nanobind binding also advertised `path_or_buffer` as a positional-or-keyword parameter (the stubs
+	// still do). nanobind's all-or-nothing nb::arg rule forbids naming just the source alongside **kwargs, so we
+	// honor the keyword by pulling `path_or_buffer` out of kwargs when no positional source was given, and pop it
+	// so ReadCSV's unknown-parameter check doesn't reject it.
 	auto read_csv_fn = [](DuckDBPyConnection &self, nb::args args, nb::kwargs kwargs) {
-		nb::object name = args.size() >= 1 ? nb::object(args[0]) : nb::object(nb::none());
+		nb::object name = nb::none();
+		if (args.size() >= 1) {
+			name = nb::object(args[0]);
+		} else if (kwargs.contains("path_or_buffer")) {
+			name = kwargs["path_or_buffer"];
+			PyDict_DelItemString(kwargs.ptr(), "path_or_buffer");
+		}
 		return self.ReadCSV(name, kwargs);
 	};
 	m.def("read_csv", read_csv_fn, "Create a relation object from the CSV file in 'name'");

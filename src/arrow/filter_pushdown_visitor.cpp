@@ -61,6 +61,24 @@ nb::object EmitCompare(FilterBackend &backend, ExpressionType op, nb::object col
 		return backend.NaNCompare(op, std::move(col));
 	}
 	auto scalar = backend.MakeScalar(constant, arrow_type, timezone_config);
+	// DuckDB orders NaN as the greatest float value, so `nan > finite` and `nan >= finite` are TRUE, while
+	// IEEE (pyarrow) makes them FALSE. For a finite FLOAT/DOUBLE constant with `>` / `>=`, the plain
+	// comparison would silently drop NaN column rows the engine keeps (the arrow scan never re-applies
+	// pushed filters). OR the NaN rows back in so the pushed filter matches DuckDB semantics. `<`, `<=`,
+	// `=`, `<>` already agree with IEEE, so they are left unchanged. (Idempotent for the polars backend,
+	// which already treats NaN as greatest, and only reached for float constants so is_nan is always valid.)
+	// N3: keying is_nan on the CONSTANT's float-ness is safe -- a float constant here implies a float column
+	// (int/float comparisons are constant-folded to int bounds or wrapped in a non-pushed CAST upstream), so
+	// col.is_nan() always resolves to a valid pyarrow kernel.
+	const auto constant_type_id = constant.type().id();
+	const bool constant_is_float =
+	    constant_type_id == LogicalTypeId::FLOAT || constant_type_id == LogicalTypeId::DOUBLE;
+	if (constant_is_float &&
+	    (op == ExpressionType::COMPARE_GREATERTHAN || op == ExpressionType::COMPARE_GREATERTHANOREQUALTO)) {
+		auto compare = backend.Compare(op, col, std::move(scalar));
+		auto is_nan = backend.IsNaN(std::move(col));
+		return backend.Or(std::move(compare), std::move(is_nan));
+	}
 	return backend.Compare(op, std::move(col), std::move(scalar));
 }
 

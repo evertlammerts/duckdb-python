@@ -3,6 +3,7 @@
 #include "duckdb_python/pandas/column/pandas_numpy_column.hpp"
 #include "duckdb_python/numpy/numpy_array.hpp"
 #include "duckdb_python/pyconnection/pyconnection.hpp"
+#include "duckdb_python/pyutil.hpp"
 
 namespace duckdb {
 
@@ -150,7 +151,10 @@ void Pandas::Bind(ClientContext &context, nb::handle df_p, vector<PandasColumnBi
 	for (idx_t col_idx = 0; col_idx < column_count; col_idx++) {
 		PandasColumnBindData bind_data;
 
-		names.emplace_back(nb::cast<std::string>(df.names[col_idx]));
+		// Stringify any label (int/float/tuple/MultiIndex/datetime column names are all valid in pandas).
+		// nb::cast<std::string> only accepts PyUnicode and would throw on a non-str label; CastToString runs
+		// PyObject_Str like the pre-nanobind py::str(...) path did.
+		names.emplace_back(duckdb::PyUtil::CastToString(df.names[col_idx]));
 		auto column = df[col_idx];
 		auto column_type = BindColumn(context, column, bind_data);
 

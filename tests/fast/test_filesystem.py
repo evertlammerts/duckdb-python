@@ -283,3 +283,79 @@ class TestPythonFilesystem:
 
         res = c.sql(q).fetchall()
         assert res == [(1719568210134107692, 1)]
+
+
+class TestNanobindFilesystemHardening:
+    """Regressions for the pre-existing filesystem safety gaps the nanobind cutover surfaced."""
+
+    def test_read_returning_more_bytes_does_not_overflow(self, monkeypatch, memory):
+        """A read(n) that returns MORE than n bytes must not overflow the read buffer (#11).
+
+        PythonFilesystem::Read memcpy'd data.size() bytes (Python-controlled) into a buffer sized for
+        nr_bytes, so a greedy read overflowed it (heap overflow, caught by ASan). The copy must be
+        clamped to nr_bytes; the extra bytes are dropped and the content still parses correctly.
+        """
+        from fsspec.implementations.memory import MemoryFile
+
+        # A large file so DuckDB issues full-buffer reads that the greedy read can overflow.
+        big = "\n".join(f"{i};{i * 10};{i % 7}" for i in range(200000)).encode() + b"\n"
+        with memory.open("big.csv", "wb") as f:
+            f.write(big)
+
+        orig_read = MemoryFile.read
+
+        def greedy_read(self, length=-1):
+            data = orig_read(self, length)
+            # Only append when the read filled the request, so the returned size exceeds nr_bytes.
+            if length is not None and length >= 0 and len(data) == length:
+                return data + b"\x00" * 64
+            return data
+
+        monkeypatch.setattr(MemoryFile, "read", greedy_read)
+
+        con = duckdb.connect()
+        con.register_filesystem(memory)
+        # Must not overflow (ASan) and must count correctly despite the injected trailing bytes.
+        query = "SELECT count(*), sum(column0) FROM read_csv('memory://big.csv', sep=';', header=false)"
+        res = con.sql(query).fetchone()
+        assert res == (200000, sum(range(200000)))
+
+    def test_filesystem_object_destructor_swallows_delete_error(self, monkeypatch):
+        """A raising fsspec delete in ~FileSystemObject must not abort the process (#12).
+
+        The destructor called obj.delete(file) with no try/catch, so a KeyError (missing entry) escaped
+        the implicitly-noexcept destructor and aborted the process. Reading a file-like object registers
+        such a cleanup dependency; its destruction must survive a raising delete.
+        """
+        import gc
+        import io
+
+        from duckdb.filesystem import ModifiedMemoryFileSystem
+
+        def raising_delete(self, *args, **kwargs):
+            msg = "simulated missing entry"
+            raise KeyError(msg)
+
+        monkeypatch.setattr(ModifiedMemoryFileSystem, "delete", raising_delete, raising=False)
+
+        con = duckdb.connect()
+        rel = con.read_csv(io.BytesIO(b"a,b\n1,2\n3,4\n"))
+        assert rel.fetchall() == [(1, 2), (3, 4)]
+        del rel
+        del con
+        gc.collect()  # runs ~FileSystemObject -> delete() raises -> must not std::terminate
+        # Reaching this line means the process survived the throwing destructor.
+        assert True
+
+    def test_modified_memory_filesystem_importable(self):
+        """#13 note: ModifiedMemoryFileSystem::check_ must not throw from noexcept contexts.
+
+        check_ was missing the try/catch its sibling AbstractFileSystem::check_ has; nanobind can invoke
+        it from noexcept caster/isinstance contexts where a throw would std::terminate. The throwing path
+        (a failed duckdb.filesystem import or IsInstance == -1) cannot be induced from Python without
+        breaking the module itself, so this only asserts the module stays importable; the fix is verified
+        by compile + sibling parity and re-checked under ASan by the reviewer.
+        """
+        from duckdb.filesystem import ModifiedMemoryFileSystem
+
+        assert ModifiedMemoryFileSystem is not None

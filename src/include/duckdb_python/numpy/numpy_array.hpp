@@ -11,6 +11,8 @@
 #include "duckdb_python/nb/casters.hpp"
 #include "duckdb.hpp"
 
+#include <type_traits>
+
 namespace duckdb {
 
 namespace numpy_internal {
@@ -35,8 +37,9 @@ inline PyTypeObject *NumpyNdarrayType() {
 	return cached;
 }
 
-//! Allocate an uninitialized 1-D numpy array of `count` elements with the given numpy dtype string
-//! (e.g. "int64", "float32", "object", "datetime64[us]") via the numpy C API (PyArray_Empty). The
+//! Allocate a 1-D numpy array of `count` elements with the given numpy dtype string (e.g. "int64",
+//! "float32", "object", "datetime64[us]") via the numpy C API (PyArray_NewFromDescr). Primitive dtypes
+//! are left uninitialized (callers fill immediately); object dtype is zero-filled (NULL, read as None). The
 //! parsed np.dtype objects are cached to avoid a dtype-string parse on every call. This is hot: a
 //! LIST/ARRAY column allocates one array per row. Defined in numpy_array.cpp (the single TU that
 //! pulls in the numpy C API). Only ever called on the single-threaded, GIL-held result path.
@@ -60,10 +63,11 @@ nb::object NumpyEmpty(idx_t count, const string &dtype);
 //! `Resize()`, the only operation that reallocates the buffer. The struct read is dtype-agnostic
 //! (works for the `object` dtype that DLPack/`nb::ndarray` cannot represent).
 //!
-//! Ownership is move-only-when-asked: the ctor takes by value and moves, GetArray() hands
-//! back a reference, and no method copies the array buffer. The raw `cached_data_` member uses
-//! default copy/move: a copy shares the same underlying numpy buffer (so the pointer stays
-//! valid), and a move transfers array + pointer together.
+//! Ownership is move-only: the ctor takes by value and moves, GetArray() hands back a reference, and
+//! no method copies the array buffer. Copy is deleted on purpose: two copies would share one numpy
+//! object but cache the buffer pointer independently, so a `Resize()` on one (which reallocates and
+//! refreshes only its own `cached_data_`) would leave the other's cached pointer dangling. Move
+//! transfers array + pointer together and is safe.
 class NumpyArray {
 public:
 	NumpyArray() = default;
@@ -75,8 +79,8 @@ public:
 
 	NumpyArray(NumpyArray &&) = default;
 	NumpyArray &operator=(NumpyArray &&) = default;
-	NumpyArray(const NumpyArray &) = default;
-	NumpyArray &operator=(const NumpyArray &) = default;
+	NumpyArray(const NumpyArray &) = delete;
+	NumpyArray &operator=(const NumpyArray &) = delete;
 
 public:
 	//! Allocate a fresh, contiguous 1-D numpy array of `count` elements with the given numpy
@@ -154,5 +158,12 @@ private:
 	//! this never goes stale.
 	idx_t length_ = DConstants::INVALID_INDEX;
 };
+
+//! NumpyArray must stay move-only: copying would duplicate the cached raw buffer pointer while sharing
+//! one numpy object, so a Resize() on one copy would dangle the other's pointer.
+static_assert(!std::is_copy_constructible<NumpyArray>::value && !std::is_copy_assignable<NumpyArray>::value,
+              "NumpyArray must remain move-only (see cached_data_ note)");
+static_assert(std::is_move_constructible<NumpyArray>::value && std::is_move_assignable<NumpyArray>::value,
+              "NumpyArray must remain movable");
 
 } // namespace duckdb

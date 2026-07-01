@@ -10,7 +10,7 @@ This is the **production** duckdb-python client — the `duckdb` package on PyPI
 - **Package name**: `duckdb`
 - **Bindings**: pybind11
 - **Build backend**: `duckdb_packaging.build_backend` (custom wrapper around scikit-build-core)
-- **Supported Python**: 3.10, 3.11, 3.12, 3.13, 3.14
+- **Supported Python**: 3.11, 3.12, 3.13, 3.14
 - **Free-threaded Python**: not supported in this client. A separate prototype client based on DuckDB's C API targets free-threading, Stable ABI, and multi-interpreter support.
 
 ## IMPORTANT: build before running anything
@@ -115,7 +115,7 @@ uv sync --no-build-isolation -v --reinstall -p 3.11
 uv sync --no-build-isolation -v --reinstall -p 3.14
 ```
 
-Supported: `3.10`, `3.11`, `3.12`, `3.13`, `3.14`. Do **not** use free-threaded variants (`3.13t`, `3.14t`) — the production client does not support them.
+Supported: `3.11`, `3.12`, `3.13`, `3.14`. Do **not** use free-threaded variants (`3.13t`, `3.14t`) — the production client does not support them.
 
 ### Build configuration reference
 

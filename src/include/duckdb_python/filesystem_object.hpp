@@ -22,8 +22,14 @@ public:
 		// Assert that the 'obj' is a filesystem
 		D_ASSERT(duckdb::PyUtil::IsInstance(
 		    obj, DuckDBPyConnection::ImportCache()->duckdb.filesystem.ModifiedMemoryFileSystem()));
-		for (auto &file : filenames) {
-			obj.attr("delete")(file);
+		// Destructors are implicitly noexcept: a Python exception escaping here (fsspec `_rm` raises
+		// KeyError for a missing entry) would std::terminate the process. Swallow it, mirroring
+		// ~PythonFileHandle / ~PythonFilesystem.
+		try {
+			for (auto &file : filenames) {
+				obj.attr("delete")(file);
+			}
+		} catch (...) { // NOLINT: intentional catch-all in a destructor
 		}
 	}
 

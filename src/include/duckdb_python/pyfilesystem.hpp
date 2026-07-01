@@ -16,8 +16,15 @@ public:
 
 public:
 	static bool check_(const nb::handle &object) {
-		return duckdb::PyUtil::IsInstance(object,
-		                                  nb::module_::import_("duckdb.filesystem").attr("ModifiedMemoryFileSystem"));
+		// Non-throwing: nanobind can invoke check_ from noexcept caster / isinstance contexts, where a
+		// thrown import error or an IsInstance failure (PyObject_IsInstance == -1) would std::terminate.
+		// Mirror AbstractFileSystem::check_ and report "not an instance" on any error.
+		try {
+			return duckdb::PyUtil::IsInstance(
+			    object, nb::module_::import_("duckdb.filesystem").attr("ModifiedMemoryFileSystem"));
+		} catch (...) {
+			return false;
+		}
 	}
 };
 

@@ -111,9 +111,13 @@ int64_t PythonFilesystem::Read(FileHandle &handle, void *buffer, int64_t nr_byte
 
 	nb::bytes data = nb::bytes(read(nr_bytes));
 
-	memcpy(buffer, data.c_str(), data.size());
+	// `buffer` is sized for nr_bytes. A misbehaving fsspec read(n) may return MORE than n bytes; clamp so
+	// the copy can never overflow `buffer`. Returning fewer than nr_bytes is a legal short read (EOF).
+	int64_t data_size = static_cast<int64_t>(data.size());
+	int64_t bytes_to_copy = data_size < nr_bytes ? data_size : nr_bytes;
+	memcpy(buffer, data.c_str(), static_cast<size_t>(bytes_to_copy));
 
-	return data.size();
+	return bytes_to_copy;
 }
 
 void PythonFilesystem::Read(duckdb::FileHandle &handle, void *buffer, int64_t nr_bytes, uint64_t location) {
@@ -121,7 +125,15 @@ void PythonFilesystem::Read(duckdb::FileHandle &handle, void *buffer, int64_t nr
 	auto &py_handle = PythonFileHandle::GetHandle(handle);
 	py_handle.attr("seek")(location);
 	nb::bytes data = nb::bytes(py_handle.attr("read")(nr_bytes));
-	memcpy(buffer, data.c_str(), data.size());
+	// This overload must populate exactly nr_bytes: DuckDB assumes the whole buffer is filled. A short read
+	// would leave the tail uninitialized (garbage handed back to the engine), so surface it as an error.
+	// A read returning more than nr_bytes is clamped so it can never overflow `buffer`.
+	int64_t data_size = static_cast<int64_t>(data.size());
+	if (data_size < nr_bytes) {
+		throw IOException("Failed to read " + std::to_string(nr_bytes) + " bytes from Python file at offset " +
+		                  std::to_string(location) + ": only " + std::to_string(data_size) + " bytes returned");
+	}
+	memcpy(buffer, data.c_str(), static_cast<size_t>(nr_bytes));
 }
 bool PythonFilesystem::FileExists(const string &filename, optional_ptr<FileOpener> opener) {
 	return Exists(filename, "isfile");
