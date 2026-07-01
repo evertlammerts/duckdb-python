@@ -659,6 +659,29 @@ class TestRegressions:
         assert len(result) == 1
         assert math.isnan(result[0][0])
 
+    @pytest.mark.parametrize("op", ["=", "!=", "<", "<=", ">", ">="])
+    def test_finite_constant_includes_nan_rows(self, duckdb_cursor, op):
+        """Cross-check (#9): a finite constant against a NaN-containing column agrees via polars too.
+
+        DuckDB orders NaN as greatest; the `>` / `>=` fix is idempotent for polars (which already treats
+        NaN as greatest), so the polars pushdown must not regress.
+        """
+        duckdb_cursor.execute(
+            "CREATE TABLE _pn AS SELECT a::DOUBLE a FROM VALUES "
+            "('inf'), ('nan'), ('0.34234'), ('34234234.00005'), ('-nan') t(a)"
+        )
+        lf = to_polars_lazyframe(duckdb_cursor.table("_pn"))
+        duckdb_cursor.register("arrow_table", lf)
+        rows_polars = duckdb_cursor.execute(f"SELECT a FROM arrow_table WHERE a {op} 4.0").fetchall()
+        rows_duck = duckdb_cursor.execute(f"SELECT a FROM _pn WHERE a {op} 4.0").fetchall()
+
+        # NaN-safe row-set comparison: NaN != NaN, so bucket NaNs by count and sort the finite rows.
+        def summarize(rows):
+            vals = [r[0] for r in rows]
+            return sum(1 for v in vals if v != v), sorted(v for v in vals if v == v)
+
+        assert summarize(rows_polars) == summarize(rows_duck)
+
 
 # ===========================================================================
 # 13. Canaries — behaviour we expect to change upstream

@@ -263,6 +263,29 @@ class TestNaNPushdown:
         q_duck = f"SELECT count(*) FROM _n WHERE a {op} 'NaN'::FLOAT"
         assert duckdb_cursor.execute(q_arrow).fetchone() == duckdb_cursor.execute(q_duck).fetchone()
 
+    @pytest.mark.parametrize(
+        "op",
+        ["=", "!=", "<", "<=", ">", ">="],
+    )
+    def test_finite_constant_includes_nan_rows(self, duckdb_cursor, op):
+        """Regression (#9): a finite constant against a column that CONTAINS NaN.
+
+        DuckDB orders NaN as the greatest value, so `nan > finite` / `nan >= finite` are TRUE; IEEE/pyarrow
+        make them FALSE. Before the fix the arrow scan silently dropped the NaN rows for `>` / `>=` (the scan
+        never re-applies pushed filters). Every operator must agree with DuckDB's own answer.
+        """
+        rows_arrow = duckdb_cursor.execute(f"SELECT a FROM arrow_table WHERE a {op} 4.0").fetchall()
+        rows_duck = duckdb_cursor.execute(f"SELECT a FROM _n WHERE a {op} 4.0").fetchall()
+
+        # NaN-safe row-set comparison: NaN != NaN, so bucket NaNs by count and sort the finite rows.
+        def summarize(rows):
+            vals = [r[0] for r in rows]
+            nan_count = sum(1 for v in vals if v != v)
+            finite = sorted(v for v in vals if v == v)
+            return nan_count, finite
+
+        assert summarize(rows_arrow) == summarize(rows_duck)
+
 
 # ===========================================================================
 # 5. Struct extract pushdown

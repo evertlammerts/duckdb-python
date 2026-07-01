@@ -2,9 +2,8 @@
 import os
 import re
 
-import pandas as pd
-
 import duckdb
+import pandas as pd
 
 
 class TestDBConfig:

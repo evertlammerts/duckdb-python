@@ -1,8 +1,8 @@
-import pandas as pd
 import pytest
 from conftest import is_string_dtype
 
 import duckdb
+import pandas as pd
 
 
 def create_generic_dataframe(data):

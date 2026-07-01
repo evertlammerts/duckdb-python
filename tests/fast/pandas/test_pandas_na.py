@@ -1,11 +1,11 @@
 import platform
 
-import numpy as np
-import pandas as pd
 import pytest
 from conftest import is_string_dtype
 
 import duckdb
+import numpy as np
+import pandas as pd
 
 
 def assert_nullness(items, null_indices):

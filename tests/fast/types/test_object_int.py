@@ -1,10 +1,10 @@
 import warnings
 from contextlib import suppress
 
-import numpy as np
 import pytest
 
 import duckdb
+import numpy as np
 
 
 class TestPandasObjectInteger:

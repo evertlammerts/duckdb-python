@@ -1,10 +1,10 @@
 import datetime
 import os
 
-import pandas as pd
 import pytest
 
 import duckdb
+import pandas as pd
 
 # We only run this test if this env var is set
 # TODO: we can add a custom command line argument to pytest to provide an extension directory  # noqa: TD002, TD003

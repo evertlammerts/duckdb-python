@@ -91,8 +91,77 @@ CONSTANT_VALUES = {
 def test_binary_operator_constant_rhs(rel, value, column):
     """Expression == <constant> should work for every constant type."""
     expr = ColumnExpression(column) == value
+    # `==` must build a SQL Expression, never fall back to a Python bool: a bool RHS would still let
+    # select() yield one row, masking a None/operator regression -- so assert the type explicitly.
+    assert isinstance(expr, duckdb.Expression)
     result = rel.select(expr).fetchall()
     assert len(result) == 1
+
+
+# ---------------------------------------------------------------------------
+# 1b. None operand: None is a meaningful value (SQL NULL), not "argument absent".
+#     nanobind gates None for bound-type params before implicit conversion, so the
+#     operators/between take py::object + route None through ToExpression -> NULL constant.
+#     These guard the P0 (`== None` -> Python bool) and P1 (operators/between raise on None).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda c: c == None,  # noqa: E711
+        lambda c: c != None,  # noqa: E711
+        lambda c: c + None,
+        lambda c: c - None,
+        lambda c: c * None,
+        lambda c: c < None,
+        lambda c: c > None,
+        lambda c: c & None,
+        lambda c: c | None,
+        lambda c: c.between(None, 5),
+        lambda c: c.between(1, None),
+        lambda c: None + c,  # reflected (__radd__)
+        lambda c: None & c,  # reflected (__rand__)
+    ],
+    ids=[
+        "eq",
+        "ne",
+        "add",
+        "sub",
+        "mul",
+        "lt",
+        "gt",
+        "and",
+        "or",
+        "between_lower",
+        "between_upper",
+        "reflected_add",
+        "reflected_and",
+    ],
+)
+def test_none_operand_builds_sql_null_expression(build):
+    """A None operand becomes a SQL NULL constant on every operator/between, yielding a real Expression."""
+    expr = build(ColumnExpression("a"))
+    assert isinstance(expr, duckdb.Expression)
+    assert "NULL" in str(expr)
+
+
+def test_none_filter_keeps_no_rows():
+    """`col != None` builds `(col != NULL)`: SQL NULL semantics keep no rows (a Python-bool True kept all)."""
+    rel = duckdb.connect().sql("SELECT * FROM (VALUES (1), (NULL), (3)) t(a)")
+    assert rel.filter(ColumnExpression("a") != None).fetchall() == []  # noqa: E711
+
+
+def test_unconvertible_operand_preserves_notimplemented():
+    """An unconvertible operand must still yield NotImplemented so Python falls back.
+
+    `expr == object()` stays a bool, `expr + object()` raises TypeError -- not a thrown duckdb error.
+    """
+    a = ColumnExpression("a")
+    assert (a == object()) is False
+    assert (a != object()) is True
+    with pytest.raises(TypeError):
+        a + object()
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +175,18 @@ def test_binary_operator_str_rhs(rel):
     expr = ColumnExpression("i") == "i"
     result = rel.select(expr).fetchall()
     assert result == [(True,)]
+
+
+def test_binary_operator_bytes_rhs(rel):
+    """Bytes on the RHS is decoded as UTF-8 and (like str) becomes a ColumnExpression (column reference)."""
+    expr = ColumnExpression("i") == b"i"
+    assert isinstance(expr, duckdb.Expression)
+    assert rel.select(expr).fetchall() == [(True,)]
+
+
+def test_project_with_bytes_column_name(rel):
+    """rel.select(b'col') references the column (bytes decoded), not a silent BLOB constant (regression guard)."""
+    assert rel.select(b"i").fetchall() == [(42,)]
 
 
 # ---------------------------------------------------------------------------
@@ -280,3 +361,45 @@ def test_aggregate_with_scalar():
     result = rel.aggregate([5]).fetchall()
     assert len(result) == 3
     assert all(row == (5,) for row in result)
+
+
+# ---------------------------------------------------------------------------
+# 13. Value-semantic invariants
+#
+# DuckDBPyExpression is a value-semantic bound type: returned by std::unique_ptr,
+# with no shared_ptr holder, no enable_shared_from_this, and no custom type_caster.
+# Every combinator deep-copies its operands into a fresh tree, so two wrappers never
+# alias the same expression. These lock in the two contracts that design relies on:
+#   1. expressions are never cached/aliased by identity (each builder returns fresh)
+#   2. an unconvertible argument raises a clear InvalidInputException, not a leaked
+#      C++ exception (the helper that replaced the caster must catch + re-raise)
+# ---------------------------------------------------------------------------
+
+
+def test_expressions_are_not_identity_cached():
+    """Every builder call yields a fresh object; expressions are value-like, never aliased."""
+    a = ColumnExpression("a")
+    assert a.alias("x") is not a.alias("x")
+    assert (a == 5) is not (a == 5)
+    assert a.isin(1, 2) is not a.isin(1, 2)
+    # A non-modifier passthrough still yields a distinct wrapper.
+    assert a.cast("INTEGER") is not a.cast("INTEGER")
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda bad: ColumnExpression("i").isin(bad),  # py::args path
+        lambda bad: CoalesceOperator(bad),  # py::args path
+        lambda bad: FunctionExpression("greatest", bad),  # py::args path
+    ],
+    ids=["isin", "coalesce", "function_expression"],
+)
+def test_unconvertible_arg_raises_clean_error(build):
+    """A value with no expression conversion raises InvalidInputException, not a raw C++ error."""
+
+    class NotConvertible:
+        pass
+
+    with pytest.raises(duckdb.InvalidInputException, match="arguments of type Expression"):
+        build(NotConvertible())

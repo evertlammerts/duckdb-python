@@ -1,10 +1,9 @@
 #!/usr/bin/env python
 import datetime
 
+import duckdb
 import numpy
 import pandas as pd
-
-import duckdb
 
 
 def run_parallel_queries(main_table, left_join_table, expected_df, iteration_count=5):

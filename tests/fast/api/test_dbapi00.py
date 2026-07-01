@@ -1,8 +1,9 @@
 # simple DB API testcase
 
+import pytest
+
 import numpy
 import pandas as pd
-import pytest
 
 
 def assert_result_equal(result):

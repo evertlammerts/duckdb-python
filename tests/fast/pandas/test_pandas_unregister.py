@@ -1,10 +1,10 @@
 import gc
 import tempfile
 
-import pandas as pd
 import pytest
 
 import duckdb
+import pandas as pd
 
 
 class TestPandasUnregister:

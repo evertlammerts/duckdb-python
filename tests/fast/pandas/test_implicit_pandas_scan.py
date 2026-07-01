@@ -1,8 +1,7 @@
 # simple DB API testcase
 
-import pandas as pd
-
 import duckdb
+import pandas as pd
 
 
 class TestImplicitPandasScan:

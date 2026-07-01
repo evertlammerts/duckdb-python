@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.29)
 
-project(duckdb_py LANGUAGES CXX)
+project(duckdb_python LANGUAGES CXX)
 
 # Always use C++17
 set(CMAKE_CXX_STANDARD 17)
@@ -35,8 +35,26 @@ endif()
 # ────────────────────────────────────────────
 # Dependencies
 # ────────────────────────────────────────────
-# PyBind11
-find_package(pybind11 REQUIRED CONFIG)
+# nanobind (requires Python to be located first; pybind11 used to do this
+# internally)
+find_package(
+  Python
+  COMPONENTS Interpreter Development.Module NumPy
+  REQUIRED)
+# Nanobind ships its CMake config inside site-packages/nanobind/cmake, so
+# find_package() can't discover it unless we set it. (scikit-build-core does
+# this as well)
+if(NOT nanobind_ROOT)
+  execute_process(
+    COMMAND "${Python_EXECUTABLE}" -m nanobind --cmake_dir
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    OUTPUT_VARIABLE nanobind_ROOT)
+endif()
+find_package(nanobind CONFIG REQUIRED)
+# Build nanobind's core support library up front so the object libraries below
+# (which include nanobind headers via the umbrella) compile against its include
+# dirs + Python headers + flags.
+nanobind_build_library(nanobind-static)
 
 # DuckDB
 include(cmake/duckdb_loader.cmake)
@@ -49,26 +67,42 @@ duckdb_add_library(duckdb_target)
 
 # Bundle in INTERFACE library
 add_library(_duckdb_dependencies INTERFACE)
-target_link_libraries(_duckdb_dependencies INTERFACE pybind11::pybind11
+target_link_libraries(_duckdb_dependencies INTERFACE nanobind-static
                                                      duckdb_target)
 # Also add include directory
 target_include_directories(
   _duckdb_dependencies
-  INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/duckdb_py/include>
-)
+  INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/include>)
 
 # We link duckdb_static. Without this define, duckdb.h marks C API symbols
 # __declspec(dllimport) on Windows, producing unresolvable __imp_* references at
 # link time. No-op on non-Windows.
 target_compile_definitions(_duckdb_dependencies INTERFACE DUCKDB_STATIC_BUILD)
 
+# Optional AddressSanitizer instrumentation of the Python binding objects ONLY.
+# Every binding object library consumes _duckdb_dependencies (for headers) and
+# _duckdb links it, so adding the flag here instruments the bindings and links
+# the ASAN runtime, while the engine target (duckdb_target, which does NOT
+# consume this) stays uninstrumented and keeps hitting the sccache cache. ASAN's
+# allocator is process-global, so heap errors involving the instrumented binding
+# code are still caught. OFF by default; enable with -DDUCKDB_PY_ASAN=ON.
+option(DUCKDB_PY_ASAN
+       "Instrument the Python binding objects with AddressSanitizer" OFF)
+if(DUCKDB_PY_ASAN)
+  target_compile_options(
+    _duckdb_dependencies INTERFACE -fsanitize=address -fno-omit-frame-pointer
+                                   -g)
+  target_link_options(_duckdb_dependencies INTERFACE -fsanitize=address)
+endif()
+
 # ────────────────────────────────────────────
 # Descend into the real DuckDB‑Python sources
 # ────────────────────────────────────────────
-add_subdirectory(src/duckdb_py)
+add_subdirectory(src)
 
-pybind11_add_module(
+nanobind_add_module(
   _duckdb
+  NB_STATIC
   $<TARGET_OBJECTS:python_src>
   $<TARGET_OBJECTS:python_arrow>
   $<TARGET_OBJECTS:python_common>
@@ -77,7 +111,6 @@ pybind11_add_module(
   $<TARGET_OBJECTS:python_native>
   $<TARGET_OBJECTS:python_numpy>
   $<TARGET_OBJECTS:python_pandas>
-  $<TARGET_OBJECTS:python_pybind11>
   $<TARGET_OBJECTS:python_connection>
   $<TARGET_OBJECTS:python_expression>
   $<TARGET_OBJECTS:python_relation>

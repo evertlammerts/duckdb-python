@@ -2,11 +2,11 @@ import csv
 import datetime
 import os
 
-import pandas as pd
 import pytest
 from conftest import getTimeSeriesData
 from spark_namespace import USE_ACTUAL_SPARK
 
+import pandas as pd
 from duckdb import InvalidInputException, read_csv
 
 if USE_ACTUAL_SPARK:

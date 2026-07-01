@@ -1,9 +1,9 @@
 import datetime
 
-import numpy as np
 import pytest
 
 import duckdb
+import numpy as np
 
 pd = pytest.importorskip("pandas", "2.0.0")
 pytest.importorskip("pyarrow")

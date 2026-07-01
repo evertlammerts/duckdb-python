@@ -1,6 +1,5 @@
-import pandas as pd
-
 import duckdb
+import pandas as pd
 from duckdb import Value
 
 NULL = None

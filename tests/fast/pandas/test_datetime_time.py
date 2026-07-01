@@ -1,10 +1,10 @@
 from datetime import datetime, time, timezone
 
-import numpy as np
-import pandas as pd
 import pytest
 
 import duckdb
+import numpy as np
+import pandas as pd
 
 _ = pytest.importorskip("pandas", minversion="2.0.0")
 

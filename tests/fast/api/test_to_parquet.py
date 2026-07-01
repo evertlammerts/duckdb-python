@@ -3,10 +3,10 @@ import pathlib
 import re
 import tempfile
 
-import pandas as pd
 import pytest
 
 import duckdb
+import pandas as pd
 
 
 class TestToParquet:

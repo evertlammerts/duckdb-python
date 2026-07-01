@@ -1,7 +1,6 @@
+import duckdb
 import numpy
 import pandas as pd
-
-import duckdb
 
 
 class TestProgressBarPandas:

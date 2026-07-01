@@ -2,11 +2,11 @@ import datetime
 import os
 import platform
 
-import pandas as pd
 import pytest
 from conftest import pandas_2_or_higher
 
 import duckdb
+import pandas as pd
 
 
 class TestPandasTimestamps:

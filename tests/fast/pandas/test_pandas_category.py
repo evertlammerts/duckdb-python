@@ -1,8 +1,8 @@
-import numpy
-import pandas as pd
 import pytest
 
 import duckdb
+import numpy
+import pandas as pd
 
 
 def check_category_equal(category):

@@ -1,8 +1,7 @@
 import datetime
 
-import pandas as pd
-
 import duckdb
+import pandas as pd
 
 
 def run_checks(df):

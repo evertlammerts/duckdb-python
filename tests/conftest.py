@@ -86,9 +86,10 @@ def getTimeSeriesData(nper=None, freq: "Frequency" = "B"):  # noqa: F821
     import string
     from datetime import datetime
 
+    from pandas._typing import Frequency
+
     import numpy as np
     from pandas import DatetimeIndex, Series, bdate_range
-    from pandas._typing import Frequency
 
     _N = 30
     _K = 4

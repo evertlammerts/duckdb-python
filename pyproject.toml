@@ -10,7 +10,7 @@ dynamic = ["version"]
 description = "DuckDB in-process database"
 readme = "README.md"
 keywords = ["DuckDB", "Database", "SQL", "OLAP"]
-requires-python = ">=3.10.0"
+requires-python = ">=3.11.0"
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "License :: OSI Approved :: MIT License",
@@ -25,7 +25,6 @@ classifiers = [
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -63,8 +62,12 @@ build-backend = "duckdb_packaging.build_backend"
 backend-path = ["./"]
 requires = [
     "scikit-build-core>=0.11.4",
-	"pybind11[global]>=2.6.0",
+	"nanobind>=2.0",
     "setuptools_scm>=8.0",
+    # numpy C API headers (PyArray_Empty in the result path). Building against numpy 2.x yields a
+    # binary compatible with numpy >=1.19 AND 2.x at runtime (numpy 2.0 backward-compat), so the
+    # unpinned runtime numpy range is preserved. Build-time only; the runtime numpy dep is unchanged.
+    "numpy>=2.0",
 ]
 
 [tool.scikit-build]
@@ -246,6 +249,7 @@ test = [ # dependencies used for running tests
     "pytest-reraise",
     "pytest-timeout",
     "pytest-timestamper",
+    "pytest-xdist", # parallel test execution (-n auto); without this `uv sync --reinstall` prunes a manual install
     "coverage",
     "gcovr; sys_platform != 'win32' or platform_machine != 'ARM64'",
     "gcsfs; sys_platform != 'win32' or platform_machine != 'ARM64'",
@@ -294,7 +298,7 @@ pypi = [ # dependencies used by the pypi cleanup script
 build = [
     "cmake>=3.29.0",
     "ninja>=1.10",
-    "pybind11[global]>=2.6.0",
+    "nanobind>=2.0",
     "scikit_build_core>=0.11.4",
     "setuptools_scm>=8.0",
 ]
@@ -474,6 +478,11 @@ before-build = ["yum install -y ccache"]
 
 [tool.cibuildwheel.macos]
 before-build = ["brew install ccache"]
+# nanobind uses C++17 aligned new/delete (std::align_val_t), which the runtime only provides on macOS 10.13+.
+# cp311's framework defaults to a 10.9 deployment target (used for the x86_64 slice of x86_64/universal2
+# wheels), so nanobind fails to compile there; cp312+ frameworks already target 10.13+. Pin 10.14 so every CPython
+# version builds (arm64 slices are 11.0 regardless).
+environment = { MACOSX_DEPLOYMENT_TARGET = "10.14" }
 
 [tool.cibuildwheel.windows]
 before-build = ["choco install ccache"]

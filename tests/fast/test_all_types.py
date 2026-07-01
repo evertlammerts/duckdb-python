@@ -5,12 +5,12 @@ from contextlib import suppress
 from decimal import Decimal
 from uuid import UUID
 
-import numpy as np
-import pandas as pd
 import pytest
 import pytz
 
 import duckdb
+import numpy as np
+import pandas as pd
 
 
 def replace_with_ndarray(obj):

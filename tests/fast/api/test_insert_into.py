@@ -1,7 +1,7 @@
 import pytest
-from pandas import DataFrame
 
 import duckdb
+from pandas import DataFrame
 
 
 class TestInsertInto:

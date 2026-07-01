@@ -1,6 +1,5 @@
-import pandas as pd
-
 import duckdb
+import pandas as pd
 
 
 def check_result_list(res):

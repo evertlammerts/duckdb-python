@@ -1,8 +1,7 @@
 # multiple result sets
 
-import numpy
-
 import duckdb
+import numpy
 
 
 class TestMultipleResultSets:

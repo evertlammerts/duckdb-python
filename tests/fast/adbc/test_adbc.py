@@ -1,8 +1,9 @@
 import datetime
 from pathlib import Path
 
-import numpy as np
 import pytest
+
+import numpy as np
 
 adbc_driver_manager = pytest.importorskip("adbc_driver_manager")
 adbc_driver_manager_dbapi = pytest.importorskip("adbc_driver_manager.dbapi")

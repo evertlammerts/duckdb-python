@@ -2,10 +2,10 @@ import re
 from datetime import date, timedelta
 from typing import NoReturn
 
-import pandas as pd
 import pytest
 
 import duckdb
+import pandas as pd
 
 
 # column count differs from bind
@@ -17,6 +17,38 @@ def evil1(df):
 
 
 class TestMap:
+    @pytest.mark.xfail(
+        reason="#10 deferred: the arg-tuple leak keeps the input DataFrame alive, and that reference is "
+        "load-bearing because ArrayWrapper::ToArray std::move's the result buffers into the input df; "
+        "releasing the tuple frees them too early and regresses test_isse_3237. A correct fix needs a "
+        "lifetime refactor. Pre-existing (byte-identical to main), not a cutover regression.",
+        strict=True,
+    )
+    def test_map_does_not_leak_input_dataframe(self, duckdb_cursor):
+        """Known-leak marker (#10): the map callback's arg tuple is not released.
+
+        The PyTuple_Pack tuple pins each chunk's input DataFrame. Deferred (see xfail reason), so this
+        test documents the leak and will xpass once the lifetime refactor lands.
+        """
+        import gc
+        import weakref
+
+        refs: list[weakref.ref] = []
+
+        def capture(df):
+            refs.append(weakref.ref(df))
+            # Return a fresh, unrelated frame so the OUTPUT never references the input df.
+            return pd.DataFrame({"col0": [len(df)]})
+
+        # > STANDARD_VECTOR_SIZE (2048) rows -> several chunks -> several FunctionCall invocations.
+        rel = duckdb_cursor.sql("SELECT i AS col0 FROM range(20000) t(i)")
+        rel.map(capture, schema={"col0": int}).fetchall()
+
+        gc.collect()
+        assert len(refs) >= 2, f"expected multiple chunks, got {len(refs)}"
+        alive = sum(1 for r in refs if r() is not None)
+        assert alive == 0, f"{alive}/{len(refs)} per-chunk input DataFrames leaked (pinned by arg tuple)"
+
     def test_evil_map(self, duckdb_cursor):
         testrel = duckdb.values([1, 2])
         rel = testrel.map(evil1, schema={"i": str})
