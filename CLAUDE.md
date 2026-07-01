@@ -188,8 +188,11 @@ uv run ruff format src/ tests/
 # Type checking (mypy — strict mode, see [tool.mypy] in pyproject.toml)
 uv run mypy
 
-# Pre-commit hooks (configured in .pre-commit-config.yaml)
-uvx pre-commit run --all-files
+# Pre-commit hooks (configured in .pre-commit-config.yaml). Install pinned to 3.12
+# (cmakelang crashes on 3.14; keeps hooks off the build interpreter):
+uv tool install --python 3.12 pre-commit
+pre-commit install          # git hook, runs on commit
+pre-commit run --all-files  # run across the tree
 ```
 
 ## Debugging

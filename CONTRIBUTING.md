@@ -4,6 +4,18 @@
 
 See the [instructions on duckdb.org](https://duckdb.org/docs/stable/dev/building/python).
 
+### Pre-commit hooks
+
+Formatting and linting run through [pre-commit](https://pre-commit.com). Install it pinned to Python 3.12 (the `cmake-format` hook's `cmakelang` dependency crashes on 3.14) so the hooks stay independent of your build interpreter, which may be 3.13 or 3.14t:
+
+```bash
+uv tool install --python 3.12 pre-commit
+pre-commit install          # git hook, runs on `git commit`
+pre-commit run --all-files  # run across the tree
+```
+
+The same checks run in CI.
+
 ## General Guidelines
 
 ### **Did you find a bug?**
