@@ -39,7 +39,7 @@ endif()
 # internally)
 find_package(
   Python
-  COMPONENTS Interpreter Development.Module
+  COMPONENTS Interpreter Development.Module NumPy
   REQUIRED)
 # Nanobind ships its CMake config inside site-packages/nanobind/cmake, so
 # find_package() can't discover it unless we set it. (scikit-build-core does

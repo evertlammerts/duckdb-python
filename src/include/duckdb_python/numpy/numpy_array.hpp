@@ -11,8 +11,6 @@
 #include "duckdb_python/nb/casters.hpp"
 #include "duckdb.hpp"
 
-#include <unordered_map>
-
 namespace duckdb {
 
 namespace numpy_internal {
@@ -37,24 +35,12 @@ inline PyTypeObject *NumpyNdarrayType() {
 	return cached;
 }
 
-//! Allocate an uninitialized 1-D numpy array of `count` elements with the given numpy dtype string.
-//! `numpy.empty` and the `np.dtype` objects are cached to avoid a module import, attribute lookup,
-//! and dtype-string parse on every call. This is hot: a LIST/ARRAY column allocates one array per
-//! row. Cached handles are leaked for process lifetime (shutdown-safe: no Python destructor runs
-//! after finalization). Only ever called on the single-threaded, GIL-held result path.
-inline nb::object NumpyEmpty(idx_t count, const string &dtype) {
-	static PyObject *empty_fn = []() -> PyObject * {
-		nb::object fn = nb::module_::import_("numpy").attr("empty");
-		return fn.release().ptr();
-	}();
-	static auto &dtype_cache = *new std::unordered_map<string, PyObject *>();
-	PyObject *&descr = dtype_cache[dtype];
-	if (!descr) {
-		nb::object d = nb::module_::import_("numpy").attr("dtype")(dtype);
-		descr = d.release().ptr();
-	}
-	return nb::borrow<nb::object>(empty_fn)(count, nb::handle(descr));
-}
+//! Allocate an uninitialized 1-D numpy array of `count` elements with the given numpy dtype string
+//! (e.g. "int64", "float32", "object", "datetime64[us]") via the numpy C API (PyArray_Empty). The
+//! parsed np.dtype objects are cached to avoid a dtype-string parse on every call. This is hot: a
+//! LIST/ARRAY column allocates one array per row. Defined in numpy_array.cpp (the single TU that
+//! pulls in the numpy C API). Only ever called on the single-threaded, GIL-held result path.
+nb::object NumpyEmpty(idx_t count, const string &dtype);
 
 } // namespace numpy_internal
 
