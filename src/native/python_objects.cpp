@@ -462,6 +462,7 @@ static bool KeyIsHashable(const LogicalType &type) {
 		return true;
 	}
 	case LogicalTypeId::STRUCT:
+	case LogicalTypeId::TUPLE:
 		return false;
 	case LogicalTypeId::SQLNULL:
 		// A SQLNULL key is always NULL, and Python's None is hashable.
@@ -608,7 +609,7 @@ nb::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 			time = val.GetValueUnsafe<dtime_t>();
 		} else {
 			// Python's datetime doesn't support nanoseconds, we convert to micros.
-			time = val.GetValueUnsafe<dtime_ns_t>().time();
+			time = dtime_t(val.GetValueUnsafe<dtime_ns_t>().value / 1000);
 		}
 		duckdb::Time::Convert(time, hour, min, sec, usec);
 		try {
@@ -702,7 +703,8 @@ nb::object PythonObject::FromValue(const Value &val, const LogicalType &type,
 		}
 		return std::move(py_struct);
 	}
-	case LogicalTypeId::STRUCT: {
+	case LogicalTypeId::STRUCT:
+	case LogicalTypeId::TUPLE: {
 		return FromStruct(val, type, client_properties);
 	}
 	case LogicalTypeId::UUID: {

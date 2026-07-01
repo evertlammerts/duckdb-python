@@ -79,10 +79,9 @@ nb::object MakePyArrowScalar(const Value &constant, const string &timezone_confi
 		// Cast::Operation<dtime_ns_t, int64_t> for which no specialization exists, and
 		// throws "Unimplemented type for cast (INT64 -> INT64)". Use the type-strong
 		// GetValueUnsafe<dtime_ns_t>() which reads `value_.time_ns` from the union
-		// directly. The `dtime_ns_t.micros` field name is a misnomer — it actually holds
-		// nanoseconds (see arrow_conversion.cpp:432).
+		// directly. dtime_ns_t.value holds nanoseconds (see arrow_conversion.cpp:432).
 		nb::handle date_type = import_cache.pyarrow.time64();
-		return dataset_scalar(scalar(constant.GetValueUnsafe<dtime_ns_t>().micros, date_type("ns")));
+		return dataset_scalar(scalar(constant.GetValueUnsafe<dtime_ns_t>().value, date_type("ns")));
 	}
 	case LogicalTypeId::TIMESTAMP: {
 		nb::handle date_type = import_cache.pyarrow.timestamp();

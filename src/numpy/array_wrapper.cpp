@@ -295,21 +295,10 @@ struct ArrayConvert {
 };
 
 struct StructConvert {
-	static nb::dict ConvertValue(Vector &input, idx_t chunk_offset, NumpyAppendData &append_data) {
-		auto &client_properties = append_data.client_properties;
-
-		nb::dict py_struct;
+	// Delegate to FromStruct so unnamed structs / TUPLE values become Python tuples (named ones stay dicts).
+	static nb::object ConvertValue(Vector &input, idx_t chunk_offset, NumpyAppendData &append_data) {
 		auto val = input.GetValue(chunk_offset);
-		auto &child_types = StructType::GetChildTypes(input.GetType());
-		auto &struct_children = StructValue::GetChildren(val);
-
-		for (idx_t i = 0; i < struct_children.size(); i++) {
-			auto &child_entry = child_types[i];
-			auto &child_name = child_entry.first;
-			auto &child_type = child_entry.second;
-			py_struct[child_name.c_str()] = PythonObject::FromValue(struct_children[i], child_type, client_properties);
-		}
-		return py_struct;
+		return PythonObject::FromStruct(val, input.GetType(), append_data.client_properties);
 	}
 };
 
@@ -716,6 +705,7 @@ void ArrayWrapper::Append(idx_t current_offset, Vector &input, idx_t source_size
 		may_have_null = ConvertNested<nb::object, duckdb_py_convert::UnionConvert>(append_data);
 		break;
 	case LogicalTypeId::STRUCT:
+	case LogicalTypeId::TUPLE:
 		may_have_null = ConvertNested<nb::object, duckdb_py_convert::StructConvert>(append_data);
 		break;
 	case LogicalTypeId::VARIANT:

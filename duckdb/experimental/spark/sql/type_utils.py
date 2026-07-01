@@ -94,7 +94,7 @@ def convert_nested_type(dtype: DuckDBPyType) -> DataType:  # noqa: D103
             "DuckDB union types cannot be directly mapped to PySpark types."
         )
         raise ContributionsAcceptedError(msg)
-    if id == "struct":
+    if id == "struct" or id == "tuple":
         children: list[tuple[str, DuckDBPyType]] = dtype.children
         fields = [StructField(x[0], convert_type(x[1])) for x in children]
         return StructType(fields)
@@ -105,7 +105,7 @@ def convert_nested_type(dtype: DuckDBPyType) -> DataType:  # noqa: D103
 
 def convert_type(dtype: DuckDBPyType) -> DataType:  # noqa: D103
     id = dtype.id
-    if id in ["list", "struct", "map", "array"]:
+    if id in ["list", "struct", "tuple", "map", "array"]:
         return convert_nested_type(dtype)
     if id == "decimal":
         children: list[tuple[str, DuckDBPyType]] = dtype.children

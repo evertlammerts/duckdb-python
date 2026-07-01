@@ -120,7 +120,7 @@ Value TransformDictionaryToStruct(optional_ptr<ClientContext> context, const PyD
                                   const LogicalType &target_type = LogicalType::UNKNOWN) {
 	auto struct_keys = TransformStructKeys(dict.keys, dict.len, target_type);
 
-	bool struct_target = target_type.id() == LogicalTypeId::STRUCT;
+	bool struct_target = target_type.id() == LogicalTypeId::STRUCT || target_type.id() == LogicalTypeId::TUPLE;
 	if (struct_target && dict.len != StructType::GetChildCount(target_type)) {
 		throw InvalidInputException("We could not convert the object %s to the desired target type (%s)",
 		                            dict.ToString(), target_type.ToString());
@@ -255,7 +255,7 @@ Value TransformTupleToStruct(optional_ptr<ClientContext> context, nb::handle ele
 	auto tuple = nb::cast<nb::tuple>(ele);
 	auto size = nb::len(tuple);
 
-	D_ASSERT(target_type.id() == LogicalTypeId::STRUCT);
+	D_ASSERT(target_type.id() == LogicalTypeId::STRUCT || target_type.id() == LogicalTypeId::TUPLE);
 	auto child_types = StructType::GetChildTypes(target_type);
 	auto child_count = child_types.size();
 	if (size != child_count) {
@@ -562,7 +562,7 @@ struct PythonValueConversion {
 
 	static void HandleTuple(optional_ptr<ClientContext> context, Value &result, const LogicalType &target_type,
 	                        nb::handle ele, idx_t list_size) {
-		if (target_type.id() == LogicalTypeId::STRUCT) {
+		if (target_type.id() == LogicalTypeId::STRUCT || target_type.id() == LogicalTypeId::TUPLE) {
 			result = TransformTupleToStruct(context, ele, target_type);
 			return;
 		}
@@ -588,6 +588,7 @@ struct PythonValueConversion {
 			PyDictionary dict = PyDictionary(nb::borrow<nb::object>(ele));
 			switch (target_type.id()) {
 			case LogicalTypeId::STRUCT:
+			case LogicalTypeId::TUPLE:
 				return TransformDictionaryToStruct(context, dict, target_type);
 			case LogicalTypeId::MAP:
 				return TransformDictionaryToMap(context, dict, target_type);
@@ -890,6 +891,7 @@ struct PythonVectorConversion {
 		auto &result_type = result.GetType();
 		switch (result_type.id()) {
 		case LogicalTypeId::STRUCT:
+		case LogicalTypeId::TUPLE:
 			ConvertTupleToStruct(context, result, result_offset, ele, tuple_size);
 			break;
 		case LogicalTypeId::ARRAY:
@@ -985,6 +987,7 @@ void TransformPythonObjectInternal(optional_ptr<ClientContext> context, nb::hand
 		auto &conversion_target = OP::ConversionTarget(result, param);
 		switch (conversion_target.id()) {
 		case LogicalTypeId::STRUCT:
+		case LogicalTypeId::TUPLE:
 		case LogicalTypeId::UNKNOWN:
 		case LogicalTypeId::LIST:
 		case LogicalTypeId::ARRAY:
