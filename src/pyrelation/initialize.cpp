@@ -278,7 +278,7 @@ static void InitializeMetaQueries(nb::class_<DuckDBPyRelation> &m) {
 }
 
 void DuckDBPyRelation::Initialize(nb::handle &m) {
-	// Weak-referenceable like pybind11 (nanobind requires the explicit opt-in).
+	// nanobind types aren't weak-referenceable by default.
 	auto relation_module = nb::class_<DuckDBPyRelation>(m, "DuckDBPyRelation", nb::is_weak_referenceable());
 	InitializeReadOnlyProperties(relation_module);
 	InitializeAggregates(relation_module);

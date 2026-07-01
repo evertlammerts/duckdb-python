@@ -352,7 +352,7 @@ bool DuckDBPyType::TryConvert(const nb::object &object, std::unique_ptr<DuckDBPy
 }
 
 void DuckDBPyType::Initialize(nb::handle &m) {
-	// Weak-referenceable like pybind11 (nanobind requires the explicit opt-in).
+	// nanobind types aren't weak-referenceable by default.
 	auto type_module = nb::class_<DuckDBPyType>(m, "DuckDBPyType", nb::is_weak_referenceable());
 
 	type_module.def("__repr__", &DuckDBPyType::ToString, "Stringified representation of the type object");

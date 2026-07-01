@@ -15,7 +15,7 @@ static void InitializeReadOnlyProperties(nb::class_<DuckDBPyStatement> &m) {
 }
 
 void DuckDBPyStatement::Initialize(nb::handle &m) {
-	// Weak-referenceable like pybind11 (nanobind requires the explicit opt-in).
+	// nanobind types aren't weak-referenceable by default.
 	auto relation_module = nb::class_<DuckDBPyStatement>(m, "Statement", nb::is_weak_referenceable());
 	InitializeReadOnlyProperties(relation_module);
 }

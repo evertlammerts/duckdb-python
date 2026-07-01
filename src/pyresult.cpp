@@ -37,7 +37,7 @@ DuckDBPyResult::DuckDBPyResult(unique_ptr<QueryResult> result_p) : result(std::m
 
 DuckDBPyResult::~DuckDBPyResult() {
 	// The destructor must run with the GIL held: `result` and `current_chunk`
-	// can transitively own pybind-managed Python references (registered
+	// can transitively own Python references (registered
 	// objects, arrow release callbacks, PYTHON_OBJECT vector values, etc.),
 	// whose teardown calls into the Python C API. Releasing the GIL here
 	// (as the previous implementation did) causes Py_DECREF / PyObject_Free

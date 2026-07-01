@@ -69,7 +69,7 @@ DuckDBPyConnection::~DuckDBPyConnection() {
 		// the GIL for it so other Python threads can run. The implicit member
 		// destructors that fire after this scope (notably
 		// `registered_functions`, a `case_insensitive_map_t<unique_ptr<ExternalDependency>>`
-		// whose entries transitively own pybind-managed Python references)
+		// whose entries transitively own Python references)
 		// run with the GIL reacquired because `gil` is destroyed at the end
 		// of the inner block.
 		{
@@ -477,7 +477,7 @@ DuckDBPyConnection::RegisterScalarUDF(const string &name, const nb::callable &ud
 }
 
 void DuckDBPyConnection::Initialize(nb::handle &m) {
-	// Weak-referenceable like pybind11 (which set tp_weaklistoffset by default); nanobind requires the opt-in,
+	// nanobind types aren't weak-referenceable by default;
 	// otherwise weakref.ref/proxy/finalize on a connection raises TypeError.
 	auto connection_module = nb::class_<DuckDBPyConnection>(m, "DuckDBPyConnection", nb::is_weak_referenceable());
 
@@ -1920,7 +1920,7 @@ void DuckDBPyConnection::Close() {
 	// is pure C++ work and can take noticeable time. Hold the GIL back for
 	// `registered_functions.clear()` because the
 	// `case_insensitive_map_t<unique_ptr<ExternalDependency>>` it destroys
-	// transitively owns pybind-managed Python references (Python UDF
+	// transitively owns Python references (Python UDF
 	// callables, registered Python objects, …). Decrementing those
 	// references with the GIL released is undefined behaviour — see
 	// duckdb-python#456.
@@ -2166,7 +2166,7 @@ duckdb::pyarrow::RecordBatchReader DuckDBPyConnection::FetchRecordBatchReader(co
 case_insensitive_map_t<Value> TransformPyConfigDict(const nb::dict &py_config_dict) {
 	case_insensitive_map_t<Value> config_dict;
 	for (auto kv : py_config_dict) {
-		// Config values may be int/bool/str; str-ify them (matches pybind11's nb::str(value)) rather than
+		// Config values may be int/bool/str; str-ify them rather than
 		// requiring an actual Python str (nb::cast<std::string> would throw on a non-str like 0 or False).
 		auto key = nb::cast<std::string>(nb::str(kv.first));
 		auto val = nb::cast<std::string>(nb::str(kv.second));

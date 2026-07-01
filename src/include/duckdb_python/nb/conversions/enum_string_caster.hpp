@@ -39,7 +39,7 @@
 					value = FromIntegerFn(nanobind::cast<int64_t>(src));                                               \
 					return true;                                                                                       \
 				}                                                                                                      \
-				/* Registered nb::enum_ instances aren't int subclasses (unlike pybind11's), so accept a member  */    \
+				/* Registered nb::enum_ instances aren't int subclasses, so accept a member  */                        \
 				/* of the registered enum by reading its integer .value.                                         */    \
 				nanobind::handle enum_type = nanobind::type<EnumType>();                                               \
 				if (enum_type.is_valid() && PyObject_IsInstance(src.ptr(), enum_type.ptr()) == 1) {                    \

@@ -11,9 +11,9 @@ namespace {
 // Binary operators take their operand as nb::object (not Expression) so that None can bind: nanobind rejects None for a
 // bound-type parameter before the registered implicit conversion runs, so `expr == None` / `expr + None` would never
 // reach the None -> SQL NULL conversion otherwise. We convert explicitly via TryToExpression (an existing Expression is
-// copied, a str becomes a column reference, any other value -- including None -- becomes a constant). On a genuinely
+// copied, a str becomes a column reference, any other value (including None) becomes a constant). On a genuinely
 // unconvertible operand we return Py_NotImplemented so Python falls back to the reflected operator / identity
-// comparison, exactly as the is_operator() overload did under pybind11 (keeps e.g. `expr == object()` returning False
+// comparison, keeping e.g. `expr == object()` returning False
 // instead of raising).
 template <typename Build>
 nb::object ExpressionBinaryOp(const nb::object &other, Build &&build) {
@@ -325,7 +325,7 @@ static void InitializeImplicitConversion(nb::class_<DuckDBPyExpression> &m) {
 }
 
 void DuckDBPyExpression::Initialize(nb::module_ &m) {
-	// Weak-referenceable like pybind11 (nanobind requires the explicit opt-in).
+	// nanobind types aren't weak-referenceable by default.
 	auto expression = nb::class_<DuckDBPyExpression>(m, "Expression", nb::is_weak_referenceable());
 
 	InitializeStaticMethods(m);

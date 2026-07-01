@@ -283,8 +283,7 @@ static unique_ptr<TableRef> ReplaceInternal(ClientContext &context, const string
 		has_locals = !nb::none().is(local_dict_p);
 		if (has_locals) {
 			// search local dictionary. On Python 3.13+ (PEP 667) frame.f_locals is a FrameLocalsProxy, not a
-			// dict, so reinterpreting/cast<nb::dict> would fail; materialize a real dict from the mapping
-			// (pybind11's cast<nb::dict> did the equivalent dict(obj) conversion).
+			// dict, so cast<nb::dict> would fail; materialize a real dict from the mapping.
 			auto local_dict = FrameDictToDict(local_dict_p);
 			auto result = TryReplacement(local_dict, table_name, context, current_frame);
 			if (result) {

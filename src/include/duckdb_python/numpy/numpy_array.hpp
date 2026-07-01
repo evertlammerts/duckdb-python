@@ -18,14 +18,11 @@ namespace duckdb {
 namespace numpy_internal {
 
 //! Mirror of the leading fields of numpy's `PyArrayObject` (stable ABI across numpy 1.x and 2.x).
-//! Only the buffer pointer is needed. Reading `data` is a plain struct field access -- no Python
-//! call, no allocation, no GIL -- exactly what pybind11's `py::array::data()` did internally via
-//! its own equivalent proxy struct. Obtaining the pointer this way (instead of via a `ctypes.data`
-//! attribute chain) is what keeps the numpy columnar path fast for LIST/ARRAY columns, whose
-//! per-element converter allocates a fresh array per row.
+//! Reading `data` is a plain struct field access (no Python call, allocation, or GIL). Obtaining
+//! the pointer this way, instead of via a `ctypes.data` attribute chain, keeps the numpy columnar
+//! path fast for LIST/ARRAY columns, whose per-element converter allocates a fresh array per row.
 struct NumpyArrayProxy {
-	PyObject_HEAD
-	char *data;
+	PyObject_HEAD char *data;
 };
 
 //! Borrowed handle to the `numpy.ndarray` type, fetched once under the GIL and intentionally leaked
@@ -41,12 +38,10 @@ inline PyTypeObject *NumpyNdarrayType() {
 }
 
 //! Allocate an uninitialized 1-D numpy array of `count` elements with the given numpy dtype string.
-//! The bound `numpy.empty` and the `np.dtype` objects (a handful of distinct dtype strings) are
-//! cached to avoid a module import, an attribute lookup, and a dtype-string parse on every call --
-//! this is hot, since a LIST/ARRAY column allocates one array per row (pybind11 constructed the
-//! array at the C level via `py::array(py::dtype, count)`, which paid none of that). Cached handles
-//! are leaked for process lifetime (shutdown-safe: no Python destructor runs after finalization).
-//! Only ever called on the single-threaded, GIL-held result-materialization path.
+//! `numpy.empty` and the `np.dtype` objects are cached to avoid a module import, attribute lookup,
+//! and dtype-string parse on every call. This is hot: a LIST/ARRAY column allocates one array per
+//! row. Cached handles are leaked for process lifetime (shutdown-safe: no Python destructor runs
+//! after finalization). Only ever called on the single-threaded, GIL-held result path.
 inline nb::object NumpyEmpty(idx_t count, const string &dtype) {
 	static PyObject *empty_fn = []() -> PyObject * {
 		nb::object fn = nb::module_::import_("numpy").attr("empty");
@@ -69,17 +64,15 @@ inline nb::object NumpyEmpty(idx_t count, const string &dtype) {
 //! object. Under nanobind there is no `nb::array` (and no `nb::dtype`); the array is held
 //! as a plain `nb::object` and the few buffer operations go through numpy directly.
 //!
-//! Performance note: `Data()`/`MutableData()` are on the HOT path — the numpy scan calls
-//! `Data()` once per column per 2048-row chunk (see numpy_scan.cpp), and DuckDB drives that
-//! scan from multiple threads WITHOUT holding the GIL. It is also on the LIST/ARRAY result path,
-//! where a fresh array (and thus a fresh buffer pointer) is materialized per row. The pointer is
-//! read directly from the numpy array's C struct (see `numpy_internal::NumpyArrayProxy`): a plain
-//! field access, no Python call, no allocation, no GIL — exactly what pybind11's
-//! `py::array::data()` did. We compute it ONCE, eagerly, in the constructor (always invoked
-//! single-threaded with the GIL held at bind/result time) and cache it; the cache is invalidated
-//! (and recomputed) by `Resize()`, the only operation that reallocates the buffer. Reading the
-//! struct field is dtype-agnostic (works for the `object` dtype that DLPack/`nb::ndarray` cannot
-//! represent).
+//! Performance note: `Data()`/`MutableData()` are on the HOT path. The numpy scan calls `Data()`
+//! once per column per 2048-row chunk (see numpy_scan.cpp), and DuckDB drives that scan from
+//! multiple threads WITHOUT holding the GIL. It is also on the LIST/ARRAY result path, where a
+//! fresh array (and buffer pointer) is materialized per row. The pointer is read directly from the
+//! numpy array's C struct (see `numpy_internal::NumpyArrayProxy`): a plain field access, no Python
+//! call, allocation, or GIL. We compute it ONCE, eagerly, in the constructor (single-threaded with
+//! the GIL held at bind/result time) and cache it; the cache is invalidated (and recomputed) by
+//! `Resize()`, the only operation that reallocates the buffer. The struct read is dtype-agnostic
+//! (works for the `object` dtype that DLPack/`nb::ndarray` cannot represent).
 //!
 //! Ownership is move-only-when-asked: the ctor takes by value and moves, GetArray() hands
 //! back a reference, and no method copies the array buffer. The raw `cached_data_` member uses
@@ -101,8 +94,8 @@ public:
 
 public:
 	//! Allocate a fresh, contiguous 1-D numpy array of `count` elements with the given numpy
-	//! dtype string (e.g. "int64", "float32", "object", "datetime64[us]"). Uninitialized —
-	//! callers fill it immediately, matching the previous `nb::array(nb::dtype(d), count)`.
+	//! dtype string (e.g. "int64", "float32", "object", "datetime64[us]"). Uninitialized; callers
+	//! fill it immediately.
 	static NumpyArray Allocate(const string &dtype, idx_t count) {
 		NumpyArray result(numpy_internal::NumpyEmpty(count, dtype));
 		result.length_ = count;
@@ -127,11 +120,11 @@ public:
 	}
 
 	//! Resize the underlying numpy buffer in place. This REALLOCATES the buffer, so the cached
-	//! pointer is invalidated and recomputed (GIL is held -- this only runs on the single-threaded
-	//! result-materialization path). Resizing to the current length is a genuine no-op in numpy;
-	//! we skip the Python `resize` call entirely in that case (buffer and cached pointer unchanged).
-	//! The LIST/ARRAY per-element path allocates each array at its exact final size, so its
-	//! `ToArray()` shrink-to-count is always such a no-op -- hot, hence worth skipping.
+	//! pointer is invalidated and recomputed (GIL held; only runs on the single-threaded result
+	//! path). Resizing to the current length is a genuine no-op in numpy, so we skip the Python
+	//! `resize` call entirely in that case. The LIST/ARRAY per-element path allocates each array at
+	//! its exact final size, so its `ToArray()` shrink-to-count is always such a no-op: hot, worth
+	//! skipping.
 	void Resize(idx_t count) {
 		if (length_ != DConstants::INVALID_INDEX && count == length_) {
 			return;
@@ -143,7 +136,7 @@ public:
 	}
 
 	//! Access the underlying array, e.g. for `.attr(...)` calls, iteration, or to hand it
-	//! back to Python. Returned by reference -- never copied.
+	//! back to Python. Returned by reference, never copied.
 	nb::object &GetArray() {
 		return array;
 	}
@@ -154,8 +147,8 @@ public:
 private:
 	//! Compute and cache the buffer start address of the underlying numpy array, if not already
 	//! cached and a numpy ndarray is held. The pointer is read directly from the array's C struct
-	//! (dtype-agnostic, works for the `object` dtype too), matching pybind11's `py::array::data()`.
-	//! Only ever called with the GIL held (construction / Resize).
+	//! (dtype-agnostic, works for the `object` dtype too). Only ever called with the GIL held
+	//! (construction / Resize).
 	void EnsurePointer() {
 		// Some NumpyArray wrappers hold non-ndarray objects (e.g. a pandas Index) whose buffer pointer is never read.
 		// Gate the read on an actual numpy ndarray so we never reinterpret a foreign object's memory as an array.

@@ -1043,7 +1043,7 @@ void TransformPythonObjectInternal(optional_ptr<ClientContext> context, nb::hand
 	}
 	case PythonObjectType::Bytes: {
 		// Read the buffer directly (mirrors the ByteArray branch above): nanobind's nb::cast<std::string> rejects
-		// a bytes object (pybind11 accepted it), so go through the CPython API instead.
+		// a bytes object, so go through the CPython API instead.
 		char *bytes_buffer;
 		Py_ssize_t bytes_length;
 		PyBytes_AsStringAndSize(ele.ptr(), &bytes_buffer, &bytes_length); // NOLINT

@@ -21,9 +21,9 @@
 
 namespace duckdb {
 
-//! Format a caught Python error as "TypeName: message" (e.g. "AttributeError: error"), matching pybind11's
-//! error_already_set::what(). nanobind's python_error::what() returns the full multi-line traceback (including
-//! interpreter/pytest frames), which is far too noisy to embed verbatim in the DuckDB error message.
+//! Format a caught Python error as "TypeName: message" (e.g. "AttributeError: error"). nanobind's
+//! python_error::what() returns the full multi-line traceback (interpreter/pytest frames included),
+//! too noisy to embed verbatim in the DuckDB error message.
 static string FormatUDFPythonError(nb::python_error &error) {
 	auto type_name = nb::cast<std::string>(nb::str(nb::object(error.type().attr("__name__"))));
 	auto message = nb::cast<std::string>(nb::str(error.value()));
@@ -507,8 +507,8 @@ public:
 		}
 		param_count = nb::len(sig_params);
 		parameters.reserve(param_count);
-		// inspect.Signature.parameters is a mappingproxy, not a dict; materialize a real dict (nanobind's
-		// cast<nb::dict> would reject the proxy, unlike pybind11's converting nb::dict).
+		// inspect.Signature.parameters is a mappingproxy, not a dict; materialize a real dict
+		// (cast<nb::dict> would reject the proxy).
 		nb::dict params;
 		params.update(sig_params);
 		for (auto item : params) {
@@ -538,8 +538,7 @@ public:
 		if (!numpy) {
 			throw InvalidInputException("'numpy' is required for this operation, but it wasn't installed");
 		}
-		// numpy.__version__ is a string; pybind11's cast<nb::tuple> converted it to a tuple of characters
-		// (PySequence_Tuple). nanobind's cast<nb::tuple> would reject a non-tuple, so convert explicitly.
+		// numpy.__version__ is a string; nb::cast<nb::tuple> rejects a non-tuple, so convert it explicitly.
 		nb::object numpy_version_str = numpy.attr("__version__");
 		auto numpy_version = nb::tuple(numpy_version_str);
 		if (NumpyDeprecatesAccessToCore(numpy_version)) {
