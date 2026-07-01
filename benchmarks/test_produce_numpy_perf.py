@@ -1,36 +1,33 @@
-"""Standalone CodSpeed benchmark module for the COLUMNAR produce paths (duckdb -> numpy/pandas), i.e. df(),
-fetchnumpy(), fetch_df_chunk() — NOT integrated (not in pyproject, not in CI, not committed). Run under each
-build's interpreter and compare:
+"""CodSpeed benchmark: columnar produce paths (df(), fetchnumpy(), fetch_df_chunk()). Standalone, not in CI.
 
-  M=/Users/evert/projects/duckdb-python/main/.venv-release/bin/python
-  C=/Users/evert/projects/duckdb-python/wt-codspeed/.venv-release/bin/python
+A/B: run under each build, compare (data libs pinned identically, so the delta is the binding):
   cd /Users/evert/projects/duckdb-python/wt-codspeed
-  $M -m pytest benchmarks/test_produce_numpy_perf.py --codspeed --codspeed-mode=walltime -o addopts= -p no:cacheprovider
-  $C -m pytest benchmarks/test_produce_numpy_perf.py --codspeed --codspeed-mode=walltime -o addopts= -p no:cacheprovider
+  for P in ../main/.venv-release/bin/python .venv-release/bin/python; do \
+    $P -m pytest benchmarks/test_produce_numpy_perf.py \
+    --codspeed --codspeed-mode=walltime -o addopts= -p no:cacheprovider; \
+  done
 
-WHY THIS MODULE: the columnar OUT path (FetchNumpyInternal -> ArrayWrapper ConvertColumnRegular) is exactly
-what the nanobind cutover reworked. The under-covered cases are: (1) the WITH-NULLS branch (HAS_NULLS=true ->
-masked_array build -> masked->pd.NA rewrite, array_wrapper.cpp / pyresult.cpp) -- NEVER previously benchmarked
-and the most-changed code; (2) datetime; (3) fetchnumpy without the DataFrame wrap; (4) fetch_df_chunk; and
-the wide-internal types HUGEINT (->double cast), UUID (UUIDConvert), DECIMAL(28,x) (ConvertDecimalInternal
-<hugeint_t>) that exercise distinct OUT-col converters.
-
-GOTCHA (encoded below): OUT-col NULL benchmarks use REAL DuckDB nulls (CASE WHEN .. THEN NULL). A no-null
-column silently takes the cheap std::move path and the masked-array branch never triggers, so it would measure
-the wrong thing.
-
-FULL CONSUME: df() / fetchnumpy() eagerly materialize the whole column set; fetch_df_chunk is drained in a loop.
-
-numpy/pandas are pinned to the SAME versions in both .venv-release, so the A/B delta is purely the binding.
+Covers the with-NULLS branch (masked_array build), datetime, and wide-internal types (hugeint/uuid/decimal128).
+Gotcha: NULL benchmarks use real DuckDB nulls (CASE WHEN); a no-null column takes the cheap path and measures
+the wrong thing. Full consume: df()/fetchnumpy() materialize the columns; fetch_df_chunk is drained in a loop.
 """
+
+from __future__ import annotations
 
 import gc
 import sys
 import tracemalloc
+from typing import TYPE_CHECKING
+
+import pytest
 
 import duckdb
 import numpy as np  # noqa: F401  (pinned identically A/B; imported so the env matches the other modules)
-import pytest
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from pytest_codspeed import BenchmarkFixture
 
 N = 500_000
 TYPE_N = 200_000  # wide-internal types (hugeint/uuid/decimal128) are heavier per cell
@@ -48,18 +45,19 @@ Q_DEC128 = f"SELECT ((i * 1.5)::DECIMAL(28, 6)) AS d FROM range({TYPE_N}) t(i)"
 
 
 @pytest.fixture
-def con():
+def con() -> Iterator[duckdb.DuckDBPyConnection]:
+    """Yield a fresh connection, closed on teardown."""
     c = duckdb.connect()
     yield c
     c.close()
 
 
-def _bench_df(benchmark, con, query):
+def _bench_df(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, query: str) -> None:
     con.sql(query).df()  # warm
     benchmark(lambda: con.sql(query).df())
 
 
-def _bench_numpy(benchmark, con, query):
+def _bench_numpy(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, query: str) -> None:
     con.sql(query).fetchnumpy()  # warm
     benchmark(lambda: con.sql(query).fetchnumpy())
 
@@ -69,32 +67,39 @@ def _bench_numpy(benchmark, con, query):
 # --------------------------------------------------------------------------- #
 
 
-def test_df_numeric(benchmark, con):
+def test_df_numeric(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
+    """Benchmark df() of a numeric result."""
     _bench_df(benchmark, con, Q_NUM)
 
 
-def test_df_numeric_with_nulls(benchmark, con):
+def test_df_numeric_with_nulls(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
+    """Benchmark df() of a null-heavy numeric result."""
     # REAL nulls -> HAS_NULLS=true -> masked_array build + masked->pd.NA rewrite (the reworked branch)
     _bench_df(benchmark, con, Q_NUM_NULLS)
 
 
-def test_df_string(benchmark, con):
+def test_df_string(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
+    """Benchmark df() of a string result."""
     _bench_df(benchmark, con, Q_STR)
 
 
-def test_df_timestamp(benchmark, con):
+def test_df_timestamp(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
+    """Benchmark df() of a timestamp result."""
     _bench_df(benchmark, con, Q_TS)
 
 
-def test_df_hugeint(benchmark, con):
+def test_df_hugeint(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
+    """Benchmark df() of a hugeint result."""
     _bench_df(benchmark, con, Q_HUGEINT)
 
 
-def test_df_uuid(benchmark, con):
+def test_df_uuid(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
+    """Benchmark df() of a uuid result."""
     _bench_df(benchmark, con, Q_UUID)
 
 
-def test_df_decimal128(benchmark, con):
+def test_df_decimal128(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
+    """Benchmark df() of a 128-bit decimal result."""
     _bench_df(benchmark, con, Q_DEC128)
 
 
@@ -103,11 +108,13 @@ def test_df_decimal128(benchmark, con):
 # --------------------------------------------------------------------------- #
 
 
-def test_fetchnumpy_numeric(benchmark, con):
+def test_fetchnumpy_numeric(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
+    """Benchmark fetchnumpy() of a numeric result."""
     _bench_numpy(benchmark, con, Q_NUM)
 
 
-def test_fetchnumpy_numeric_with_nulls(benchmark, con):
+def test_fetchnumpy_numeric_with_nulls(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
+    """Benchmark fetchnumpy() of a null-heavy numeric result."""
     _bench_numpy(benchmark, con, Q_NUM_NULLS)
 
 
@@ -116,8 +123,10 @@ def test_fetchnumpy_numeric_with_nulls(benchmark, con):
 # --------------------------------------------------------------------------- #
 
 
-def test_fetch_df_chunk_loop(benchmark, con):
-    def run():
+def test_fetch_df_chunk_loop(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
+    """Benchmark draining a result with fetch_df_chunk()."""
+
+    def run() -> int:
         rel = con.sql(Q_NUM)
         rows = 0
         while True:
@@ -136,7 +145,8 @@ def test_fetch_df_chunk_loop(benchmark, con):
 # --------------------------------------------------------------------------- #
 
 
-def test_torch_numeric(benchmark, con):
+def test_torch_numeric(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
+    """Benchmark torch() of a numeric result (skipped if torch is absent)."""
     pytest.importorskip("torch")
     q = f"SELECT i::BIGINT AS a, (i * 1.5)::DOUBLE AS b FROM range({TYPE_N}) t(i)"
     con.sql(q).torch()  # warm
@@ -160,7 +170,8 @@ def test_torch_numeric(benchmark, con):
 # --------------------------------------------------------------------------- #
 
 
-def test_mem_df_with_nulls():
+def test_mem_df_with_nulls() -> None:
+    """Guard the Python-tracked peak allocation of a null-heavy df() call."""
     con = duckdb.connect()
     try:
         tracemalloc.start()

@@ -1,30 +1,30 @@
-"""Standalone CodSpeed benchmark module: the TYPE x DIRECTION produce matrix — NOT integrated (not in
-pyproject, not in CI, not committed). Run under each build's interpreter and compare:
+"""CodSpeed benchmark: the type x direction produce matrix (fetchall / df / to_arrow per type). Standalone, not in CI.
 
-  M=/Users/evert/projects/duckdb-python/main/.venv-release/bin/python
-  C=/Users/evert/projects/duckdb-python/wt-codspeed/.venv-release/bin/python
+A/B: run under each build, compare (data libs pinned identically, so the delta is the binding):
   cd /Users/evert/projects/duckdb-python/wt-codspeed
-  $M -m pytest benchmarks/test_types_roundtrip_perf.py --codspeed --codspeed-mode=walltime -o addopts= -p no:cacheprovider
-  $C -m pytest benchmarks/test_types_roundtrip_perf.py --codspeed --codspeed-mode=walltime -o addopts= -p no:cacheprovider
+  for P in ../main/.venv-release/bin/python .venv-release/bin/python; do \
+    $P -m pytest benchmarks/test_types_roundtrip_perf.py \
+    --codspeed --codspeed-mode=walltime -o addopts= -p no:cacheprovider; \
+  done
 
-WHY THIS MODULE: a single systematic sweep of one logical type per column across the three produce directions
-  * OUT-row   = fetchall()          -> FromValue per cell (python_objects.cpp)
-  * OUT-col   = df()                -> ArrayWrapper / ConvertColumn (array_wrapper.cpp)
-  * OUT-arrow = to_arrow_table()    -> arrow export converters
-so a regression localizes to (type, direction). Includes the iqmo/bareduckdb cross-check breadth that the
-narrow-numeric homogeneous benchmarks miss: HUGEINT (PyLong_FromString / hugeint->double / int128 export),
-UUID (uuid.UUID per row / UUIDConvert), DECIMAL(28,6) int128-internal (ConvertDecimalInternal<hugeint_t>),
-and a long-varchar (>64 chars) that shifts the string paths from overhead-bound to copy-bound.
-
-FULL CONSUME: fetchall and df materialize everything; to_arrow_table is eager. NOTE: to_arrow_table on a
-materialized result re-runs the query with the GIL released (PromoteMaterializedToArrow), so the OUT-arrow
-column is engine-parallel and walltime-NOISY -- treat it as informational, not a hard gate.
-
-numpy/pandas/pyarrow are pinned to the SAME versions in both .venv-release, so the A/B delta is purely the binding.
+One logical type per column across three directions, so a regression localizes to (type, direction). Includes
+the wide types the narrow-numeric benchmarks miss: hugeint, uuid, decimal128, long varchar. Note: to_arrow on a
+materialized result re-runs the query with the GIL released, so the arrow column is engine-parallel and
+walltime-noisy: informational, not a hard gate.
 """
 
-import duckdb
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import pytest
+
+import duckdb
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from pytest_codspeed import BenchmarkFixture
 
 N = 100_000
 
@@ -46,32 +46,36 @@ TYPES = list(TYPE_EXPR)
 
 
 @pytest.fixture
-def con():
+def con() -> Iterator[duckdb.DuckDBPyConnection]:
+    """Yield a fresh connection, closed on teardown."""
     c = duckdb.connect()
     yield c
     c.close()
 
 
-def _query(type_name):
+def _query(type_name: str) -> str:
     return f"SELECT {TYPE_EXPR[type_name]} AS c FROM range({N}) t(i)"
 
 
 @pytest.mark.parametrize("type_name", TYPES)
-def test_out_row_fetchall(benchmark, con, type_name):
+def test_out_row_fetchall(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, type_name: str) -> None:
+    """Benchmark fetchall of one logical type per column."""
     q = _query(type_name)
     con.execute(q).fetchall()  # warm
     benchmark(lambda: con.execute(q).fetchall())
 
 
 @pytest.mark.parametrize("type_name", TYPES)
-def test_out_col_df(benchmark, con, type_name):
+def test_out_col_df(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, type_name: str) -> None:
+    """Benchmark df() of one logical type per column."""
     q = _query(type_name)
     con.sql(q).df()  # warm
     benchmark(lambda: con.sql(q).df())
 
 
 @pytest.mark.parametrize("type_name", TYPES)
-def test_out_arrow_table(benchmark, con, type_name):
+def test_out_arrow_table(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, type_name: str) -> None:
+    """Benchmark to_arrow_table() of one logical type per column (informational only)."""
     # informational only: PromoteMaterializedToArrow re-runs the query with the GIL released (noisy)
     q = _query(type_name)
     con.sql(q).to_arrow_table()  # warm

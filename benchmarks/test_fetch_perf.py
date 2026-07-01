@@ -1,57 +1,70 @@
-"""Standalone CodSpeed benchmark module — NOT integrated (not in pyproject, not in CI, not committed).
+"""CodSpeed benchmark: row fetch paths (fetchall, fetchone iteration, expression construction). Standalone, not in CI.
 
-Purpose: A/B the binding-layer perf between the two builds (pybind11 `main` vs nanobind cutover), in particular
-the narrow-column `fetchall` regression. Run the SAME file under each build's interpreter and compare:
+A/B: run under each build, compare (data libs pinned identically, so the delta is the binding):
+  cd /Users/evert/projects/duckdb-python/wt-codspeed
+  for P in ../main/.venv-release/bin/python .venv-release/bin/python; do \
+    $P -m pytest benchmarks/test_fetch_perf.py \
+    --codspeed --codspeed-mode=walltime -o addopts= -p no:cacheprovider; \
+  done
 
-  M=/Users/evert/projects/duckdb-python/main/.venv-release/bin/python
-  C=/Users/evert/projects/duckdb-python/wt-cutover/.venv-release/bin/python
-  cd /Users/evert/projects/duckdb-python/wt-cutover
-  $M -m pytest benchmarks/test_fetch_perf.py --codspeed --codspeed-mode=walltime -o addopts=
-  $C -m pytest benchmarks/test_fetch_perf.py --codspeed --codspeed-mode=walltime -o addopts=
-
-NOTE: macOS arm64 has no Valgrind, so only `--codspeed-mode=walltime` works locally (wall-clock stats). The
-deterministic instruction-count mode (`--codspeed-mode=simulation`) needs Linux + the CodSpeed instrument
-(CI, or `codspeed run` in a Linux container). In CI/cloud, CodSpeed compares each run against a git baseline;
-locally we get the same benchmark workflow but A/B by running the file under the two interpreters by hand.
+Only walltime works locally (no Valgrind on macOS arm64); the deterministic instruction-count mode needs Linux (CI).
+Walltime is noisy on sub-ms benchmarks.
 """
 
-import duckdb
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import pytest
+
+import duckdb
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from pytest_codspeed import BenchmarkFixture
 
 
 @pytest.fixture
-def con():
+def con() -> Iterator[duckdb.DuckDBPyConnection]:
+    """Yield a fresh connection, closed on teardown."""
     c = duckdb.connect()
     yield c
     c.close()
 
 
-def _bench_fetchall(benchmark, con, query):
+def _bench_fetchall(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, query: str) -> None:
     con.execute(query).fetchall()  # warm the engine before measuring
     benchmark(lambda: con.execute(query).fetchall())
 
 
-def test_fetchall_int(benchmark, con):
+def test_fetchall_int(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
+    """Benchmark fetchall of a single BIGINT column."""
     _bench_fetchall(benchmark, con, "SELECT i::BIGINT AS a FROM range(200000) t(i)")
 
 
-def test_fetchall_smallint(benchmark, con):
+def test_fetchall_smallint(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
+    """Benchmark fetchall of a single INTEGER column."""
     _bench_fetchall(benchmark, con, "SELECT (i % 100)::INTEGER AS a FROM range(200000) t(i)")
 
 
-def test_fetchall_double(benchmark, con):
+def test_fetchall_double(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
+    """Benchmark fetchall of a single DOUBLE column."""
     _bench_fetchall(benchmark, con, "SELECT (i * 1.5)::DOUBLE AS a FROM range(200000) t(i)")
 
 
-def test_fetchall_2int(benchmark, con):
+def test_fetchall_2int(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
+    """Benchmark fetchall of two BIGINT columns."""
     _bench_fetchall(benchmark, con, "SELECT i::BIGINT AS a, (i + 1)::BIGINT AS b FROM range(200000) t(i)")
 
 
-def test_fetchall_str(benchmark, con):
+def test_fetchall_str(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
+    """Benchmark fetchall of a single VARCHAR column."""
     _bench_fetchall(benchmark, con, "SELECT ('str_value_' || i) AS s FROM range(100000) t(i)")
 
 
-def test_fetchall_mixed(benchmark, con):
+def test_fetchall_mixed(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
+    """Benchmark fetchall of a mixed scalar/list/struct row."""
     query = (
         "SELECT i::BIGINT AS bi, ('str_' || i) AS s, [i, i + 1, i + 2] AS lst, "
         "{'a': i, 'b': i + 1} AS st FROM range(50000) t(i)"
@@ -59,10 +72,11 @@ def test_fetchall_mixed(benchmark, con):
     _bench_fetchall(benchmark, con, query)
 
 
-def test_fetchone_iter(benchmark, con):
+def test_fetchone_iter(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
+    """Benchmark iterating a result one row at a time with fetchone."""
     query = "SELECT i::BIGINT AS a, (i * 1.5)::DOUBLE AS b FROM range(100000) t(i)"
 
-    def run():
+    def run() -> None:
         rel = con.execute(query)
         while rel.fetchone() is not None:
             pass
@@ -78,35 +92,40 @@ def test_fetchone_iter(benchmark, con):
 # --------------------------------------------------------------------------- #
 
 
-def test_fetchall_int_gate(benchmark, con):
+def test_fetchall_int_gate(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
+    """Benchmark the small-N BIGINT instruction-count gate."""
     _bench_fetchall(benchmark, con, "SELECT i::BIGINT AS a FROM range(2048) t(i)")
 
 
-def test_fetchall_2int_gate(benchmark, con):
+def test_fetchall_2int_gate(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
+    """Benchmark the small-N two-BIGINT instruction-count gate."""
     _bench_fetchall(benchmark, con, "SELECT i::BIGINT AS a, (i + 1)::BIGINT AS b FROM range(2048) t(i)")
 
 
-def test_fetchall_null_heavy(benchmark, con):
-    _bench_fetchall(
-        benchmark, con, "SELECT CASE WHEN i % 2 = 0 THEN NULL ELSE i::BIGINT END FROM range(200000) t(i)"
-    )
+def test_fetchall_null_heavy(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
+    """Benchmark fetchall of a half-NULL BIGINT column."""
+    _bench_fetchall(benchmark, con, "SELECT CASE WHEN i % 2 = 0 THEN NULL ELSE i::BIGINT END FROM range(200000) t(i)")
 
 
-def test_fetchall_timestamptz(benchmark, con):
+def test_fetchall_timestamptz(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
+    """Benchmark fetchall of a TIMESTAMPTZ column."""
     _bench_fetchall(
         benchmark, con, "SELECT (TIMESTAMPTZ '2020-01-01' + (i * INTERVAL 1 SECOND)) FROM range(100000) t(i)"
     )
 
 
-def test_fetchall_decimal128(benchmark, con):
+def test_fetchall_decimal128(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
+    """Benchmark fetchall of a 128-bit DECIMAL column."""
     _bench_fetchall(benchmark, con, "SELECT ((i * 1.5)::DECIMAL(28, 6)) FROM range(200000) t(i)")
 
 
-def test_fetchall_blob(benchmark, con):
+def test_fetchall_blob(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
+    """Benchmark fetchall of a BLOB column."""
     _bench_fetchall(benchmark, con, "SELECT ('blob_value_' || i)::BLOB FROM range(100000) t(i)")
 
 
-def test_fetchall_mixed_wide(benchmark, con):
+def test_fetchall_mixed_wide(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
+    """Benchmark fetchall of a heterogeneous wide-type row."""
     # heterogeneous row -> per-cell type dispatch in the Fetchone column loop (distinct branch/cache profile
     # from the homogeneous single-type columns above)
     query = (
@@ -116,10 +135,11 @@ def test_fetchall_mixed_wide(benchmark, con):
     _bench_fetchall(benchmark, con, query)
 
 
-def test_fetchmany_batched(benchmark, con):
+def test_fetchmany_batched(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
+    """Benchmark draining a result with batched fetchmany."""
     query = "SELECT i::BIGINT AS a, (i * 1.5)::DOUBLE AS b FROM range(100000) t(i)"
 
-    def run():
+    def run() -> None:
         rel = con.execute(query)
         while True:
             rows = rel.fetchmany(10_000)
@@ -129,8 +149,10 @@ def test_fetchmany_batched(benchmark, con):
     benchmark(run)
 
 
-def test_expr_many(benchmark):
-    def run():
+def test_expr_many(benchmark: BenchmarkFixture) -> None:
+    """Benchmark building many column/constant expressions."""
+
+    def run() -> int:
         out = []
         for i in range(2000):
             col = duckdb.ColumnExpression(f"col_{i}")

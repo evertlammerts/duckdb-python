@@ -1,31 +1,32 @@
-"""Standalone CodSpeed benchmark module for the NUMPY ingest paths (numpy / numpy-backed pandas -> duckdb)
-— NOT integrated (not in pyproject, not in CI, not committed). Run under each build's interpreter and compare:
+"""CodSpeed benchmark: numpy ingest paths (numpy / numpy-backed pandas -> duckdb). Standalone, not in CI.
 
-  M=/Users/evert/projects/duckdb-python/main/.venv-release/bin/python
-  C=/Users/evert/projects/duckdb-python/wt-codspeed/.venv-release/bin/python
+A/B: run under each build, compare (data libs pinned identically, so the delta is the binding):
   cd /Users/evert/projects/duckdb-python/wt-codspeed
-  $M -m pytest benchmarks/test_ingest_numpy_perf.py --codspeed --codspeed-mode=walltime -o addopts= -p no:cacheprovider
-  $C -m pytest benchmarks/test_ingest_numpy_perf.py --codspeed --codspeed-mode=walltime -o addopts= -p no:cacheprovider
+  for P in ../main/.venv-release/bin/python .venv-release/bin/python; do \
+    $P -m pytest benchmarks/test_ingest_numpy_perf.py \
+    --codspeed --codspeed-mode=walltime -o addopts= -p no:cacheprovider; \
+  done
 
-WHY THIS MODULE: the numpy scan (NumpyScan / NumpyArray facade / RawArrayWrapper / pandas-bind / analyzer) is
-the IN-numpy half the nanobind cutover reworked, and several of its branches were untested:
-  * I0-2 object-string scan: the per-row isinstance + PyUnicodeIsCompactASCII zero-copy vs DecodePythonUnicode
-    transcode ladder (numpy_scan.cpp). GOTCHA (encoded): a meaningful benchmark MUST mix ASCII + non-ASCII +
-    a null sentinel -- ASCII-only misses the transcode + null-detection ladder entirely.
-  * I0-1 double NaN->NULL loop (numpy_scan.cpp) -- the reworked float path.
-  * NULL-heavy masked scan: ScanNumpyMasked + ApplyMask (pandas nullable Int64).
-  * I1-3 analyzer bind: PandasAnalyzer::Analyze samples rows through the GetItemType ladder. This is a per-BIND
-    cost, independent of row count, so it is the ONE place count(*) is the correct consume (the cost is at bind,
-    not scan); every other READ here aggregates over real columns (sum/length) to force a full engine scan.
-  * I1-8 numpy ndarray / dict-of-arrays via the replacement scan (resolved from a module global).
-
-numpy/pandas are pinned to the SAME versions in both .venv-release, so the A/B delta is purely the binding.
+Covers the object-string scan (ASCII zero-copy vs transcode ladder), the NaN->NULL float loop, the masked
+scan, and analyzer bind. Gotchas: the object-string benchmark MUST mix ASCII + non-ASCII + a null or it misses
+the ladder; analyzer bind is the one place count(*) is correct (cost is at bind, not scan) while every other
+READ aggregates over real columns.
 """
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import pytest
 
 import duckdb
 import numpy as np
 import pandas as pd
-import pytest
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from pytest_codspeed import BenchmarkFixture
 
 N = 500_000
 ANALYZER_N = 200_000
@@ -42,26 +43,30 @@ _MIXED_TYPES = [(i if i % 3 == 0 else (float(i) if i % 3 == 1 else f"s{i}")) for
 
 
 @pytest.fixture
-def con():
+def con() -> Iterator[duckdb.DuckDBPyConnection]:
+    """Yield a fresh connection, closed on teardown."""
     c = duckdb.connect()
     yield c
     c.close()
 
 
 @pytest.fixture(scope="module")
-def df_double_with_nan():
+def df_double_with_nan() -> pd.DataFrame:
+    """Return a numpy-backed double frame with real NaNs."""
     a = np.arange(N, dtype="float64") * 1.5
     a[::10] = np.nan  # real NaNs -> NaN->NULL conversion loop
     return pd.DataFrame({"a": a})
 
 
 @pytest.fixture(scope="module")
-def df_object_string_mixed():
+def df_object_string_mixed() -> pd.DataFrame:
+    """Return an object-string frame mixing ASCII, non-ASCII, and nulls."""
     return pd.DataFrame({"s": pd.array(_MIXED_STRINGS, dtype=object)})
 
 
 @pytest.fixture(scope="module")
-def df_masked_int():
+def df_masked_int() -> pd.DataFrame:
+    """Return a nullable-Int64 frame that scans masked."""
     # pandas nullable Int64 -> numpy values + validity mask -> ScanNumpyMasked + ApplyMask
     arr = pd.array(np.arange(N), dtype="Int64")
     arr[::10] = pd.NA
@@ -69,7 +74,8 @@ def df_masked_int():
 
 
 @pytest.fixture(scope="module")
-def df_object_mixed_types():
+def df_object_mixed_types() -> pd.DataFrame:
+    """Return an object frame of mixed python types for analyzer bind."""
     return pd.DataFrame({"v": pd.array(_MIXED_TYPES, dtype=object)})
 
 
@@ -78,21 +84,31 @@ def df_object_mixed_types():
 # --------------------------------------------------------------------------- #
 
 
-def test_read_numpy_dict_numeric(benchmark, con):
+def test_read_numpy_dict_numeric(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
+    """Benchmark scanning a numpy-dict replacement scan."""
     benchmark(lambda: con.sql("SELECT sum(a), sum(b) FROM NPDICT").fetchall())
 
 
-def test_read_numpy_double_with_nan(benchmark, con, df_double_with_nan):
+def test_read_numpy_double_with_nan(
+    benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, df_double_with_nan: pd.DataFrame
+) -> None:
+    """Benchmark scanning a numpy double column with NaNs."""
     con.register("t", df_double_with_nan)
     benchmark(lambda: con.execute("SELECT sum(a) FROM t").fetchall())
 
 
-def test_read_numpy_masked_int(benchmark, con, df_masked_int):
+def test_read_numpy_masked_int(
+    benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, df_masked_int: pd.DataFrame
+) -> None:
+    """Benchmark scanning a masked nullable-int column."""
     con.register("t", df_masked_int)
     benchmark(lambda: con.execute("SELECT sum(a) FROM t").fetchall())
 
 
-def test_read_numpy_object_string_mixed(benchmark, con, df_object_string_mixed):
+def test_read_numpy_object_string_mixed(
+    benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, df_object_string_mixed: pd.DataFrame
+) -> None:
+    """Benchmark scanning a mixed object-string column."""
     con.register("t", df_object_string_mixed)
     benchmark(lambda: con.execute("SELECT count(s), sum(length(s)) FROM t").fetchall())
 
@@ -103,7 +119,10 @@ def test_read_numpy_object_string_mixed(benchmark, con, df_object_string_mixed):
 # --------------------------------------------------------------------------- #
 
 
-def test_bind_analyzer_object(benchmark, con, df_object_mixed_types):
+def test_bind_analyzer_object(
+    benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, df_object_mixed_types: pd.DataFrame
+) -> None:
+    """Benchmark the analyzer bind of a mixed-type object column."""
     con.register("t", df_object_mixed_types)
     con.execute("SELECT count(*) FROM t").fetchall()  # warm
     benchmark(lambda: con.execute("SELECT count(*) FROM t").fetchall())

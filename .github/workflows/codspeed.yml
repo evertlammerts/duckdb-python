@@ -1,19 +1,12 @@
-# Performance-regression benchmarks via CodSpeed, in deterministic instruction-count (simulation) mode.
+# Perf-regression benchmarks via CodSpeed in instruction-count (simulation) mode: deterministic, so the whole
+# suite is gate-able (no walltime noise, no gated/informational split).
 #
-# TOKENLESS FOR NOW: the CodSpeed action's token is only needed to UPLOAD results to the CodSpeed
-# dashboard (the hosted PR-gate). Without it the action still RUNS every benchmark under Valgrind and
-# reports the instruction counts in the job log. To turn on the hosted regression gate later: create a
-# CodSpeed project for the repo and either (public repo) rely on the OIDC `id-token: write` permission
-# below, or add a `CODSPEED_TOKEN` repo secret and pass `token: ${{ secrets.CODSPEED_TOKEN }}` to the action.
+# TOKENLESS: the token is only for uploading to the CodSpeed dashboard. Without it the action still runs every
+# benchmark and reports counts in the job log. For the hosted gate later, create a CodSpeed project and rely on
+# the OIDC id-token permission below (public repo), or add a CODSPEED_TOKEN secret and pass token: to the action.
 #
-# Why simulation (instruction-count) and not walltime: instruction counts are deterministic even for the
-# multi-threaded / engine-heavy paths (Valgrind serializes and counts), so the whole suite is gate-able and
-# there is no need to split "gated vs informational" the way noisy local walltime required. Instruction count
-# is exactly the signal that would have caught the LIST/ARRAY df() regression cleanly.
-#
-# NOTE: this workflow has not been run in CI yet; the build steps mirror the documented dev build (CLAUDE.md)
-# and will likely need a shakeout run. Valgrind is slow (~20-50x); if the full suite is too slow, trim the
-# largest-N benchmarks or run a curated subset.
+# Not yet run in CI; the build mirrors the dev build (CLAUDE.md) and will need a shakeout. Valgrind is slow
+# (~20-50x); trim the largest-N benchmarks if the suite is too slow.
 
 name: Benchmarks
 
