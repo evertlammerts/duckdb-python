@@ -32,7 +32,7 @@ class TestProfiler:
             "optimizer",
             "physical_planner",
             "planner",
-            "parser",
+            # `parser` was dropped as a top-level profiling section in duckdb >= v1.6.0-dev10062.
         }
         assert expected_keys.issubset(profiling_dict.keys())
 
