@@ -1,0 +1,74 @@
+# Performance-regression benchmarks via CodSpeed, in deterministic instruction-count (simulation) mode.
+#
+# TOKENLESS FOR NOW: the CodSpeed action's token is only needed to UPLOAD results to the CodSpeed
+# dashboard (the hosted PR-gate). Without it the action still RUNS every benchmark under Valgrind and
+# reports the instruction counts in the job log. To turn on the hosted regression gate later: create a
+# CodSpeed project for the repo and either (public repo) rely on the OIDC `id-token: write` permission
+# below, or add a `CODSPEED_TOKEN` repo secret and pass `token: ${{ secrets.CODSPEED_TOKEN }}` to the action.
+#
+# Why simulation (instruction-count) and not walltime: instruction counts are deterministic even for the
+# multi-threaded / engine-heavy paths (Valgrind serializes and counts), so the whole suite is gate-able and
+# there is no need to split "gated vs informational" the way noisy local walltime required. Instruction count
+# is exactly the signal that would have caught the LIST/ARRAY df() regression cleanly.
+#
+# NOTE: this workflow has not been run in CI yet; the build steps mirror the documented dev build (CLAUDE.md)
+# and will likely need a shakeout run. Valgrind is slow (~20-50x); if the full suite is too slow, trim the
+# largest-N benchmarks or run a curated subset.
+
+name: Benchmarks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: codspeed-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmarks:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # enables tokenless (OIDC) upload once a CodSpeed project is linked; harmless otherwise
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive # the DuckDB engine submodule is needed to build
+          fetch-depth: 0 # setuptools_scm needs history for version detection
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      - name: Cache sccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/sccache
+          key: sccache-codspeed-${{ hashFiles('external/duckdb') }}
+          restore-keys: sccache-codspeed-
+
+      - name: Install sccache
+        run: |
+          curl -fsSL https://github.com/mozilla/sccache/releases/download/v0.8.2/sccache-v0.8.2-x86_64-unknown-linux-musl.tar.gz \
+            | tar -xz --strip-components=1 -C /usr/local/bin sccache-v0.8.2-x86_64-unknown-linux-musl/sccache
+
+      - name: Build the extension (release) + benchmark deps
+        env:
+          CMAKE_C_COMPILER_LAUNCHER: sccache
+          CMAKE_CXX_COMPILER_LAUNCHER: sccache
+        run: |
+          uv sync --only-group build --no-install-project -p 3.13
+          uv sync --no-build-isolation --no-editable --reinstall -p 3.13
+          # benchmark deps: keep these pinned in lockstep with any baseline you compare against, so the only
+          # cross-run delta is the binding (numpy/pandas/pyarrow/polars/pytz + the codspeed plugin).
+          uv pip install pytest pytest-codspeed numpy pandas pyarrow polars pytz
+
+      - name: Run benchmarks (instruction-count)
+        uses: CodSpeedHQ/action@v4
+        with:
+          mode: simulation
+          run: uv run pytest benchmarks/ --codspeed -o addopts= -p no:cacheprovider
