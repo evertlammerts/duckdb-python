@@ -48,7 +48,7 @@ def _bench_numpy(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, qu
 # df(): the production numpy-backed columnar path. no-null vs REAL-null vs string vs timestamp vs wide types.
 
 
-@pytest.mark.gate
+@pytest.mark.informational
 def test_df_numeric(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
     _bench_df(benchmark, con, Q_NUM)
 
@@ -86,7 +86,7 @@ def test_df_decimal128(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnecti
 # fetchnumpy(): same FetchNumpyInternal, without the DataFrame wrap.
 
 
-@pytest.mark.gate
+@pytest.mark.informational
 def test_fetchnumpy_numeric(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection) -> None:
     _bench_numpy(benchmark, con, Q_NUM)
 

@@ -80,10 +80,13 @@ jobs:
         run: |
           # step 1: build deps only (needed for --no-build-isolation), no project
           uv sync --only-group build --no-install-project -p 3.13
-          # step 2: build+install the project (release) + build group, without the heavy default `dev` group
-          uv sync --no-build-isolation --no-editable --reinstall --no-default-groups --group build -p 3.13
-          # step 3: the frozen bench pins (exact ==), so the only cross-run delta is the binding
+          # step 2: the frozen bench pins (exact ==), so the only cross-run delta is the binding. MUST precede the
+          # build: numpy>=2.0 is a [build-system].requires (numpy C API headers), which --no-build-isolation does
+          # not auto-install and which is not in the `build` group, so CMake's find_package(... NumPy) fails first.
           uv pip install -r benchmarks/requirements-bench.txt
+          # step 3: build+install the project (release), no default `dev` group (torch/tensorflow/pyspark). uv pip
+          # install is additive; uv sync here would prune numpy back out before the build and re-break the config.
+          uv pip install --no-build-isolation --no-deps --reinstall -C cmake.build-type=Release .
 
       - name: Collect gate node-ids
         # the gate/informational marker split; regen uses it to classify each benchmark

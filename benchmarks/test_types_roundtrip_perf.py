@@ -36,6 +36,14 @@ TYPE_EXPR = {
 }
 TYPES = list(TYPE_EXPR)
 
+# OUT-col bool/int64 are engine-diluted below the Option-B cutoff (binding_fraction < 0.25, see baseline.json): the
+# numpy column fill is trivial next to the engine scan, so they are informational while the other types stay gate.
+# OUT-row is unaffected (fetchall builds a Python object per cell, binding-dominated for every type).
+_OUT_COL_DILUTED = {"bool", "int64"}
+_OUT_COL_PARAMS = [
+    pytest.param(t, marks=pytest.mark.informational if t in _OUT_COL_DILUTED else pytest.mark.gate) for t in TYPES
+]
+
 
 def _query(type_name: str) -> str:
     return f"SELECT {TYPE_EXPR[type_name]} AS c FROM range({N}) t(i)"
@@ -49,8 +57,7 @@ def test_out_row_fetchall(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConne
     benchmark(lambda: con.execute(q).fetchall())
 
 
-@pytest.mark.gate  # OUT-col: binding-dominated ArrayWrapper fill per type
-@pytest.mark.parametrize("type_name", TYPES)
+@pytest.mark.parametrize("type_name", _OUT_COL_PARAMS)  # OUT-col: ArrayWrapper fill; gate per type except diluted ones
 def test_out_col_df(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, type_name: str) -> None:
     q = _query(type_name)
     con.sql(q).df()  # warm
