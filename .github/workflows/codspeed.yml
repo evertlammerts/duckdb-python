@@ -1,18 +1,6 @@
-# Instruction-count (Callgrind) perf-regression gate against a COMMITTED baseline. No CodSpeed account/token/runner:
-# compare_baseline.py parses raw callgrind dumps and diffs each benchmark against benchmarks/baseline.json. Counts
-# are near-deterministic with PYTHONHASHSEED pinned (~0.1% noise), so the 5% gate threshold sits far above it.
-# Details + rationale: benchmarks/README.md and benchmarks/PLAN.md.
-#
-# Triggers: nightly schedule + manual workflow_dispatch (no pull_request/push). A dispatch on a feature branch
-# compares that branch's counts vs the baseline.json committed on it, answering "did my branch regress vs main".
-#
-# Modes (workflow_dispatch input `regen`):
-#   regen=false (default) -> COMPARE + report. Report-only for now (never fails); flip to --enforce once trusted.
-#   regen=true            -> write a fresh baseline.json + upload as an artifact to commit deliberately. Bump
-#                            requirements-bench.txt FIRST (separate commit) if the pins should change.
-#
-# The concurrency module is excluded from the sweep (Callgrind serializes threads, so its signal is meaningless).
-# Memory mode (a second sweep for produce peak-RSS) is deferred (see PLAN.md).
+# Instruction-count (Callgrind) perf gate vs a committed benchmarks/baseline.json; no CodSpeed account needed
+# (compare_baseline.py parses the raw callgrind dumps). Rationale in benchmarks/README.md and benchmarks/PLAN.md.
+# workflow_dispatch input `regen`: false compares (report only), true writes baseline.json and uploads it.
 
 name: Benchmarks
 
@@ -33,24 +21,23 @@ concurrency:
 jobs:
   benchmarks:
     runs-on: ubuntu-latest
-    timeout-minutes: 90 # ~25 min sweep at BENCH_SCALE=10 (12-core Linux) + ~10 min cold build; margin for CI
+    timeout-minutes: 90 # ~25 min sweep (BENCH_SCALE=10) + ~10 min cold build, plus margin
     permissions:
       contents: read
     env:
-      PYTHONHASHSEED: "0" # stable instruction counts for dict/struct paths
-      CODSPEED_ENV: "1" # activates pytest-codspeed's instrument hooks
-      # shrink the O(rows) benches so the sweep fits under timeout-minutes. Local runs leave this unset -> full N.
-      # Recorded in baseline.json meta.bench_scale; a baseline only compares to a run at the SAME scale.
+      PYTHONHASHSEED: "0" # deterministic instruction counts
+      CODSPEED_ENV: "1" # enable pytest-codspeed callgrind hooks
+      # shrink O(rows) benches to fit the timeout; a baseline only compares to a run at the SAME scale (meta.bench_scale)
       BENCH_SCALE: "10"
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive # the DuckDB engine submodule is needed to build
-          fetch-depth: 0 # setuptools_scm needs history for version detection
+          submodules: recursive
+          fetch-depth: 0 # setuptools_scm needs history
 
       - name: Resolve DuckDB submodule SHA
         id: duckdb_sha
-        # used for the sccache key AND passed to compare_baseline.py for the engine-bump guard
+        # sccache key + compare_baseline.py engine-bump guard
         run: echo "sha=$(git rev-parse HEAD:external/duckdb)" >> "$GITHUB_OUTPUT"
 
       - name: Install uv
@@ -78,29 +65,29 @@ jobs:
           CMAKE_C_COMPILER_LAUNCHER: sccache
           CMAKE_CXX_COMPILER_LAUNCHER: sccache
         run: |
-          # step 1: build deps only (needed for --no-build-isolation), no project
           uv sync --only-group build --no-install-project -p 3.13
-          # step 2: the frozen bench pins (exact ==), so the only cross-run delta is the binding. MUST precede the
-          # build: numpy>=2.0 is a [build-system].requires (numpy C API headers), which --no-build-isolation does
-          # not auto-install and which is not in the `build` group, so CMake's find_package(... NumPy) fails first.
+          # pins BEFORE the build: numpy>=2.0 is a build-system.requires (C API headers), absent under
+          # --no-build-isolation and not in the `build` group, so find_package(NumPy) fails otherwise.
           uv pip install -r benchmarks/requirements-bench.txt
-          # step 3: build+install the project (release), no default `dev` group (torch/tensorflow/pyspark). uv pip
-          # install is additive; uv sync here would prune numpy back out before the build and re-break the config.
+          # uv pip is additive; uv sync would prune numpy back out before the build. release, no dev group.
           uv pip install --no-build-isolation --no-deps --reinstall -C cmake.build-type=Release .
 
       - name: Collect gate node-ids
-        # the gate/informational marker split; regen uses it to classify each benchmark
-        run: uv run --no-sync pytest benchmarks/ -m gate --collect-only -q -o addopts= -p no:cacheprovider \
-             | grep '::' > gate_list.txt || true
+        # regen uses these to classify each benchmark. Block scalar so `\` is a real shell continuation; a plain
+        # scalar folds it to a literal `\ `, mangling pytest args into an empty (all-informational) gate list.
+        run: |
+          uv run --no-sync pytest benchmarks/ -m gate --collect-only -q -o addopts= -p no:cacheprovider \
+            | grep '::' > gate_list.txt || true
+          # an empty gate list yields a 0-gate baseline that never catches a regression
+          test -s gate_list.txt || { echo "ERROR: gate_list.txt empty"; exit 1; }
+          echo "collected $(wc -l < gate_list.txt) gate node-ids"
 
       - name: Run benchmarks under Callgrind (per-benchmark instruction counts)
-        # ONE sweep over gate+informational EXCEPT the concurrency module (thread-serialized, expensive). Each
-        # benchmark emits a callgrind dump keyed by its uri.
+        # one sweep; concurrency module excluded (Callgrind serializes threads).
         run: |
           mkdir -p profiles
-          # Invoke the venv python DIRECTLY under valgrind, not `uv run`: uv run forks pytest as a child, and
-          # valgrind without --trace-children only instruments uv, so the child runs un-instrumented (native
-          # speed) and pytest-codspeed's callgrind_dump_stats_at calls no-op -> zero dumps.
+          # run the venv python directly, NOT `uv run`: valgrind without --trace-children only instruments uv,
+          # leaving pytest un-instrumented (native speed, zero dumps).
           CODSPEED_PROFILE_FOLDER="$PWD/profiles" valgrind --tool=callgrind --instr-atstart=no \
             --callgrind-out-file="$PWD/profiles/cg.%p.%n" \
             "$VIRTUAL_ENV/bin/python" -m pytest benchmarks/ \
@@ -109,7 +96,7 @@ jobs:
 
       - name: Compare against committed baseline (report-only)
         if: ${{ !inputs.regen }}
-        # report-only: prints the delta table, never fails the job. Add --enforce once trusted.
+        # report only, never fails; add --enforce once trusted
         run: |
           uv run --no-sync python benchmarks/compare_baseline.py compare \
             --profiles profiles --baseline benchmarks/baseline.json \
