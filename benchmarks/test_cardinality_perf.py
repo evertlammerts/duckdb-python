@@ -1,16 +1,8 @@
-"""CodSpeed benchmark: the result-cardinality (rows-to-Python) sweep. Standalone, not in CI.
+"""Result-cardinality (rows-to-Python) sweep via LIMIT n, no ORDER BY. See benchmarks/README.md.
 
-A/B: run under each build, compare (data libs pinned identically, so the delta is the binding):
-  cd /Users/evert/projects/duckdb-python/wt-codspeed
-  for P in ../main/.venv-release/bin/python .venv-release/bin/python; do \
-    $P -m pytest benchmarks/test_cardinality_perf.py \
-    --codspeed --codspeed-mode=walltime -o addopts= -p no:cacheprovider; \
-  done
-
-Sweeps `SELECT * FROM src LIMIT n` (no ORDER BY) over a pre-materialized 3-column source: a plain LIMIT
-early-stops the scan, so the per-row conversion dominates and the slope is monotone in n. A steeper slope on
-one build is a per-row conversion regression. n=100 is the overhead regime, n=100_000 is throughput.
-(An earlier ORDER BY version was dropped: the top-N sort swamped the signal.)
+`SELECT * FROM src LIMIT n` early-stops the scan, so per-row conversion dominates and the slope is monotone in n.
+A steeper slope on one build is a per-row conversion regression. n=100 is overhead, n=100_000 is throughput.
+(An ORDER BY version was dropped: the top-N sort swamped the signal.)
 """
 
 from __future__ import annotations
@@ -27,18 +19,15 @@ if TYPE_CHECKING:
 
     from pytest_codspeed import BenchmarkFixture
 
-# env-gated (INFRA-4): scale the source rows AND the top-N of the sweep by the same factor, keeping the small-N
-# points fixed and SRC_ROWS >= max(LIMITS). Preserves the LIMIT-no-ORDER-BY early-stop pattern (Do-NOT-regress).
+# scale the source rows AND the top-N by the same factor, keeping small-N points fixed and SRC_ROWS >= max(LIMITS).
 SRC_ROWS = scaled(200_000)
 LIMITS = [100, 1_000, 10_000, scaled(100_000)]
 
 
 @pytest.fixture(scope="module")
 def con() -> Iterator[duckdb.DuckDBPyConnection]:
-    """Yield a connection over a once-materialized source table."""
-    # Fixed source materialized ONCE (module-scoped): building it per test would add noise, and it must be
-    # identical across the n sweep. `SELECT * FROM src LIMIT n` then reads only the first n rows.
-    c = duckdb.connect(config={"threads": 1})  # pin engine parallelism (INFRA-6); module-scoped source table
+    # source materialized ONCE (module-scoped) and identical across the n sweep; per-test build would add noise
+    c = duckdb.connect(config={"threads": 1})
     c.execute(
         "CREATE TABLE src AS "
         f"SELECT i::BIGINT AS a, (i * 1.5)::DOUBLE AS b, ('s_' || i) AS s FROM range({SRC_ROWS}) t(i)"
@@ -48,15 +37,12 @@ def con() -> Iterator[duckdb.DuckDBPyConnection]:
 
 
 def _query(n: int) -> str:
-    # No ORDER BY: a plain LIMIT early-stops the scan at n rows -> engine cost cheap and monotone in n, so the
-    # per-row binding conversion dominates the n-varying signal (unlike the old ORDER BY top-N sort).
     return f"SELECT a, b, s FROM src LIMIT {n}"
 
 
-@pytest.mark.gate  # fetchall materializes n rows to Python -> binding-dominated; small-n end is the noise-free gate
+@pytest.mark.gate  # fetchall materializes n rows -> binding-dominated; small-n end is the noise-free gate
 @pytest.mark.parametrize("n", LIMITS)
 def test_limit_fetchall(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, n: int) -> None:
-    """Benchmark fetchall over a LIMIT n sweep."""
     q = _query(n)
     con.execute(q).fetchall()  # warm
     benchmark(lambda: con.execute(q).fetchall())
@@ -65,7 +51,6 @@ def test_limit_fetchall(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnect
 @pytest.mark.gate  # df() materializes n rows to numpy columns -> binding-dominated
 @pytest.mark.parametrize("n", LIMITS)
 def test_limit_df(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, n: int) -> None:
-    """Benchmark df() over a LIMIT n sweep."""
     q = _query(n)
     con.sql(q).df()  # warm
     benchmark(lambda: con.sql(q).df())
@@ -74,7 +59,6 @@ def test_limit_df(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, n
 @pytest.mark.informational  # to_arrow_table re-runs the query GIL-released (engine-parallel) -> not gated
 @pytest.mark.parametrize("n", LIMITS)
 def test_limit_to_arrow(benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, n: int) -> None:
-    """Benchmark to_arrow_table() over a LIMIT n sweep."""
     q = _query(n)
     con.sql(q).to_arrow_table()  # warm
     benchmark(lambda: con.sql(q).to_arrow_table())

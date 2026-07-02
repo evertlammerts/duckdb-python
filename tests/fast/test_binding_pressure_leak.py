@@ -1,12 +1,8 @@
-"""Sustained-iteration leak guards for the binding object-pinning paths (COV-3).
+"""Sustained-iteration leak guards for the binding object-pinning paths.
 
-Sibling of test_relation_dependency_leak.py. CodSpeed measures steady-state PER-CALL cost and structurally cannot
-see a per-call refcount imbalance in the object-pinning graph (ExternalDependency / registered_objects / a UDF's
-retained Python callable) until it OOMs. This is a plain assertion test (NOT a codspeed benchmark, no marker): it
-runs each pinning path N times and asserts RSS and Python-object growth stay flat.
-
-Covers the paths the existing leak test does not: register/unregister, native + arrow UDF create/run/remove, and
-executemany. (from_arrow/from_df/replacement-scan pinning is already covered by test_relation_dependency_leak.py.)
+CodSpeed measures per-call cost and can't see a refcount imbalance in the object-pinning graph until it OOMs, so
+this plain assertion test runs each pinning path N times and asserts RSS and object growth stay flat. Covers what
+test_relation_dependency_leak.py does not: register/unregister, native + arrow UDF create/run/remove, executemany.
 """
 
 import gc

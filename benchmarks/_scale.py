@@ -1,17 +1,12 @@
-"""Env-gated row-count scaling for the benchmark suite (INFRA-4).
+"""Env-gated row-count scaling for the benchmark suite.
 
-Callgrind is 20-50x, and the O(rows) / per-row-object benchmarks at full N make the CI sweep too slow. `scaled(n)`
-shrinks those row counts ONLY when an explicit `BENCH_SCALE=<divisor>` env var is set (which the CI Callgrind
-sweep sets). Unset -> full N, so LOCAL walltime A/B keeps the large N unchanged.
-
-CRITICAL: a gate benchmark and the engine-control floor it is compared against (the FLOOR_MAP pairs in
-compare_baseline.py) share the same base N, so routing BOTH through `scaled()` keeps them at an identical scaled
-N -- the Option-B binding_fraction stays valid. Scaling ONLY reduces row counts; it must never change the data
-patterns the benchmarks depend on (real NULLs, mixed ASCII+non-ASCII+null, LIMIT-no-ORDER-BY, warm-before-measure).
-
-A floor keeps a scaled benchmark row-dominated (well above the range(2048) fixed-cost probes), so per-element
-work still dominates and the fraction/signal stay meaningful. The small-N `*_gate` probes are NOT routed through
-this (they are already fast and are the fixed-cost baseline).
+Callgrind is 20-50x, so the O(rows) benches at full N make the CI sweep too slow. `scaled(n)` shrinks row counts
+ONLY when `BENCH_SCALE=<divisor>` is set (which the CI sweep sets); unset -> full N, so local walltime A/B is
+unchanged. A gate bench and the engine floor it is compared against share a base N, so routing BOTH through
+`scaled()` keeps them at an identical scaled N and the binding fraction stays valid. Scaling reduces row counts
+only; it must never change the data patterns the benches depend on (real nulls, mixed ASCII, LIMIT-no-ORDER-BY).
+A floor keeps a scaled bench row-dominated so per-element work still dominates; the small-N `*_gate` probes are
+already fast and are NOT scaled.
 """
 
 from __future__ import annotations

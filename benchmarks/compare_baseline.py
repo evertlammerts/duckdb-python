@@ -1,27 +1,17 @@
 #!/usr/bin/env python3
-"""Committed-baseline instruction-count comparison for the CodSpeed benchmark suite.
+"""Committed-baseline instruction-count comparison for the benchmark suite. See benchmarks/README.md.
 
-WHY / HOW (grounded, verified on a Linux+valgrind box):
-  The suite runs under `valgrind --tool=callgrind` with pytest-codspeed. pytest-codspeed's hooks call
-  `callgrind_dump_stats_at(<uri>)` at the end of each benchmark, so callgrind writes ONE dump file per
-  benchmark, headed by `desc: Trigger: Client Request: <uri>` with the instruction count on the `totals:`
-  line (`events: Ir`). The hooks also obj-skip libpython, so counts are clean. NO CodSpeed account, token, or
-  runner binary is involved -- this parses the raw callgrind dumps directly.
+pytest-codspeed's hooks call `callgrind_dump_stats_at(<uri>)` per benchmark, so callgrind writes ONE dump each,
+headed by `desc: Trigger: Client Request: <uri>` with the count on `totals:` (`events: Ir`). This parses those
+raw dumps directly (no CodSpeed account/token/runner). Run-to-run noise is ~0.1%, so the 5% gate threshold sits
+far above it (PYTHONHASHSEED pinned in CI).
 
-  Observed run-to-run noise on that box was ~0.1% (callgrind is near-deterministic, not bit-identical), so the
-  default gate threshold (5%) sits far above noise. PYTHONHASHSEED is pinned in CI to keep dict/struct paths
-  stable.
+Two modes (CI-only; no valgrind on macOS arm64):
+  regen:   write baseline.json from a fresh run: counts + provenance + binding fractions + auto-move.
+  compare: diff a fresh run against baseline.json. Gate benches over threshold are regressions; informational
+           are reported only. Report-only by default; `--enforce` exits non-zero on a gate regression.
 
-TWO MODES:
-  regen   -- build benchmarks/baseline.json from a fresh valgrind run: per-benchmark instruction counts +
-             provenance meta + (for the mapped numeric-produce gates) the engine-diluted binding fraction, and
-             the Option-B auto-move of any gate below the cutoff to `informational`.
-  compare -- parse a fresh valgrind run, diff each benchmark against baseline.json, and print a report. GATE
-             benchmarks over their threshold are regressions; `informational` benchmarks are reported only.
-             REPORT-ONLY by default (always exit 0); `--enforce` exits non-zero on a gate regression.
-
-Both are CI-only in practice (no valgrind on macOS arm64). baseline.json and benchmarks/requirements-bench.txt
-are regenerated together (same job) so the counts always correspond to the frozen data-lib pins.
+baseline.json and benchmarks/requirements-bench.txt are regenerated together so counts match the frozen pins.
 """
 
 from __future__ import annotations
@@ -37,14 +27,13 @@ from pathlib import Path
 
 SCHEMA_VERSION = 1
 GATE_DEFAULT_THRESHOLD_PCT = 5.0
-BINDING_FRACTION_CUTOFF = 0.25  # Option-B: a gate whose isolable binding fraction is below this is auto-moved
-#                                 to informational (a threshold on its engine-diluted total is not meaningful).
+BINDING_FRACTION_CUTOFF = 0.25  # a gate whose isolable binding fraction is below this is auto-moved to
+#                                 informational (a threshold on its engine-diluted total is not meaningful).
 
-# Option-B floor map: the engine-control benchmark whose instruction count is the "engine floor" of a given
-# numeric-produce gate. binding_fraction = 1 - floor_Ir / bench_Ir. ONLY the numeric-produce benches are listed:
-# MEAS-1 showed their per-element binding is a bulk memcpy (~engine magnitude); every other gate (OUT-row fetch
-# of any type, string/nested/decimal/hugeint/uuid produce, UDFs, native ingest, analyzer bind) is high-binding
-# and needs no fraction. Add a mapping (and, if needed, an engine floor) here to evaluate more benches.
+# Floor map: the engine-control bench that is the "engine floor" of a numeric-produce gate.
+# binding_fraction = 1 - floor_Ir / bench_Ir. ONLY numeric-produce benches are listed (their per-element binding
+# is a bulk memcpy of ~engine magnitude); every other gate is high-binding and needs no fraction. Add a mapping
+# (and, if needed, a floor) to evaluate more benches.
 _E = "benchmarks/test_engine_control_perf.py"
 FLOOR_MAP = {
     "benchmarks/test_produce_numpy_perf.py::test_df_numeric": f"{_E}::test_engine_sum_2col_500k",
@@ -65,11 +54,7 @@ _TOTALS_RE = re.compile(r"^totals:\s*(?P<ir>\d+)\s*$")
 
 
 def _normalize_uri(raw: str) -> str:
-    """Return a repo-relative benchmark key.
-
-    Inside a git repo pytest-codspeed already emits a git-relative uri (e.g. `benchmarks/x.py::test[p]`); this
-    defensively strips a leading absolute path if the run happened outside a git repo.
-    """
+    """Return a repo-relative benchmark key (strip a leading absolute path if the run was outside a git repo)."""
     raw = raw.strip()
     if "::" not in raw:
         return raw
@@ -83,8 +68,8 @@ def _normalize_uri(raw: str) -> str:
 def parse_profiles(profile_dir: Path) -> dict[str, int]:
     """Parse every callgrind dump in `profile_dir`; return {benchmark_uri: instruction_count}.
 
-    Only dumps whose Trigger is a benchmark Client Request (contains `::`) are kept; the metadata and
-    program-termination dumps are skipped. If a uri appears more than once (should not happen) the max is kept.
+    Keeps only dumps whose Trigger is a benchmark Client Request (contains `::`); skips metadata/termination
+    dumps. If a uri appears more than once (should not happen) the max is kept.
     """
     counts: dict[str, int] = {}
     files = sorted(profile_dir.rglob("*")) if profile_dir.exists() else []
@@ -236,9 +221,8 @@ def compare(args: argparse.Namespace) -> int:
                 "may not be pure binding. Regenerate the baseline with the current pins."
             )
 
-    # engine-bump guard: engine-inclusive counts shift when the bundled DuckDB submodule changes, for reasons
-    # unrelated to the binding. If the current submodule SHA differs from the baseline's, do not treat gate
-    # deltas as hard failures (they may reflect the engine bump); warn to regenerate the baseline.
+    # engine-bump guard: engine-inclusive counts shift when the DuckDB submodule changes. If the SHA differs from
+    # the baseline's, don't treat gate deltas as hard failures (they may reflect the bump); warn to regenerate.
     engine_changed = bool(
         args.submodule_sha and meta.get("duckdb_submodule_sha") and args.submodule_sha != meta["duckdb_submodule_sha"]
     )

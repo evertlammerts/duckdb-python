@@ -281,10 +281,8 @@ test = [ # dependencies used for running tests
     "numpy>=2; ( sys_platform != 'win32' or platform_machine != 'ARM64' ) and python_version >= '3.12'",
     "numpy>=2.3; sys_platform == 'win32' and platform_machine == 'ARM64' and python_version >= '3.11'",
 ]
-bench = [ # minimal, pinned deps for the CodSpeed benchmark suite (.github/workflows/codspeed.yml). Deliberately
-          # NOT the heavy `test` group (no torch/tensorflow/pyspark/adbc). Pinned via uv.lock and kept in lockstep
-          # with any baseline compared against, so the only cross-run delta is the binding. Constraints mirror the
-          # `test` group so the lockfile resolves identically. torch/tf produce paths are local-only (importorskip).
+bench = [ # Pinned deps for the benchmark suite (see benchmarks/README.md). Minimal, not the heavy `test` group.
+          # Constraints mirror `test` so the lockfile resolves identically; torch/tf are local-only (importorskip).
     "pytest",
     "pytest_codspeed",
     "polars>=1.33.0",
@@ -456,6 +454,10 @@ strict = true
     'D100', 'D101', 'D102', 'D103', 'D104', 'D105', 'D107',
     # No need for type hinting in tests
     'ANN001', 'ANN201', 'ANN202'
+]
+"benchmarks/**.py" = [
+    # benchmarks are test-like: docstrings optional (shared context lives in benchmarks/README.md)
+    'D100', 'D101', 'D102', 'D103', 'D104', 'D105', 'D107',
 ]
 "tests/fast/spark/**.py" = [
     "E402"
