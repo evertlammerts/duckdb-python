@@ -98,9 +98,12 @@ jobs:
         # benchmark emits a callgrind dump keyed by its uri.
         run: |
           mkdir -p profiles
+          # Invoke the venv python DIRECTLY under valgrind, not `uv run`: uv run forks pytest as a child, and
+          # valgrind without --trace-children only instruments uv, so the child runs un-instrumented (native
+          # speed) and pytest-codspeed's callgrind_dump_stats_at calls no-op -> zero dumps.
           CODSPEED_PROFILE_FOLDER="$PWD/profiles" valgrind --tool=callgrind --instr-atstart=no \
             --callgrind-out-file="$PWD/profiles/cg.%p.%n" \
-            uv run --no-sync pytest benchmarks/ \
+            "$VIRTUAL_ENV/bin/python" -m pytest benchmarks/ \
               --ignore=benchmarks/test_concurrency_perf.py \
               -m "gate or informational" --codspeed -o addopts= -p no:cacheprovider
 
