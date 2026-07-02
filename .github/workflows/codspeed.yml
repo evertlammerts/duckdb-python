@@ -1,0 +1,129 @@
+# Instruction-count (Callgrind) perf-regression gate against a COMMITTED baseline. No CodSpeed account/token/runner:
+# compare_baseline.py parses raw callgrind dumps and diffs each benchmark against benchmarks/baseline.json. Counts
+# are near-deterministic with PYTHONHASHSEED pinned (~0.1% noise), so the 5% gate threshold sits far above it.
+# Details + rationale: benchmarks/README.md and benchmarks/PLAN.md.
+#
+# Triggers: nightly schedule + manual workflow_dispatch (no pull_request/push). A dispatch on a feature branch
+# compares that branch's counts vs the baseline.json committed on it, answering "did my branch regress vs main".
+#
+# Modes (workflow_dispatch input `regen`):
+#   regen=false (default) -> COMPARE + report. Report-only for now (never fails); flip to --enforce once trusted.
+#   regen=true            -> write a fresh baseline.json + upload as an artifact to commit deliberately. Bump
+#                            requirements-bench.txt FIRST (separate commit) if the pins should change.
+#
+# The concurrency module is excluded from the sweep (Callgrind serializes threads, so its signal is meaningless).
+# Memory mode (a second sweep for produce peak-RSS) is deferred (see PLAN.md).
+
+name: Benchmarks
+
+on:
+  schedule:
+    - cron: "0 3 * * *" # nightly at 03:00 UTC
+  workflow_dispatch:
+    inputs:
+      regen:
+        description: "Regenerate benchmarks/baseline.json (upload as artifact) instead of comparing"
+        type: boolean
+        default: false
+
+concurrency:
+  group: codspeed-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmarks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90 # ~25 min sweep at BENCH_SCALE=10 (12-core Linux) + ~10 min cold build; margin for CI
+    permissions:
+      contents: read
+    env:
+      PYTHONHASHSEED: "0" # stable instruction counts for dict/struct paths
+      CODSPEED_ENV: "1" # activates pytest-codspeed's instrument hooks
+      # shrink the O(rows) benches so the sweep fits under timeout-minutes. Local runs leave this unset -> full N.
+      # Recorded in baseline.json meta.bench_scale; a baseline only compares to a run at the SAME scale.
+      BENCH_SCALE: "10"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive # the DuckDB engine submodule is needed to build
+          fetch-depth: 0 # setuptools_scm needs history for version detection
+
+      - name: Resolve DuckDB submodule SHA
+        id: duckdb_sha
+        # used for the sccache key AND passed to compare_baseline.py for the engine-bump guard
+        run: echo "sha=$(git rev-parse HEAD:external/duckdb)" >> "$GITHUB_OUTPUT"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+
+      - name: Cache sccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/sccache
+          key: sccache-codspeed-${{ steps.duckdb_sha.outputs.sha }}
+          restore-keys: sccache-codspeed-
+
+      - name: Install sccache
+        run: |
+          curl -fsSL https://github.com/mozilla/sccache/releases/download/v0.8.2/sccache-v0.8.2-x86_64-unknown-linux-musl.tar.gz \
+            | tar -xz --strip-components=1 -C /usr/local/bin sccache-v0.8.2-x86_64-unknown-linux-musl/sccache
+
+      - name: Build the extension (release) + pinned benchmark deps
+        env:
+          CMAKE_C_COMPILER_LAUNCHER: sccache
+          CMAKE_CXX_COMPILER_LAUNCHER: sccache
+        run: |
+          # step 1: build deps only (needed for --no-build-isolation), no project
+          uv sync --only-group build --no-install-project -p 3.13
+          # step 2: the frozen bench pins (exact ==), so the only cross-run delta is the binding. MUST precede the
+          # build: numpy>=2.0 is a [build-system].requires (numpy C API headers), which --no-build-isolation does
+          # not auto-install and which is not in the `build` group, so CMake's find_package(... NumPy) fails first.
+          uv pip install -r benchmarks/requirements-bench.txt
+          # step 3: build+install the project (release), no default `dev` group (torch/tensorflow/pyspark). uv pip
+          # install is additive; uv sync here would prune numpy back out before the build and re-break the config.
+          uv pip install --no-build-isolation --no-deps --reinstall -C cmake.build-type=Release .
+
+      - name: Collect gate node-ids
+        # the gate/informational marker split; regen uses it to classify each benchmark
+        run: uv run --no-sync pytest benchmarks/ -m gate --collect-only -q -o addopts= -p no:cacheprovider \
+             | grep '::' > gate_list.txt || true
+
+      - name: Run benchmarks under Callgrind (per-benchmark instruction counts)
+        # ONE sweep over gate+informational EXCEPT the concurrency module (thread-serialized, expensive). Each
+        # benchmark emits a callgrind dump keyed by its uri.
+        run: |
+          mkdir -p profiles
+          CODSPEED_PROFILE_FOLDER="$PWD/profiles" valgrind --tool=callgrind --instr-atstart=no \
+            --callgrind-out-file="$PWD/profiles/cg.%p.%n" \
+            uv run --no-sync pytest benchmarks/ \
+              --ignore=benchmarks/test_concurrency_perf.py \
+              -m "gate or informational" --codspeed -o addopts= -p no:cacheprovider
+
+      - name: Compare against committed baseline (report-only)
+        if: ${{ !inputs.regen }}
+        # report-only: prints the delta table, never fails the job. Add --enforce once trusted.
+        run: |
+          uv run --no-sync python benchmarks/compare_baseline.py compare \
+            --profiles profiles --baseline benchmarks/baseline.json \
+            --submodule-sha "${{ steps.duckdb_sha.outputs.sha }}" \
+            --pins benchmarks/requirements-bench.txt
+
+      - name: Regenerate baseline (upload artifact to commit deliberately)
+        if: ${{ inputs.regen }}
+        run: |
+          uv run --no-sync python benchmarks/compare_baseline.py regen \
+            --profiles profiles --out benchmarks/baseline.json --gate-list gate_list.txt \
+            --git-commit "${{ github.sha }}" --submodule-sha "${{ steps.duckdb_sha.outputs.sha }}" \
+            --pins benchmarks/requirements-bench.txt
+
+      - name: Upload regenerated baseline
+        if: ${{ inputs.regen }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline-update
+          path: benchmarks/baseline.json

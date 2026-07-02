@@ -250,6 +250,7 @@ test = [ # dependencies used for running tests
     "pytest-timeout",
     "pytest-timestamper",
     "pytest-xdist", # parallel test execution (-n auto); without this `uv sync --reinstall` prunes a manual install
+    "pytest_codspeed",
     "coverage",
     "gcovr; sys_platform != 'win32' or platform_machine != 'ARM64'",
     "gcsfs; sys_platform != 'win32' or platform_machine != 'ARM64'",
@@ -279,6 +280,20 @@ test = [ # dependencies used for running tests
     "numpy<2; ( sys_platform != 'win32' or platform_machine != 'ARM64' ) and python_version < '3.12'",
     "numpy>=2; ( sys_platform != 'win32' or platform_machine != 'ARM64' ) and python_version >= '3.12'",
     "numpy>=2.3; sys_platform == 'win32' and platform_machine == 'ARM64' and python_version >= '3.11'",
+]
+bench = [ # Pinned deps for the benchmark suite (see benchmarks/README.md). Minimal, not the heavy `test` group.
+          # Constraints mirror `test` so the lockfile resolves identically; torch/tf are local-only (importorskip).
+    "pytest",
+    "pytest_codspeed",
+    "polars>=1.33.0",
+    "pytz",
+    "numpy<2; ( sys_platform != 'win32' or platform_machine != 'ARM64' ) and python_version < '3.12'",
+    "numpy>=2; ( sys_platform != 'win32' or platform_machine != 'ARM64' ) and python_version >= '3.12'",
+    "numpy>=2.3; sys_platform == 'win32' and platform_machine == 'ARM64' and python_version >= '3.11'",
+    "pandas>=3.0.0; python_version > '3.10'",
+    "pandas<3.0.0; python_version < '3.11'",
+    "pyarrow>=23.0.0; python_version >= '3.10' and (sys_platform != 'win32' or platform_machine != 'ARM64')",
+    "pyarrow>=18.0.0; python_version < '3.10' and (sys_platform != 'win32' or platform_machine != 'ARM64')",
 ]
 scripts = [ # dependencies used for running scripts
     "cxxheaderparser",
@@ -439,6 +454,10 @@ strict = true
     'D100', 'D101', 'D102', 'D103', 'D104', 'D105', 'D107',
     # No need for type hinting in tests
     'ANN001', 'ANN201', 'ANN202'
+]
+"benchmarks/**.py" = [
+    # benchmarks are test-like: docstrings optional (shared context lives in benchmarks/README.md)
+    'D100', 'D101', 'D102', 'D103', 'D104', 'D105', 'D107',
 ]
 "tests/fast/spark/**.py" = [
     "E402"
