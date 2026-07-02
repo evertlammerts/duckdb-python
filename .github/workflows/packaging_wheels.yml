@@ -30,7 +30,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: [ cp311, cp314 ]
+        python: [ cp314 ]
         platform:
           - { os: windows-2022,     arch: amd64,      cibw_system: win }
           - { os: windows-11-arm,   arch: ARM64,      cibw_system: win }
