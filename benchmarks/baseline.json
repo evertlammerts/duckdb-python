@@ -1,9 +1,9 @@
 {
   "meta": {
     "schema_version": 1,
-    "generated_at_utc": "2026-07-02T06:26:46+00:00",
-    "git_commit": "090e02142b1bca4163c526ad75a4dcc84a5ae374",
-    "duckdb_submodule_sha": "d9a775e4c03b23ecb3784f879196aa81adf0ac1c",
+    "generated_at_utc": "2026-07-02T10:39:31+00:00",
+    "git_commit": "ddd71963ded733c0d70841cf0a27ce3efbdb8c6f",
+    "duckdb_submodule_sha": "1da5b6c8cf6ce50ff8089aa59eb028bae8044f08",
     "requirements_bench_sha256": "2bdfd6a766947a61559afb2799c54f0ea173b9325f55082ad809bf7b97b2c659",
     "measurement": {
       "tool": "valgrind callgrind",
@@ -20,7 +20,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 13968509,
+      "instructions": 13234377,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -28,7 +28,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 13117509,
+      "instructions": 12899099,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -36,7 +36,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 17445483,
+      "instructions": 16808671,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -44,7 +44,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 7507078,
+      "instructions": 6654121,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -52,7 +52,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 8566385,
+      "instructions": 7788904,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -60,7 +60,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 16952462,
+      "instructions": 16318265,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -68,7 +68,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 29404937,
+      "instructions": 35184533,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -76,7 +76,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 29199115,
+      "instructions": 34891957,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -84,7 +84,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 25884569,
+      "instructions": 32861083,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -92,7 +92,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 29363771,
+      "instructions": 35112605,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -100,7 +100,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 29278882,
+      "instructions": 34730605,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -108,7 +108,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 49732326,
+      "instructions": 51734481,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -116,7 +116,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 32634030,
+      "instructions": 33850667,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -124,7 +124,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 31130130,
+      "instructions": 32217517,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -132,7 +132,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 68677642,
+      "instructions": 71513957,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -140,7 +140,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 61656223,
+      "instructions": 66950208,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -148,7 +148,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 32870219,
+      "instructions": 34404751,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -156,7 +156,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 30241645,
+      "instructions": 31383134,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -164,7 +164,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 93837059,
+      "instructions": 103824509,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -172,7 +172,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 41073162,
+      "instructions": 43074317,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -180,7 +180,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 31192384,
+      "instructions": 32401442,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -188,7 +188,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 30319144,
+      "instructions": 31416581,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -196,7 +196,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 51996785,
+      "instructions": 55048499,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -204,7 +204,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 3255412,
+      "instructions": 3633775,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -212,7 +212,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 3253716,
+      "instructions": 3632023,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -220,7 +220,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 2855767,
+      "instructions": 3211889,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -228,7 +228,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 31312283,
+      "instructions": 37557571,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -236,7 +236,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 30527833,
+      "instructions": 36895059,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -244,7 +244,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 5144687,
+      "instructions": 6055741,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -252,7 +252,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 46799205,
+      "instructions": 54059510,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -260,7 +260,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 234831861,
+      "instructions": 271638006,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -268,7 +268,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 28100940,
+      "instructions": 33349249,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -276,7 +276,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 18885980,
+      "instructions": 22345385,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -284,7 +284,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 3207318,
+      "instructions": 3724222,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -292,7 +292,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 298310717,
+      "instructions": 340003609,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -300,7 +300,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 629847376,
+      "instructions": 702796711,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -308,7 +308,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 18497920,
+      "instructions": 21094700,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -316,7 +316,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 18158437,
+      "instructions": 21409422,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -324,7 +324,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 36630015,
+      "instructions": 41836625,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -332,7 +332,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 442013591,
+      "instructions": 390785984,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -340,7 +340,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 44376635,
+      "instructions": 52492693,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -348,7 +348,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 56082286,
+      "instructions": 64211821,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -356,7 +356,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 20508999651,
+      "instructions": 22773135475,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -364,7 +364,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 6300053057,
+      "instructions": 7011565008,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -372,7 +372,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 4364660696,
+      "instructions": 4830766039,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -380,7 +380,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 5224666337,
+      "instructions": 5805088896,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -388,7 +388,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 21109327,
+      "instructions": 22592113,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -396,7 +396,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 5698722,
+      "instructions": 6448389,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -404,7 +404,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 4441652,
+      "instructions": 4939556,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -412,7 +412,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 4427922,
+      "instructions": 4834310,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -420,7 +420,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 71135312,
+      "instructions": 80120985,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -428,7 +428,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 5978439,
+      "instructions": 6644414,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -436,7 +436,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 16958452,
+      "instructions": 16303697,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -444,7 +444,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 6253482,
+      "instructions": 7031838,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -452,7 +452,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 31577228,
+      "instructions": 32692229,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -460,7 +460,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 31316827,
+      "instructions": 35531575,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -468,7 +468,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 27977539,
+      "instructions": 33395666,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -476,7 +476,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 29474196,
+      "instructions": 35262927,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -484,7 +484,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 40398312,
+      "instructions": 45978557,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -492,7 +492,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 69326603,
+      "instructions": 76064352,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -500,7 +500,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 21747493,
+      "instructions": 25492525,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -508,7 +508,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 12498891,
+      "instructions": 14746792,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -516,23 +516,23 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 7060301,
+      "instructions": 7995031,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
     "benchmarks/test_produce_numpy_perf.py::test_df_numeric": {
       "marker": "informational",
-      "source_marker": "gate",
-      "auto_moved": true,
-      "instructions": 29464799,
-      "binding_fraction": 0.0,
+      "source_marker": "informational",
+      "auto_moved": false,
+      "instructions": 35256355,
+      "binding_fraction": null,
       "threshold_pct": null
     },
     "benchmarks/test_produce_numpy_perf.py::test_df_numeric_with_nulls": {
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 40357060,
+      "instructions": 45939193,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -540,7 +540,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 69304377,
+      "instructions": 75962963,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -548,7 +548,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 21738267,
+      "instructions": 25473843,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -556,7 +556,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 215063593,
+      "instructions": 220298436,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -564,23 +564,23 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 43497043,
+      "instructions": 49712218,
       "binding_fraction": null,
       "threshold_pct": null
     },
     "benchmarks/test_produce_numpy_perf.py::test_fetchnumpy_numeric": {
       "marker": "informational",
-      "source_marker": "gate",
-      "auto_moved": true,
-      "instructions": 28165468,
-      "binding_fraction": 0.0,
+      "source_marker": "informational",
+      "auto_moved": false,
+      "instructions": 33944853,
+      "binding_fraction": null,
       "threshold_pct": null
     },
     "benchmarks/test_produce_numpy_perf.py::test_fetchnumpy_numeric_with_nulls": {
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 35144943,
+      "instructions": 40658168,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -588,7 +588,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 64025731,
+      "instructions": 69063552,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -596,7 +596,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 3639613,
+      "instructions": 3940908,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -604,7 +604,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 5143666,
+      "instructions": 5917219,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -612,7 +612,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 11654375,
+      "instructions": 13682653,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -620,7 +620,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 6088232,
+      "instructions": 6989466,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -628,7 +628,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 12398027,
+      "instructions": 14807454,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -636,7 +636,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 6319959,
+      "instructions": 7044278,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -644,7 +644,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 2512782,
+      "instructions": 2720419,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -652,7 +652,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 11014392,
+      "instructions": 12925581,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -660,7 +660,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 5119483,
+      "instructions": 5744664,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -668,7 +668,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 10337048,
+      "instructions": 12021064,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -676,7 +676,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 11291045,
+      "instructions": 13392814,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -684,7 +684,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 20944198,
+      "instructions": 28029946,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -692,31 +692,31 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 11322686,
+      "instructions": 14498290,
       "binding_fraction": null,
       "threshold_pct": null
     },
     "benchmarks/test_types_roundtrip_perf.py::test_out_col_df[bool]": {
       "marker": "informational",
-      "source_marker": "gate",
-      "auto_moved": true,
-      "instructions": 3638394,
-      "binding_fraction": 0.1053,
+      "source_marker": "informational",
+      "auto_moved": false,
+      "instructions": 3965864,
+      "binding_fraction": null,
       "threshold_pct": null
     },
     "benchmarks/test_types_roundtrip_perf.py::test_out_col_df[date]": {
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 6410855,
-      "binding_fraction": 0.4922,
+      "instructions": 7406654,
+      "binding_fraction": 0.5094,
       "threshold_pct": 5.0
     },
     "benchmarks/test_types_roundtrip_perf.py::test_out_col_df[decimal128]": {
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 12496882,
+      "instructions": 14746031,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -724,7 +724,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 6410024,
+      "instructions": 7331242,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -732,31 +732,31 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 12732237,
-      "binding_fraction": 0.7443,
+      "instructions": 15690529,
+      "binding_fraction": 0.7684,
       "threshold_pct": 5.0
     },
     "benchmarks/test_types_roundtrip_perf.py::test_out_col_df[hugeint]": {
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 7054469,
+      "instructions": 7998654,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
     "benchmarks/test_types_roundtrip_perf.py::test_out_col_df[int64]": {
       "marker": "informational",
-      "source_marker": "gate",
-      "auto_moved": true,
-      "instructions": 2718974,
-      "binding_fraction": 0.0,
+      "source_marker": "informational",
+      "auto_moved": false,
+      "instructions": 2957718,
+      "binding_fraction": null,
       "threshold_pct": null
     },
     "benchmarks/test_types_roundtrip_perf.py::test_out_col_df[list]": {
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 91324470,
+      "instructions": 99033627,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -764,7 +764,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 110991217,
+      "instructions": 125117218,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -772,7 +772,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 10647333,
+      "instructions": 12351561,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -780,7 +780,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 215166204,
+      "instructions": 220313633,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -788,7 +788,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 40038336,
+      "instructions": 47128590,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -796,7 +796,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 28326808,
+      "instructions": 31366014,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -804,7 +804,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 17981967,
+      "instructions": 21042553,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -812,7 +812,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 23701642,
+      "instructions": 27286189,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -820,7 +820,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 234148728,
+      "instructions": 271217448,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -828,7 +828,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 21656881,
+      "instructions": 25532489,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -836,7 +836,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 28070587,
+      "instructions": 33290221,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -844,7 +844,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 159982348,
+      "instructions": 184865901,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -852,7 +852,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 18836658,
+      "instructions": 22382107,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -860,7 +860,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 150499447,
+      "instructions": 172332344,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -868,7 +868,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 119062526,
+      "instructions": 134136017,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -876,7 +876,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 30750748,
+      "instructions": 35722888,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -884,7 +884,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 226484384,
+      "instructions": 234289800,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -892,7 +892,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 49637213,
+      "instructions": 59326464,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -900,7 +900,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 33743613,
+      "instructions": 39627192,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -908,7 +908,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 102838074,
+      "instructions": 113267549,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -916,7 +916,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 56453572,
+      "instructions": 55495884,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -924,7 +924,7 @@
       "marker": "informational",
       "source_marker": "informational",
       "auto_moved": false,
-      "instructions": 72729269,
+      "instructions": 73488819,
       "binding_fraction": null,
       "threshold_pct": null
     },
@@ -932,7 +932,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 40772497,
+      "instructions": 47311728,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -940,7 +940,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 35374345,
+      "instructions": 40500454,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -948,7 +948,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 48207658,
+      "instructions": 56305063,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -956,7 +956,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 26901535,
+      "instructions": 30843428,
       "binding_fraction": null,
       "threshold_pct": 5.0
     },
@@ -964,7 +964,7 @@
       "marker": "gate",
       "source_marker": "gate",
       "auto_moved": false,
-      "instructions": 93255939,
+      "instructions": 105343681,
       "binding_fraction": null,
       "threshold_pct": 5.0
     }
