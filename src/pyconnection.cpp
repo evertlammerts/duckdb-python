@@ -618,13 +618,13 @@ identifier_map_t<BoundParameterData> TransformPreparedParameters(ClientContext &
                                                                  optional_ptr<PreparedStatement> prep = {}) {
 	identifier_map_t<BoundParameterData> named_values;
 	if (duckdb::PyUtil::IsListLike(params)) {
-		if (prep && prep->named_param_map.size() != nb::len(params)) {
+		if (prep && prep->GetParameterCount() != nb::len(params)) {
 			if (nb::len(params) == 0) {
 				throw InvalidInputException("Expected %d parameters, but none were supplied",
-				                            prep->named_param_map.size());
+				                            prep->GetParameterCount());
 			}
-			throw InvalidInputException("Prepared statement needs %d parameters, %d given",
-			                            prep->named_param_map.size(), nb::len(params));
+			throw InvalidInputException("Prepared statement needs %d parameters, %d given", prep->GetParameterCount(),
+			                            nb::len(params));
 		}
 		auto unnamed_values = DuckDBPyConnection::TransformPythonParamList(context, params);
 		for (idx_t i = 0; i < unnamed_values.size(); i++) {
