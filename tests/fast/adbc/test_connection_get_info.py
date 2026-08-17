@@ -30,7 +30,6 @@ class TestADBCConnectionGetInfo:
                 "ADBC DuckDB Driver",
                 "v" + duckdb.__duckdb_version__,  # don't hardcode this, as it will change every version
                 "(unknown)",
-                None,
             ],
             type=pa.string(),
         )
@@ -47,9 +46,8 @@ class TestADBCConnectionGetInfo:
         reader = pa.RecordBatchReader._import_from_c(res.address)
         table = reader.read_all()
         values = table["info_value"]
-
-        # Because all the codes we asked for were unrecognized, the result set is empty
-        assert values.num_chunks == 0
+        assert values.num_chunks == 1
+        assert values.chunk(0).nbytes == 0
 
     def test_unrecognized_codes(self):
         con = adbc_driver_duckdb_dbapi.connect()
