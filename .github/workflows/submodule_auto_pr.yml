@@ -27,6 +27,8 @@ jobs:
   create_pr:
     name: Create PR to bump duckdb submodule to given SHA
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout DuckDB Python
         uses: actions/checkout@v4
