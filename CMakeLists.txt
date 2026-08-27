@@ -48,7 +48,17 @@ endif()
 
 install(TARGETS _duckdb LIBRARY DESTINATION duckdb)
 
-# Copy the engine into the package, following any symlink chain to the real file.
-get_filename_component(_duckdb_lib_real "${DUCKDB_LIBRARY}" REALPATH)
-get_filename_component(_duckdb_lib_name "${DUCKDB_LIBRARY}" NAME)
-install(FILES "${_duckdb_lib_real}" DESTINATION duckdb RENAME "${_duckdb_lib_name}")
+# Copy the engine into the package. On Windows DUCKDB_LIBRARY is the import
+# library, which is a link-time artifact; the wheel needs the DLL beside the
+# extension instead. Everywhere else the two are the same file.
+get_filename_component(_duckdb_lib_dir "${DUCKDB_LIBRARY}" DIRECTORY)
+if(WIN32)
+  file(GLOB _duckdb_runtime "${_duckdb_lib_dir}/duckdb.dll")
+  if(NOT _duckdb_runtime)
+    message(FATAL_ERROR "no duckdb.dll beside ${DUCKDB_LIBRARY}; the bundle must carry both")
+  endif()
+else()
+  get_filename_component(_duckdb_runtime "${DUCKDB_LIBRARY}" REALPATH)
+endif()
+get_filename_component(_duckdb_runtime_name "${_duckdb_runtime}" NAME)
+install(FILES "${_duckdb_runtime}" DESTINATION duckdb RENAME "${_duckdb_runtime_name}")

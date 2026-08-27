@@ -32,13 +32,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: linux-amd64,  runner: ubuntu-latest }
-          - { target: linux-arm64,  runner: ubuntu-24.04-arm }
-          - { target: macos-arm64,  runner: macos-15 }
-          # macos-amd64 and windows-amd64 are not wired yet. Intel macOS needs
-          # either the last Intel runner or a cross build; Windows needs the
-          # bundle script's engine build to go through CMake instead of make.
+          # Runner labels match duckdb-python main's wheel matrix. No
+          # universal2: Intel and arm64 macOS each get their own wheel.
+          - { target: windows-amd64,  runner: windows-2022 }
+          - { target: windows-arm64,  runner: windows-11-arm }
+          - { target: linux-x86_64,   runner: ubuntu-24.04 }
+          - { target: linux-aarch64,  runner: ubuntu-24.04-arm }
+          - { target: macos-arm64,    runner: macos-15 }
+          - { target: macos-x86_64,   runner: macos-15-intel }
     runs-on: ${{ matrix.runner }}
+    # Build the Linux engine inside the same manylinux image the wheels use, so
+    # its glibc floor matches the wheel tag rather than the runner's glibc.
+    container: ${{ startsWith(matrix.target, 'linux-') && 'quay.io/pypa/manylinux_2_28_' || '' }}${{ startsWith(matrix.target, 'linux-') && (matrix.target == 'linux-x86_64' && 'x86_64' || 'aarch64') || '' }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
@@ -58,8 +66,9 @@ jobs:
           path: .duckdb
           fetch-depth: 1
 
+      # ccache does not help the MSVC build, so it is skipped there.
       - name: Set up ccache
-        if: steps.cache.outputs.cache-hit != 'true'
+        if: steps.cache.outputs.cache-hit != 'true' && runner.os != 'Windows'
         uses: hendrikmuhs/ccache-action@v1
         with:
           key: engine-${{ matrix.target }}
@@ -67,12 +76,13 @@ jobs:
       - name: Build the engine bundle
         if: steps.cache.outputs.cache-hit != 'true'
         env:
-          CMAKE_C_COMPILER_LAUNCHER: ccache
-          CMAKE_CXX_COMPILER_LAUNCHER: ccache
           CORE_EXTENSIONS: "core_functions;json;parquet;icu"
-          BUILD_UNITTESTS: "0"
-          BUILD_SHELL: "0"
-        run: ./scripts/build_engine_bundle.sh .duckdb engine-bundle release
+          # Match the floor the wheels are built against, per arch. See the
+          # note in wheels.yml.
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.target == 'macos-arm64' && '11.0' || '10.14' }}
+          CMAKE_C_COMPILER_LAUNCHER: ${{ runner.os != 'Windows' && 'ccache' || '' }}
+          CMAKE_CXX_COMPILER_LAUNCHER: ${{ runner.os != 'Windows' && 'ccache' || '' }}
+        run: python scripts/build_engine_bundle.py .duckdb engine-bundle --build-type Release
 
       - uses: actions/upload-artifact@v4
         with:

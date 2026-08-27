@@ -21,9 +21,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: linux-amd64, runner: ubuntu-latest }
-          - { target: linux-arm64, runner: ubuntu-24.04-arm }
-          - { target: macos-arm64, runner: macos-15 }
+          - { target: windows-amd64,  runner: windows-2022 }
+          - { target: windows-arm64,  runner: windows-11-arm }
+          - { target: linux-x86_64,   runner: ubuntu-24.04 }
+          - { target: linux-aarch64,  runner: ubuntu-24.04-arm }
+          - { target: macos-arm64,    runner: macos-15 }
+          - { target: macos-x86_64,   runner: macos-15-intel }
         flavor:
           # STABLE_ABI applies on non-free-threaded >= 3.12; FREE_THREADED
           # applies on t interpreters. One CMake path serves both.
@@ -31,6 +34,10 @@ jobs:
           - { name: ft314, python: "3.14t" }
     runs-on: ${{ matrix.runner }}
     name: ${{ matrix.target }} / ${{ matrix.flavor.name }}
+    defaults:
+      run:
+        # Windows runners default to PowerShell; every step below is bash.
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -42,48 +49,78 @@ jobs:
 
       - name: Build the wheel
         env:
+          # Without a pin the wheel takes the runner's OS version as its floor
+          # and installs almost nowhere. The floor is per arch: arm64 macOS did
+          # not exist before 11.0 and packaging generates no arm64 tag below
+          # it, so a 10.x arm64 wheel is uninstallable on Apple Silicon.
+          # Intel keeps 10.14, the floor nanobind's aligned new/delete needs.
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.target == 'macos-arm64' && '11.0' || '10.14' }}
           # The bundle is self-contained: it carries duckdb_cpp.{hpp,cpp}, the
           # two v2 headers, DuckDBCppApi.cmake, and the library. So one path
           # serves as both the C++ API directory and the library prefix.
           SKBUILD_CMAKE_DEFINE: "DUCKDB_CPP_DIR=${{ github.workspace }}/engine-bundle;DUCKDB_ROOT=${{ github.workspace }}/engine-bundle"
         run: |
           uv venv --python ${{ matrix.flavor.python }} .venv-build
+          PY=.venv-build/bin/python
+          [ -x "$PY" ] || PY=.venv-build/Scripts/python.exe
           VIRTUAL_ENV=.venv-build uv pip install "scikit-build-core>=0.10" "nanobind>=2.13"
-          VIRTUAL_ENV=.venv-build uv build --wheel --no-build-isolation \
-            --python .venv-build/bin/python
+          VIRTUAL_ENV=.venv-build uv build --wheel --no-build-isolation --python "$PY"
+
+      - name: Retag Linux wheels as manylinux
+        # A wheel built straight on the runner is tagged linux_*, which PyPI
+        # and test.pypi both refuse. auditwheel rewrites the tag against the
+        # glibc the extension actually needs. The engine is already inside the
+        # wheel, so this is a retag and an rpath fix, not a vendoring step.
+        if: startsWith(matrix.target, 'linux-')
+        run: |
+          uv tool install auditwheel
+          for whl in dist/*.whl; do
+            auditwheel repair "$whl" --plat manylinux_2_28_${{ matrix.target == 'linux-x86_64' && 'x86_64' || 'aarch64' }} -w dist/repaired
+          done
+          rm -f dist/*.whl && mv dist/repaired/*.whl dist/ && rmdir dist/repaired
 
       - name: Assert the stable-ABI wheel is really stable-ABI
         # STABLE_ABI silently no-ops if CMake was not asked for
         # Development.SABIModule: the wheel is still TAGGED cp312-abi3 while the
-        # extension inside is version-tagged. Assert on the artifact, never on
-        # the build log.
+        # extension inside carries a version-specific suffix. Assert on the
+        # artifact, never on the build log.
         if: matrix.flavor.name == 'abi3'
         run: |
-          whl=$(ls dist/*.whl)
-          echo "$whl"
-          case "$whl" in *-abi3-*) ;; *) echo "wheel is not abi3-tagged"; exit 1;; esac
-          if ! unzip -l "$whl" | grep -q '_duckdb\.abi3\.'; then
-            echo "FAIL: wheel is tagged abi3 but contains a version-tagged extension:"
-            unzip -l "$whl" | grep '_duckdb'
-            exit 1
-          fi
+          python - <<'EOF'
+          import glob, sys, zipfile
+          whl = glob.glob("dist/*.whl")[0]
+          print(whl)
+          if "-abi3-" not in whl:
+              sys.exit(f"wheel is not abi3-tagged: {whl}")
+          names = zipfile.ZipFile(whl).namelist()
+          ext = [n for n in names if "_duckdb" in n and n.endswith((".so", ".pyd", ".dylib"))]
+          if not any(".abi3." in n for n in ext):
+              sys.exit(f"tagged abi3 but the extension is version-tagged: {ext}")
+          print("abi3 OK:", ext)
+          EOF
 
       - name: One wheel, every interpreter
         if: matrix.flavor.name == 'abi3'
         run: |
+          whl=$(ls "$PWD"/dist/*.whl)
           for v in 3.12 3.13 3.14; do
-            uv venv --python $v "/tmp/t$v"
-            VIRTUAL_ENV="/tmp/t$v" uv pip install dist/*.whl
+            uv venv --python $v "$RUNNER_TEMP/t$v"
+            PY="$RUNNER_TEMP/t$v/bin/python"
+            [ -x "$PY" ] || PY="$RUNNER_TEMP/t$v/Scripts/python.exe"
+            VIRTUAL_ENV="$RUNNER_TEMP/t$v" uv pip install "$whl"
             # Run from elsewhere so the source tree cannot shadow the install.
-            (cd /tmp && "/tmp/t$v/bin/python" -c "import duckdb; print('$v ->', duckdb.__version__)")
+            (cd "$RUNNER_TEMP" && "$PY" -c "import duckdb; print('$v ->', duckdb.__version__, duckdb.duckdb_version())")
           done
 
       - name: Free-threaded wheel keeps the GIL off
         if: matrix.flavor.name == 'ft314'
         run: |
-          uv venv --python 3.14t /tmp/tft
-          VIRTUAL_ENV=/tmp/tft uv pip install dist/*.whl
-          (cd /tmp && /tmp/tft/bin/python -c "
+          whl=$(ls "$PWD"/dist/*.whl)
+          uv venv --python 3.14t "$RUNNER_TEMP/tft"
+          PY="$RUNNER_TEMP/tft/bin/python"
+          [ -x "$PY" ] || PY="$RUNNER_TEMP/tft/Scripts/python.exe"
+          VIRTUAL_ENV="$RUNNER_TEMP/tft" uv pip install "$whl"
+          (cd "$RUNNER_TEMP" && "$PY" -c "
           import sys, duckdb
           assert not sys._is_gil_enabled(), 'GIL was re-enabled on import'
           print('3.14t ->', duckdb.__version__, '(GIL off)')
