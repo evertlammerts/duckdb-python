@@ -61,7 +61,14 @@ def build_engine(src: Path, build_dir: Path, build_type: str) -> None:
     ]
     if core_extensions := os.environ.get("CORE_EXTENSIONS"):
         configure.append(f"-DCORE_EXTENSIONS={core_extensions}")
-    if shutil.which("ninja"):
+    if sys.platform == "win32":
+        # Let CMake pick the Visual Studio generator. With Ninja on PATH the
+        # Windows runners resolve the compiler to a MinGW gcc that rejects
+        # DuckDB's -march flags ("bad value 'armv8-a' for '-march=' switch").
+        # DuckDB's own Makefile passes the platform the same way.
+        if platform := os.environ.get("CMAKE_GENERATOR_PLATFORM"):
+            configure += ["-A", platform]
+    elif shutil.which("ninja"):
         configure += ["-G", "Ninja"]
     run(configure)
     run(["cmake", "--build", str(build_dir), "--config", build_type,

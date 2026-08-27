@@ -34,16 +34,16 @@ jobs:
         include:
           # Runner labels match duckdb-python main's wheel matrix. No
           # universal2: Intel and arm64 macOS each get their own wheel.
-          - { target: windows-amd64,  runner: windows-2022 }
-          - { target: windows-arm64,  runner: windows-11-arm }
-          - { target: linux-x86_64,   runner: ubuntu-24.04 }
-          - { target: linux-aarch64,  runner: ubuntu-24.04-arm }
-          - { target: macos-arm64,    runner: macos-15 }
-          - { target: macos-x86_64,   runner: macos-15-intel }
+          # Linux builds inside the manylinux image so the engine's glibc floor
+          # matches the wheel tag rather than the runner's glibc.
+          - { target: windows-amd64,  runner: windows-2022,    container: "", msvc_arch: x64 }
+          - { target: windows-arm64,  runner: windows-11-arm,  container: "", msvc_arch: ARM64 }
+          - { target: linux-x86_64,   runner: ubuntu-24.04,    container: "quay.io/pypa/manylinux_2_28_x86_64" }
+          - { target: linux-aarch64,  runner: ubuntu-24.04-arm, container: "quay.io/pypa/manylinux_2_28_aarch64" }
+          - { target: macos-arm64,    runner: macos-15,        container: "" }
+          - { target: macos-x86_64,   runner: macos-15-intel,  container: "" }
     runs-on: ${{ matrix.runner }}
-    # Build the Linux engine inside the same manylinux image the wheels use, so
-    # its glibc floor matches the wheel tag rather than the runner's glibc.
-    container: ${{ startsWith(matrix.target, 'linux-') && 'quay.io/pypa/manylinux_2_28_' || '' }}${{ startsWith(matrix.target, 'linux-') && (matrix.target == 'linux-x86_64' && 'x86_64' || 'aarch64') || '' }}
+    container: ${{ matrix.container }}
     defaults:
       run:
         shell: bash
@@ -65,6 +65,10 @@ jobs:
           ref: ${{ needs.pin.outputs.sha }}
           path: .duckdb
           fetch-depth: 1
+          # DuckDB derives its version from `git describe`. Without tags that
+          # fails ("No names found, cannot describe anything") and the engine
+          # reports no version, which is what duckdb_version() surfaces.
+          fetch-tags: true
 
       # ccache does not help the MSVC build, so it is skipped there.
       - name: Set up ccache
@@ -77,12 +81,16 @@ jobs:
         if: steps.cache.outputs.cache-hit != 'true'
         env:
           CORE_EXTENSIONS: "core_functions;json;parquet;icu"
+          # Selects the Visual Studio target architecture. Empty off Windows.
+          CMAKE_GENERATOR_PLATFORM: ${{ matrix.msvc_arch }}
           # Match the floor the wheels are built against, per arch. See the
           # note in wheels.yml.
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.target == 'macos-arm64' && '11.0' || '10.14' }}
           CMAKE_C_COMPILER_LAUNCHER: ${{ runner.os != 'Windows' && 'ccache' || '' }}
           CMAKE_CXX_COMPILER_LAUNCHER: ${{ runner.os != 'Windows' && 'ccache' || '' }}
-        run: python scripts/build_engine_bundle.py .duckdb engine-bundle --build-type Release
+        run: |
+          PY=$(command -v python3 || command -v python)
+          "$PY" scripts/build_engine_bundle.py .duckdb engine-bundle --build-type Release
 
       - uses: actions/upload-artifact@v4
         with:

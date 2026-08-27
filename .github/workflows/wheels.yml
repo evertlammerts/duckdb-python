@@ -11,6 +11,14 @@ on:
     branches: [neo]
   workflow_dispatch:
 
+# A newer push to the same ref supersedes whatever is still running. Set on the
+# caller only: engine.yml is reached through workflow_call, and a called
+# workflow's jobs are cancelled with the run that called them, so a second
+# group here would only risk a deadlock.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   engine:
     uses: ./.github/workflows/engine.yml
@@ -21,18 +29,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: windows-amd64,  runner: windows-2022 }
-          - { target: windows-arm64,  runner: windows-11-arm }
-          - { target: linux-x86_64,   runner: ubuntu-24.04 }
-          - { target: linux-aarch64,  runner: ubuntu-24.04-arm }
-          - { target: macos-arm64,    runner: macos-15 }
-          - { target: macos-x86_64,   runner: macos-15-intel }
+          # Linux builds inside the manylinux image. Building on the runner
+          # would link against its glibc (2.39) and no retag to manylinux_2_28
+          # would be honest.
+          - { target: windows-amd64,  runner: windows-2022,    container: "" }
+          - { target: windows-arm64,  runner: windows-11-arm,  container: "" }
+          - { target: linux-x86_64,   runner: ubuntu-24.04,    container: "quay.io/pypa/manylinux_2_28_x86_64",  plat: manylinux_2_28_x86_64 }
+          - { target: linux-aarch64,  runner: ubuntu-24.04-arm, container: "quay.io/pypa/manylinux_2_28_aarch64", plat: manylinux_2_28_aarch64 }
+          - { target: macos-arm64,    runner: macos-15,        container: "" }
+          - { target: macos-x86_64,   runner: macos-15-intel,  container: "" }
         flavor:
           # STABLE_ABI applies on non-free-threaded >= 3.12; FREE_THREADED
           # applies on t interpreters. One CMake path serves both.
           - { name: abi3,  python: "3.12"  }
           - { name: ft314, python: "3.14t" }
     runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
     name: ${{ matrix.target }} / ${{ matrix.flavor.name }}
     defaults:
       run:
@@ -73,9 +85,11 @@ jobs:
         # wheel, so this is a retag and an rpath fix, not a vendoring step.
         if: startsWith(matrix.target, 'linux-')
         run: |
-          uv tool install auditwheel
           for whl in dist/*.whl; do
-            auditwheel repair "$whl" --plat manylinux_2_28_${{ matrix.target == 'linux-x86_64' && 'x86_64' || 'aarch64' }} -w dist/repaired
+            # --exclude: the engine is already inside the wheel and was built
+            # in this image, so auditwheel must not copy it a second time.
+            auditwheel repair "$whl" --plat ${{ matrix.plat }} \
+              --exclude libduckdb.so -w dist/repaired
           done
           rm -f dist/*.whl && mv dist/repaired/*.whl dist/ && rmdir dist/repaired
 
@@ -86,7 +100,8 @@ jobs:
         # artifact, never on the build log.
         if: matrix.flavor.name == 'abi3'
         run: |
-          python - <<'EOF'
+          PY=$(command -v python3 || command -v python)
+          "$PY" - <<'EOF'
           import glob, sys, zipfile
           whl = glob.glob("dist/*.whl")[0]
           print(whl)
