@@ -71,11 +71,21 @@ jobs:
           # it, so a 10.x arm64 wheel is uninstallable on Apple Silicon.
           # Intel keeps 10.14, the floor nanobind's aligned new/delete needs.
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.target == 'macos-arm64' && '11.0' || '10.14' }}
-          # The bundle is self-contained: it carries duckdb_cpp.{hpp,cpp}, the
-          # two v2 headers, DuckDBCppApi.cmake, and the library. So one path
-          # serves as both the C++ API directory and the library prefix.
-          SKBUILD_CMAKE_DEFINE: "DUCKDB_CPP_DIR=${{ github.workspace }}/engine-bundle;DUCKDB_ROOT=${{ github.workspace }}/engine-bundle"
         run: |
+          # Resolve the bundle path in the shell, not through
+          # ${{ github.workspace }}: that expression yields the HOST path,
+          # which is not where the workspace is mounted inside a container, and
+          # on Windows it yields backslashes that CMake parses as escapes.
+          # cygpath -m gives CMake-friendly "D:/a/..." on the Windows runners.
+          if command -v cygpath >/dev/null 2>&1; then
+            BUNDLE="$(cygpath -m "$PWD")/engine-bundle"
+          else
+            BUNDLE="$PWD/engine-bundle"
+          fi
+          export SKBUILD_CMAKE_DEFINE="DUCKDB_CPP_DIR=$BUNDLE;DUCKDB_ROOT=$BUNDLE"
+          # The bundle is self-contained: it carries duckdb_cpp.{hpp,cpp}, the
+          # two v2 headers, DuckDBCppApi.cmake, and the library, so one path
+          # serves as both the C++ API directory and the library prefix.
           uv venv --python ${{ matrix.python }} .venv-build
           PY=.venv-build/bin/python
           [ -x "$PY" ] || PY=.venv-build/Scripts/python.exe
@@ -167,13 +177,22 @@ jobs:
           path: engine-bundle
 
       - name: Build and install
-        env:
-          SKBUILD_CMAKE_DEFINE: "DUCKDB_CPP_DIR=${{ github.workspace }}/engine-bundle;DUCKDB_ROOT=${{ github.workspace }}/engine-bundle"
         # --no-build-isolation needs the build backend already present, so the
         # build group goes in first and stays in for the project build. Without
         # the pin uv picks the newest interpreter in the image, which is a 3.15
         # release candidate.
         run: |
+          # Resolve the bundle path in the shell, not through
+          # ${{ github.workspace }}: that expression yields the HOST path,
+          # which is not where the workspace is mounted inside a container, and
+          # on Windows it yields backslashes that CMake parses as escapes.
+          # cygpath -m gives CMake-friendly "D:/a/..." on the Windows runners.
+          if command -v cygpath >/dev/null 2>&1; then
+            BUNDLE="$(cygpath -m "$PWD")/engine-bundle"
+          else
+            BUNDLE="$PWD/engine-bundle"
+          fi
+          export SKBUILD_CMAKE_DEFINE="DUCKDB_CPP_DIR=$BUNDLE;DUCKDB_ROOT=$BUNDLE"
           uv sync --only-group build --no-install-project --python 3.12
           uv sync --no-build-isolation --group build --group dev --python 3.12
 
