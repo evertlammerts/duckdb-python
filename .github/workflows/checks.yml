@@ -1,0 +1,24 @@
+# Lint and format. Deliberately needs no engine and no built extension, so it
+# reports in seconds instead of waiting on a build.
+name: Checks
+
+on:
+  push:
+    branches: [neo]
+  pull_request:
+    branches: [neo]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint and format
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uvx ruff check --output-format=github .
+      - run: uvx ruff format --check .

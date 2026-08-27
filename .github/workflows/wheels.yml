@@ -2,7 +2,7 @@
 #
 # Two wheels per platform: one stable-ABI wheel covering CPython 3.12 and every
 # later version, and one free-threaded wheel per free-threaded interpreter.
-name: Wheels
+name: Build and test
 
 on:
   push:
@@ -145,3 +145,29 @@ jobs:
         with:
           name: wheel-${{ matrix.target }}-${{ matrix.flavor.name }}
           path: dist/*.whl
+
+  test:
+    name: Types and tests
+    needs: engine
+    runs-on: ubuntu-24.04
+    container: quay.io/pypa/manylinux_2_28_x86_64
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: engine-linux-x86_64
+          path: engine-bundle
+
+      - name: Build and install
+        env:
+          SKBUILD_CMAKE_DEFINE: "DUCKDB_CPP_DIR=${{ github.workspace }}/engine-bundle;DUCKDB_ROOT=${{ github.workspace }}/engine-bundle"
+        run: uv sync --no-build-isolation --group dev
+
+      # mypy needs the built extension present: the stub is checked against it,
+      # not accepted in place of it.
+      - run: uv run --no-sync mypy
+      - run: uv run --no-sync pytest

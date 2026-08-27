@@ -32,12 +32,14 @@ RUNTIME_NAMES = ("libduckdb.dylib", "libduckdb.so", "duckdb.dll")
 IMPORT_NAMES = ("duckdb.lib",)
 
 
-def run(cmd: list[str], **kw) -> None:
+def run(cmd: list[str]) -> None:
+    """Echo a command and run it, failing the script if it fails."""
     print("+", " ".join(map(str, cmd)), flush=True)
-    subprocess.run(cmd, check=True, **kw)
+    subprocess.run(cmd, check=True)
 
 
 def find_first(root: Path, names: tuple[str, ...]) -> Path | None:
+    """First file under `root` matching any of `names`, in the order given."""
     for name in names:
         hits = sorted(root.rglob(name))
         if hits:
@@ -52,7 +54,11 @@ def build_engine(src: Path, build_dir: Path, build_type: str) -> None:
     to the Windows runners, so we call CMake ourselves.
     """
     configure = [
-        "cmake", "-S", str(src), "-B", str(build_dir),
+        "cmake",
+        "-S",
+        str(src),
+        "-B",
+        str(build_dir),
         f"-DCMAKE_BUILD_TYPE={build_type}",
         "-DBUILD_SHELL=0",
         "-DBUILD_UNITTESTS=0",
@@ -71,8 +77,7 @@ def build_engine(src: Path, build_dir: Path, build_type: str) -> None:
     elif shutil.which("ninja"):
         configure += ["-G", "Ninja"]
     run(configure)
-    run(["cmake", "--build", str(build_dir), "--config", build_type,
-         "--parallel", str(os.cpu_count() or 2)])
+    run(["cmake", "--build", str(build_dir), "--config", build_type, "--parallel", str(os.cpu_count() or 2)])
 
 
 def exports_v2(lib: Path) -> bool | None:
@@ -93,6 +98,7 @@ def exports_v2(lib: Path) -> bool | None:
 
 
 def main() -> int:
+    """Assemble the bundle. Returns a process exit code."""
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("source", type=Path, help="a DuckDB checkout")
     ap.add_argument("output", type=Path, help="bundle directory to create")
@@ -131,8 +137,7 @@ def main() -> int:
     if imp := find_first(build_dir, IMPORT_NAMES):
         shutil.copy2(imp.resolve(), out / "lib" / imp.name)
 
-    sha = subprocess.run(["git", "-C", str(src), "rev-parse", "HEAD"],
-                         capture_output=True, text=True)
+    sha = subprocess.run(["git", "-C", str(src), "rev-parse", "HEAD"], capture_output=True, text=True)
     (out / "ENGINE_SHA").write_text((sha.stdout.strip() or "unknown") + "\n")
 
     size = sum(f.stat().st_size for f in out.rglob("*") if f.is_file())

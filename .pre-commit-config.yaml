@@ -1,0 +1,23 @@
+# Fast checks only. Anything needing a built extension (pytest, mypy) runs in
+# CI, not here: a hook that needs a 20-minute engine build is a hook people
+# disable.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-added-large-files
+        # The engine is never committed; it is built or downloaded.
+        args: [--maxkb=512]
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-toml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: mixed-line-ending
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.0
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format

@@ -17,3 +17,62 @@ build-dir = "build/{wheel_tag}"
 wheel.py-api = "cp312"          # one abi3 wheel per platform, 3.12 and up
 wheel.packages = ["src/duckdb"]
 sdist.include = ["src", "CMakeLists.txt"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=5",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+# strict-markers so a typo in a marker fails instead of silently selecting
+# nothing; filterwarnings=error so a warning is a result, not a scroll-by.
+addopts = "-ra --verbose --strict-markers --strict-config"
+filterwarnings = ["error"]
+markers = [
+    "freethreaded: only meaningful on a free-threaded interpreter",
+]
+
+[tool.ruff]
+line-length = 120
+indent-width = 4
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "ANN",  # flake8-annotations
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "D",    # flake8-docstrings
+    "E",    # pycodestyle
+    "EM",   # flake8-errmsg
+    "F",    # pyflakes
+    "I",    # isort
+    "PERF", # perflint
+    "PIE",  # flake8-pie
+    "PT",   # flake8-pytest-style
+    "PTH",  # flake8-use-pathlib
+    "RUF",  # ruff-specific
+    "SIM",  # flake8-simplify
+    "TRY",  # tryceratops
+    "UP",   # pyupgrade
+    "W",    # pycodestyle
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+# Tests do not need docstrings on every assertion helper.
+"tests/*" = ["D103", "D100"]
+
+[tool.mypy]
+files = ["src/duckdb", "tests", "scripts"]
+strict = true
+warn_unreachable = true
+pretty = true
+python_version = "3.12"
