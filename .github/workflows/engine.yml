@@ -1,0 +1,81 @@
+# Builds the DuckDB engine bundle once per platform per engine SHA, and
+# publishes it as a workflow artifact for the wheel jobs to consume.
+#
+# The engine is NOT committed to this repository. It is also not downloaded:
+# DuckDB does not yet publish a libduckdb carrying the V2 C API (the `nightly`
+# release tag does not exist, and released libduckdb exports no duckdb_v2_*
+# symbols), so DuckDBCppApi.cmake's download mode cannot be used. When core
+# starts publishing those artifacts this whole workflow goes away and the
+# build switches to download mode.
+name: Engine bundle
+
+on:
+  workflow_call:
+    outputs:
+      sha:
+        description: The engine SHA the bundles were built from.
+        value: ${{ jobs.pin.outputs.sha }}
+
+jobs:
+  pin:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.read.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: read
+        run: echo "sha=$(grep -v '^#' engine.pin | head -1 | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: pin
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux-amd64,  runner: ubuntu-latest }
+          - { target: linux-arm64,  runner: ubuntu-24.04-arm }
+          - { target: macos-arm64,  runner: macos-15 }
+          # macos-amd64 and windows-amd64 are not wired yet. Intel macOS needs
+          # either the last Intel runner or a cross build; Windows needs the
+          # bundle script's engine build to go through CMake instead of make.
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore cached engine bundle
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: engine-bundle
+          key: engine-${{ matrix.target }}-${{ needs.pin.outputs.sha }}
+
+      - name: Check out DuckDB at the pinned SHA
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: duckdb/duckdb
+          ref: ${{ needs.pin.outputs.sha }}
+          path: .duckdb
+          fetch-depth: 1
+
+      - name: Set up ccache
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          key: engine-${{ matrix.target }}
+
+      - name: Build the engine bundle
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CORE_EXTENSIONS: "core_functions;json;parquet;icu"
+          BUILD_UNITTESTS: "0"
+          BUILD_SHELL: "0"
+        run: ./scripts/build_engine_bundle.sh .duckdb engine-bundle release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engine-${{ matrix.target }}
+          path: engine-bundle
+          retention-days: 7

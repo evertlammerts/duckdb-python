@@ -1,0 +1,95 @@
+# Builds and verifies the wheel matrix against the engine bundle.
+#
+# Two wheels per platform: one stable-ABI wheel covering CPython 3.12 and every
+# later version, and one free-threaded wheel per free-threaded interpreter.
+name: Wheels
+
+on:
+  push:
+    branches: [neo]
+  pull_request:
+    branches: [neo]
+  workflow_dispatch:
+
+jobs:
+  engine:
+    uses: ./.github/workflows/engine.yml
+
+  wheel:
+    needs: engine
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux-amd64, runner: ubuntu-latest }
+          - { target: linux-arm64, runner: ubuntu-24.04-arm }
+          - { target: macos-arm64, runner: macos-15 }
+        flavor:
+          # STABLE_ABI applies on non-free-threaded >= 3.12; FREE_THREADED
+          # applies on t interpreters. One CMake path serves both.
+          - { name: abi3,  python: "3.12"  }
+          - { name: ft314, python: "3.14t" }
+    runs-on: ${{ matrix.runner }}
+    name: ${{ matrix.target }} / ${{ matrix.flavor.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: engine-${{ matrix.target }}
+          path: engine-bundle
+
+      - name: Build the wheel
+        env:
+          # The bundle is self-contained: it carries duckdb_cpp.{hpp,cpp}, the
+          # two v2 headers, DuckDBCppApi.cmake, and the library. So one path
+          # serves as both the C++ API directory and the library prefix.
+          SKBUILD_CMAKE_DEFINE: "DUCKDB_CPP_DIR=${{ github.workspace }}/engine-bundle;DUCKDB_ROOT=${{ github.workspace }}/engine-bundle"
+        run: |
+          uv venv --python ${{ matrix.flavor.python }} .venv-build
+          VIRTUAL_ENV=.venv-build uv pip install "scikit-build-core>=0.10" "nanobind>=2.13"
+          VIRTUAL_ENV=.venv-build uv build --wheel --no-build-isolation \
+            --python .venv-build/bin/python
+
+      - name: Assert the stable-ABI wheel is really stable-ABI
+        # STABLE_ABI silently no-ops if CMake was not asked for
+        # Development.SABIModule: the wheel is still TAGGED cp312-abi3 while the
+        # extension inside is version-tagged. Assert on the artifact, never on
+        # the build log.
+        if: matrix.flavor.name == 'abi3'
+        run: |
+          whl=$(ls dist/*.whl)
+          echo "$whl"
+          case "$whl" in *-abi3-*) ;; *) echo "wheel is not abi3-tagged"; exit 1;; esac
+          if ! unzip -l "$whl" | grep -q '_duckdb\.abi3\.'; then
+            echo "FAIL: wheel is tagged abi3 but contains a version-tagged extension:"
+            unzip -l "$whl" | grep '_duckdb'
+            exit 1
+          fi
+
+      - name: One wheel, every interpreter
+        if: matrix.flavor.name == 'abi3'
+        run: |
+          for v in 3.12 3.13 3.14; do
+            uv venv --python $v "/tmp/t$v"
+            VIRTUAL_ENV="/tmp/t$v" uv pip install dist/*.whl
+            # Run from elsewhere so the source tree cannot shadow the install.
+            (cd /tmp && "/tmp/t$v/bin/python" -c "import duckdb; print('$v ->', duckdb.__version__)")
+          done
+
+      - name: Free-threaded wheel keeps the GIL off
+        if: matrix.flavor.name == 'ft314'
+        run: |
+          uv venv --python 3.14t /tmp/tft
+          VIRTUAL_ENV=/tmp/tft uv pip install dist/*.whl
+          (cd /tmp && /tmp/tft/bin/python -c "
+          import sys, duckdb
+          assert not sys._is_gil_enabled(), 'GIL was re-enabled on import'
+          print('3.14t ->', duckdb.__version__, '(GIL off)')
+          ")
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.target }}-${{ matrix.flavor.name }}
+          path: dist/*.whl

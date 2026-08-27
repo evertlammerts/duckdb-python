@@ -1,0 +1,4 @@
+# The DuckDB engine this client builds against. One SHA, nothing else.
+# Bump to move to a newer engine; CI rebuilds the engine bundle on change and
+# reuses a cached one otherwise.
+65ed7716210e39baab51b8bbf766d08f7d7949b0
