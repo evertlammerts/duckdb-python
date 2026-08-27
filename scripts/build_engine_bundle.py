@@ -83,18 +83,25 @@ def build_engine(src: Path, build_dir: Path, build_type: str) -> None:
 def exports_v2(lib: Path) -> bool | None:
     """Whether the library exports the V2 C API. None when undeterminable.
 
-    `nm` is not on the Windows runners and `dumpbin` needs a developer shell,
-    so fall back to scanning for the symbol name in the export table, which is
-    stored as plain text in every object format we ship.
+    Only ever authoritative when a real symbol reader answered. `nm` does not
+    read PE reliably and `dumpbin` needs a developer shell, so on Windows this
+    usually returns None. That is deliberate: the real gate is the link probe
+    in DuckDBCppApi.cmake, which compiles against `duckdb_v2_library_version`
+    at the point of use. This check exists only to fail early and legibly when
+    someone points the build at a released libduckdb, and a check that cannot
+    see the answer must say so rather than guess.
     """
-    if shutil.which("nm"):
-        out = subprocess.run(["nm", "-g", str(lib)], capture_output=True, text=True)
+    if sys.platform != "win32" and shutil.which("nm"):
+        out = subprocess.run(["nm", "-g", str(lib)], capture_output=True, text=True, check=False)
         if out.returncode == 0:
             return "duckdb_v2_" in out.stdout
-    try:
-        return b"duckdb_v2_library_version" in lib.read_bytes()
-    except OSError:
-        return None
+    if sys.platform == "win32" and shutil.which("dumpbin"):
+        out = subprocess.run(
+            ["dumpbin", "/exports", str(lib)], capture_output=True, text=True, check=False
+        )
+        if out.returncode == 0:
+            return "duckdb_v2_" in out.stdout
+    return None
 
 
 def main() -> int:
@@ -121,7 +128,11 @@ def main() -> int:
         case False:
             sys.exit(f"{runtime} exports no duckdb_v2_* symbols: pre-V2 engine")
         case None:
-            print(f"warning: could not verify V2 exports in {runtime}", file=sys.stderr)
+            print(
+                f"note: cannot verify V2 exports in {runtime} on this platform; "
+                "DuckDBCppApi.cmake's link probe is the real gate",
+                file=sys.stderr,
+            )
 
     if out.exists():
         shutil.rmtree(out)

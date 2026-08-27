@@ -71,11 +71,22 @@ jobs:
           fetch-tags: true
 
       # ccache does not help the MSVC build, so it is skipped there.
+      #
+      # Its only job here is making an engine.pin bump cheap: a full build is
+      # already avoided by the SHA-keyed bundle cache above. The manylinux
+      # images carry ccache 3.7.7 from EPEL, which predates zstd compression,
+      # so the same budget holds far fewer of DuckDB's ~2000 objects than 4.x
+      # does on macOS. 3.x also prints stats in a format ccache-action cannot
+      # parse, which is why only the macOS jobs show a summary.
       - name: Set up ccache
         if: steps.cache.outputs.cache-hit != 'true' && runner.os != 'Windows'
         uses: hendrikmuhs/ccache-action@v1
         with:
           key: engine-${{ matrix.target }}
+          # The 500MB default is well under a full DuckDB build. Kept at 1G so
+          # four targets stay clear of the 10GB repository cache limit that the
+          # engine bundles also draw on.
+          max-size: 1G
 
       - name: Build the engine bundle
         if: steps.cache.outputs.cache-hit != 'true'
