@@ -28,24 +28,28 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # target and flavor are real axes so they cross-product: 6 x 2 = 12
+        # jobs. `include` only attaches fields to those combinations. Putting
+        # the targets in `include` instead silently collapses the matrix to one
+        # job per flavor, because include entries do not multiply, they merge
+        # and the last match wins.
+        target:
+          [windows-amd64, windows-arm64, linux-x86_64, linux-aarch64, macos-arm64, macos-x86_64]
+        # STABLE_ABI applies on non-free-threaded >= 3.12; FREE_THREADED applies
+        # on t interpreters. One CMake path serves both.
+        flavor: [abi3, ft314]
         include:
-          # Linux builds inside the manylinux image. Building on the runner
-          # would link against its glibc (2.39) and no retag to manylinux_2_28
-          # would be honest.
-          - { target: windows-amd64,  runner: windows-2022,    container: "" }
-          - { target: windows-arm64,  runner: windows-11-arm,  container: "" }
-          - { target: linux-x86_64,   runner: ubuntu-24.04,    container: "quay.io/pypa/manylinux_2_28_x86_64",  plat: manylinux_2_28_x86_64 }
+          - { target: windows-amd64,  runner: windows-2022,     container: "" }
+          - { target: windows-arm64,  runner: windows-11-arm,   container: "" }
+          - { target: linux-x86_64,   runner: ubuntu-24.04,     container: "quay.io/pypa/manylinux_2_28_x86_64",  plat: manylinux_2_28_x86_64 }
           - { target: linux-aarch64,  runner: ubuntu-24.04-arm, container: "quay.io/pypa/manylinux_2_28_aarch64", plat: manylinux_2_28_aarch64 }
-          - { target: macos-arm64,    runner: macos-15,        container: "" }
-          - { target: macos-x86_64,   runner: macos-15-intel,  container: "" }
-        flavor:
-          # STABLE_ABI applies on non-free-threaded >= 3.12; FREE_THREADED
-          # applies on t interpreters. One CMake path serves both.
-          - { name: abi3,  python: "3.12"  }
-          - { name: ft314, python: "3.14t" }
+          - { target: macos-arm64,    runner: macos-15,         container: "" }
+          - { target: macos-x86_64,   runner: macos-15-intel,   container: "" }
+          - { flavor: abi3,  python: "3.12" }
+          - { flavor: ft314, python: "3.14t" }
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.container }}
-    name: ${{ matrix.target }} / ${{ matrix.flavor.name }}
+    name: ${{ matrix.target }} / ${{ matrix.flavor }}
     defaults:
       run:
         # Windows runners default to PowerShell; every step below is bash.
@@ -72,7 +76,7 @@ jobs:
           # serves as both the C++ API directory and the library prefix.
           SKBUILD_CMAKE_DEFINE: "DUCKDB_CPP_DIR=${{ github.workspace }}/engine-bundle;DUCKDB_ROOT=${{ github.workspace }}/engine-bundle"
         run: |
-          uv venv --python ${{ matrix.flavor.python }} .venv-build
+          uv venv --python ${{ matrix.python }} .venv-build
           PY=.venv-build/bin/python
           [ -x "$PY" ] || PY=.venv-build/Scripts/python.exe
           VIRTUAL_ENV=.venv-build uv pip install "scikit-build-core>=0.10" "nanobind>=2.13"
@@ -98,7 +102,7 @@ jobs:
         # Development.SABIModule: the wheel is still TAGGED cp312-abi3 while the
         # extension inside carries a version-specific suffix. Assert on the
         # artifact, never on the build log.
-        if: matrix.flavor.name == 'abi3'
+        if: matrix.flavor == 'abi3'
         run: |
           PY=$(command -v python3 || command -v python)
           "$PY" - <<'EOF'
@@ -115,7 +119,7 @@ jobs:
           EOF
 
       - name: One wheel, every interpreter
-        if: matrix.flavor.name == 'abi3'
+        if: matrix.flavor == 'abi3'
         run: |
           whl=$(ls "$PWD"/dist/*.whl)
           for v in 3.12 3.13 3.14; do
@@ -128,7 +132,7 @@ jobs:
           done
 
       - name: Free-threaded wheel keeps the GIL off
-        if: matrix.flavor.name == 'ft314'
+        if: matrix.flavor == 'ft314'
         run: |
           whl=$(ls "$PWD"/dist/*.whl)
           uv venv --python 3.14t "$RUNNER_TEMP/tft"
@@ -143,7 +147,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wheel-${{ matrix.target }}-${{ matrix.flavor.name }}
+          name: wheel-${{ matrix.target }}-${{ matrix.flavor }}
           path: dist/*.whl
 
   test:
@@ -165,7 +169,13 @@ jobs:
       - name: Build and install
         env:
           SKBUILD_CMAKE_DEFINE: "DUCKDB_CPP_DIR=${{ github.workspace }}/engine-bundle;DUCKDB_ROOT=${{ github.workspace }}/engine-bundle"
-        run: uv sync --no-build-isolation --group dev
+        # --no-build-isolation needs the build backend already present, so the
+        # build group goes in first and stays in for the project build. Without
+        # the pin uv picks the newest interpreter in the image, which is a 3.15
+        # release candidate.
+        run: |
+          uv sync --only-group build --no-install-project --python 3.12
+          uv sync --no-build-isolation --group build --group dev --python 3.12
 
       # mypy needs the built extension present: the stub is checked against it,
       # not accepted in place of it.

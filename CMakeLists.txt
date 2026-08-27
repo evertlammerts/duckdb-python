@@ -34,7 +34,8 @@ find_package(nanobind CONFIG REQUIRED)
 # and FREE_THREADED only on free-threaded interpreters, so one call covers the
 # whole wheel matrix.
 nanobind_add_module(_duckdb STABLE_ABI FREE_THREADED NB_DOMAIN duckdb
-  src/_duckdb/module.cpp)
+  src/_duckdb/module.cpp
+  src/_duckdb/pyconv.cpp)
 target_link_libraries(_duckdb PRIVATE duckdb::cpp_api)
 
 # The engine ships beside the extension inside the wheel, linked not dlopened.

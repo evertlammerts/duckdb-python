@@ -96,9 +96,7 @@ def exports_v2(lib: Path) -> bool | None:
         if out.returncode == 0:
             return "duckdb_v2_" in out.stdout
     if sys.platform == "win32" and shutil.which("dumpbin"):
-        out = subprocess.run(
-            ["dumpbin", "/exports", str(lib)], capture_output=True, text=True, check=False
-        )
+        out = subprocess.run(["dumpbin", "/exports", str(lib)], capture_output=True, text=True, check=False)
         if out.returncode == 0:
             return "duckdb_v2_" in out.stdout
     return None

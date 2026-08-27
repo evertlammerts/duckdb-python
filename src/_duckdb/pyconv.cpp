@@ -23,14 +23,64 @@ namespace {
 // DuckDB counts days and microseconds from the Unix epoch; Python's date and
 // datetime count from year 1. Convert by offsetting from the epoch rather than
 // reimplementing the calendar.
-nb::object EpochDate(ConversionContext &ctx, int32_t days) {
-	return ctx.date_cls(1970, 1, 1) + ctx.timedelta_cls(days, 0, 0);
+
+// DuckDB reserves the extremes of the storage type for the infinite dates,
+// which have no Python counterpart. The previous client clamped them to
+// date/datetime min and max, and the adopted test suite expects that, so the
+// behaviour carries over as a documented divergence: an infinite date returned
+// this way no longer round-trips as infinite.
+constexpr int32_t DATE_POSITIVE_INFINITY = 2147483647;
+constexpr int32_t DATE_NEGATIVE_INFINITY = -2147483647;
+constexpr int64_t TIMESTAMP_POSITIVE_INFINITY = 9223372036854775807LL;
+constexpr int64_t TIMESTAMP_NEGATIVE_INFINITY = -9223372036854775807LL;
+
+// Python's date stops at year 9999 while DuckDB reaches year 5874897, so a
+// value can be perfectly valid in the engine and unrepresentable here. Report
+// that as a conversion error rather than letting datetime raise OverflowError,
+// whose message names an internal day count and not the column.
+[[noreturn]] void ThrowUnrepresentable(const std::string &what, const std::string &rendered) {
+	throw duckdb::cxx::Exception(4001 /* TYPE_CONVERSION */,
+	                             "Conversion Error: " + what + " " + rendered +
+	                                 " is outside the range Python's datetime can represent");
+}
+nb::object EpochDate(ConversionContext &ctx, int32_t days, const Value &value) {
+	if (days == DATE_POSITIVE_INFINITY) {
+		return ctx.date_cls.attr("max");
+	}
+	if (days == DATE_NEGATIVE_INFINITY) {
+		return ctx.date_cls.attr("min");
+	}
+	try {
+		return ctx.date_cls(1970, 1, 1) + ctx.timedelta_cls(days, 0, 0);
+	} catch (const nb::python_error &) {
+		ThrowUnrepresentable("date", value.ToText());
+	}
 }
 
-nb::object EpochDateTime(ConversionContext &ctx, int64_t micros, bool utc) {
+// A time of day is a microsecond offset with no date, so build it by offsetting
+// midnight and dropping the date part.
+nb::object TimeFromMicros(ConversionContext &ctx, int64_t micros) {
+	return (ctx.datetime_cls(1970, 1, 1) + ctx.timedelta_cls(0, 0, micros)).attr("time")();
+}
+
+nb::object EpochDateTime(ConversionContext &ctx, int64_t micros, bool utc, const Value &value) {
+	// Keep the infinities as aware as the column they came from: mixing an
+	// aware value with a naive one raises TypeError on comparison.
+	if (micros == TIMESTAMP_POSITIVE_INFINITY) {
+		nb::object limit = ctx.datetime_cls.attr("max");
+		return utc ? limit.attr("replace")(nb::arg("tzinfo") = ctx.timezone_utc) : limit;
+	}
+	if (micros == TIMESTAMP_NEGATIVE_INFINITY) {
+		nb::object limit = ctx.datetime_cls.attr("min");
+		return utc ? limit.attr("replace")(nb::arg("tzinfo") = ctx.timezone_utc) : limit;
+	}
 	nb::object epoch = utc ? ctx.datetime_cls(1970, 1, 1, 0, 0, 0, 0, ctx.timezone_utc)
 	                       : ctx.datetime_cls(1970, 1, 1);
-	return epoch + ctx.timedelta_cls(0, 0, micros);
+	try {
+		return epoch + ctx.timedelta_cls(0, 0, micros);
+	} catch (const nb::python_error &) {
+		ThrowUnrepresentable("timestamp", value.ToText());
+	}
 }
 
 // A leading integer, for the types whose text form is exact but whose binary
@@ -48,7 +98,8 @@ ConversionContext::ConversionContext() {
 	time_cls = datetime.attr("time");
 	datetime_cls = datetime.attr("datetime");
 	timedelta_cls = datetime.attr("timedelta");
-	timezone_utc = datetime.attr("timezone").attr("utc");
+	timezone_cls = datetime.attr("timezone");
+	timezone_utc = timezone_cls.attr("utc");
 	decimal_cls = nb::module_::import_("decimal").attr("Decimal");
 	uuid_cls = nb::module_::import_("uuid").attr("UUID");
 }
@@ -88,17 +139,31 @@ nb::object ValueToPython(const Value &value, ConversionContext &ctx) {
 		return nb::bytes(blob.data(), blob.size());
 	}
 	case LogicalTypeId::DATE:
-		return EpochDate(ctx, value.Get<duckdb::cxx::date_t>().days);
-	case LogicalTypeId::TIME: {
-		// A time of day is a microsecond offset with no date, so build it by
-		// offsetting midnight and dropping the date part.
-		const auto micros = value.Get<duckdb::cxx::dtime_t>().micros;
-		return (ctx.datetime_cls(1970, 1, 1) + ctx.timedelta_cls(0, 0, micros)).attr("time")();
-	}
+		return EpochDate(ctx, value.Get<duckdb::cxx::date_t>().days, value);
+	case LogicalTypeId::TIME:
+		return TimeFromMicros(ctx, value.Get<duckdb::cxx::dtime_t>().micros);
 	case LogicalTypeId::TIMESTAMP:
-		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_t>().micros, false);
+		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_t>().micros, false, value);
 	case LogicalTypeId::TIMESTAMP_TZ:
-		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_tz_t>().micros, true);
+		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_tz_t>().micros, true, value);
+	case LogicalTypeId::TIMESTAMP_SEC:
+		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_s_t>().seconds * 1'000'000, false, value);
+	case LogicalTypeId::TIMESTAMP_MS:
+		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_ms_t>().millis * 1'000, false, value);
+	case LogicalTypeId::TIMESTAMP_NS:
+		// Python datetime resolves to microseconds, so sub-microsecond digits
+		// are dropped. Documented divergence, not a rounding bug.
+		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_ns_t>().nanos / 1'000, false, value);
+	case LogicalTypeId::TIMESTAMP_TZ_NS:
+		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_tz_ns_t>().nanos / 1'000, true, value);
+	case LogicalTypeId::TIME_NS:
+		// Same microsecond floor as TIMESTAMP_NS.
+		return TimeFromMicros(ctx, value.Get<duckdb::cxx::dtime_ns_t>().nanos / 1'000);
+	case LogicalTypeId::TIME_TZ: {
+		const auto value_tz = value.Get<duckdb::cxx::dtime_tz_t>();
+		nb::object tz = ctx.timezone_cls(ctx.timedelta_cls(0, value_tz.GetOffset(), 0));
+		return TimeFromMicros(ctx, value_tz.GetMicros()).attr("replace")(nb::arg("tzinfo") = tz);
+	}
 	case LogicalTypeId::INTERVAL: {
 		const auto interval = value.Get<duckdb::cxx::interval_t>();
 		// A month is not a fixed duration, so this mapping is lossy for any

@@ -25,6 +25,7 @@ struct ConversionContext {
 	nb::object time_cls;
 	nb::object datetime_cls;
 	nb::object timedelta_cls;
+	nb::object timezone_cls;
 	nb::object timezone_utc;
 	nb::object decimal_cls;
 	nb::object uuid_cls;
