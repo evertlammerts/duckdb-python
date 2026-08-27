@@ -67,6 +67,9 @@ select = [
     "UP",   # pyupgrade
     "W",    # pycodestyle
 ]
+# Protocol methods and __init__ are described by their class docstring;
+# requiring one on each adds noise without adding meaning.
+ignore = ["D105", "D107"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

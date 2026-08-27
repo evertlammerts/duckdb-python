@@ -2,9 +2,10 @@
 
 from importlib.metadata import version as _package_version
 
+from . import dbapi, exceptions
 from ._duckdb import library_version
 
-__all__ = ["__version__", "duckdb_version", "library_version"]
+__all__ = ["__version__", "dbapi", "duckdb_version", "exceptions", "library_version"]
 
 #: Version of this package.
 __version__: str = _package_version("duckdb")

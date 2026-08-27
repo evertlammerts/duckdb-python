@@ -38,6 +38,14 @@ jobs:
         # STABLE_ABI applies on non-free-threaded >= 3.12; FREE_THREADED applies
         # on t interpreters. One CMake path serves both.
         flavor: [abi3, ft314]
+        exclude:
+          # No free-threaded CPython is published for Windows on ARM64. uv does
+          # not fail on that: it silently downloads the x86_64 build onto the
+          # ARM64 runner, so the extension targets x64 while the engine bundle
+          # is ARM64. DuckDBCppApi.cmake's link probe catches the mismatch, but
+          # the combination cannot work until such a build exists.
+          - target: windows-arm64
+            flavor: ft314
         include:
           - { target: windows-amd64,  runner: windows-2022,     container: "" }
           - { target: windows-arm64,  runner: windows-11-arm,   container: "" }

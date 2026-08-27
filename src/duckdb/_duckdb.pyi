@@ -11,6 +11,19 @@ class Result:
     def fetch_all(self) -> list[tuple[Any, ...]]:
         """Drain the result into a list of row tuples."""
 
+    @property
+    def result_type(self) -> str:
+        """One of "rows", "changed_rows", or "nothing"."""
+
+    def close(self) -> None:
+        """Release the result so the connection can run another query."""
+
+    def drain(self) -> int:
+        """Run to completion and report how many rows changed."""
+
+    def fetch_rows(self, count: int) -> list[tuple[Any, ...]]:
+        """Up to `count` more rows, or every remaining row when `count` is zero."""
+
 class Connection:
     def execute(self, sql: str, parameters: Sequence[Any] | Mapping[str, Any] | None = None) -> Result:
         """Run one statement, binding parameters positionally or by name."""

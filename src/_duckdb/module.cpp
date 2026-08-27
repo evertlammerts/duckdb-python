@@ -12,6 +12,7 @@
 #include <nanobind/stl/vector.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -73,7 +74,7 @@ public:
 
 	/// Column names paired with the text form of their type.
 	std::vector<std::pair<std::string, std::string>> Schema() {
-		const auto schema = result.GetSchema();
+		const auto schema = Live().GetSchema();
 		std::vector<std::pair<std::string, std::string>> out;
 		const auto count = schema.GetFieldCount();
 		out.reserve(count);
@@ -83,9 +84,93 @@ public:
 		return out;
 	}
 
+	/// The result, or a clear error once it has been closed.
+	cxx::QueryResult &Live() {
+		if (!result) {
+			nb::object module = nb::module_::import_("duckdb.exceptions");
+			PyErr_SetString(module.attr("InterfaceError").ptr(), "result is closed");
+			throw nb::python_error();
+		}
+		return *result;
+	}
+
+	/// Whether this result carries rows, a changed-row count, or nothing.
+	std::string ResultType() {
+		switch (Live().GetResultType()) {
+		case cxx::QueryResult::ResultType::QUERY_RESULT:
+			return "rows";
+		case cxx::QueryResult::ResultType::CHANGED_ROWS:
+			return "changed_rows";
+		default:
+			return "nothing";
+		}
+	}
+
+	/// Run the statement to completion and report how many rows it changed.
+	///
+	/// Side effects land when a result is drained, so a statement whose result
+	/// is dropped without draining never takes effect at all.
+	cxx::idx_t Drain() {
+		auto &live = Live();
+		pending.reset();
+		finished = true;
+		nb::gil_scoped_release release;
+		return live.Drain();
+	}
+
+	/// Release the result so the connection can run another query.
+	///
+	/// The engine allows one live result per connection, so a caller that
+	/// stops reading early needs a way to say so. Relying on the Python object
+	/// being collected would make the moment of release depend on refcount
+	/// timing, which is exactly the wrong thing for an exclusive resource.
+	void Close() {
+		pending.reset();
+		finished = true;
+		nb::gil_scoped_release release;
+		result.reset();
+	}
+
+	/// Up to `count` more rows, or every remaining row when `count` is zero.
+	///
+	/// Streaming is the only execution model here, so rows are taken a chunk
+	/// at a time and a partly-read chunk is carried across calls. Buffering
+	/// the whole result to serve fetchone() would defeat the point.
+	nb::list FetchRows(ConversionContext &ctx, size_t count) {
+		nb::list rows;
+		Live(); // raises if the result was closed
+		while (count == 0 || nb::len(rows) < count) {
+			// Anything left over from the previous call comes first.
+			if (pending) {
+				const auto available = pending->GetRowCount();
+				while (offset < available && (count == 0 || nb::len(rows) < count)) {
+					rows.append(RowAt(*pending, offset++, ctx));
+				}
+				if (offset < available) {
+					return rows; // count reached mid-chunk
+				}
+				pending.reset();
+				offset = 0;
+			}
+			if (finished) {
+				return rows;
+			}
+			if (!Advance(ctx)) {
+				return rows;
+			}
+		}
+		return rows;
+	}
+
 	/// Drain the result into a list of row tuples.
 	nb::list FetchAll(ConversionContext &ctx) {
-		nb::list rows;
+		return FetchRows(ctx, 0);
+	}
+
+private:
+	/// Step until a chunk arrives or the result ends. False once it has ended.
+	bool Advance(ConversionContext &ctx) {
+		(void)ctx;
 		while (true) {
 			// StepResult carries a DataChunk and so is not default
 			// constructible; build it in place from the call.
@@ -93,14 +178,16 @@ public:
 				// The engine runs on its own threads and may block; never hold
 				// the GIL across it, or a callback into Python deadlocks.
 				nb::gil_scoped_release release;
-				return result.Step();
+				return Live().Step();
 			}();
 			switch (step.status) {
 			case cxx::QueryResult::StepStatus::CHUNK:
-				AppendChunk(rows, step.chunk, ctx);
-				break;
+				pending = std::move(step.chunk);
+				offset = 0;
+				return true;
 			case cxx::QueryResult::StepStatus::FINISHED:
-				return rows;
+				finished = true;
+				return false;
 			case cxx::QueryResult::StepStatus::CANCELLED: {
 				nb::object module = nb::module_::import_("duckdb.exceptions");
 				PyErr_SetString(module.attr("InterruptError").ptr(), "query was cancelled");
@@ -108,33 +195,27 @@ public:
 			}
 			case cxx::QueryResult::StepStatus::WAITING: {
 				nb::gil_scoped_release release;
-				result.Wait();
+				Live().Wait();
 				break;
 			}
 			}
 		}
 	}
 
-private:
-	static void AppendChunk(nb::list &rows, const cxx::DataChunk &chunk, ConversionContext &ctx) {
+	static nb::tuple RowAt(const cxx::DataChunk &chunk, cxx::idx_t row, ConversionContext &ctx) {
 		const auto columns = chunk.GetVectorCount();
-		const auto row_count = chunk.GetRowCount();
-		std::vector<cxx::Vector> vectors;
-		vectors.reserve(columns);
+		nb::list values;
 		for (cxx::idx_t c = 0; c < columns; c++) {
-			vectors.push_back(chunk.GetVector(c));
+			values.append(ValueToPython(chunk.GetVector(c).GetValue(row), ctx));
 		}
-		for (cxx::idx_t r = 0; r < row_count; r++) {
-			nb::list row;
-			for (cxx::idx_t c = 0; c < columns; c++) {
-				row.append(ValueToPython(vectors[c].GetValue(r), ctx));
-			}
-			rows.append(nb::tuple(row));
-		}
+		return nb::tuple(values);
 	}
 
 	std::shared_ptr<DatabaseState> owner;
-	cxx::QueryResult result;
+	std::optional<cxx::QueryResult> result;
+	std::optional<cxx::DataChunk> pending;
+	cxx::idx_t offset = 0;
+	bool finished = false;
 };
 
 class Connection {
@@ -249,7 +330,13 @@ NB_MODULE(_duckdb, m) {
 
 	nb::class_<Result>(m, "Result")
 	    .def_prop_ro("schema", &Result::Schema)
-	    .def("fetch_all", [conversion](Result &self) { return self.FetchAll(*conversion); });
+	    .def("fetch_all", [conversion](Result &self) { return self.FetchAll(*conversion); })
+	    .def("close", &Result::Close)
+	    .def("drain", &Result::Drain)
+	    .def_prop_ro("result_type", &Result::ResultType)
+	    .def("fetch_rows",
+	         [conversion](Result &self, size_t count) { return self.FetchRows(*conversion, count); },
+	         nb::arg("count"));
 
 	m.def("library_version", []() { return cxx::LibraryVersion(); },
 	      "The version of the DuckDB engine this extension is linked against.");
