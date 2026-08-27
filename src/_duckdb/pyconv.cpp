@@ -10,11 +10,16 @@
 
 #include <nanobind/stl/string.h>
 
+#include <algorithm>
+#include <utility>
+#include <vector>
+
 #include <cstdint>
 #include <string>
 
 namespace duckdb_python {
 
+using duckdb::cxx::LogicalType;
 using duckdb::cxx::LogicalTypeId;
 using duckdb::cxx::Value;
 
@@ -102,6 +107,9 @@ ConversionContext::ConversionContext() {
 	timezone_utc = timezone_cls.attr("utc");
 	decimal_cls = nb::module_::import_("decimal").attr("Decimal");
 	uuid_cls = nb::module_::import_("uuid").attr("UUID");
+	epoch_naive = datetime_cls(1970, 1, 1);
+	epoch_aware = datetime_cls(1970, 1, 1, 0, 0, 0, 0, timezone_utc);
+	one_microsecond = timedelta_cls(0, 0, 1);
 }
 
 nb::object ValueToPython(const Value &value, ConversionContext &ctx) {
@@ -219,6 +227,191 @@ nb::object ValueToPython(const Value &value, ConversionContext &ctx) {
 		// failing the whole fetch.
 		return nb::cast(value.ToText());
 	}
+}
+
+namespace {
+
+using duckdb::cxx::Connection;
+
+// date(1970, 1, 1).toordinal(); Python counts days from year 1, DuckDB from
+// the epoch.
+constexpr int64_t EPOCH_ORDINAL = 719163;
+
+// Whole microseconds between two Python datetimes, using Python's own
+// arithmetic rather than total_seconds(), which is a float and loses precision
+// on timestamps far from the epoch.
+int64_t MicrosSince(const nb::object &epoch, nb::handle moment, ConversionContext &ctx) {
+	nb::object delta = nb::steal(PyNumber_Subtract(moment.ptr(), epoch.ptr()));
+	if (!delta.is_valid()) {
+		throw nb::python_error();
+	}
+	nb::object count = nb::steal(PyNumber_FloorDivide(delta.ptr(), ctx.one_microsecond.ptr()));
+	if (!count.is_valid()) {
+		throw nb::python_error();
+	}
+	return nb::cast<int64_t>(count);
+}
+
+// Round-trip a value through its text form and let the engine parse it. Exact
+// for integers of any width and for decimals, neither of which has a runtime
+// C++ type here to build directly.
+Value FromText(Connection &connection, const std::string &text, const LogicalType &target) {
+	const duckdb::cxx::varchar_t borrowed(text);
+	return Value::Create(connection, borrowed).Cast(connection, target);
+}
+
+[[noreturn]] void ThrowUnsupported(nb::handle object) {
+	const auto name = nb::cast<std::string>(nb::handle(Py_TYPE(object.ptr())).attr("__name__"));
+	throw duckdb::cxx::InvalidInputException("Invalid Input Error: cannot bind a parameter of type " +
+	                                         name);
+}
+
+} // namespace
+
+Value PythonToValue(Connection &connection, nb::handle object, ConversionContext &ctx) {
+	using duckdb::cxx::LogicalTypeId;
+
+	// A NULL still needs a type to carry it. SQLNULL would be the honest
+	// choice but create_type_from_id rejects it, so INTEGER stands in: NULL
+	// casts from any type to any other, so the binder still lands on whatever
+	// the statement wants.
+	if (object.is_none()) {
+		return Value::CreateNull(connection, connection.CreateType(LogicalTypeId::INTEGER));
+	}
+	// Before the int branch: a Python bool IS an int, so testing int first
+	// would silently bind True as 1.
+	if (nb::isinstance<nb::bool_>(object)) {
+		return Value::Create(connection, nb::cast<bool>(object));
+	}
+	if (nb::isinstance<nb::int_>(object)) {
+		// Widest type that holds the value; the binder narrows from there.
+		// Choosing narrowly here would reject values the column can hold.
+		int64_t narrow = 0;
+		if (nb::try_cast<int64_t>(object, narrow)) {
+			return Value::Create(connection, narrow);
+		}
+		const auto text = nb::cast<std::string>(nb::str(object));
+		// The C++ API pins C++17, so no starts_with here.
+		const bool negative = !text.empty() && text[0] == '-';
+		const auto id = negative ? LogicalTypeId::HUGEINT : LogicalTypeId::UHUGEINT;
+		return FromText(connection, text, connection.CreateType(id));
+	}
+	if (nb::isinstance<nb::float_>(object)) {
+		return Value::Create(connection, nb::cast<double>(object));
+	}
+	if (nb::isinstance<nb::str>(object)) {
+		const auto text = nb::cast<std::string>(object);
+		return Value::Create(connection, duckdb::cxx::varchar_t(text));
+	}
+	if (nb::isinstance<nb::bytes>(object)) {
+		const auto bytes = nb::cast<nb::bytes>(object);
+		return Value::Create(connection, duckdb::cxx::blob_t(bytes.c_str(),
+		                                                    static_cast<uint32_t>(bytes.size())));
+	}
+	// datetime before date: datetime subclasses date, so order decides.
+	if (nb::isinstance(object, ctx.datetime_cls)) {
+		const bool aware = !object.attr("tzinfo").is_none();
+		const int64_t micros = MicrosSince(aware ? ctx.epoch_aware : ctx.epoch_naive, object, ctx);
+		if (aware) {
+			return Value::Create(connection, duckdb::cxx::timestamp_tz_t {micros});
+		}
+		return Value::Create(connection, duckdb::cxx::timestamp_t {micros});
+	}
+	if (nb::isinstance(object, ctx.date_cls)) {
+		const auto days = nb::cast<int64_t>(object.attr("toordinal")()) - EPOCH_ORDINAL;
+		return Value::Create(connection, duckdb::cxx::date_t {static_cast<int32_t>(days)});
+	}
+	if (nb::isinstance(object, ctx.time_cls)) {
+		nb::object naive = object.attr("replace")(nb::arg("tzinfo") = nb::none());
+		nb::object combined = ctx.datetime_cls.attr("combine")(ctx.epoch_naive.attr("date")(), naive);
+		return Value::Create(connection,
+		                     duckdb::cxx::dtime_t {MicrosSince(ctx.epoch_naive, combined, ctx)});
+	}
+	if (nb::isinstance(object, ctx.timedelta_cls)) {
+		// timedelta carries no months, so this direction is lossless; the
+		// reverse is not, which is why months are folded at 30 days there.
+		duckdb::cxx::interval_t interval {};
+		interval.months = 0;
+		interval.days = nb::cast<int32_t>(object.attr("days"));
+		interval.micros = nb::cast<int64_t>(object.attr("seconds")) * 1'000'000 +
+		                  nb::cast<int64_t>(object.attr("microseconds"));
+		return Value::Create(connection, interval);
+	}
+	if (nb::isinstance(object, ctx.decimal_cls)) {
+		// Via text: there is no runtime decimal type to build, and going
+		// through double would lose the scale that makes it a Decimal.
+		//
+		// The width and scale come from the value itself. A fixed DECIMAL(38,10)
+		// would silently repad, turning Decimal("123.456") into
+		// Decimal("123.4560000000") and losing the scale the caller chose.
+		nb::object parts = object.attr("as_tuple")();
+		nb::object exponent = parts.attr("exponent");
+		if (!nb::isinstance<nb::int_>(exponent)) {
+			// NaN and the infinities carry a string exponent and have no
+			// DECIMAL counterpart at all.
+			throw duckdb::cxx::InvalidInputException(
+			    "Invalid Input Error: cannot bind a non-finite Decimal");
+		}
+		// A Decimal is digits x 10^exponent. A negative exponent is the scale;
+		// a positive one adds trailing zeroes the digit tuple does not carry,
+		// so Decimal("1E+2") needs three integer places, not one.
+		const auto power = nb::cast<int>(exponent);
+		const auto digits = static_cast<int>(nb::cast<nb::tuple>(parts.attr("digits")).size());
+		const auto scale = std::max(0, -power);
+		const auto integer_places = digits + std::max(0, power);
+		const auto width = std::min(38, std::max(std::max(integer_places, scale), 1));
+		if (scale > width) {
+			throw duckdb::cxx::InvalidInputException(
+			    "Invalid Input Error: Decimal has more fractional digits than DECIMAL can hold");
+		}
+		return FromText(connection, nb::cast<std::string>(nb::str(object)),
+		                connection.ParseType("DECIMAL(" + std::to_string(width) + "," +
+		                                     std::to_string(scale) + ")"));
+	}
+	if (nb::isinstance(object, ctx.uuid_cls)) {
+		return FromText(connection, nb::cast<std::string>(nb::str(object)),
+		                connection.CreateType(LogicalTypeId::UUID));
+	}
+	if (nb::isinstance<nb::list>(object) || nb::isinstance<nb::tuple>(object)) {
+		std::vector<Value> children;
+		for (nb::handle item : object) {
+			children.push_back(PythonToValue(connection, item, ctx));
+		}
+		if (children.empty()) {
+			// An empty list still needs a child type, and nothing in the value
+			// says which. INTEGER for the same reason a bare NULL takes it.
+			return Value::CreateList(connection, connection.CreateType(LogicalTypeId::INTEGER));
+		}
+		return Value::CreateList(connection, children);
+	}
+	if (nb::isinstance<nb::dict>(object)) {
+		// A dict is the only Python type that maps onto two DuckDB types, so
+		// the rule is stated rather than guessed per call: string keys read as
+		// a STRUCT, anything else as a MAP.
+		auto mapping = nb::cast<nb::dict>(object);
+		bool all_strings = true;
+		for (auto entry : mapping) {
+			if (!nb::isinstance<nb::str>(entry.first)) {
+				all_strings = false;
+				break;
+			}
+		}
+		if (all_strings) {
+			std::vector<std::pair<std::string, Value>> fields;
+			for (auto entry : mapping) {
+				fields.emplace_back(nb::cast<std::string>(entry.first),
+				                    PythonToValue(connection, entry.second, ctx));
+			}
+			return Value::CreateStruct(connection, fields);
+		}
+		std::vector<std::pair<Value, Value>> entries;
+		for (auto entry : mapping) {
+			entries.emplace_back(PythonToValue(connection, entry.first, ctx),
+			                     PythonToValue(connection, entry.second, ctx));
+		}
+		return Value::CreateMap(connection, entries);
+	}
+	ThrowUnsupported(object);
 }
 
 } // namespace duckdb_python

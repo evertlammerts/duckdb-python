@@ -1,5 +1,6 @@
 """Type stubs for the nanobind extension module."""
 
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 class Result:
@@ -11,7 +12,9 @@ class Result:
         """Drain the result into a list of row tuples."""
 
 class Connection:
-    def execute(self, sql: str) -> Result: ...
+    def execute(self, sql: str, parameters: Sequence[Any] | Mapping[str, Any] | None = None) -> Result:
+        """Run one statement, binding parameters positionally or by name."""
+
     def interrupt(self) -> None: ...
     def get_option(self, name: str) -> str: ...
     def set_option(self, name: str, value: str) -> None: ...

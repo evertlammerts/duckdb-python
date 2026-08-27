@@ -143,9 +143,44 @@ public:
 	    : owner(std::move(owner)), connection(std::move(connection)) {
 	}
 
-	Result Execute(const std::string &sql) {
+	/// Run one statement, optionally binding parameters.
+	///
+	/// `parameters` is either a sequence, binding $1, $2, ... in order, or a
+	/// mapping, binding $name. NamedParam carries both shapes: an empty name
+	/// means positional. A statement cannot mix the two, which the engine
+	/// enforces at bind time.
+	Result Execute(const std::string &sql, nb::handle parameters, ConversionContext &ctx) {
+		if (parameters.is_none()) {
+			nb::gil_scoped_release release;
+			return Result(owner, connection.Execute(sql));
+		}
+
+		std::vector<cxx::NamedParam> bound;
+		if (nb::isinstance<nb::dict>(parameters)) {
+			for (auto entry : nb::cast<nb::dict>(parameters)) {
+				bound.push_back({nb::cast<std::string>(entry.first),
+				                 PythonToValue(connection, entry.second, ctx)});
+			}
+		} else {
+			for (nb::handle item : parameters) {
+				bound.push_back({std::string(), PythonToValue(connection, item, ctx)});
+			}
+		}
+
+		// Parameters need a parsed statement; the string overload takes none.
+		// Exactly one statement, so a caller cannot smuggle a second past the
+		// parameter binding.
+		auto statements = connection.ParseSQL(sql);
+		auto statement = statements.Next();
+		if (!statement) {
+			throw cxx::InvalidInputException("Invalid Input Error: no statement to execute");
+		}
+		if (statements.Next()) {
+			throw cxx::InvalidInputException(
+			    "Invalid Input Error: execute takes exactly one statement when binding parameters");
+		}
 		nb::gil_scoped_release release;
-		return Result(owner, connection.Execute(sql));
+		return Result(owner, connection.Execute(statement, bound));
 	}
 
 	void Interrupt() {
@@ -203,7 +238,11 @@ NB_MODULE(_duckdb, m) {
 	    .def("connect", &Database::Connect);
 
 	nb::class_<Connection>(m, "Connection")
-	    .def("execute", &Connection::Execute, nb::arg("sql"))
+	    .def("execute",
+	         [conversion](Connection &self, const std::string &sql, nb::handle parameters) {
+		         return self.Execute(sql, parameters, *conversion);
+	         },
+	         nb::arg("sql"), nb::arg("parameters") = nb::none())
 	    .def("interrupt", &Connection::Interrupt)
 	    .def("get_option", &Connection::GetOption, nb::arg("name"))
 	    .def("set_option", &Connection::SetOption, nb::arg("name"), nb::arg("value"));

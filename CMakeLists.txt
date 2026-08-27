@@ -12,6 +12,14 @@ endif()
 set(DUCKDB_CPP_DEFAULT_DUCKDB_VERSION "1.5.5")
 include("${DUCKDB_CPP_DIR}/cmake/DuckDBCppApi.cmake")
 
+# DuckDBCppApi.cmake builds duckdb_cpp_api as a plain static library, without
+# position-independent code. Linking that into a shared module fails on ELF:
+#   relocation R_X86_64_32S against `...Environment` vtable can not be used
+#   when making a shared object; recompile with -fPIC
+# macOS and Windows do not care, so this only shows up on Linux. A Python
+# extension is always a shared module, so set it here. Belongs upstream.
+set_property(TARGET duckdb_cpp_api PROPERTY POSITION_INDEPENDENT_CODE ON)
+
 # Escape hatch for building against a raw DuckDB checkout, where
 # duckdb_extension_v2.h sits in src/include rather than beside duckdb_cpp.cpp.
 # An engine bundle carries both, so it does not need this.

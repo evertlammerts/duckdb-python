@@ -110,21 +110,28 @@ jobs:
       - name: Assert the stable-ABI wheel is really stable-ABI
         # STABLE_ABI silently no-ops if CMake was not asked for
         # Development.SABIModule: the wheel is still TAGGED cp312-abi3 while the
-        # extension inside carries a version-specific suffix. Assert on the
-        # artifact, never on the build log.
+        # extension inside is built for one interpreter. Assert on the artifact.
+        #
+        # Checked as "carries no interpreter version" rather than "is named
+        # .abi3.", because the stable-ABI filename differs per platform:
+        # `_duckdb.abi3.so` on Unix but a bare `_duckdb.pyd` on Windows, where
+        # the version-specific form is `_duckdb.cp312-win_amd64.pyd`.
         if: matrix.flavor == 'abi3'
         run: |
           PY=$(command -v python3 || command -v python)
           "$PY" - <<'EOF'
-          import glob, sys, zipfile
+          import glob, re, sys, zipfile
           whl = glob.glob("dist/*.whl")[0]
           print(whl)
           if "-abi3-" not in whl:
               sys.exit(f"wheel is not abi3-tagged: {whl}")
           names = zipfile.ZipFile(whl).namelist()
           ext = [n for n in names if "_duckdb" in n and n.endswith((".so", ".pyd", ".dylib"))]
-          if not any(".abi3." in n for n in ext):
-              sys.exit(f"tagged abi3 but the extension is version-tagged: {ext}")
+          if not ext:
+              sys.exit(f"no extension module found in {whl}: {names}")
+          versioned = [n for n in ext if re.search(r"cp3\d|cpython-3\d", n)]
+          if versioned:
+              sys.exit(f"tagged abi3 but built for one interpreter: {versioned}")
           print("abi3 OK:", ext)
           EOF
 
@@ -200,3 +207,37 @@ jobs:
       # not accepted in place of it.
       - run: uv run --no-sync mypy
       - run: uv run --no-sync pytest
+
+  coverage:
+    name: Seam coverage
+    needs: engine
+    # macOS only, and one platform is enough: coverage is about which lines
+    # execute, not about platform behaviour. clang's instrumentation is also
+    # what the report script speaks; the manylinux images use gcc.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: engine-macos-arm64
+          path: engine-bundle
+
+      - name: Build instrumented and run the suite
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          BUNDLE="$PWD/engine-bundle"
+          export SKBUILD_CMAKE_DEFINE="DUCKDB_CPP_DIR=$BUNDLE;DUCKDB_ROOT=$BUNDLE;CMAKE_CXX_FLAGS=-fprofile-instr-generate -fcoverage-mapping;CMAKE_SHARED_LINKER_FLAGS=-fprofile-instr-generate"
+          uv sync --only-group build --no-install-project --python 3.12
+          uv sync --no-build-isolation --group build --group dev --python 3.12
+          mkdir -p "$RUNNER_TEMP/profraw"
+          # Run from elsewhere so the source tree cannot shadow the install.
+          (cd "$RUNNER_TEMP" && LLVM_PROFILE_FILE="$RUNNER_TEMP/profraw/duckdb-%p.profraw" \
+            "$GITHUB_WORKSPACE/.venv/bin/python" -m pytest "$GITHUB_WORKSPACE/tests" -q)
+
+      - name: Report and gate
+        run: |
+          SO=$(find build -name '_duckdb*.so' | head -1)
+          uv run --no-sync python scripts/seam_coverage.py "$RUNNER_TEMP/profraw" "$SO" \
+            --min-lines 90 | tee "$GITHUB_STEP_SUMMARY"

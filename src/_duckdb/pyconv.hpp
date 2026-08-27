@@ -29,9 +29,19 @@ struct ConversionContext {
 	nb::object timezone_utc;
 	nb::object decimal_cls;
 	nb::object uuid_cls;
+
+	/// Epochs held for the parameter direction, so datetimes convert by
+	/// subtraction rather than by reimplementing the calendar.
+	nb::object epoch_naive;
+	nb::object epoch_aware;
+	nb::object one_microsecond;
 };
 
 /// One DuckDB value as a Python object. NULL becomes None.
 nb::object ValueToPython(const duckdb::cxx::Value &value, ConversionContext &ctx);
+
+/// One Python object as a DuckDB value, for binding as a parameter.
+duckdb::cxx::Value PythonToValue(duckdb::cxx::Connection &connection, nb::handle object,
+                                 ConversionContext &ctx);
 
 } // namespace duckdb_python

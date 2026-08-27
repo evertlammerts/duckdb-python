@@ -7,6 +7,11 @@ __pycache__/
 .venv-*/
 engine-bundle/
 
+# Coverage artefacts
+.coverage
+*.profraw
+*.profdata
+
 # IDEs
 .idea/
 cmake-build-*/
