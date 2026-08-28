@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 import duckdb
-from duckdb import col, exceptions, sql_expr, star
+from duckdb import _duckdb, col, exceptions, sql_expr, star
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -52,7 +52,7 @@ class TestGraph:
         # The whole point of walking by identity: the engine sees one scan of
         # the shared step, not two copies of its subtree.
         shared = orders.filter(col("country") == "nl")
-        joined = shared.join(shared, on=col("l.id") == col("r.id"))
+        joined = shared.join(shared, on=col("l.id") == col("r.id"), suffix="_r")
         sql = joined.render()
         assert sql.count("WHERE") == 1
         assert len(joined.fetchall()) == 3
@@ -60,7 +60,7 @@ class TestGraph:
     def test_a_self_join_is_unambiguous(self, orders: duckdb.Frame) -> None:
         # Both sides name the same CTE, so without the l/r aliases the FROM
         # clause would not parse.
-        pairs = orders.join(orders, on=col("l.id") == (col("r.id") - 1)).fetchall()
+        pairs = orders.join(orders, on=col("l.id") == (col("r.id") - 1), suffix="_r").fetchall()
         assert len(pairs) == 4
 
     def test_a_frame_can_be_extended_twice_independently(self, orders: duckdb.Frame) -> None:
@@ -110,7 +110,10 @@ class TestSchema:
         assert widened.types[-1] == "DECIMAL(12,1)"
 
     def test_the_schema_is_asked_for_once(self, orders: duckdb.Frame) -> None:
-        assert orders.schema is orders.schema
+        # Identity would not show this any more: the schema is built from a
+        # cached shape, so what matters is that the engine is asked once.
+        assert orders.schema == orders.schema
+        assert orders._cached_shape is not None
 
     def test_a_bad_query_reports_the_engine_error(self, con: duckdb.Connection) -> None:
         with pytest.raises(exceptions.CatalogError):
@@ -479,3 +482,184 @@ class TestTableSource:
     def test_an_awkward_name_needs_no_escaping_by_the_caller(self, con: duckdb.Connection) -> None:
         con.run('CREATE TABLE "select ""x""" AS SELECT 1 AS v')
         assert con.table('select "x"').fetchall() == [(1,)]
+
+
+class TestDerivedNamesMatchTheEngine:
+    """Every derived shape must equal what the binder would have said.
+
+    Deriving names is the whole point of the shape layer, and drifting from the
+    engine is the one way it can go wrong. Each case here derives a shape and
+    then asks the engine the same question, so a rule that is subtly wrong
+    fails rather than silently disagreeing.
+    """
+
+    def frames(self, con: duckdb.Connection) -> dict[str, duckdb.Frame]:
+        orders, countries = con.table("orders"), con.table("countries")
+        lists = con.sql("SELECT 1 AS k, [10, 20] AS xs")
+        wide = con.sql("SELECT 'nl' AS c, 1 AS q1, 2 AS q2")
+        return {
+            "table": orders,
+            "sql": con.sql("SELECT 1 AS a, 'b' AS b"),
+            "filter": orders.filter(col("amount") > 100),
+            "select names": orders.select("id", "country"),
+            "select exprs": orders.select(col("id"), col("amount").alias("total")),
+            "select star": orders.select(star()),
+            "star exclude": orders.select(star(exclude=["amount"])),
+            "star rename": orders.select(star(rename={"amount": "value"})),
+            "with_columns add": orders.with_columns(big=col("amount") > 100),
+            "with_columns replace": orders.with_columns(amount=col("amount") * 2),
+            "with_columns both": orders.with_columns(amount=col("amount") + 1, extra=col("id")),
+            "drop": orders.drop("amount"),
+            "rename": orders.rename(country="iso"),
+            "sort": orders.sort(col("id")),
+            "limit": orders.limit(2),
+            "offset": orders.offset(1),
+            "distinct": orders.distinct(),
+            "distinct on": orders.distinct(on="country"),
+            "sample": orders.sample(1, seed=1),
+            "aggregate": orders.aggregate(col("amount").sum().alias("total")),
+            "grouped": orders.group_by(col("country")).agg(col("amount").sum().alias("total")),
+            "grouped alias": orders.group_by(col("country").alias("iso")).agg(col("id").count().alias("n")),
+            "join on expr": orders.join(countries, on=col("l.country") == col("r.code")),
+            "join using": orders.rename(country="code").join(countries, on="code"),
+            "join suffix": orders.join(orders, on=col("l.id") == col("r.id"), suffix="_r"),
+            "join semi": orders.join(countries, on=col("l.country") == col("r.code"), how="semi"),
+            "cross": orders.cross(countries),
+            "union": orders.union(orders),
+            "intersect": orders.intersect(orders),
+            "except": orders.except_(orders),
+            "unnest": lists.unnest("xs"),
+            "unpivot": wide.unpivot("q1", "q2", name="quarter", value="sales"),
+            "describe": orders.describe(),
+            "deep chain": orders.filter(col("id") > 0).select("id", "amount").sort(col("id")).limit(3),
+            "join then verbs": orders.join(countries, on=col("l.country") == col("r.code"))
+            .drop("code")
+            .rename(label="name"),
+        }
+
+    def test_every_verb_derives_what_the_engine_reports(self, con: duckdb.Connection) -> None:
+        wrong = {}
+        for label, frame in self.frames(con).items():
+            derived = frame.columns
+            truth = [column.name for column in frame._bind_whole()]
+            if derived != truth:
+                wrong[label] = (derived, truth)
+        assert not wrong, f"derived shape disagrees with the binder: {wrong}"
+
+    def test_known_types_agree_with_the_engine(self, con: duckdb.Connection) -> None:
+        wrong = {}
+        for label, frame in self.frames(con).items():
+            truth = dict(frame._bind_whole())
+            for column in frame.shape:
+                if column.type is not None and truth.get(column.name) != column.type:
+                    wrong[f"{label}.{column.name}"] = (column.type, truth.get(column.name))
+        assert not wrong, f"carried type disagrees with the binder: {wrong}"
+
+
+def record_binds(con: duckdb.Connection, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Every query put to the binder from here on."""
+    seen: list[str] = []
+    engine = type(con._engine())
+    original = engine.bind
+
+    def recording(self: _duckdb.Connection, sql: str) -> object:
+        seen.append(sql)
+        return original(self, sql)
+
+    monkeypatch.setattr(engine, "bind", recording)
+    return seen
+
+
+class TestTheEngineIsAskedSparingly:
+    """Names are derived here, so the binder is asked once per source."""
+
+    def test_building_a_frame_asks_nothing(self, con: duckdb.Connection) -> None:
+        frame = con.table("orders").filter(col("amount") > 100).select("id").sort(col("id"))
+        assert frame._cached_shape is None, "building must not reach the engine"
+
+    def test_columns_costs_one_bind_per_source(self, con: duckdb.Connection, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls = record_binds(con, monkeypatch)
+        joined = (
+            con.table("orders")
+            .filter(col("amount") > 100)
+            .join(con.table("countries"), on=col("l.country") == col("r.code"))
+            .select("id", "label")
+        )
+        assert joined.columns == ["id", "label"]
+        assert len(calls) == 2, f"one per source, got {len(calls)}: {calls}"
+
+    def test_types_come_along_with_the_source(self, con: duckdb.Connection, monkeypatch: pytest.MonkeyPatch) -> None:
+        frame = con.table("orders").filter(col("amount") > 100).select("id")
+        assert frame.columns == ["id"]  # pays for the source
+        calls = record_binds(con, monkeypatch)
+        # A column carried through untouched keeps the type the engine gave it,
+        # so asking for types again costs nothing.
+        assert frame.types == ["INTEGER"]
+        assert calls == []
+
+    def test_an_engine_named_column_is_bound_on_a_stub(
+        self, con: duckdb.Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        con.table("orders").columns  # pay for the source first  # noqa: B018
+        calls = record_binds(con, monkeypatch)
+        # Nothing here knows what DuckDB will call this column, so it asks. The
+        # question it asks is this step over an empty input, not the whole query.
+        frame = con.table("orders").select(sql_expr("amount * 2"))
+        assert frame.columns == ["(amount * 2)"]
+        assert len(calls) == 2, calls  # the fresh source, then the stub
+        assert "WHERE FALSE" in calls[-1]
+        assert "NULL::INTEGER" in calls[-1]
+
+    def test_a_stub_does_not_grow_with_the_chain(self, con: duckdb.Connection, monkeypatch: pytest.MonkeyPatch) -> None:
+        deep = con.table("orders")
+        for _ in range(8):
+            deep = deep.filter(col("amount") > 0)
+        deep.columns  # noqa: B018
+        calls = record_binds(con, monkeypatch)
+        assert deep.select(sql_expr("amount * 2")).columns == ["(amount * 2)"]
+        # The point of the stub: one step's worth of SQL, however deep the chain.
+        assert len(calls) == 1
+        assert calls[0].count("SELECT") == 2, calls[0]
+
+
+class TestJoinRefusesToDuplicateAName:
+    """A join carries both sides through, so a shared name would appear twice.
+
+    DuckDB does not catch that once the join is behind a step: it binds the
+    later reference to whichever came first and answers. That silent wrong
+    answer is what this refuses.
+    """
+
+    def test_a_shared_name_is_refused(self, con: duckdb.Connection) -> None:
+        with pytest.raises(ValueError, match="both sides of this join have"):
+            con.table("orders").join(con.table("orders"), on=col("l.id") == col("r.id"))
+
+    def test_the_message_names_the_columns(self, con: duckdb.Connection) -> None:
+        with pytest.raises(ValueError, match=r"'id'.*'country'.*'amount'"):
+            con.table("orders").join(con.table("orders"), on=col("l.id") == col("r.id"))
+
+    def test_a_suffix_renames_the_right_side(self, con: duckdb.Connection) -> None:
+        joined = con.table("orders").join(con.table("orders"), on=col("l.id") == col("r.id"), suffix="_r")
+        assert joined.columns == ["id", "country", "amount", "id_r", "country_r", "amount_r"]
+        assert joined.columns == [c.name for c in joined._bind_whole()]
+
+    def test_a_suffixed_column_is_reachable(self, con: duckdb.Connection) -> None:
+        joined = con.table("orders").join(con.table("orders"), on=col("l.id") == (col("r.id") - 1), suffix="_next")
+        pairs = joined.select("id", "id_next").sort(col("id")).fetchall()
+        assert pairs == [(1, 2), (2, 3), (3, 4), (4, 5)]
+
+    def test_a_using_key_is_not_a_clash(self, con: duckdb.Connection) -> None:
+        # USING folds its key into one column, so it cannot appear twice.
+        left = con.table("orders").select("id", "country")
+        right = con.table("countries").rename(code="country")
+        assert left.join(right, on="country").columns == ["id", "country", "label"]
+
+    def test_a_semi_join_keeps_only_the_left(self, con: duckdb.Connection) -> None:
+        # Nothing from the right survives, so nothing can collide.
+        joined = con.table("orders").join(con.table("orders"), on=col("l.id") == col("r.id"), how="semi")
+        assert joined.columns == ["id", "country", "amount"]
+
+    def test_disjoint_sides_need_no_suffix(self, con: duckdb.Connection) -> None:
+        joined = con.table("orders").join(con.table("countries"), on=col("l.country") == col("r.code"))
+        assert joined.columns == ["id", "country", "amount", "code", "label"]
+        assert "RENAME" not in joined.render()

@@ -14,6 +14,7 @@ Two rules differ from plain Python:
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import datetime
 import decimal
@@ -237,6 +238,20 @@ def active_sink() -> ParamSink | None:
     """The innermost sink, if one is active."""
     stack = _sink_stack.get()
     return stack[-1] if stack else None
+
+
+@contextlib.contextmanager
+def suspended_sinks() -> Iterator[None]:
+    """Render with no sink, so literals stay in the text.
+
+    The schema oracle needs this. An untyped `$1` tells the binder nothing,
+    while the literal it stands for tells it everything.
+    """
+    token = _sink_stack.set(())
+    try:
+        yield
+    finally:
+        _sink_stack.reset(token)
 
 
 # --- the tree --------------------------------------------------------------
