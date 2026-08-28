@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import gc
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -63,3 +65,45 @@ def test_comment_only_statement_with_parameters_is_refused() -> None:
     con = _duckdb.Database(":memory:").connect()
     with pytest.raises(exceptions.InvalidInputError, match="no statement"):
         con.execute("-- nothing here", [1])
+
+
+class TestOneEnvironment:
+    """All databases are opened through a single Environment.
+
+    The Environment exists to notice a second attempt to open a database
+    already open in this process. Giving each Database its own would remove
+    that guard silently, which is what an earlier version did.
+    """
+
+    def test_opening_the_same_file_twice_is_refused(self, tmp_path: Path) -> None:
+        path = str(tmp_path / "same.db")
+        first = _duckdb.Database(path).connect()
+        first.execute("CREATE TABLE t (v INTEGER)").drain()
+        with pytest.raises(exceptions.Error, match=r"(?i)in use|conflict"):
+            _duckdb.Database(path)
+
+    def test_reopening_after_release_works(self, tmp_path: Path) -> None:
+        # The guard is about concurrent use, not a permanent claim.
+        path = str(tmp_path / "reopen.db")
+        first = _duckdb.Database(path)
+        first.connect().execute("CREATE TABLE t (v INTEGER)").drain()
+        del first
+        gc.collect()
+        second = _duckdb.Database(path).connect()
+        assert second.execute("SELECT count(*) FROM t").fetch_all() == [(0,)]
+
+    def test_memory_databases_are_independent(self) -> None:
+        # ":memory:" names no file, so each is its own database and the guard
+        # does not apply.
+        one = _duckdb.Database(":memory:").connect()
+        two = _duckdb.Database(":memory:").connect()
+        one.execute("CREATE TABLE only_in_one (v INTEGER)").drain()
+        with pytest.raises(exceptions.CatalogError):
+            two.execute("SELECT * FROM only_in_one").fetch_all()
+
+    def test_two_connections_to_one_database_see_each_other(self) -> None:
+        database = _duckdb.Database(":memory:")
+        writer, reader = database.connect(), database.connect()
+        writer.execute("CREATE TABLE t (v INTEGER)").drain()
+        writer.execute("INSERT INTO t VALUES (1)").drain()
+        assert reader.execute("SELECT count(*) FROM t").fetch_all() == [(1,)]

@@ -201,6 +201,31 @@ class TestPredicatesAndFunctions:
     def test_between(self, con: _duckdb.Connection) -> None:
         assert evaluate(con, lit(5).between(1, 10)) is True
 
+    def test_like(self, con: _duckdb.Connection) -> None:
+        assert evaluate(con, lit("Alpha").like("Al%")) is True
+        assert evaluate(con, lit("Alpha").like("al%")) is False
+        assert evaluate(con, lit("ab").like("a_")) is True
+
+    def test_ilike_ignores_case(self, con: _duckdb.Connection) -> None:
+        assert evaluate(con, lit("Alpha").ilike("al%")) is True
+
+    def test_like_negates_with_invert(self, con: _duckdb.Connection) -> None:
+        assert evaluate(con, ~lit("Alpha").like("b%")) is True
+
+    def test_like_escape(self, con: _duckdb.Connection) -> None:
+        # Without an escape the underscore is a wildcard and would match "axb".
+        assert evaluate(con, lit("a_b").like("a!_b", escape="!")) is True
+        assert evaluate(con, lit("axb").like("a!_b", escape="!")) is False
+
+    def test_a_like_pattern_is_bound(self, con: _duckdb.Connection) -> None:
+        # Patterns arrive from users as often as values do, so the same rule
+        # applies: never in the SQL text.
+        pattern = "%x'; DROP TABLE t; --%"
+        with ParamSink() as sink:
+            sql = col("s").like(pattern).fragment()
+        assert "DROP" not in sql
+        assert sink.entries[0][1] == pattern
+
     def test_cast(self, con: _duckdb.Connection) -> None:
         assert evaluate(con, lit("42").cast("INTEGER")) == 42
 

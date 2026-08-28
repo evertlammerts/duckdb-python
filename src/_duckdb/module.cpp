@@ -44,15 +44,29 @@ void TranslateException(const std::exception_ptr &captured, void * /*payload*/) 
 	}
 }
 
-// The environment owns the databases opened through it, so it must outlive
-// every connection. Holding both together keeps that ordering without asking
-// the Python layer to care.
+/// Everything this module owns for the lifetime of its interpreter.
+///
+/// There is exactly one Environment, and every database is opened through it.
+/// That is the whole point of the Environment: it is what notices a second
+/// attempt to open a database already open in this process. Giving each
+/// Database its own Environment would silently remove that guard.
+///
+/// This is per module instance, not a C++ static. nanobind initialises modules
+/// in two phases and the exec function runs once per interpreter that imports
+/// us, so a state created there and captured by the bindings registered
+/// alongside it belongs to that interpreter alone.
+struct ModuleState {
+	cxx::Environment environment;
+	ConversionContext conversion;
+};
+
+/// One open database, and the module state that must outlive it.
 struct DatabaseState {
-	DatabaseState(const std::string &path,
+	DatabaseState(std::shared_ptr<ModuleState> module, const std::string &path,
 	              const std::vector<std::pair<std::string, std::string>> &options)
-	    : environment() {
+	    : module(std::move(module)) {
 		if (options.empty()) {
-			database = std::make_unique<cxx::Database>(environment.Open(path));
+			database = std::make_unique<cxx::Database>(this->module->environment.Open(path));
 			return;
 		}
 		std::vector<cxx::DatabaseOption> opts;
@@ -60,10 +74,10 @@ struct DatabaseState {
 		for (const auto &[name, value] : options) {
 			opts.emplace_back(name, value);
 		}
-		database = std::make_unique<cxx::Database>(environment.Open(path, opts));
+		database = std::make_unique<cxx::Database>(this->module->environment.Open(path, opts));
 	}
 
-	cxx::Environment environment;
+	std::shared_ptr<ModuleState> module;
 	std::unique_ptr<cxx::Database> database;
 };
 
@@ -368,28 +382,28 @@ NB_MODULE(_duckdb, m) {
 	m.doc() = "DuckDB Python extension module.";
 	nb::register_exception_translator(&TranslateException);
 
-	// One conversion context per module: the Python constructors it holds are
-	// looked up once rather than per value.
-	auto conversion = std::make_shared<ConversionContext>();
+	// Created here, in the module's exec function, so it belongs to this
+	// interpreter and is reachable only through the bindings registered below.
+	auto state = std::make_shared<ModuleState>();
 
 	nb::class_<Database>(m, "Database")
 	    .def("__init__",
 	         // options is taken as a handle so None is accepted, matching the
 	         // stub and the way Connection::execute takes its parameters.
-	         [](Database *self, const std::string &path, nb::handle options) {
+	         [state](Database *self, const std::string &path, nb::handle options) {
 		         std::vector<std::pair<std::string, std::string>> settings;
 		         if (!options.is_none()) {
 			         settings = nb::cast<std::vector<std::pair<std::string, std::string>>>(options);
 		         }
-		         new (self) Database(std::make_shared<DatabaseState>(path, settings));
+		         new (self) Database(std::make_shared<DatabaseState>(state, path, settings));
 	         },
 	         nb::arg("path") = std::string(":memory:"), nb::arg("options") = nb::none())
 	    .def("connect", &Database::Connect);
 
 	nb::class_<Connection>(m, "Connection")
 	    .def("execute",
-	         [conversion](Connection &self, const std::string &sql, nb::handle parameters) {
-		         return self.Execute(sql, parameters, *conversion);
+	         [state](Connection &self, const std::string &sql, nb::handle parameters) {
+		         return self.Execute(sql, parameters, state->conversion);
 	         },
 	         nb::arg("sql"), nb::arg("parameters") = nb::none())
 	    .def("bind", &Connection::Bind, nb::arg("sql"))
@@ -399,12 +413,12 @@ NB_MODULE(_duckdb, m) {
 
 	nb::class_<Result>(m, "Result")
 	    .def_prop_ro("schema", &Result::Schema)
-	    .def("fetch_all", [conversion](Result &self) { return self.FetchAll(*conversion); })
+	    .def("fetch_all", [state](Result &self) { return self.FetchAll(state->conversion); })
 	    .def("close", &Result::Close)
 	    .def("drain", &Result::Drain)
 	    .def_prop_ro("result_type", &Result::ResultType)
 	    .def("fetch_rows",
-	         [conversion](Result &self, size_t count) { return self.FetchRows(*conversion, count); },
+	         [state](Result &self, size_t count) { return self.FetchRows(state->conversion, count); },
 	         nb::arg("count"));
 
 	m.def("library_version", []() { return cxx::LibraryVersion(); },

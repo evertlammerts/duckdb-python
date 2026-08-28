@@ -18,7 +18,7 @@ import contextvars
 import datetime
 import decimal
 import uuid
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -41,6 +41,22 @@ def quote(name: str) -> str:
     """A SQL identifier, always quoted so no name can be read as syntax."""
     escaped = name.replace('"', '""')
     return f'"{escaped}"'
+
+
+@runtime_checkable
+class Renderable(Protocol):
+    """Anything that can render itself as a complete query.
+
+    A `Frame` satisfies this. Declared as a shape rather than imported so
+    expressions stay independent of the frame layer, which imports this one.
+    """
+
+    def render(self) -> str: ...
+
+
+def qualified(name: str) -> str:
+    """A dotted name, quoted part by part so `main.orders` stays two identifiers."""
+    return ".".join(quote(part) for part in name.split("."))
 
 
 # What an operand may be without an explicit lit(). The temporal, decimal and
@@ -424,9 +440,26 @@ class Expr:
         """Whether this is not NULL."""
         return Postfix("IS NOT NULL", self)
 
-    def isin(self, values: Iterable[object]) -> Expr:
-        """Membership. An empty list is never a match."""
+    def isin(self, values: Iterable[object] | Renderable) -> Expr:
+        """Membership, in a list of values or in a one-column query.
+
+        An empty list is never a match.
+        """
+        if isinstance(values, Renderable):
+            return Binary("IN", self, SubQuery(values))
         return In(self, [_lift(v) for v in _as_list(list(values))])
+
+    def like(self, pattern: object, *, escape: str | None = None) -> Expr:
+        """Text match, where `%` is any run of characters and `_` is any one.
+
+        LIKE is an operator rather than a function, so `fn("like", ...)` cannot
+        reach it. Negate with `~`.
+        """
+        return Like("LIKE", self, _lift(pattern), escape)
+
+    def ilike(self, pattern: object, *, escape: str | None = None) -> Expr:
+        """`like`, ignoring case."""
+        return Like("ILIKE", self, _lift(pattern), escape)
 
     def between(self, low: object, high: object) -> Expr:
         """Inclusive range."""
@@ -474,7 +507,7 @@ class Col(Expr):
         # A dotted name is a qualified reference: each part is quoted on its
         # own, so `l.id` becomes "l"."id" rather than one odd identifier.
         # Needed to disambiguate a join, where both sides can carry the name.
-        return ".".join(quote(part) for part in self.name.split("."))
+        return qualified(self.name)
 
 
 class Star(Expr):
@@ -606,6 +639,38 @@ class In(Expr):
             return "FALSE"  # nothing is a member of an empty set
         rendered = ", ".join(v.fragment() for v in self.values)
         return f"({self.operand.fragment()} IN ({rendered}))"
+
+
+class Like(Expr):
+    """A LIKE or ILIKE match."""
+
+    def __init__(self, keyword: str, operand: Expr, pattern: Expr, escape: str | None) -> None:
+        super().__init__()
+        self.keyword = keyword
+        self.operand = operand
+        self.pattern = pattern
+        self.escape = escape
+
+    def fragment(self) -> str:
+        rendered = f"({self.operand.fragment()} {self.keyword} {self.pattern.fragment()}"
+        if self.escape is not None:
+            rendered += f" ESCAPE {render_literal(self.escape)}"
+        return rendered + ")"
+
+
+class SubQuery(Expr):
+    """A whole query standing in for a value."""
+
+    def __init__(self, query: Renderable) -> None:
+        super().__init__()
+        self.query = query
+
+    def fragment(self) -> str:
+        # Rendered here rather than when this node was built, so the query's
+        # own literals reach whichever sink is active for the statement it
+        # lands in. Its step names are local to these parentheses; an outer
+        # step of the same name is shadowed, not confused with it.
+        return f"({self.query.render()})"
 
 
 class Between(Expr):
@@ -795,6 +860,7 @@ __all__ += [
     "last_value",
     "lead",
     "ntile",
+    "qualified",
     "quote",
     "rank",
     "row_number",

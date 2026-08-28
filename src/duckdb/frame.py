@@ -8,13 +8,18 @@ and it is computed once.
 
 Rendering never consults a schema. Column names and types come from the
 binder, through `.schema`, because it is the only thing that knows them.
+
+Rows leave through `fetchall` and its neighbours, or through a sink, which
+writes them to a table or a file without them passing through Python.
 """
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
-from .expr import Expr, ParamSink, col, quote
+from .exceptions import Error
+from .expr import Expr, ParamSink, SubQuery, col, qualified, quote, render_literal
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator
@@ -22,6 +27,17 @@ if TYPE_CHECKING:
     from . import _duckdb
 
 __all__ = ["Frame"]
+
+
+_OPTION_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def _option(name: str) -> str:
+    """A COPY option name. Checked, because it cannot be quoted."""
+    if not _OPTION_NAME.match(name):
+        message = f"not a copy option name: {name!r}"
+        raise ValueError(message)
+    return name.upper()
 
 
 def _as_exprs(values: Iterable[object] | object) -> list[Expr]:
@@ -122,6 +138,15 @@ class Frame:
         """The column types."""
         return [type_text for _, type_text in self.schema]
 
+    def describe(self) -> Frame:
+        """Per-column statistics, as a frame: count, min, max, average, quartiles.
+
+        This reads the rows, unlike `.schema`, which only asks the binder.
+        """
+        # Wrapped in a SELECT because a bare SUMMARIZE cannot follow a WITH,
+        # and every step but the first is reached through one.
+        return self._derive("SELECT * FROM (SUMMARIZE SELECT * FROM {0})")
+
     # -- verbs
 
     def filter(self, predicate: Expr | str) -> Frame:
@@ -203,6 +228,57 @@ class Frame:
             return f"SELECT DISTINCT ON ({', '.join(e.fragment() for e in keys)}) * FROM {source}"
 
         return self._derive(body)
+
+    def sample(
+        self,
+        n: int | None = None,
+        *,
+        percent: float | None = None,
+        seed: int | None = None,
+        method: str | None = None,
+    ) -> Frame:
+        """A random subset: `n` rows, or `percent` of them.
+
+        Give a `seed` to get the same rows every run. `method` is reservoir,
+        bernoulli or system; the default suits whichever size you asked for.
+        """
+        if (n is None) == (percent is None):
+            message = "sample takes either n or percent"
+            raise TypeError(message)
+        # Bernoulli and system sample each row independently, so they cannot
+        # hit an exact count. Only reservoir can, so that is the default for n.
+        size = f"{int(n)} ROWS" if n is not None else f"{float(percent or 0)} PERCENT"
+        chosen = _option(method) if method else ("RESERVOIR" if n is not None else "BERNOULLI")
+        arguments = f"{chosen}, {int(seed)}" if seed is not None else chosen
+        return self._derive(f"SELECT * FROM {{0}} USING SAMPLE {size} ({arguments})")
+
+    def unnest(self, *columns: str) -> Frame:
+        """Expand list columns to one row per element, repeating the rest.
+
+        Unnesting two columns together walks them in step rather than making
+        every pairing; the shorter one runs out as NULL.
+        """
+        if not columns:
+            message = "unnest needs at least one column"
+            raise TypeError(message)
+        expanded = ", ".join(f"unnest({quote(c)}) AS {quote(c)}" for c in columns)
+        return self._derive(f"SELECT * REPLACE ({expanded}) FROM {{0}}")
+
+    def unpivot(self, *columns: str, name: str = "name", value: str = "value") -> Frame:
+        """Turn columns into rows, one row per column named.
+
+        The columns not named are kept and repeat down the rows. `name` and
+        `value` name the two columns that replace the ones folded away.
+        """
+        if not columns:
+            message = "unpivot needs at least one column"
+            raise TypeError(message)
+        folded = ", ".join(quote(c) for c in columns)
+        # Wrapped for the same reason as `describe`: a bare UNPIVOT cannot
+        # follow a WITH.
+        return self._derive(
+            f"SELECT * FROM (UNPIVOT (SELECT * FROM {{0}}) ON {folded} INTO NAME {quote(name)} VALUE {quote(value)})"
+        )
 
     def aggregate(self, *aggregates: object, group_by: Iterable[object] | object = ()) -> Frame:
         """Group and aggregate. Group keys come first in the output."""
@@ -286,13 +362,46 @@ class Frame:
         """A single column, as a frame."""
         return self.select(col(name))
 
+    # -- as a value inside another query
+
+    def scalar(self) -> Expr:
+        """This query used where a single value is expected.
+
+        It must return one row and one column. It is not correlated: it cannot
+        see the columns of the query it lands in, so it is computed once.
+
+            budget = totals.aggregate(col("amount").mean().alias("m"))
+            orders.filter(col("amount") > budget.scalar())
+        """
+        return SubQuery(self)
+
     # -- execution
 
-    def _execute(self) -> _duckdb.Result:
+    def _bind(self, wrap: Callable[[str], str] | None = None) -> tuple[str, list[Any] | None]:
+        """The SQL for this frame and the values it binds.
+
+        Rendered inside a sink, so lifted literals are bound as `$n` instead of
+        being written into the text.
+        """
         with ParamSink() as sink:
             sql = self.render()
+            if wrap is not None:
+                sql = wrap(sql)
         values = [value if kind == "literal" else None for kind, value, _ in sink.entries]
-        return self._connection.execute(sql, values or None)
+        return sql, values or None
+
+    def _execute(self) -> _duckdb.Result:
+        sql, values = self._bind()
+        return self._connection.execute(sql, values)
+
+    def _run(self, wrap: Callable[[str], str]) -> int:
+        """Run a statement built around this frame, reporting rows changed."""
+        sql, values = self._bind(wrap)
+        result = self._connection.execute(sql, values)
+        try:
+            return result.drain()
+        finally:
+            result.close()
 
     def fetchall(self) -> list[tuple[Any, ...]]:
         """Every row, as tuples."""
@@ -314,8 +423,63 @@ class Frame:
         row = counted.fetchone()
         return int(row[0]) if row else 0
 
+    # -- writing the rows somewhere
+
+    def create(self, name: str, *, replace: bool = False, temporary: bool = False) -> int:
+        """Store the rows in a new table. Returns how many were written."""
+        prefix = "CREATE OR REPLACE" if replace else "CREATE"
+        kind = "TEMPORARY TABLE" if temporary else "TABLE"
+        return self._run(lambda q: f"{prefix} {kind} {qualified(name)} AS {q}")
+
+    def insert_into(self, name: str) -> int:
+        """Append the rows to a table that exists. Returns how many were added."""
+        return self._run(lambda q: f"INSERT INTO {qualified(name)} {q}")
+
+    def to_parquet(self, path: str, **options: object) -> int:
+        """Write a Parquet file. Returns how many rows were written."""
+        return self._copy(path, {"format": "parquet", **options})
+
+    def to_csv(self, path: str, **options: object) -> int:
+        """Write a CSV file. Returns how many rows were written."""
+        return self._copy(path, {"format": "csv", **options})
+
+    def _copy(self, path: str, options: dict[str, object]) -> int:
+        """COPY TO. The path is a literal because COPY will not take a parameter."""
+        rendered = ", ".join(f"{_option(k)} {render_literal(v)}" for k, v in options.items())
+        return self._run(lambda q: f"COPY ({q}) TO {render_literal(path)} ({rendered})")
+
+    # -- looking at it
+
+    def explain(self, *, analyze: bool = False) -> str:
+        """The query plan, as text.
+
+        With `analyze` the query runs and the plan carries what each step cost.
+        """
+        keyword = "EXPLAIN ANALYZE" if analyze else "EXPLAIN"
+        sql, values = self._bind(lambda q: f"{keyword} {q}")
+        rows = self._connection.execute(sql, values).fetch_all()
+        return str(rows[0][1]) if rows else ""
+
+    def show(self, limit: int = 10) -> None:
+        """Print the first rows."""
+        print(self.preview(limit))
+
+    def preview(self, limit: int = 10) -> str:
+        """The first rows drawn as a table. What `show` prints."""
+        # One row past the limit, so the footer can say there are more without
+        # counting them all.
+        head = self.limit(limit + 1)
+        rows = head.fetchall()
+        return _box(head.columns, head.types, rows[:limit], more=len(rows) > limit)
+
     def __repr__(self) -> str:
-        return f"<Frame {', '.join(self.columns)}>"
+        try:
+            return self.preview()
+        except Error as error:
+            # A repr that raises is unusable in a debugger and a repr that hides
+            # the reason is worse, so name it and carry on.
+            reason = str(error).splitlines()[0] if str(error) else ""
+            return f"<Frame, unrunnable: {type(error).__name__}: {reason}>"
 
 
 class GroupedFrame:
@@ -328,3 +492,35 @@ class GroupedFrame:
     def agg(self, *aggregates: object) -> Frame:
         """Apply aggregates to each group."""
         return self._frame.aggregate(*aggregates, group_by=self._keys)
+
+
+_CELL_LIMIT = 32
+
+
+def _cell(value: object) -> str:
+    """One value as text, shortened if it would stretch the table."""
+    if value is None:
+        return "NULL"
+    text = str(value)
+    return text if len(text) <= _CELL_LIMIT else text[: _CELL_LIMIT - 1] + "\u2026"
+
+
+def _box(columns: list[str], types: list[str], rows: list[tuple[Any, ...]], *, more: bool) -> str:
+    """Rows drawn as a table, the way DuckDB's own shell draws them."""
+    heading = [columns, types]
+    body = [[_cell(v) for v in row] for row in rows]
+    widths = [max(len(line[i]) for line in [*heading, *body]) for i in range(len(columns))]
+
+    def rule(left: str, join: str, right: str) -> str:
+        return left + join.join("\u2500" * (w + 2) for w in widths) + right
+
+    def line(cells: list[str]) -> str:
+        padded = (c.ljust(w) for c, w in zip(cells, widths, strict=True))
+        return "\u2502 " + " \u2502 ".join(padded) + " \u2502"
+
+    drawn = [rule("\u250c", "\u252c", "\u2510"), line(columns), line(types), rule("\u251c", "\u253c", "\u2524")]
+    drawn += [line(cells) for cells in body]
+    drawn.append(rule("\u2514", "\u2534", "\u2518"))
+    if more:
+        drawn.append(f"({len(body)} rows shown, there are more)")
+    return "\n".join(drawn)

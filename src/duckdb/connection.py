@@ -1,8 +1,8 @@
 """Connecting, and running SQL.
 
-`sql()` builds a query without running it. `run()` runs one and reports how
-many rows it changed. There is no cursor here and no fetch family; those belong
-to PEP 249 and live in `duckdb.dbapi`.
+`sql()` and `table()` build a query without running it. `run()` runs one and
+reports how many rows it changed. There is no cursor here and no fetch family;
+those belong to PEP 249 and live in `duckdb.dbapi`.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from . import _duckdb
+from .expr import qualified
 from .frame import Frame
 
 if TYPE_CHECKING:
@@ -37,6 +38,15 @@ class Connection:
     def sql(self, query: str) -> Frame:
         """Build a query. Nothing runs until you ask the frame for rows."""
         return Frame(self._engine(), query)
+
+    def table(self, name: str) -> Frame:
+        """A table or view, by name.
+
+        The name is quoted, so a name that arrived from outside the program
+        cannot turn into more SQL. Building `sql(f"SELECT * FROM {name}")`
+        instead is where that goes wrong.
+        """
+        return Frame(self._engine(), f"SELECT * FROM {qualified(name)}")
 
     def run(self, sql: str, parameters: Sequence[Any] | Mapping[str, Any] | None = None) -> int:
         """Run a statement and report how many rows it changed.
