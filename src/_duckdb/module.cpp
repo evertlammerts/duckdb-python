@@ -296,6 +296,28 @@ public:
 		return Result(owner, connection.Execute(statement, bound));
 	}
 
+	/// What a statement would produce, without running it.
+	///
+	/// The binder is the only authority on schema. Predicting types in Python
+	/// would mean reimplementing DuckDB's type resolution and drifting from it.
+	/// Returns the output columns and the parameters the statement expects.
+	std::pair<std::vector<std::pair<std::string, std::string>>,
+	          std::vector<std::pair<std::string, std::string>>>
+	Bind(const std::string &sql) {
+		auto statements = connection.ParseSQL(sql);
+		auto statement = statements.Next();
+		if (!statement) {
+			throw cxx::InvalidInputException("Invalid Input Error: no statement to bind");
+		}
+		if (statements.Next()) {
+			throw cxx::InvalidInputException(
+			    "Invalid Input Error: bind takes exactly one statement");
+		}
+		nb::gil_scoped_release release;
+		const auto signature = connection.Bind(statement);
+		return {Fields(signature.output), Fields(signature.parameters)};
+	}
+
 	void Interrupt() {
 		connection.Interrupt();
 	}
@@ -309,6 +331,16 @@ public:
 	}
 
 private:
+	static std::vector<std::pair<std::string, std::string>> Fields(const cxx::Schema &schema) {
+		std::vector<std::pair<std::string, std::string>> fields;
+		const auto count = schema.GetFieldCount();
+		fields.reserve(count);
+		for (cxx::idx_t i = 0; i < count; i++) {
+			fields.emplace_back(std::string(schema.GetFieldName(i)), schema.GetFieldType(i).ToText());
+		}
+		return fields;
+	}
+
 	std::shared_ptr<DatabaseState> owner;
 	cxx::Connection connection;
 };
@@ -360,6 +392,7 @@ NB_MODULE(_duckdb, m) {
 		         return self.Execute(sql, parameters, *conversion);
 	         },
 	         nb::arg("sql"), nb::arg("parameters") = nb::none())
+	    .def("bind", &Connection::Bind, nb::arg("sql"))
 	    .def("interrupt", &Connection::Interrupt)
 	    .def("get_option", &Connection::GetOption, nb::arg("name"))
 	    .def("set_option", &Connection::SetOption, nb::arg("name"), nb::arg("value"));

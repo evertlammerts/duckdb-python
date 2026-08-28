@@ -91,7 +91,9 @@ jobs:
       - name: Build the engine bundle
         if: steps.cache.outputs.cache-hit != 'true'
         env:
-          CORE_EXTENSIONS: "core_functions;json;parquet;icu"
+          # tpch is built in so the TPC-H harness has data. Without it those
+          # tests skip, and a harness that always skips is worse than none.
+          CORE_EXTENSIONS: "core_functions;json;parquet;icu;tpch"
           # Selects the Visual Studio target architecture. Empty off Windows.
           CMAKE_GENERATOR_PLATFORM: ${{ matrix.msvc_arch }}
           # Match the floor the wheels are built against, per arch. See the

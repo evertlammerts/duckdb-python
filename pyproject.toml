@@ -75,6 +75,10 @@ ignore = ["D105", "D107"]
 convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
+# Operator methods must be able to return NotImplemented, so Python can fall
+# back to its own handling when the other operand is not ours. That value's
+# type is not expressible, so the return annotations admit Any.
+"src/duckdb/expr.py" = ["ANN401"]
 # Test names are the documentation; a docstring per assertion adds noise.
 # Explanations that matter live in comments at the point they apply.
 "tests/*" = ["D100", "D101", "D102", "D103"]

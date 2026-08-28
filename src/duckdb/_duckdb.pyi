@@ -28,6 +28,12 @@ class Connection:
     def execute(self, sql: str, parameters: Sequence[Any] | Mapping[str, Any] | None = None) -> Result:
         """Run one statement, binding parameters positionally or by name."""
 
+    def bind(self, sql: str) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+        """What a statement produces and expects, without running it.
+
+        Returns (output columns, parameters), each a list of (name, type).
+        """
+
     def interrupt(self) -> None: ...
     def get_option(self, name: str) -> str: ...
     def set_option(self, name: str, value: str) -> None: ...
