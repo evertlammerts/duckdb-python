@@ -218,12 +218,16 @@ class Cursor:
         connection = self._require_open()
         connection._claim_result_slot(self)
         connection._begin_if_needed()
+        # Cleared before the call, not after: if it raises there is no last
+        # query, and leaving the previous one's metadata in place would make
+        # description and rowcount describe a statement that never ran.
+        self._description = None
+        self._rowcount = -1
         result = connection._engine().execute(operation, parameters)
 
         if result.result_type == "rows":
             self._result = result
             self._description = [(name, type_text, None, None, None, None, None) for name, type_text in result.schema]
-            self._rowcount = -1
             return self
 
         # Anything that is not a row-producing statement is drained here and
@@ -240,11 +244,19 @@ class Cursor:
     def executemany(self, operation: str, seq_of_parameters: Sequence[Parameters]) -> Cursor:
         """Run one statement once per parameter set.
 
-        PEP 249 leaves rowcount undefined here when any set produces rows, and
-        DuckDB has no batched bind, so the sets run in order.
+        DuckDB has no batched bind, so the sets run in order. `rowcount` is the
+        total across them, which is what sqlite3 and most drivers report; PEP
+        249 leaves it undefined only when the statement produces rows, and it
+        stays -1 in that case.
         """
+        total = 0
+        counted = False
         for parameters in seq_of_parameters:
             self.execute(operation, parameters)
+            if self._rowcount >= 0:
+                total += self._rowcount
+                counted = True
+        self._rowcount = total if counted else -1
         return self
 
     # -- fetching
@@ -334,11 +346,9 @@ class Connection:
         return self._raw
 
     def _claim_result_slot(self, cursor: Cursor) -> None:
-        """Give `cursor` the connection's single result slot."""
-        if self._open_cursor is not None and self._open_cursor is not cursor:
+        """Release whoever holds the connection's single result slot, then take it."""
+        if self._open_cursor is not None:
             self._open_cursor._release_result()
-        elif self._open_cursor is cursor:
-            cursor._release_result()
         self._open_cursor = cursor
 
     def _release_cursor(self, cursor: Cursor) -> None:

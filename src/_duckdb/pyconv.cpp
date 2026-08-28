@@ -11,6 +11,7 @@
 #include <nanobind/stl/string.h>
 
 #include <algorithm>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -56,7 +57,7 @@ nb::object EpochDate(ConversionContext &ctx, int32_t days, const Value &value) {
 		return ctx.date_cls.attr("min");
 	}
 	try {
-		return ctx.date_cls(1970, 1, 1) + ctx.timedelta_cls(days, 0, 0);
+		return ctx.epoch_date + ctx.timedelta_cls(days, 0, 0);
 	} catch (const nb::python_error &) {
 		ThrowUnrepresentable("date", value.ToText());
 	}
@@ -65,7 +66,7 @@ nb::object EpochDate(ConversionContext &ctx, int32_t days, const Value &value) {
 // A time of day is a microsecond offset with no date, so build it by offsetting
 // midnight and dropping the date part.
 nb::object TimeFromMicros(ConversionContext &ctx, int64_t micros) {
-	return (ctx.datetime_cls(1970, 1, 1) + ctx.timedelta_cls(0, 0, micros)).attr("time")();
+	return (ctx.epoch_naive + ctx.timedelta_cls(0, 0, micros)).attr("time")();
 }
 
 nb::object EpochDateTime(ConversionContext &ctx, int64_t micros, bool utc, const Value &value) {
@@ -79,8 +80,7 @@ nb::object EpochDateTime(ConversionContext &ctx, int64_t micros, bool utc, const
 		nb::object limit = ctx.datetime_cls.attr("min");
 		return utc ? limit.attr("replace")(nb::arg("tzinfo") = ctx.timezone_utc) : limit;
 	}
-	nb::object epoch = utc ? ctx.datetime_cls(1970, 1, 1, 0, 0, 0, 0, ctx.timezone_utc)
-	                       : ctx.datetime_cls(1970, 1, 1);
+	const nb::object &epoch = utc ? ctx.epoch_aware : ctx.epoch_naive;
 	try {
 		return epoch + ctx.timedelta_cls(0, 0, micros);
 	} catch (const nb::python_error &) {
@@ -88,11 +88,10 @@ nb::object EpochDateTime(ConversionContext &ctx, int64_t micros, bool utc, const
 	}
 }
 
-// A leading integer, for the types whose text form is exact but whose binary
-// form has no Python counterpart (HUGEINT is wider than any C integer nanobind
-// converts).
-nb::object IntFromText(const std::string &text) {
-	return nb::module_::import_("builtins").attr("int")(text);
+// For the types whose text form is exact but whose binary form has no Python
+// counterpart: HUGEINT is wider than any C integer nanobind converts.
+nb::object IntFromText(ConversionContext &ctx, const std::string &text) {
+	return ctx.int_cls(text);
 }
 
 } // namespace
@@ -107,6 +106,8 @@ ConversionContext::ConversionContext() {
 	timezone_utc = timezone_cls.attr("utc");
 	decimal_cls = nb::module_::import_("decimal").attr("Decimal");
 	uuid_cls = nb::module_::import_("uuid").attr("UUID");
+	int_cls = nb::module_::import_("builtins").attr("int");
+	epoch_date = date_cls(1970, 1, 1);
 	epoch_naive = datetime_cls(1970, 1, 1);
 	epoch_aware = datetime_cls(1970, 1, 1, 0, 0, 0, 0, timezone_utc);
 	one_microsecond = timedelta_cls(0, 0, 1);
@@ -184,7 +185,7 @@ nb::object ValueToPython(const Value &value, ConversionContext &ctx) {
 	case LogicalTypeId::UHUGEINT:
 		// Exact: the text form of an integer loses nothing, and Python ints are
 		// arbitrary precision.
-		return IntFromText(value.ToText());
+		return IntFromText(ctx, value.ToText());
 	case LogicalTypeId::DECIMAL:
 		// Exact, and deliberately not float: Decimal(str) preserves the scale.
 		return ctx.decimal_cls(value.ToText());
@@ -305,6 +306,12 @@ Value PythonToValue(Connection &connection, nb::handle object, ConversionContext
 	}
 	if (nb::isinstance<nb::bytes>(object)) {
 		const auto bytes = nb::cast<nb::bytes>(object);
+		// blob_t carries a uint32 length, so anything larger would wrap and
+		// bind silently truncated. Every other overflow here throws.
+		if (bytes.size() > std::numeric_limits<uint32_t>::max()) {
+			throw duckdb::cxx::InvalidInputException(
+			    "Invalid Input Error: bytes value is larger than a BLOB can hold");
+		}
 		return Value::Create(connection, duckdb::cxx::blob_t(bytes.c_str(),
 		                                                    static_cast<uint32_t>(bytes.size())));
 	}
@@ -323,9 +330,25 @@ Value PythonToValue(Connection &connection, nb::handle object, ConversionContext
 	}
 	if (nb::isinstance(object, ctx.time_cls)) {
 		nb::object naive = object.attr("replace")(nb::arg("tzinfo") = nb::none());
-		nb::object combined = ctx.datetime_cls.attr("combine")(ctx.epoch_naive.attr("date")(), naive);
-		return Value::Create(connection,
-		                     duckdb::cxx::dtime_t {MicrosSince(ctx.epoch_naive, combined, ctx)});
+		nb::object combined = ctx.datetime_cls.attr("combine")(ctx.epoch_date, naive);
+		const int64_t micros = MicrosSince(ctx.epoch_naive, combined, ctx);
+
+		// An aware time binds as TIME_TZ. Dropping the offset here would be a
+		// silent loss, and the read direction already returns TIME_TZ aware, so
+		// the round trip has to keep it.
+		nb::object offset = object.attr("utcoffset")();
+		if (!offset.is_none()) {
+			const auto seconds =
+			    nb::cast<int64_t>(offset.attr("total_seconds")().attr("__int__")());
+			if (seconds > duckdb::cxx::dtime_tz_t::MAX_OFFSET ||
+			    seconds < -duckdb::cxx::dtime_tz_t::MAX_OFFSET) {
+				throw duckdb::cxx::InvalidInputException(
+				    "Invalid Input Error: time zone offset is outside the range TIME_TZ can hold");
+			}
+			return Value::Create(connection,
+			                     duckdb::cxx::dtime_tz_t(micros, static_cast<int32_t>(seconds)));
+		}
+		return Value::Create(connection, duckdb::cxx::dtime_t {micros});
 	}
 	if (nb::isinstance(object, ctx.timedelta_cls)) {
 		// timedelta carries no months, so this direction is lossless; the

@@ -1,0 +1,22 @@
+name: Build and install the project
+description: >
+  Install the build backend, then build the project against it.
+
+  Two steps because --no-build-isolation needs the backend already present: a
+  single sync into a fresh environment has no scikit-build-core to build with.
+  The interpreter is pinned because uv otherwise picks the newest one in the
+  image, which in the manylinux images is a release candidate.
+
+inputs:
+  python:
+    description: Interpreter to build against.
+    required: false
+    default: "3.12"
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        uv sync --only-group build --no-install-project --python "${{ inputs.python }}"
+        uv sync --no-build-isolation --group build --group dev --python "${{ inputs.python }}"

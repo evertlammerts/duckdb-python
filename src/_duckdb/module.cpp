@@ -12,6 +12,7 @@
 #include <nanobind/stl/vector.h>
 
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
@@ -66,15 +67,26 @@ struct DatabaseState {
 	std::unique_ptr<cxx::Database> database;
 };
 
+/// The engine result and the lock guarding its lifetime.
+///
+/// Held behind a shared_ptr rather than inline, because a std::mutex member
+/// would make Result non-movable, and nanobind constructs Result by value from
+/// Connection::execute.
+struct ResultState {
+	std::mutex lifetime;
+	std::shared_ptr<cxx::QueryResult> result;
+};
+
 class Result {
 public:
 	Result(std::shared_ptr<DatabaseState> owner, cxx::QueryResult result)
-	    : owner(std::move(owner)), result(std::move(result)) {
+	    : owner(std::move(owner)), state(std::make_shared<ResultState>()) {
+		state->result = std::make_shared<cxx::QueryResult>(std::move(result));
 	}
 
 	/// Column names paired with the text form of their type.
 	std::vector<std::pair<std::string, std::string>> Schema() {
-		const auto schema = Live().GetSchema();
+		const auto schema = Live()->GetSchema();
 		std::vector<std::pair<std::string, std::string>> out;
 		const auto count = schema.GetFieldCount();
 		out.reserve(count);
@@ -84,19 +96,24 @@ public:
 		return out;
 	}
 
-	/// The result, or a clear error once it has been closed.
-	cxx::QueryResult &Live() {
-		if (!result) {
+	/// A reference to the live result, or a clear error once it is closed.
+	///
+	/// Returns a shared_ptr rather than a raw reference on purpose: the caller
+	/// keeps the engine result alive for as long as it is using it, even if
+	/// another thread closes this Result meanwhile.
+	std::shared_ptr<cxx::QueryResult> Live() {
+		std::lock_guard<std::mutex> guard(state->lifetime);
+		if (!state->result) {
 			nb::object module = nb::module_::import_("duckdb.exceptions");
 			PyErr_SetString(module.attr("InterfaceError").ptr(), "result is closed");
 			throw nb::python_error();
 		}
-		return *result;
+		return state->result;
 	}
 
 	/// Whether this result carries rows, a changed-row count, or nothing.
 	std::string ResultType() {
-		switch (Live().GetResultType()) {
+		switch (Live()->GetResultType()) {
 		case cxx::QueryResult::ResultType::QUERY_RESULT:
 			return "rows";
 		case cxx::QueryResult::ResultType::CHANGED_ROWS:
@@ -111,11 +128,11 @@ public:
 	/// Side effects land when a result is drained, so a statement whose result
 	/// is dropped without draining never takes effect at all.
 	cxx::idx_t Drain() {
-		auto &live = Live();
+		auto live = Live();
 		pending.reset();
 		finished = true;
 		nb::gil_scoped_release release;
-		return live.Drain();
+		return live->Drain();
 	}
 
 	/// Release the result so the connection can run another query.
@@ -124,11 +141,24 @@ public:
 	/// stops reading early needs a way to say so. Relying on the Python object
 	/// being collected would make the moment of release depend on refcount
 	/// timing, which is exactly the wrong thing for an exclusive resource.
+	///
+	/// Only the owning pointer is cleared here. A thread already inside
+	/// Step/Wait/Drain holds its own reference and keeps the engine result
+	/// alive until it returns, so closing never frees it underneath that
+	/// thread. Both sides drop the GIL, so the GIL cannot serialise this.
 	void Close() {
-		pending.reset();
-		finished = true;
-		nb::gil_scoped_release release;
-		result.reset();
+		std::shared_ptr<cxx::QueryResult> released;
+		{
+			std::lock_guard<std::mutex> guard(state->lifetime);
+			pending.reset();
+			finished = true;
+			released = std::move(state->result);
+			state->result.reset();
+		}
+		// Drop the last reference, if it is the last, outside the lock and
+		// without the GIL: destruction talks to the engine.
+		nb::gil_scoped_release unlock;
+		released.reset();
 	}
 
 	/// Up to `count` more rows, or every remaining row when `count` is zero.
@@ -155,7 +185,7 @@ public:
 			if (finished) {
 				return rows;
 			}
-			if (!Advance(ctx)) {
+			if (!Advance()) {
 				return rows;
 			}
 		}
@@ -169,16 +199,18 @@ public:
 
 private:
 	/// Step until a chunk arrives or the result ends. False once it has ended.
-	bool Advance(ConversionContext &ctx) {
-		(void)ctx;
+	bool Advance() {
 		while (true) {
 			// StepResult carries a DataChunk and so is not default
 			// constructible; build it in place from the call.
-			auto step = [this] {
+			// The reference is taken before the GIL is dropped and held for
+			// the whole call, so a concurrent Close cannot free it here.
+			auto live = Live();
+			auto step = [&live] {
 				// The engine runs on its own threads and may block; never hold
 				// the GIL across it, or a callback into Python deadlocks.
 				nb::gil_scoped_release release;
-				return Live().Step();
+				return live->Step();
 			}();
 			switch (step.status) {
 			case cxx::QueryResult::StepStatus::CHUNK:
@@ -195,7 +227,7 @@ private:
 			}
 			case cxx::QueryResult::StepStatus::WAITING: {
 				nb::gil_scoped_release release;
-				Live().Wait();
+				live->Wait();
 				break;
 			}
 			}
@@ -212,7 +244,7 @@ private:
 	}
 
 	std::shared_ptr<DatabaseState> owner;
-	std::optional<cxx::QueryResult> result;
+	std::shared_ptr<ResultState> state;
 	std::optional<cxx::DataChunk> pending;
 	cxx::idx_t offset = 0;
 	bool finished = false;
@@ -310,12 +342,16 @@ NB_MODULE(_duckdb, m) {
 
 	nb::class_<Database>(m, "Database")
 	    .def("__init__",
-	         [](Database *self, const std::string &path,
-	            const std::vector<std::pair<std::string, std::string>> &options) {
-		         new (self) Database(std::make_shared<DatabaseState>(path, options));
+	         // options is taken as a handle so None is accepted, matching the
+	         // stub and the way Connection::execute takes its parameters.
+	         [](Database *self, const std::string &path, nb::handle options) {
+		         std::vector<std::pair<std::string, std::string>> settings;
+		         if (!options.is_none()) {
+			         settings = nb::cast<std::vector<std::pair<std::string, std::string>>>(options);
+		         }
+		         new (self) Database(std::make_shared<DatabaseState>(path, settings));
 	         },
-	         nb::arg("path") = std::string(":memory:"),
-	         nb::arg("options") = std::vector<std::pair<std::string, std::string>>())
+	         nb::arg("path") = std::string(":memory:"), nb::arg("options") = nb::none())
 	    .def("connect", &Database::Connect);
 
 	nb::class_<Connection>(m, "Connection")

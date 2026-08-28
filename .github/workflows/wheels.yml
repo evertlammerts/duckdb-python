@@ -71,6 +71,8 @@ jobs:
           name: engine-${{ matrix.target }}
           path: engine-bundle
 
+      - uses: ./.github/actions/engine-bundle
+
       - name: Build the wheel
         env:
           # Without a pin the wheel takes the runner's OS version as its floor
@@ -80,20 +82,6 @@ jobs:
           # Intel keeps 10.14, the floor nanobind's aligned new/delete needs.
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.target == 'macos-arm64' && '11.0' || '10.14' }}
         run: |
-          # Resolve the bundle path in the shell, not through
-          # ${{ github.workspace }}: that expression yields the HOST path,
-          # which is not where the workspace is mounted inside a container, and
-          # on Windows it yields backslashes that CMake parses as escapes.
-          # cygpath -m gives CMake-friendly "D:/a/..." on the Windows runners.
-          if command -v cygpath >/dev/null 2>&1; then
-            BUNDLE="$(cygpath -m "$PWD")/engine-bundle"
-          else
-            BUNDLE="$PWD/engine-bundle"
-          fi
-          export SKBUILD_CMAKE_DEFINE="DUCKDB_CPP_DIR=$BUNDLE;DUCKDB_ROOT=$BUNDLE"
-          # The bundle is self-contained: it carries duckdb_cpp.{hpp,cpp}, the
-          # two v2 headers, DuckDBCppApi.cmake, and the library, so one path
-          # serves as both the C++ API directory and the library prefix.
           uv venv --python ${{ matrix.python }} .venv-build
           PY=.venv-build/bin/python
           [ -x "$PY" ] || PY=.venv-build/Scripts/python.exe
@@ -191,25 +179,8 @@ jobs:
           name: engine-linux-x86_64
           path: engine-bundle
 
-      - name: Build and install
-        # --no-build-isolation needs the build backend already present, so the
-        # build group goes in first and stays in for the project build. Without
-        # the pin uv picks the newest interpreter in the image, which is a 3.15
-        # release candidate.
-        run: |
-          # Resolve the bundle path in the shell, not through
-          # ${{ github.workspace }}: that expression yields the HOST path,
-          # which is not where the workspace is mounted inside a container, and
-          # on Windows it yields backslashes that CMake parses as escapes.
-          # cygpath -m gives CMake-friendly "D:/a/..." on the Windows runners.
-          if command -v cygpath >/dev/null 2>&1; then
-            BUNDLE="$(cygpath -m "$PWD")/engine-bundle"
-          else
-            BUNDLE="$PWD/engine-bundle"
-          fi
-          export SKBUILD_CMAKE_DEFINE="DUCKDB_CPP_DIR=$BUNDLE;DUCKDB_ROOT=$BUNDLE"
-          uv sync --only-group build --no-install-project --python 3.12
-          uv sync --no-build-isolation --group build --group dev --python 3.12
+      - uses: ./.github/actions/engine-bundle
+      - uses: ./.github/actions/build-and-install
 
       # mypy needs the built extension present: the stub is checked against it,
       # not accepted in place of it.
@@ -231,14 +202,17 @@ jobs:
           name: engine-macos-arm64
           path: engine-bundle
 
-      - name: Build instrumented and run the suite
+      - uses: ./.github/actions/engine-bundle
+        with:
+          extra-defines: >-
+            CMAKE_CXX_FLAGS=-fprofile-instr-generate -fcoverage-mapping;CMAKE_SHARED_LINKER_FLAGS=-fprofile-instr-generate
+
+      - uses: ./.github/actions/build-and-install
+
+      - name: Run the suite under instrumentation
         env:
           MACOSX_DEPLOYMENT_TARGET: "11.0"
         run: |
-          BUNDLE="$PWD/engine-bundle"
-          export SKBUILD_CMAKE_DEFINE="DUCKDB_CPP_DIR=$BUNDLE;DUCKDB_ROOT=$BUNDLE;CMAKE_CXX_FLAGS=-fprofile-instr-generate -fcoverage-mapping;CMAKE_SHARED_LINKER_FLAGS=-fprofile-instr-generate"
-          uv sync --only-group build --no-install-project --python 3.12
-          uv sync --no-build-isolation --group build --group dev --python 3.12
           mkdir -p "$RUNNER_TEMP/profraw"
           # Run from elsewhere so the source tree cannot shadow the install.
           (cd "$RUNNER_TEMP" && LLVM_PROFILE_FILE="$RUNNER_TEMP/profraw/duckdb-%p.profraw" \

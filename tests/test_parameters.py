@@ -148,3 +148,42 @@ def test_parameters_reject_multiple_statements(con: _duckdb.Connection) -> None:
     # rather than silently binding into the first.
     with pytest.raises(exceptions.InvalidInputError, match="exactly one statement"):
         con.execute("SELECT $1; SELECT $1", [1])
+
+
+class TestAwareTime:
+    """An aware `time` binds as TIME_TZ rather than losing its offset.
+
+    The read direction already returns TIME_TZ aware, so binding it back
+    naively made the round trip asymmetric and silently dropped the offset.
+    """
+
+    def test_offset_survives_a_roundtrip(self, con: _duckdb.Connection) -> None:
+        aware = datetime.time(13, 45, 6, tzinfo=datetime.timezone(datetime.timedelta(hours=2)))
+        back = roundtrip(con, aware)
+        assert back.utcoffset() == datetime.timedelta(hours=2)
+        assert back.replace(tzinfo=None) == aware.replace(tzinfo=None)
+
+    def test_binds_as_time_with_time_zone(self, con: _duckdb.Connection) -> None:
+        aware = datetime.time(13, 45, 6, tzinfo=datetime.UTC)
+        assert "TIME" in con.execute("SELECT typeof($1)", [aware]).fetch_all()[0][0]
+
+    def test_negative_offset(self, con: _duckdb.Connection) -> None:
+        aware = datetime.time(9, 0, tzinfo=datetime.timezone(datetime.timedelta(hours=-5)))
+        assert roundtrip(con, aware).utcoffset() == datetime.timedelta(hours=-5)
+
+    def test_naive_time_stays_naive(self, con: _duckdb.Connection) -> None:
+        naive = datetime.time(13, 45, 6)
+        back = roundtrip(con, naive)
+        assert back.tzinfo is None
+        assert back == naive
+
+    def test_offset_beyond_the_range_is_refused(self, con: _duckdb.Connection) -> None:
+        # TIME_TZ tops out just under 16 hours; refuse rather than wrap.
+        too_far = datetime.time(12, 0, tzinfo=datetime.timezone(datetime.timedelta(hours=20)))
+        with pytest.raises(exceptions.InvalidInputError, match="offset"):
+            roundtrip(con, too_far)
+
+
+def test_database_options_accepts_none(con: _duckdb.Connection) -> None:
+    # The stub allows None, so the binding has to as well.
+    assert _duckdb.Database(":memory:", None).connect() is not None

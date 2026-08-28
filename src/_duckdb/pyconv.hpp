@@ -29,6 +29,11 @@ struct ConversionContext {
 	nb::object timezone_utc;
 	nb::object decimal_cls;
 	nb::object uuid_cls;
+	nb::object int_cls;
+
+	/// Epochs and the unit, cached because both directions offset from them
+	/// per value.
+	nb::object epoch_date;
 
 	/// Epochs held for the parameter direction, so datetimes convert by
 	/// subtraction rather than by reimplementing the calendar.

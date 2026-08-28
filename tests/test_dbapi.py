@@ -330,3 +330,64 @@ class TestResultExclusivity:
         assert cur.fetchone() == (0,)
         cur.execute("SELECT 42")
         assert cur.fetchone() == (42,)
+
+
+class TestFailedExecute:
+    """A statement that raises leaves no metadata behind.
+
+    `description` documents itself as the last query's columns. After a failed
+    execute there is no last query, so keeping the previous one's values would
+    describe a statement that never ran.
+    """
+
+    def test_description_is_cleared(self, con: dbapi.Connection) -> None:
+        cur = con.cursor()
+        cur.execute("SELECT 1 AS a")
+        assert cur.description is not None
+        with pytest.raises(dbapi.DatabaseError):
+            cur.execute("SELECT * FROM no_such_table")
+        assert cur.description is None
+
+    def test_rowcount_is_cleared(self, con: dbapi.Connection) -> None:
+        cur = con.cursor()
+        cur.execute("CREATE TABLE t (v INTEGER)")
+        cur.execute("INSERT INTO t VALUES (1), (2)")
+        assert cur.rowcount == 2
+        with pytest.raises(dbapi.DatabaseError):
+            cur.execute("INSERT INTO no_such_table VALUES (1)")
+        assert cur.rowcount == -1
+
+    def test_a_syntax_error_clears_it_too(self, con: dbapi.Connection) -> None:
+        cur = con.cursor()
+        cur.execute("SELECT 1 AS a")
+        with pytest.raises(dbapi.DatabaseError):
+            cur.execute("SELECT FROM WHERE")
+        assert cur.description is None
+
+
+class TestExecutemanyRowcount:
+    """rowcount is the total across parameter sets, as sqlite3 reports."""
+
+    def test_insert_totals_across_sets(self, con: dbapi.Connection) -> None:
+        cur = con.cursor()
+        cur.execute("CREATE TABLE t (v INTEGER)")
+        cur.executemany("INSERT INTO t VALUES (?)", [[1], [2], [3]])
+        assert cur.rowcount == 3
+
+    def test_multi_row_sets_total(self, con: dbapi.Connection) -> None:
+        cur = con.cursor()
+        cur.execute("CREATE TABLE t (v INTEGER)")
+        cur.executemany("INSERT INTO t VALUES (?), (?)", [[1, 2], [3, 4]])
+        assert cur.rowcount == 4
+
+    def test_empty_sequence_leaves_it_undefined(self, con: dbapi.Connection) -> None:
+        cur = con.cursor()
+        cur.execute("CREATE TABLE t (v INTEGER)")
+        cur.executemany("INSERT INTO t VALUES (?)", [])
+        assert cur.rowcount == -1
+
+    def test_row_producing_statement_stays_undefined(self, con: dbapi.Connection) -> None:
+        # PEP 249 leaves rowcount undefined when the statement produces rows.
+        cur = con.cursor()
+        cur.executemany("SELECT ?", [[1], [2]])
+        assert cur.rowcount == -1
