@@ -366,23 +366,26 @@ py::list DuckDBPyConnection::ListFilesystems() {
 }
 
 py::str DuckDBPyConnection::GetProfilingInformation(const py::str &format) {
-	// We want to expose ProfilerPrintFormat as a string to Python users
+	// We want to expose ProfilerPrintFormat as a string to Python users.
+	// Compare as std::string. Inside namespace duckdb, unqualified lookup also finds the engine's
+	// operator==(const string &, const String/Identifier &), which makes py::str vs a literal ambiguous.
+	const std::string format_str = format;
 	ProfilerPrintFormat format_enum;
-	if (format == "query_tree") {
+	if (format_str == "query_tree") {
 		format_enum = ProfilerPrintFormat::QUERY_TREE;
-	} else if (format == "json") {
+	} else if (format_str == "json") {
 		format_enum = ProfilerPrintFormat::JSON;
-	} else if (format == "query_tree_optimizer") {
+	} else if (format_str == "query_tree_optimizer") {
 		format_enum = ProfilerPrintFormat::QUERY_TREE_OPTIMIZER;
-	} else if (format == "no_output") {
+	} else if (format_str == "no_output") {
 		format_enum = ProfilerPrintFormat::NO_OUTPUT;
-	} else if (format == "html") {
+	} else if (format_str == "html") {
 		format_enum = ProfilerPrintFormat::HTML;
-	} else if (format == "graphviz") {
+	} else if (format_str == "graphviz") {
 		format_enum = ProfilerPrintFormat::GRAPHVIZ;
 	} else {
 		throw InvalidInputException(
-		    "Invalid ProfilerPrintFormat string: " + std::string(format) +
+		    "Invalid ProfilerPrintFormat string: " + format_str +
 		    ". Valid options are: query_tree, json, query_tree_optimizer, no_output, html, graphviz.");
 	}
 	auto &connection = con.GetConnection();
