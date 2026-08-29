@@ -59,7 +59,7 @@ def query_text(path: Path) -> str:
 
 def answer(connection: duckdb.Connection, name: str) -> list[tuple[object, ...]]:
     """What the original query returns, for the verb version to match."""
-    return connection.sql(query_text(Path(__file__).parent / "tpch" / f"{name}.sql")).fetchall()
+    return duckdb.sql(query_text(Path(__file__).parent / "tpch" / f"{name}.sql")).fetchall(connection)
 
 
 def date(text: str) -> Expr:
@@ -79,16 +79,16 @@ def test_the_sql_bridge_carries_every_query(tpch: duckdb.Connection, path: Path)
     This is the floor. The bridge is what makes an unexpressible query a
     non-problem, so it has to hold for all 22.
     """
-    rows = tpch.sql(query_text(path)).fetchall()
+    rows = duckdb.sql(query_text(path)).fetchall(tpch)
     assert isinstance(rows, list)
 
 
 @pytest.mark.parametrize("path", QUERIES, ids=lambda p: p.stem)
 def test_schema_is_available_without_running(tpch: duckdb.Connection, path: Path) -> None:
     """The binder answers the shape of every query without executing it."""
-    frame = tpch.sql(query_text(path))
-    assert frame.columns, "no columns reported"
-    assert len(frame.columns) == len(frame.types)
+    frame = duckdb.sql(query_text(path))
+    assert frame.columns(tpch), "no columns reported"
+    assert len(frame.columns(tpch)) == len(frame.types(tpch))
 
 
 class TestExpressedDirectly:
@@ -97,7 +97,7 @@ class TestExpressedDirectly:
     def test_q01(self, tpch: duckdb.Connection) -> None:
         disc = revenue()
         actual = (
-            tpch.table("lineitem")
+            duckdb.table("lineitem")
             .filter(col("l_shipdate") <= date("1998-09-02"))
             .group_by(col("l_returnflag"), col("l_linestatus"))
             .agg(
@@ -112,12 +112,12 @@ class TestExpressedDirectly:
             )
             .sort(col("l_returnflag"), col("l_linestatus"))
         )
-        assert actual.fetchall() == answer(tpch, "q01")
+        assert actual.fetchall(tpch) == answer(tpch, "q01")
 
     def test_q03(self, tpch: duckdb.Connection) -> None:
-        customer = tpch.table("customer").filter(col("c_mktsegment") == "BUILDING")
-        orders = tpch.table("orders").filter(col("o_orderdate") < date("1995-03-15"))
-        lineitem = tpch.table("lineitem").filter(col("l_shipdate") > date("1995-03-15"))
+        customer = duckdb.table("customer").filter(col("c_mktsegment") == "BUILDING")
+        orders = duckdb.table("orders").filter(col("o_orderdate") < date("1995-03-15"))
+        lineitem = duckdb.table("lineitem").filter(col("l_shipdate") > date("1995-03-15"))
         actual = (
             customer.join(orders, on=col("c_custkey") == col("o_custkey"))
             .join(lineitem, on=col("l_orderkey") == col("o_orderkey"))
@@ -127,35 +127,35 @@ class TestExpressedDirectly:
             .sort(col("revenue").desc(), col("o_orderdate"))
             .limit(10)
         )
-        assert actual.fetchall() == answer(tpch, "q03")
+        assert actual.fetchall(tpch) == answer(tpch, "q03")
 
     def test_q05(self, tpch: duckdb.Connection) -> None:
-        orders = tpch.table("orders").filter(
+        orders = duckdb.table("orders").filter(
             (col("o_orderdate") >= date("1994-01-01")) & (col("o_orderdate") < date("1995-01-01"))
         )
         actual = (
-            tpch.table("customer")
+            duckdb.table("customer")
             .join(orders, on=col("l.c_custkey") == col("r.o_custkey"))
-            .join(tpch.table("lineitem"), on=col("l.o_orderkey") == col("r.l_orderkey"))
+            .join(duckdb.table("lineitem"), on=col("l.o_orderkey") == col("r.l_orderkey"))
             .join(
-                tpch.table("supplier"),
+                duckdb.table("supplier"),
                 on=(col("l.l_suppkey") == col("r.s_suppkey")) & (col("l.c_nationkey") == col("r.s_nationkey")),
             )
-            .join(tpch.table("nation"), on=col("l.s_nationkey") == col("r.n_nationkey"))
+            .join(duckdb.table("nation"), on=col("l.s_nationkey") == col("r.n_nationkey"))
             .join(
-                tpch.table("region").filter(col("r_name") == "ASIA"),
+                duckdb.table("region").filter(col("r_name") == "ASIA"),
                 on=col("l.n_regionkey") == col("r.r_regionkey"),
             )
             .group_by(col("n_name"))
             .agg(revenue().sum().alias("revenue"))
             .sort(col("revenue").desc())
         )
-        assert actual.fetchall() == answer(tpch, "q05")
+        assert actual.fetchall(tpch) == answer(tpch, "q05")
 
     def test_q06(self, tpch: duckdb.Connection) -> None:
         # The simplest shape in the set: restrict, then one aggregate.
         actual = (
-            tpch.table("lineitem")
+            duckdb.table("lineitem")
             .filter(
                 (col("l_shipdate") >= date("1994-01-01"))
                 & (col("l_shipdate") < date("1995-01-01"))
@@ -164,22 +164,22 @@ class TestExpressedDirectly:
             )
             .aggregate((col("l_extendedprice") * col("l_discount")).sum().alias("revenue"))
         )
-        assert actual.fetchall() == answer(tpch, "q06")
+        assert actual.fetchall(tpch) == answer(tpch, "q06")
 
     def test_q07(self, tpch: duckdb.Connection) -> None:
         # `nation` is joined twice. SQL tells the two apart with the aliases
         # n1 and n2; here the second join suffixes its side, so the customer's
         # nation arrives as n_name_cust.
         actual = (
-            tpch.table("supplier")
+            duckdb.table("supplier")
             .join(
-                tpch.table("lineitem").filter(col("l_shipdate").between(date("1995-01-01"), date("1996-12-31"))),
+                duckdb.table("lineitem").filter(col("l_shipdate").between(date("1995-01-01"), date("1996-12-31"))),
                 on=col("l.s_suppkey") == col("r.l_suppkey"),
             )
-            .join(tpch.table("orders"), on=col("l.l_orderkey") == col("r.o_orderkey"))
-            .join(tpch.table("customer"), on=col("l.o_custkey") == col("r.c_custkey"))
-            .join(tpch.table("nation"), on=col("l.s_nationkey") == col("r.n_nationkey"))
-            .join(tpch.table("nation"), on=col("l.c_nationkey") == col("r.n_nationkey"), suffix="_cust")
+            .join(duckdb.table("orders"), on=col("l.l_orderkey") == col("r.o_orderkey"))
+            .join(duckdb.table("customer"), on=col("l.o_custkey") == col("r.c_custkey"))
+            .join(duckdb.table("nation"), on=col("l.s_nationkey") == col("r.n_nationkey"))
+            .join(duckdb.table("nation"), on=col("l.c_nationkey") == col("r.n_nationkey"), suffix="_cust")
             .filter(
                 ((col("n_name") == "FRANCE") & (col("n_name_cust") == "GERMANY"))
                 | ((col("n_name") == "GERMANY") & (col("n_name_cust") == "FRANCE"))
@@ -189,27 +189,27 @@ class TestExpressedDirectly:
             .agg(col("volume").sum().alias("revenue"))
             .sort(col("n_name"), col("n_name_cust"), col("l_year"))
         )
-        assert actual.fetchall() == answer(tpch, "q07")
+        assert actual.fetchall(tpch) == answer(tpch, "q07")
 
     def test_q08(self, tpch: duckdb.Connection) -> None:
         # The customer's nation is joined first, so it keeps the plain names
         # and feeds the region join. The supplier's is suffixed.
         actual = (
-            tpch.table("part")
+            duckdb.table("part")
             .filter(col("p_type") == "ECONOMY ANODIZED STEEL")
-            .join(tpch.table("lineitem"), on=col("l.p_partkey") == col("r.l_partkey"))
-            .join(tpch.table("supplier"), on=col("l.l_suppkey") == col("r.s_suppkey"))
+            .join(duckdb.table("lineitem"), on=col("l.p_partkey") == col("r.l_partkey"))
+            .join(duckdb.table("supplier"), on=col("l.l_suppkey") == col("r.s_suppkey"))
             .join(
-                tpch.table("orders").filter(col("o_orderdate").between(date("1995-01-01"), date("1996-12-31"))),
+                duckdb.table("orders").filter(col("o_orderdate").between(date("1995-01-01"), date("1996-12-31"))),
                 on=col("l.l_orderkey") == col("r.o_orderkey"),
             )
-            .join(tpch.table("customer"), on=col("l.o_custkey") == col("r.c_custkey"))
-            .join(tpch.table("nation"), on=col("l.c_nationkey") == col("r.n_nationkey"))
+            .join(duckdb.table("customer"), on=col("l.o_custkey") == col("r.c_custkey"))
+            .join(duckdb.table("nation"), on=col("l.c_nationkey") == col("r.n_nationkey"))
             .join(
-                tpch.table("region").filter(col("r_name") == "AMERICA"),
+                duckdb.table("region").filter(col("r_name") == "AMERICA"),
                 on=col("l.n_regionkey") == col("r.r_regionkey"),
             )
-            .join(tpch.table("nation"), on=col("l.s_nationkey") == col("r.n_nationkey"), suffix="_supp")
+            .join(duckdb.table("nation"), on=col("l.s_nationkey") == col("r.n_nationkey"), suffix="_supp")
             .with_columns(o_year=fn("year", col("o_orderdate")), volume=revenue())
             .group_by(col("o_year"))
             .agg(
@@ -219,20 +219,20 @@ class TestExpressedDirectly:
             )
             .sort(col("o_year"))
         )
-        assert actual.fetchall() == answer(tpch, "q08")
+        assert actual.fetchall(tpch) == answer(tpch, "q08")
 
     def test_q09(self, tpch: duckdb.Connection) -> None:
         actual = (
-            tpch.table("part")
+            duckdb.table("part")
             .filter(col("p_name").like("%green%"))
-            .join(tpch.table("lineitem"), on=col("l.p_partkey") == col("r.l_partkey"))
-            .join(tpch.table("supplier"), on=col("l.l_suppkey") == col("r.s_suppkey"))
+            .join(duckdb.table("lineitem"), on=col("l.p_partkey") == col("r.l_partkey"))
+            .join(duckdb.table("supplier"), on=col("l.l_suppkey") == col("r.s_suppkey"))
             .join(
-                tpch.table("partsupp"),
+                duckdb.table("partsupp"),
                 on=(col("l.l_suppkey") == col("r.ps_suppkey")) & (col("l.l_partkey") == col("r.ps_partkey")),
             )
-            .join(tpch.table("orders"), on=col("l.l_orderkey") == col("r.o_orderkey"))
-            .join(tpch.table("nation"), on=col("l.s_nationkey") == col("r.n_nationkey"))
+            .join(duckdb.table("orders"), on=col("l.l_orderkey") == col("r.o_orderkey"))
+            .join(duckdb.table("nation"), on=col("l.s_nationkey") == col("r.n_nationkey"))
             .with_columns(
                 nation=col("n_name"),
                 o_year=fn("year", col("o_orderdate")),
@@ -242,20 +242,20 @@ class TestExpressedDirectly:
             .agg(col("amount").sum().alias("sum_profit"))
             .sort(col("nation"), col("o_year").desc())
         )
-        assert actual.fetchall() == answer(tpch, "q09")
+        assert actual.fetchall(tpch) == answer(tpch, "q09")
 
     def test_q10(self, tpch: duckdb.Connection) -> None:
-        orders = tpch.table("orders").filter(
+        orders = duckdb.table("orders").filter(
             (col("o_orderdate") >= date("1993-10-01")) & (col("o_orderdate") < date("1994-01-01"))
         )
         actual = (
-            tpch.table("customer")
+            duckdb.table("customer")
             .join(orders, on=col("l.c_custkey") == col("r.o_custkey"))
             .join(
-                tpch.table("lineitem").filter(col("l_returnflag") == "R"),
+                duckdb.table("lineitem").filter(col("l_returnflag") == "R"),
                 on=col("l.o_orderkey") == col("r.l_orderkey"),
             )
-            .join(tpch.table("nation"), on=col("l.c_nationkey") == col("r.n_nationkey"))
+            .join(duckdb.table("nation"), on=col("l.c_nationkey") == col("r.n_nationkey"))
             .group_by(
                 col("c_custkey"),
                 col("c_name"),
@@ -271,14 +271,14 @@ class TestExpressedDirectly:
             .sort(col("revenue").desc())
             .limit(20)
         )
-        assert actual.fetchall() == answer(tpch, "q10")
+        assert actual.fetchall(tpch) == answer(tpch, "q10")
 
     def test_q11(self, tpch: duckdb.Connection) -> None:
         german = (
-            tpch.table("partsupp")
-            .join(tpch.table("supplier"), on=col("l.ps_suppkey") == col("r.s_suppkey"))
+            duckdb.table("partsupp")
+            .join(duckdb.table("supplier"), on=col("l.ps_suppkey") == col("r.s_suppkey"))
             .join(
-                tpch.table("nation").filter(col("n_name") == "GERMANY"),
+                duckdb.table("nation").filter(col("n_name") == "GERMANY"),
                 on=col("l.s_nationkey") == col("r.n_nationkey"),
             )
         )
@@ -292,11 +292,11 @@ class TestExpressedDirectly:
             .filter(col("value") > threshold.scalar())
             .sort(col("value").desc())
         )
-        assert actual.fetchall() == answer(tpch, "q11")
+        assert actual.fetchall(tpch) == answer(tpch, "q11")
 
     def test_q12(self, tpch: duckdb.Connection) -> None:
         urgent = (col("o_orderpriority") == "1-URGENT") | (col("o_orderpriority") == "2-HIGH")
-        lineitem = tpch.table("lineitem").filter(
+        lineitem = duckdb.table("lineitem").filter(
             col("l_shipmode").isin(["MAIL", "SHIP"])
             & (col("l_commitdate") < col("l_receiptdate"))
             & (col("l_shipdate") < col("l_commitdate"))
@@ -304,7 +304,7 @@ class TestExpressedDirectly:
             & (col("l_receiptdate") < date("1995-01-01"))
         )
         actual = (
-            tpch.table("orders")
+            duckdb.table("orders")
             .join(lineitem, on=col("l.o_orderkey") == col("r.l_orderkey"))
             .group_by(col("l_shipmode"))
             .agg(
@@ -313,71 +313,71 @@ class TestExpressedDirectly:
             )
             .sort(col("l_shipmode"))
         )
-        assert actual.fetchall() == answer(tpch, "q12")
+        assert actual.fetchall(tpch) == answer(tpch, "q12")
 
     def test_q14(self, tpch: duckdb.Connection) -> None:
-        lineitem = tpch.table("lineitem").filter(
+        lineitem = duckdb.table("lineitem").filter(
             (col("l_shipdate") >= date("1995-09-01")) & (col("l_shipdate") < date("1995-10-01"))
         )
         promo = when(col("p_type").like("PROMO%")).then(revenue()).otherwise(0).sum()
-        actual = lineitem.join(tpch.table("part"), on=col("l.l_partkey") == col("r.p_partkey")).aggregate(
+        actual = lineitem.join(duckdb.table("part"), on=col("l.l_partkey") == col("r.p_partkey")).aggregate(
             (sql_expr("100.00") * promo / revenue().sum()).alias("promo_revenue")
         )
-        assert actual.fetchall() == answer(tpch, "q14")
+        assert actual.fetchall(tpch) == answer(tpch, "q14")
 
     def test_q15(self, tpch: duckdb.Connection) -> None:
         # The query the graph was built for: `totals` feeds both the join and
         # the subquery that finds the maximum, and is computed once.
         totals = (
-            tpch.table("lineitem")
+            duckdb.table("lineitem")
             .filter((col("l_shipdate") >= date("1996-01-01")) & (col("l_shipdate") < date("1996-04-01")))
             .group_by(col("l_suppkey").alias("supplier_no"))
             .agg(revenue().sum().alias("total_revenue"))
         )
         best = totals.aggregate(col("total_revenue").max().alias("m"))
         actual = (
-            tpch.table("supplier")
+            duckdb.table("supplier")
             .join(totals, on=col("l.s_suppkey") == col("r.supplier_no"))
             .filter(col("total_revenue") == best.scalar())
             .select("s_suppkey", "s_name", "s_address", "s_phone", "total_revenue")
             .sort(col("s_suppkey"))
         )
-        assert actual.fetchall() == answer(tpch, "q15")
+        assert actual.fetchall(tpch) == answer(tpch, "q15")
 
     def test_q16(self, tpch: duckdb.Connection) -> None:
         complained = (
-            tpch.table("supplier").filter(col("s_comment").like("%Customer%Complaints%")).select(col("s_suppkey"))
+            duckdb.table("supplier").filter(col("s_comment").like("%Customer%Complaints%")).select(col("s_suppkey"))
         )
-        parts = tpch.table("part").filter(
+        parts = duckdb.table("part").filter(
             (col("p_brand") != "Brand#45")
             & ~col("p_type").like("MEDIUM POLISHED%")
             & col("p_size").isin([49, 14, 23, 45, 19, 3, 36, 9])
         )
         actual = (
-            tpch.table("partsupp")
+            duckdb.table("partsupp")
             .filter(~col("ps_suppkey").isin(complained))
             .join(parts, on=col("l.ps_partkey") == col("r.p_partkey"))
             .group_by(col("p_brand"), col("p_type"), col("p_size"))
             .agg(col("ps_suppkey").n_unique().alias("supplier_cnt"))
             .sort(col("supplier_cnt").desc(), col("p_brand"), col("p_type"), col("p_size"))
         )
-        assert actual.fetchall() == answer(tpch, "q16")
+        assert actual.fetchall(tpch) == answer(tpch, "q16")
 
     def test_q18(self, tpch: duckdb.Connection) -> None:
         heavy = (
-            tpch.table("lineitem")
+            duckdb.table("lineitem")
             .group_by(col("l_orderkey"))
             .agg(col("l_quantity").sum().alias("q"))
             .filter(col("q") > 300)
             .select(col("l_orderkey"))
         )
         actual = (
-            tpch.table("customer")
+            duckdb.table("customer")
             .join(
-                tpch.table("orders").filter(col("o_orderkey").isin(heavy)),
+                duckdb.table("orders").filter(col("o_orderkey").isin(heavy)),
                 on=col("l.c_custkey") == col("r.o_custkey"),
             )
-            .join(tpch.table("lineitem"), on=col("l.o_orderkey") == col("r.l_orderkey"))
+            .join(duckdb.table("lineitem"), on=col("l.o_orderkey") == col("r.l_orderkey"))
             .group_by(
                 col("c_name"),
                 col("c_custkey"),
@@ -389,7 +389,7 @@ class TestExpressedDirectly:
             .sort(col("o_totalprice").desc(), col("o_orderdate"))
             .limit(100)
         )
-        assert actual.fetchall() == answer(tpch, "q18")
+        assert actual.fetchall(tpch) == answer(tpch, "q18")
 
     def test_q19(self, tpch: duckdb.Connection) -> None:
         def branch(brand: str, containers: list[str], quantity: int, size: int) -> Expr:
@@ -403,8 +403,8 @@ class TestExpressedDirectly:
             )
 
         actual = (
-            tpch.table("lineitem")
-            .join(tpch.table("part"), on=col("l.l_partkey") == col("r.p_partkey"))
+            duckdb.table("lineitem")
+            .join(duckdb.table("part"), on=col("l.l_partkey") == col("r.p_partkey"))
             .filter(
                 branch("Brand#12", ["SM CASE", "SM BOX", "SM PACK", "SM PKG"], 1, 5)
                 | branch("Brand#23", ["MED BAG", "MED BOX", "MED PKG", "MED PACK"], 10, 10)
@@ -412,7 +412,7 @@ class TestExpressedDirectly:
             )
             .aggregate(revenue().sum().alias("revenue"))
         )
-        assert actual.fetchall() == answer(tpch, "q19")
+        assert actual.fetchall(tpch) == answer(tpch, "q19")
 
 
 class TestExpressedAfterRewriting:
@@ -435,11 +435,11 @@ class TestExpressedAfterRewriting:
         # min(ps_supplycost) correlated on p_partkey, decorrelated. `europe` is
         # used by both the grouping and the join, so it is computed once.
         europe = (
-            tpch.table("partsupp")
-            .join(tpch.table("supplier"), on=col("l.ps_suppkey") == col("r.s_suppkey"))
-            .join(tpch.table("nation"), on=col("l.s_nationkey") == col("r.n_nationkey"))
+            duckdb.table("partsupp")
+            .join(duckdb.table("supplier"), on=col("l.ps_suppkey") == col("r.s_suppkey"))
+            .join(duckdb.table("nation"), on=col("l.s_nationkey") == col("r.n_nationkey"))
             .join(
-                tpch.table("region").filter(col("r_name") == "EUROPE"),
+                duckdb.table("region").filter(col("r_name") == "EUROPE"),
                 on=col("l.n_regionkey") == col("r.r_regionkey"),
             )
         )
@@ -447,7 +447,7 @@ class TestExpressedAfterRewriting:
             col("ps_supplycost").min().alias("min_cost")
         )
         actual = (
-            tpch.table("part")
+            duckdb.table("part")
             .filter((col("p_size") == 15) & col("p_type").like("%BRASS"))
             .join(europe, on=col("l.p_partkey") == col("r.ps_partkey"))
             .join(
@@ -458,16 +458,16 @@ class TestExpressedAfterRewriting:
             .sort(col("s_acctbal").desc(), col("n_name"), col("s_name"), col("p_partkey"))
             .limit(100)
         )
-        assert actual.fetchall() == answer(tpch, "q02")
+        assert actual.fetchall(tpch) == answer(tpch, "q02")
 
     def test_q04(self, tpch: duckdb.Connection) -> None:
         # EXISTS becomes a semi join: the left rows that have a match, without
         # the right side's columns.
         actual = (
-            tpch.table("orders")
+            duckdb.table("orders")
             .filter((col("o_orderdate") >= date("1993-07-01")) & (col("o_orderdate") < date("1993-10-01")))
             .join(
-                tpch.table("lineitem").filter(col("l_commitdate") < col("l_receiptdate")),
+                duckdb.table("lineitem").filter(col("l_commitdate") < col("l_receiptdate")),
                 on=col("l.o_orderkey") == col("r.l_orderkey"),
                 how="semi",
             )
@@ -475,16 +475,16 @@ class TestExpressedAfterRewriting:
             .agg(sql_expr("count(*)").alias("order_count"))
             .sort(col("o_orderpriority"))
         )
-        assert actual.fetchall() == answer(tpch, "q04")
+        assert actual.fetchall(tpch) == answer(tpch, "q04")
 
     def test_q13(self, tpch: duckdb.Connection) -> None:
         # The original puts the comment test in the LEFT JOIN's ON clause. On
         # the preserved side that is the same as filtering the right input
         # first, which is what a frame can say. A frame's `on` is a join
         # condition, not a place to hang extra restrictions.
-        orders = tpch.table("orders").filter(~col("o_comment").like("%special%requests%"))
+        orders = duckdb.table("orders").filter(~col("o_comment").like("%special%requests%"))
         per_customer = (
-            tpch.table("customer")
+            duckdb.table("customer")
             .join(orders, on=col("l.c_custkey") == col("r.o_custkey"), how="left")
             .group_by(col("c_custkey"))
             .agg(col("o_orderkey").count().alias("c_count"))
@@ -494,42 +494,42 @@ class TestExpressedAfterRewriting:
             .agg(sql_expr("count(*)").alias("custdist"))
             .sort(col("custdist").desc(), col("c_count").desc())
         )
-        assert actual.fetchall() == answer(tpch, "q13")
+        assert actual.fetchall(tpch) == answer(tpch, "q13")
 
     def test_q17(self, tpch: duckdb.Connection) -> None:
         # avg(l_quantity) correlated on l_partkey, decorrelated into a grouped
         # frame and joined back.
         thresholds = (
-            tpch.table("lineitem")
+            duckdb.table("lineitem")
             .group_by(col("l_partkey").alias("t_partkey"))
             .agg((sql_expr("0.2") * col("l_quantity").mean()).alias("threshold"))
         )
         actual = (
-            tpch.table("lineitem")
+            duckdb.table("lineitem")
             .join(
-                tpch.table("part").filter((col("p_brand") == "Brand#23") & (col("p_container") == "MED BOX")),
+                duckdb.table("part").filter((col("p_brand") == "Brand#23") & (col("p_container") == "MED BOX")),
                 on=col("l.l_partkey") == col("r.p_partkey"),
             )
             .join(thresholds, on=col("l.l_partkey") == col("r.t_partkey"))
             .filter(col("l_quantity") < col("threshold"))
             .aggregate((col("l_extendedprice").sum() / sql_expr("7.0")).alias("avg_yearly"))
         )
-        assert actual.fetchall() == answer(tpch, "q17")
+        assert actual.fetchall(tpch) == answer(tpch, "q17")
 
     def test_q20(self, tpch: duckdb.Connection) -> None:
         # Two nested IN subqueries, which `isin` takes directly, around a sum
         # correlated on two columns, which has to be decorrelated. The inner
         # join also does the work of the original's `>`: a partsupp row with no
         # shipments compares against NULL there and drops out here.
-        forest = tpch.table("part").filter(col("p_name").like("forest%")).select(col("p_partkey"))
+        forest = duckdb.table("part").filter(col("p_name").like("forest%")).select(col("p_partkey"))
         shipped = (
-            tpch.table("lineitem")
+            duckdb.table("lineitem")
             .filter((col("l_shipdate") >= date("1994-01-01")) & (col("l_shipdate") < date("1995-01-01")))
             .group_by(col("l_partkey").alias("q_partkey"), col("l_suppkey").alias("q_suppkey"))
             .agg((sql_expr("0.5") * col("l_quantity").sum()).alias("half"))
         )
         excess = (
-            tpch.table("partsupp")
+            duckdb.table("partsupp")
             .filter(col("ps_partkey").isin(forest))
             .join(
                 shipped,
@@ -539,42 +539,42 @@ class TestExpressedAfterRewriting:
             .select(col("ps_suppkey"))
         )
         actual = (
-            tpch.table("supplier")
+            duckdb.table("supplier")
             .filter(col("s_suppkey").isin(excess))
             .join(
-                tpch.table("nation").filter(col("n_name") == "CANADA"),
+                duckdb.table("nation").filter(col("n_name") == "CANADA"),
                 on=col("l.s_nationkey") == col("r.n_nationkey"),
             )
             .select("s_name", "s_address")
             .sort(col("s_name"))
         )
-        assert actual.fetchall() == answer(tpch, "q20")
+        assert actual.fetchall(tpch) == answer(tpch, "q20")
 
     def test_q21(self, tpch: duckdb.Connection) -> None:
         # EXISTS and NOT EXISTS over the same table become a semi join and an
         # anti join, chained. Both correlate on more than equality, which an
         # `on` expression carries.
-        late = tpch.table("lineitem").filter(col("l_receiptdate") > col("l_commitdate"))
+        late = duckdb.table("lineitem").filter(col("l_receiptdate") > col("l_commitdate"))
         another_supplier = (col("l.l_orderkey") == col("r.l_orderkey")) & (col("l.l_suppkey") != col("r.l_suppkey"))
         actual = (
-            tpch.table("supplier")
+            duckdb.table("supplier")
             .join(late, on=col("l.s_suppkey") == col("r.l_suppkey"))
             .join(
-                tpch.table("orders").filter(col("o_orderstatus") == "F"),
+                duckdb.table("orders").filter(col("o_orderstatus") == "F"),
                 on=col("l.l_orderkey") == col("r.o_orderkey"),
             )
             .join(
-                tpch.table("nation").filter(col("n_name") == "SAUDI ARABIA"),
+                duckdb.table("nation").filter(col("n_name") == "SAUDI ARABIA"),
                 on=col("l.s_nationkey") == col("r.n_nationkey"),
             )
-            .join(tpch.table("lineitem"), on=another_supplier, how="semi")
+            .join(duckdb.table("lineitem"), on=another_supplier, how="semi")
             .join(late, on=another_supplier, how="anti")
             .group_by(col("s_name"))
             .agg(sql_expr("count(*)").alias("numwait"))
             .sort(col("numwait").desc(), col("s_name"))
             .limit(100)
         )
-        assert actual.fetchall() == answer(tpch, "q21")
+        assert actual.fetchall(tpch) == answer(tpch, "q21")
 
     def test_q22(self, tpch: duckdb.Connection) -> None:
         # The scalar subquery here is uncorrelated, so `scalar()` takes it as
@@ -582,21 +582,21 @@ class TestExpressedAfterRewriting:
         code = fn("substring", col("c_phone"), 1, 2)
         codes = ["13", "31", "23", "29", "30", "18", "17"]
         average = (
-            tpch.table("customer")
+            duckdb.table("customer")
             .filter((col("c_acctbal") > 0.00) & code.isin(codes))
             .aggregate(col("c_acctbal").mean().alias("m"))
         )
         actual = (
-            tpch.table("customer")
+            duckdb.table("customer")
             .filter(code.isin(codes))
             .filter(col("c_acctbal") > average.scalar())
-            .join(tpch.table("orders"), on=col("l.c_custkey") == col("r.o_custkey"), how="anti")
+            .join(duckdb.table("orders"), on=col("l.c_custkey") == col("r.o_custkey"), how="anti")
             .with_columns(cntrycode=code)
             .group_by(col("cntrycode"))
             .agg(sql_expr("count(*)").alias("numcust"), col("c_acctbal").sum().alias("totacctbal"))
             .sort(col("cntrycode"))
         )
-        assert actual.fetchall() == answer(tpch, "q22")
+        assert actual.fetchall(tpch) == answer(tpch, "q22")
 
 
 def test_every_query_is_classified_and_proven() -> None:

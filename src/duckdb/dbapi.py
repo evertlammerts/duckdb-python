@@ -234,8 +234,10 @@ class Cursor:
         # now. Side effects land on drain, so a result dropped without draining
         # means the INSERT simply never happened. Draining also yields a real
         # rowcount, where the previous client always reported -1.
-        self._rowcount = result.drain()
-        result.close()
+        try:
+            self._rowcount = result.drain()
+        finally:
+            result.close()
         self._result = None
         self._description = None
         connection._release_cursor(self)
@@ -363,8 +365,10 @@ class Connection:
         and every later rollback silently does nothing.
         """
         result = self._engine().execute(sql)
-        result.drain()
-        result.close()
+        try:
+            result.drain()
+        finally:
+            result.close()
 
     def _begin_if_needed(self) -> None:
         """Open a transaction lazily, so a read-only session never starts one."""

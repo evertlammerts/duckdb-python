@@ -19,7 +19,10 @@ import contextvars
 import datetime
 import decimal
 import uuid
-from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any
+
+from ._aggregates import AggregateMethods
+from ._namespaces import DateMethods, ListMethods, StringMethods
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -29,6 +32,7 @@ __all__ = [
     "ParamSink",
     "coalesce",
     "col",
+    "count_all",
     "fn",
     "lit",
     "param",
@@ -44,15 +48,17 @@ def quote(name: str) -> str:
     return f'"{escaped}"'
 
 
-@runtime_checkable
-class Renderable(Protocol):
-    """Anything that can render itself as a complete query.
+class PlanBase:
+    """What an expression knows about a plan: that it renders to a query.
 
-    A `Frame` satisfies this. Declared as a shape rather than imported so
-    expressions stay independent of the frame layer, which imports this one.
+    `Frame` subclasses this. A base class rather than a protocol so that only
+    a plan is accepted where a plan is meant: a structural check would take
+    anything with a `render` method, a template engine included, and splice
+    it into the SQL.
     """
 
-    def render(self) -> str: ...
+    def render(self, shapes: Any = None) -> str:  # pragma: no cover - abstract
+        raise NotImplementedError
 
 
 def qualified(name: str) -> str:
@@ -171,7 +177,11 @@ def render_literal(value: object) -> str:
         escaped = value.replace("'", "''")
         return f"'{escaped}'"
     if isinstance(value, bytes):
-        return f"'\\x{value.hex()}'::BLOB"
+        # One escape per byte. DuckDB reads exactly two hex digits after
+        # each escape, so a single one over the whole string would take
+        # everything past the first byte as literal text.
+        escaped = "".join(f"\\x{byte:02x}" for byte in value)
+        return f"'{escaped}'::BLOB"
     # These render for the schema oracle only, where no sink is active. They
     # are built from the object's own fields, never from caller text, so there
     # is nothing here to escape.
@@ -234,6 +244,41 @@ class ParamSink:
         _sink_stack.reset(self._token)
 
 
+#: While a plan renders, the step name of every plan in its graph, keyed by
+#: identity. A subquery whose plan is in here renders as a reference to that
+#: step instead of inlining its text, so a plan used twice is computed once.
+_step_names: contextvars.ContextVar[dict[int, str] | None] = contextvars.ContextVar("duckdb_step_names", default=None)
+
+
+@contextlib.contextmanager
+def rendering_steps(names: dict[int, str]) -> Iterator[None]:
+    """Make step names visible to subqueries for the duration of a render."""
+    token = _step_names.set(names)
+    try:
+        yield
+    finally:
+        _step_names.reset(token)
+
+
+def subqueries(expression: Expr) -> list[PlanBase]:
+    """Every plan an expression refers to, in tree order, each once."""
+    found: list[PlanBase] = []
+    seen: set[int] = set()
+    stack: list[object] = [expression]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, SubQuery):
+            if id(item.query) not in seen:
+                seen.add(id(item.query))
+                found.append(item.query)
+            continue
+        if isinstance(item, Expr):
+            stack.extend(reversed(list(vars(item).values())))
+        elif isinstance(item, (list, tuple)):
+            stack.extend(reversed(item))
+    return found
+
+
 def active_sink() -> ParamSink | None:
     """The innermost sink, if one is active."""
     stack = _sink_stack.get()
@@ -278,33 +323,31 @@ def _as_list(value: object) -> list[Any]:
     return list(value) if isinstance(value, (list, tuple)) else [value]
 
 
-class Expr:
-    """One node of an expression tree."""
+class Namespaces:
+    """The function namespaces on an expression, generated from the engine's catalog.
 
-    #: Aggregate and window functions reachable as methods, name to SQL function.
-    _CALLABLES: ClassVar[dict[str, str]] = {
-        "sum": "sum",
-        "mean": "avg",
-        "avg": "avg",
-        "min": "min",
-        "max": "max",
-        "count": "count",
-        "median": "median",
-        "std": "stddev_samp",
-        "var": "var_samp",
-        "first": "first",
-        "last": "last",
-        "any_value": "any_value",
-        "bit_and": "bit_and",
-        "bit_or": "bit_or",
-        "bool_and": "bool_and",
-        "bool_or": "bool_or",
-        "product": "product",
-        "string_agg": "string_agg",
-        "skewness": "skewness",
-        "kurtosis": "kurtosis",
-        "entropy": "entropy",
-    }
+    On their own class because their names shadow `str` and `list`, which the
+    annotations in `Expr` use.
+    """
+
+    @property
+    def str(self) -> StringMethods:
+        """Text functions: `col("name").str.upper()`."""
+        return StringMethods(self)  # type: ignore[arg-type]
+
+    @property
+    def dt(self) -> DateMethods:
+        """Date and time functions: `col("placed").dt.year()`."""
+        return DateMethods(self)  # type: ignore[arg-type]
+
+    @property
+    def list(self) -> ListMethods:
+        """List functions: `col("tags").list.contains("vip")`."""
+        return ListMethods(self)  # type: ignore[arg-type]
+
+
+class Expr(AggregateMethods, Namespaces):
+    """One node of an expression tree."""
 
     def __init__(self) -> None:
         self._alias: str | None = None
@@ -327,9 +370,17 @@ class Expr:
         return f"{rendered} {self._order}" if self._order else rendered
 
     def _with(self, **changes: object) -> Expr:
-        """A copy carrying different presentation. Nodes stay immutable."""
+        """A copy carrying different presentation. Nodes stay immutable.
+
+        Mutable fields are copied, not shared. Subclasses keep their operands
+        in lists and dicts, and a clone that aliased them would let a change
+        through one name show up under the other.
+        """
         clone = object.__new__(type(self))
-        clone.__dict__.update(self.__dict__)
+        clone.__dict__.update(
+            (name, list(value) if isinstance(value, list) else dict(value) if isinstance(value, dict) else value)
+            for name, value in self.__dict__.items()
+        )
         clone.__dict__.update(changes)
         return clone
 
@@ -429,6 +480,17 @@ class Expr:
     def __neg__(self) -> Expr:
         return Unary("-", self)
 
+    def __bool__(self) -> bool:
+        """Refuse to be treated as a condition.
+
+        `==` builds a node rather than comparing, so an expression is always
+        truthy. That makes `col("a") in [col("b")]` true, and `if col("x") ==
+        1:` always taken. Raising turns both into an error at the line that
+        wrote them.
+        """
+        message = "an expression has no truth value; combine with & | ~, and test with .is_null()"
+        raise TypeError(message)
+
     def __hash__(self) -> int:
         # Defined because __eq__ is, and an expression is not a dict key.
         return id(self)
@@ -455,14 +517,19 @@ class Expr:
         """Whether this is not NULL."""
         return Postfix("IS NOT NULL", self)
 
-    def isin(self, values: Iterable[object] | Renderable) -> Expr:
-        """Membership, in a list of values or in a one-column query.
+    def isin(self, values: Iterable[object] | PlanBase) -> Expr:
+        """Membership, in a list of values or in a one-column plan.
 
         An empty list is never a match.
         """
-        if isinstance(values, Renderable):
+        if isinstance(values, PlanBase):
             return Binary("IN", self, SubQuery(values))
-        return In(self, [_lift(v) for v in _as_list(list(values))])
+        if isinstance(values, (str, bytes)):
+            # Iterating text would test each character. Nobody means that, and
+            # one value is what `==` is for.
+            message = f"isin takes a list of values or a query; for one value use == {values!r}"
+            raise TypeError(message)
+        return In(self, [_lift(v) for v in values])
 
     def like(self, pattern: object, *, escape: str | None = None) -> Expr:
         """Text match, where `%` is any run of characters and `_` is any one.
@@ -488,24 +555,44 @@ class Expr:
         self,
         partition_by: Iterable[object] | object | None = None,
         order_by: Iterable[object] | object | None = None,
+        *,
+        rows: tuple[int | None, int | None] | None = None,
+        range: tuple[int | None, int | None] | None = None,
     ) -> Expr:
-        """Turn an aggregate into a window function."""
+        """Turn an aggregate into a window function.
+
+        `rows` or `range` bounds the window as (start, end), each counted from
+        the current row: a negative number is that many before, a positive
+        number that many after, 0 is the current row and None is unbounded.
+        So `rows=(-2, 0)` is the current row and the two before it.
+        """
         partitions = [_lift(e) for e in _as_list(partition_by)] if partition_by is not None else []
         orders = [_lift(e) for e in _as_list(order_by)] if order_by is not None else []
-        return Over(self, partitions, orders)
+        if rows is not None and range is not None:
+            message = "a window is bounded by rows or by range, not both"
+            raise TypeError(message)
+        frame = ("ROWS", rows) if rows is not None else ("RANGE", range) if range is not None else None
+        return Over(self, partitions, orders, frame)
 
-    def __getattr__(self, name: str) -> Any:
-        # Aggregate shortcuts, so col("v").sum() reads the way SQL does. Only
-        # consulted for names the class does not define.
-        function = type(self)._CALLABLES.get(name)
-        if function is None:
-            message = f"{type(self).__name__!r} object has no attribute {name!r}"
-            raise AttributeError(message)
+    def ignore_nulls(self) -> Expr:
+        """Skip NULLs, for `first_value`, `last_value`, `lag`, `lead` and `nth_value`."""
+        if not isinstance(self, Func):
+            message = "ignore_nulls applies to a function call"
+            raise TypeError(message)
+        return self._with(_ignore_nulls=True)
 
-        def call(*args: object) -> Expr:
-            return Func(function, [self, *(_lift(a) for a in args)])
+    def _call(self, function: str, *args: object) -> Expr:
+        """A function call with this expression as the first argument."""
+        return Func(function, [self, *(_lift(a) for a in args)])
 
-        return call
+    def _call_at(self, function: str, position: int, *args: object) -> Expr:
+        """A function call with this expression at `position` among the arguments.
+
+        For the functions that take their subject other than first, as
+        `date_trunc('month', ts)` and `list_prepend(e, list)` do.
+        """
+        lifted = [_lift(a) for a in args]
+        return Func(function, [*lifted[:position], self, *lifted[position:]])
 
     def __repr__(self) -> str:
         return f"<Expr {self.fragment()}>"
@@ -676,15 +763,19 @@ class Like(Expr):
 class SubQuery(Expr):
     """A whole query standing in for a value."""
 
-    def __init__(self, query: Renderable) -> None:
+    def __init__(self, query: PlanBase) -> None:
         super().__init__()
         self.query = query
 
     def fragment(self) -> str:
-        # Rendered here rather than when this node was built, so the query's
-        # own literals reach whichever sink is active for the statement it
-        # lands in. Its step names are local to these parentheses; an outer
-        # step of the same name is shadowed, not confused with it.
+        names = _step_names.get()
+        if names is not None and id(self.query) in names:
+            # The plan is a step of the query being rendered, so this is a
+            # reference to it. Rendered once as a CTE, however often it is
+            # used, which is what "computed once" means.
+            return f"(SELECT * FROM {names[id(self.query)]})"
+        # Rendered on its own, with its own steps local to these parentheses.
+        # Its literals still reach whichever sink is active.
         return f"({self.query.render()})"
 
 
@@ -708,10 +799,14 @@ class Func(Expr):
         super().__init__()
         self.name = name
         self.args = args
+        self._ignore_nulls = False
 
     def fragment(self) -> str:
         rendered = ", ".join(a.fragment() for a in self.args)
-        return f"{self.name}({rendered})"
+        # IGNORE NULLS goes inside the call, where DuckDB reads it; after the
+        # closing parenthesis it is a syntax error.
+        tail = " IGNORE NULLS" if self._ignore_nulls else ""
+        return f"{self.name}({rendered}{tail})"
 
 
 class Distinct(Expr):
@@ -737,14 +832,30 @@ class Concat(Expr):
         return "(" + " || ".join(p.fragment() for p in self.parts) + ")"
 
 
+def _bound(offset: int | None, *, start: bool) -> str:
+    """One end of a window frame, from an offset relative to the current row."""
+    if offset is None:
+        return "UNBOUNDED PRECEDING" if start else "UNBOUNDED FOLLOWING"
+    if offset == 0:
+        return "CURRENT ROW"
+    return f"{abs(int(offset))} {'PRECEDING' if offset < 0 else 'FOLLOWING'}"
+
+
 class Over(Expr):
     """A window function."""
 
-    def __init__(self, operand: Expr, partitions: list[Expr], orders: list[Expr]) -> None:
+    def __init__(
+        self,
+        operand: Expr,
+        partitions: list[Expr],
+        orders: list[Expr],
+        frame: tuple[str, tuple[int | None, int | None]] | None = None,
+    ) -> None:
         super().__init__()
         self.operand = operand
         self.partitions = partitions
         self.orders = orders
+        self.frame = frame
 
     def fragment(self) -> str:
         parts = []
@@ -752,6 +863,9 @@ class Over(Expr):
             parts.append("PARTITION BY " + ", ".join(p.fragment() for p in self.partitions))
         if self.orders:
             parts.append("ORDER BY " + ", ".join(o.as_order() for o in self.orders))
+        if self.frame is not None:
+            unit, (start, end) = self.frame
+            parts.append(f"{unit} BETWEEN {_bound(start, start=True)} AND {_bound(end, start=False)}")
         return f"{self.operand.fragment()} OVER ({' '.join(parts)})"
 
 
@@ -848,6 +962,15 @@ def when(condition: object) -> CaseBuilder:
 def coalesce(*values: object) -> Expr:
     """The first argument that is not NULL."""
     return Func("coalesce", [_lift(v) for v in values])
+
+
+def count_all() -> Expr:
+    """How many rows there are: `count(*)`.
+
+    Not a method, because it counts rows rather than a column's values.
+    `col("x").count()` skips NULLs; this does not.
+    """
+    return Raw("count(*)")
 
 
 def _window(name: str) -> Any:

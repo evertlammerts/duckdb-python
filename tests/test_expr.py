@@ -260,7 +260,7 @@ class TestAggregatesAndWindows:
         # __getattr__ serves the aggregate shortcuts, so it must not swallow
         # ordinary typos into a callable that fails later.
         with pytest.raises(AttributeError, match="no_such_aggregate"):
-            _ = col("x").no_such_aggregate
+            _ = col("x").no_such_aggregate  # type: ignore[attr-defined]
 
 
 class TestPresentation:
@@ -392,6 +392,11 @@ AGGREGATE_CALLS: dict[str, tuple[object, ...]] = {
     "bit_or": (),
     "bool_and": (),
     "bool_or": (),
+    "array_agg": (),
+    "mode": (),
+    "quantile": (0.5,),
+    "arg_min": (col("v"),),
+    "arg_max": (col("v"),),
 }
 WINDOW_CALLS: dict[str, tuple[object, ...]] = {
     "row_number": (),

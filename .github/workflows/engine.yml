@@ -47,6 +47,15 @@ jobs:
     defaults:
       run:
         shell: bash
+    env:
+      # tpch is built in so the TPC-H harness has data. Without it those tests
+      # skip, and a harness that always skips is worse than none.
+      #
+      # Declared here, not on the build step, so it can go in the cache key.
+      # Keyed on the SHA alone, adding an extension reused a bundle built
+      # without it and the whole TPC-H suite skipped without saying so.
+      CORE_EXTENSIONS: "core_functions;json;parquet;icu;tpch"
+
     steps:
       - uses: actions/checkout@v4
 
@@ -55,7 +64,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: engine-bundle
-          key: engine-${{ matrix.target }}-${{ needs.pin.outputs.sha }}
+          key: engine-${{ matrix.target }}-${{ needs.pin.outputs.sha }}-${{ hashFiles('.github/workflows/engine.yml') }}
 
       - name: Check out DuckDB at the pinned SHA
         if: steps.cache.outputs.cache-hit != 'true'
@@ -91,9 +100,6 @@ jobs:
       - name: Build the engine bundle
         if: steps.cache.outputs.cache-hit != 'true'
         env:
-          # tpch is built in so the TPC-H harness has data. Without it those
-          # tests skip, and a harness that always skips is worse than none.
-          CORE_EXTENSIONS: "core_functions;json;parquet;icu;tpch"
           # Selects the Visual Studio target architecture. Empty off Windows.
           CMAKE_GENERATOR_PLATFORM: ${{ matrix.msvc_arch }}
           # Match the floor the wheels are built against, per arch. See the

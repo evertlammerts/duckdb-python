@@ -9,6 +9,7 @@ from .expr import (
     Expr,
     coalesce,
     col,
+    count_all,
     dense_rank,
     first_value,
     fn,
@@ -24,17 +25,21 @@ from .expr import (
     star,
     when,
 )
-from .frame import Frame
+from .frame import Column, Declared, Frame, declare, sql, table
 
 __all__ = [
+    "Column",
     "Connection",
+    "Declared",
     "Expr",
     "Frame",
     "__version__",
     "coalesce",
     "col",
     "connect",
+    "count_all",
     "dbapi",
+    "declare",
     "dense_rank",
     "duckdb_version",
     "exceptions",
@@ -49,8 +54,10 @@ __all__ = [
     "param",
     "rank",
     "row_number",
+    "sql",
     "sql_expr",
     "star",
+    "table",
     "when",
 ]
 
