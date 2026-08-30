@@ -56,7 +56,20 @@ from .expr import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
 
-__all__ = ["Bound", "Column", "Frame", "NeedsConnection", "Step", "sql", "table", "values"]
+__all__ = [
+    "Bound",
+    "Column",
+    "Frame",
+    "NeedsConnection",
+    "Step",
+    "read_csv",
+    "read_json",
+    "read_parquet",
+    "sql",
+    "table",
+    "table_function",
+    "values",
+]
 
 
 class Column(NamedTuple):
@@ -413,6 +426,54 @@ class Sql(Step):
     def render(self, names: tuple[str, ...], shapes: tuple[Shape | None, ...]) -> str:
         """The text, as written."""
         return self.text
+
+
+@dataclasses.dataclass(frozen=True, eq=False)
+class TableFunction(Step):
+    """A table function in a FROM clause: `read_csv('x.csv', header := true)`, `range(10)`.
+
+    The engine names and types the columns, and for a file it opens the
+    file to do so, so the question is asked with the arguments written
+    in; execution binds them. A `param()` has no value at that moment and
+    `read_csv(NULL)` is refused by the parser, so it is refused here.
+    """
+
+    name: str
+    args: tuple[Expr, ...]
+    named: tuple[tuple[str, Expr], ...]
+
+    def __post_init__(self) -> None:
+        for label, argument in [(str(i), a) for i, a in enumerate(self.args)] + list(self.named):
+            held = parameters_in(argument)
+            if held:
+                message = (
+                    f"{self.name}() cannot take param({held[0]!r}) as argument {label!r}: the engine works out "
+                    f"a table function's columns from its arguments, which a parameter does not have yet"
+                )
+                raise TypeError(message)
+
+    def render(self, names: tuple[str, ...], shapes: tuple[Shape | None, ...]) -> str:
+        arguments = [a.fragment() for a in self.args] + [f"{quote(k)} := {v.fragment()}" for k, v in self.named]
+        return f"SELECT * FROM {qualified(self.name)}({', '.join(arguments)})"
+
+    def expressions(self) -> tuple[Expr, ...]:
+        return (*self.args, *(v for _, v in self.named))
+
+
+def _argument(value: object) -> Expr:
+    """A table-function argument from a Python value, spelled as SQL spells it.
+
+    An expression is itself. A path is its text. A list is a list literal,
+    paths inside it made text, so `read_parquet([a, b])` binds one list. A
+    dict is a struct. Anything else is a literal, bound at execution.
+    """
+    if isinstance(value, Expr):
+        return value
+    if isinstance(value, os.PathLike):
+        return Lit(os.fspath(value))
+    if isinstance(value, (list, tuple)):
+        return Lit([os.fspath(v) if isinstance(v, os.PathLike) else v for v in value])
+    return Lit(value)
 
 
 @dataclasses.dataclass(frozen=True, eq=False)
@@ -1646,13 +1707,55 @@ def sql(query: str) -> Frame:
 
 
 def table(name: str) -> Frame:
-    """A plan reading a table or view, by name.
+    """A plan reading a table or view, by name; a file name reads the file.
+
+    `table("orders.csv")` and `table("data/*.parquet")` read the files, as
+    `FROM 'orders.csv'` does: the engine picks the reader from the
+    extension. For the reader's options, use `read_csv` and its siblings.
 
     The name is quoted, so a name from outside the program cannot turn into
     more SQL. What the table holds is the catalog's to say, and is asked of
     whichever connection the plan runs on.
     """
     return Frame(Table(name))
+
+
+def table_function(name: str, *args: object, **named: object) -> Frame:
+    """A plan over a table function: `table_function("read_csv", "x.csv", header=True)`.
+
+    Any table function the engine has, extensions included, by its name and
+    arguments: positional ones as given, named ones as `name := value`. A
+    string, number or date is bound at execution; a list is a list; a dict
+    is a struct; an expression is written as itself. `read_csv`,
+    `read_parquet` and `read_json` are this with the name filled in.
+
+        table_function("range", 10)
+        table_function("glob", "data/*.parquet")
+        table_function("query_table", "orders")
+    """
+    return Frame(
+        TableFunction(name, tuple(_argument(a) for a in args), tuple((k, _argument(v)) for k, v in named.items()))
+    )
+
+
+def read_csv(path: object, **named: object) -> Frame:
+    """A plan over `read_csv(path, ...)`: one file, a list of files, or a glob.
+
+    The named arguments are the reader's own, under their SQL names:
+    `header`, `delim`, `columns`, `types`, `skip`, `nullstr`, `dateformat`,
+    `compression`, `union_by_name`, `filename`, and the rest.
+    """
+    return table_function("read_csv", path, **named)
+
+
+def read_parquet(path: object, **named: object) -> Frame:
+    """A plan over `read_parquet(path, ...)`: one file, a list of files, or a glob."""
+    return table_function("read_parquet", path, **named)
+
+
+def read_json(path: object, **named: object) -> Frame:
+    """A plan over `read_json(path, ...)`: one file, a list of files, or a glob."""
+    return table_function("read_json", path, **named)
 
 
 def values(rows: Iterable[Iterable[object]], columns: Iterable[str | tuple[str, str]]) -> Frame:

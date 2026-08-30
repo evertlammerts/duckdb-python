@@ -2356,3 +2356,97 @@ class TestCopyIsSql:
         con.run("ATTACH ':memory:' AS other")
         con.run("COPY FROM DATABASE memory TO other")
         assert duckdb.sql("SELECT count(*) FROM other.orders").rows(con) == [(5,)]
+
+
+class TestTableFunctionSources:
+    """A table function is a source: `read_csv(path, header=True)` is `FROM read_csv('path', header := true)`.
+
+    Arguments are spelled as SQL spells them and bound at execution; the
+    engine works the columns out from the arguments written in, so a
+    `param()` cannot be one. `table("x.csv")` reads a file by name.
+    """
+
+    @pytest.fixture
+    def files(self, con: duckdb.Connection, tmp_path: Path) -> Path:
+        con.run(f"COPY orders TO '{tmp_path / 'orders.csv'}' (HEADER)")
+        con.run(f"COPY orders TO '{tmp_path / 'orders.parquet'}'")
+        con.run(f"COPY orders TO '{tmp_path / 'orders.json'}'")
+        con.run(f"COPY (SELECT * FROM orders WHERE id > 3) TO '{tmp_path / 'more.csv'}' (HEADER)")
+        return tmp_path
+
+    def test_a_file_is_read_with_its_path_bound(self, con: duckdb.Connection, files: Path) -> None:
+        plan = duckdb.read_csv(files / "orders.csv", header=True)
+        sql, values = plan._sql_and_values()
+        assert sql == 'SELECT * FROM "read_csv"($1, "header" := TRUE)'
+        assert values == [str(files / "orders.csv")]
+        assert plan.columns(con) == ["id", "country", "amount"]
+        assert plan.types(con) == ["BIGINT", "VARCHAR", "BIGINT"]
+        assert plan.count(con) == 5
+        assert duckdb.read_parquet(files / "orders.parquet").filter(col("id") == 2).rows(con) == [(2, "be", 80)]
+        assert duckdb.read_json(files / "orders.json").select("country").count(con) == 5
+
+    def test_lists_dicts_and_globs(self, con: duckdb.Connection, files: Path) -> None:
+        both = duckdb.read_csv([files / "orders.csv", files / "more.csv"], header=True)
+        assert both.count(con) == 7
+        assert both._sql_and_values()[1] == [[str(files / "orders.csv"), str(files / "more.csv")]]
+        typed = duckdb.read_csv(
+            files / "orders.csv", columns={"id": "INTEGER", "country": "VARCHAR", "amount": "INTEGER"}
+        )
+        assert typed.types(con) == ["INTEGER", "VARCHAR", "INTEGER"]
+        globbed = duckdb.read_csv(str(files / "*.csv"), filename=True)
+        assert globbed.columns(con) == ["id", "country", "amount", "filename"]
+        assert globbed.count(con) == 7
+
+    def test_any_table_function_by_name(self, con: duckdb.Connection, files: Path) -> None:
+        assert duckdb.table_function("range", 3).rows(con) == [(0,), (1,), (2,)]
+        assert duckdb.table_function("query_table", "orders").count(con) == 5
+        assert duckdb.table_function("glob", str(files / "*.csv")).count(con) == 2
+        assert duckdb.table_function("read_text", files / "orders.csv").columns(con) == [
+            "filename",
+            "content",
+            "size",
+            "last_modified",
+        ]
+        assert duckdb.table_function("range", 2, 5).select(sql_expr("range * 10").alias("x")).rows(con) == [
+            (20,),
+            (30,),
+            (40,),
+        ]
+        with pytest.raises(exceptions.CatalogError, match="nope"):
+            duckdb.table_function("nope", 1).rows(con)
+
+    def test_a_derived_plan_resolves_and_runs(self, con: duckdb.Connection, files: Path) -> None:
+        # The columns are worked out with the path written in, and the
+        # query then runs with it bound: two renders, one plan.
+        read = duckdb.read_csv(files / "orders.csv", header=True)
+        plan = read.with_columns(amount=col("amount") * 2).filter(col("country") == "nl").select("id", "amount")
+        assert plan.rows(con) == [(1, 240), (3, 600), (5, None)]
+        assert "REPLACE" in plan.render(con)
+        assert plan.create(con, "loaded") == 3
+        assert duckdb.table("loaded").columns(con) == ["id", "amount"]
+        assert read.insert_into(con, "orders") == 5
+
+    def test_a_param_cannot_be_an_argument(self) -> None:
+        with pytest.raises(TypeError, match="read_csv\\(\\) cannot take param\\('p'\\) as argument '0'"):
+            duckdb.read_csv(param("p"))
+        with pytest.raises(TypeError, match="as argument 'header'"):
+            duckdb.read_csv("x.csv", header=param("h"))
+
+    def test_the_file_is_read_fresh_for_every_resolution(self, con: duckdb.Connection, tmp_path: Path) -> None:
+        # A source names the world outside the catalog; its answer is
+        # never remembered, so a changed file is seen.
+        path = tmp_path / "moving.csv"
+        path.write_text("a,b\n1,2\n")
+        plan = duckdb.read_csv(path)
+        assert plan.columns(con) == ["a", "b"]
+        path.write_text("a,b,c\n1,2,3\n")
+        assert plan.columns(con) == ["a", "b", "c"]
+
+    def test_a_file_name_is_a_table(self, con: duckdb.Connection, files: Path) -> None:
+        assert duckdb.table(str(files / "orders.parquet")).count(con) == 5
+        assert duckdb.table(str(files / "*.csv")).count(con) == 7
+
+    def test_an_expression_argument_is_written_as_itself(self, con: duckdb.Connection) -> None:
+        plan = duckdb.table_function("range", sql_expr("2 + 1"))
+        assert plan.render() == 'SELECT * FROM "range"((2 + 1))'
+        assert plan.count(con) == 3

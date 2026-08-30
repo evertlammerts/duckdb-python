@@ -25,7 +25,20 @@ from .expr import (
     star,
     when,
 )
-from .frame import Bound, Column, Frame, NeedsConnection, Step, sql, table, values
+from .frame import (
+    Bound,
+    Column,
+    Frame,
+    NeedsConnection,
+    Step,
+    read_csv,
+    read_json,
+    read_parquet,
+    sql,
+    table,
+    table_function,
+    values,
+)
 
 __all__ = [
     "Bound",
@@ -54,11 +67,15 @@ __all__ = [
     "ntile",
     "param",
     "rank",
+    "read_csv",
+    "read_json",
+    "read_parquet",
     "row_number",
     "sql",
     "sql_expr",
     "star",
     "table",
+    "table_function",
     "values",
     "when",
 ]
