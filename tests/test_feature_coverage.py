@@ -46,7 +46,11 @@ FEATURES: dict[str, tuple[str, str, str | None]] = {
     "collate": (SQL_EXPR, "COLLATE is expression syntax the verbs do not spell", None),
     "conjunction": (VERB_TESTED, "& | ~ on expressions", "test_expr.TestOperatorsEvaluate"),
     "constraints": (BRIDGE, "constraints are DDL", None),
-    "copy": (VERB_TESTED, "to_parquet() and to_csv() render COPY TO; COPY FROM is a statement", "test_frame.TestSinks"),
+    "copy": (
+        VERB_TESTED,
+        "copy_to() and to_parquet/to_csv/to_json are COPY TO; COPY FROM is a statement",
+        "test_frame.TestCopyIsSql",
+    ),
     "copy_database": (BRIDGE, "COPY FROM DATABASE is a statement", None),
     "create": (VERB_TESTED, "create() renders CREATE TABLE AS", "test_frame.TestSinks"),
     "cte": (VERB_TESTED, "every step is a CTE; the graph renders one per step", "test_frame.TestGraph"),

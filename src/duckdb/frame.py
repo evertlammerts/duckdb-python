@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import dataclasses
 import html
+import os
 import re
 from collections.abc import Iterable, Sized
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
@@ -43,6 +44,7 @@ from .expr import (
     SubQuery,
     col,
     count_all,
+    parameters_in,
     qualified,
     quote,
     render_literal,
@@ -241,6 +243,38 @@ def _option(name: str) -> str:
         message = f"not a copy option name: {name!r}"
         raise ValueError(message)
     return name.upper()
+
+
+def _option_value(name: str, value: object) -> str:
+    """A COPY option value, spelled as SQL spells it.
+
+    An expression renders as itself, so `star()` is `*` and `col("x")` a
+    name. A list or tuple is the parenthesised list COPY reads a column
+    list from, `('grp', 'id')`. A dict is a struct. Anything else is a
+    literal. Written into the text, because COPY takes no parameters; a
+    `param()` in here has nothing to bind it, so it is refused.
+    """
+    if isinstance(value, Expr):
+        held = parameters_in(value)
+        if held:
+            message = f"COPY takes no parameters; option {name!r} holds param({held[0]!r})"
+            raise TypeError(message)
+        return value.fragment()
+    if isinstance(value, (list, tuple)):
+        return "(" + ", ".join(_option_value(name, v) for v in value) + ")"
+    return render_literal(value)
+
+
+def _options_clause(options: dict[str, object]) -> str:
+    """The `(NAME value, ...)` of a COPY, or nothing when there are no options.
+
+    Rendered with no sink active, so a literal is written into the text
+    whatever is going on around it: COPY cannot bind one.
+    """
+    if not options:
+        return ""
+    with suspended_sinks():
+        return " (" + ", ".join(f"{_option(k)} {_option_value(k, v)}" for k, v in options.items()) + ")"
 
 
 def _as_expr(value: object) -> Expr:
@@ -1321,24 +1355,66 @@ class Frame(PlanBase):
         """Append the rows to a table that exists. Returns how many were added."""
         return self._run(connection, lambda q: f"INSERT INTO {qualified(name)} {q}", parameters)
 
+    def copy_to(
+        self,
+        connection: Connection,
+        path: str | os.PathLike[str],
+        *,
+        parameters: Mapping[str, object] | None = None,
+        **options: object,
+    ) -> list[tuple[Any, ...]]:
+        """`COPY (this plan) TO path (options)`, returning the rows the statement returns.
+
+        The options are COPY's own, under their SQL names, `format` among
+        them: `copy_to(con, "x.parquet", format="parquet", compression="zstd")`;
+        with none, the engine picks the format from the path's extension.
+        A value is written as SQL writes it: a list is a column list, so
+        `partition_by=["grp", "id"]`; `star()` is `*`, so
+        `force_quote=star()`; a dict is a struct, as `kv_metadata` takes.
+
+        What comes back is what COPY returns: one row with the count, or
+        with `return_files=True` the count and the files, or with
+        `return_stats=True` one row per file written.
+        """
+        clause = _options_clause(options)
+        target = render_literal(os.fspath(path))
+        connection = self._on(connection)
+        sql, values = self._sql_and_values(lambda q: f"COPY ({q}) TO {target}{clause}", connection, parameters)
+        with connection._execute(sql, values) as result:
+            return result.fetch_all()
+
     def to_parquet(
-        self, connection: Connection, path: str, *, parameters: Mapping[str, object] | None = None, **options: object
-    ) -> int:
-        """Write a Parquet file. Returns how many rows were written."""
-        return self._copy(connection, path, {"format": "parquet", **options}, parameters)
+        self,
+        connection: Connection,
+        path: str | os.PathLike[str],
+        *,
+        parameters: Mapping[str, object] | None = None,
+        **options: object,
+    ) -> list[tuple[Any, ...]]:
+        """Write a Parquet file: `copy_to` with `format="parquet"`."""
+        return self.copy_to(connection, path, parameters=parameters, format="parquet", **options)
 
     def to_csv(
-        self, connection: Connection, path: str, *, parameters: Mapping[str, object] | None = None, **options: object
-    ) -> int:
-        """Write a CSV file. Returns how many rows were written."""
-        return self._copy(connection, path, {"format": "csv", **options}, parameters)
+        self,
+        connection: Connection,
+        path: str | os.PathLike[str],
+        *,
+        parameters: Mapping[str, object] | None = None,
+        **options: object,
+    ) -> list[tuple[Any, ...]]:
+        """Write a CSV file: `copy_to` with `format="csv"`."""
+        return self.copy_to(connection, path, parameters=parameters, format="csv", **options)
 
-    def _copy(
-        self, connection: Connection, path: str, options: dict[str, object], parameters: Mapping[str, object] | None
-    ) -> int:
-        """COPY TO. The path is a literal because COPY will not take a parameter."""
-        rendered = ", ".join(f"{_option(k)} {render_literal(v)}" for k, v in options.items())
-        return self._run(connection, lambda q: f"COPY ({q}) TO {render_literal(path)} ({rendered})", parameters)
+    def to_json(
+        self,
+        connection: Connection,
+        path: str | os.PathLike[str],
+        *,
+        parameters: Mapping[str, object] | None = None,
+        **options: object,
+    ) -> list[tuple[Any, ...]]:
+        """Write newline-delimited JSON, or one array with `array=True`: `copy_to` with `format="json"`."""
+        return self.copy_to(connection, path, parameters=parameters, format="json", **options)
 
     # -- looking at it
 
@@ -1463,13 +1539,29 @@ class Bound:
         """Append the rows to a table that exists."""
         return self.plan.insert_into(self.connection, name, parameters=parameters)
 
-    def to_parquet(self, path: str, *, parameters: Mapping[str, object] | None = None, **options: object) -> int:
+    def copy_to(
+        self, path: str | os.PathLike[str], *, parameters: Mapping[str, object] | None = None, **options: object
+    ) -> list[tuple[Any, ...]]:
+        """`COPY (this plan) TO path (options)`, returning what the statement returns."""
+        return self.plan.copy_to(self.connection, path, parameters=parameters, **options)
+
+    def to_parquet(
+        self, path: str | os.PathLike[str], *, parameters: Mapping[str, object] | None = None, **options: object
+    ) -> list[tuple[Any, ...]]:
         """Write a Parquet file."""
         return self.plan.to_parquet(self.connection, path, parameters=parameters, **options)
 
-    def to_csv(self, path: str, *, parameters: Mapping[str, object] | None = None, **options: object) -> int:
+    def to_csv(
+        self, path: str | os.PathLike[str], *, parameters: Mapping[str, object] | None = None, **options: object
+    ) -> list[tuple[Any, ...]]:
         """Write a CSV file."""
         return self.plan.to_csv(self.connection, path, parameters=parameters, **options)
+
+    def to_json(
+        self, path: str | os.PathLike[str], *, parameters: Mapping[str, object] | None = None, **options: object
+    ) -> list[tuple[Any, ...]]:
+        """Write JSON."""
+        return self.plan.to_json(self.connection, path, parameters=parameters, **options)
 
     def __repr__(self) -> str:
         try:

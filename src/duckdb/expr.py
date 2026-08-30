@@ -302,6 +302,19 @@ def _children(value: object) -> Iterable[object]:
     return ()
 
 
+def parameters_in(value: object) -> list[str]:
+    """The names of every `param()` an expression (or a container of them) holds, in tree order."""
+    found: list[str] = []
+    stack: list[object] = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, Param):
+            found.append(item.name)
+            continue
+        stack.extend(reversed(list(_children(item))))
+    return found
+
+
 def subqueries(value: object) -> list[PlanBase]:
     """Every plan an expression (or a container of them) refers to, in tree order, each once."""
     found: list[PlanBase] = []

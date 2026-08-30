@@ -455,13 +455,13 @@ class TestSinks:
 
     def test_to_parquet_round_trips(self, con: duckdb.Connection, orders: duckdb.Frame, tmp_path: Path) -> None:
         path = tmp_path / "orders.parquet"
-        assert orders.to_parquet(con, str(path)) == 5
+        assert orders.to_parquet(con, str(path)) == [(5,)]
         assert path.exists()
         assert duckdb.sql(f"SELECT * FROM read_parquet('{path}')").count(con) == 5
 
     def test_to_csv_round_trips(self, con: duckdb.Connection, orders: duckdb.Frame, tmp_path: Path) -> None:
         path = tmp_path / "orders.csv"
-        assert orders.to_csv(con, str(path), header=True) == 5
+        assert orders.to_csv(con, str(path), header=True) == [(5,)]
         assert path.read_text().startswith("id,country,amount")
 
     def test_copy_options_reach_the_writer(self, con: duckdb.Connection, orders: duckdb.Frame, tmp_path: Path) -> None:
@@ -1256,7 +1256,7 @@ class TestParametersAreSupplied:
         assert len(list(plan.iter_rows(con, parameters=values))) == 3
         assert plan.create(con, "nl", parameters=values) == 3
         assert plan.insert_into(con, "nl", parameters=values) == 3
-        assert plan.to_csv(con, str(tmp_path / "nl.csv"), parameters=values) == 3
+        assert plan.to_csv(con, str(tmp_path / "nl.csv"), parameters=values) == [(3,)]
         assert plan.explain(con, parameters=values)
         assert "nl" in plan.preview(con, parameters=values)
 
@@ -1902,7 +1902,7 @@ class TestEgressNames:
         assert bound.count(parameters={"where": "nl"}) == 3
         assert bound.create("nl", parameters={"where": "nl"}) == 3
         assert duckdb.table("orders").on(con).create("copy_of_orders") == 5
-        assert duckdb.table("orders").on(con).to_csv(str(tmp_path / "o.csv"), header=True) == 5
+        assert duckdb.table("orders").on(con).to_csv(str(tmp_path / "o.csv"), header=True) == [(5,)]
 
     def test_a_bound_plan_shows_itself(self, con: duckdb.Connection) -> None:
         bound = duckdb.table("orders").sort("id").on(con)
@@ -2260,3 +2260,99 @@ class TestReviewRoundSeven:
         assert not issubclass(duckdb.NeedsConnection, exceptions.Error)
         assert issubclass(exceptions.InterfaceError, exceptions.Error)
         assert "engine" in (exceptions.Error.__doc__ or "")
+
+
+class TestCopyIsSql:
+    """A sink is `COPY (plan) TO path (options)`: options spelled as SQL spells them, the result returned as it is."""
+
+    def test_a_list_is_a_column_list(self, con: duckdb.Connection, tmp_path: Path) -> None:
+        # COPY reads a column list from a parenthesised list, not from a
+        # list literal, which it takes for one column named `[grp]`.
+        rows = duckdb.table("orders").to_parquet(con, str(tmp_path / "p"), partition_by=["country", "id"])
+        assert rows == [(5,)]
+        assert (tmp_path / "p" / "country=nl" / "id=1").is_dir()
+        duckdb.table("orders").to_csv(con, str(tmp_path / "q.csv"), force_quote=["country"], header=False)
+        assert '"nl"' in (tmp_path / "q.csv").read_text().splitlines()[0]
+
+    def test_star_and_an_expression_render_as_themselves(self, con: duckdb.Connection, tmp_path: Path) -> None:
+        duckdb.table("orders").select("id", "country").to_csv(con, str(tmp_path / "s.csv"), force_quote=star())
+        assert (tmp_path / "s.csv").read_text().splitlines()[1] == '"1","nl"'
+        duckdb.table("orders").to_parquet(con, str(tmp_path / "e"), partition_by=col("country"))
+        assert (tmp_path / "e" / "country=be").is_dir()
+
+    def test_a_dict_is_a_struct(self, con: duckdb.Connection, tmp_path: Path) -> None:
+        path = tmp_path / "kv.parquet"
+        duckdb.table("orders").to_parquet(con, str(path), kv_metadata={"owner": "evert"})
+        written = duckdb.sql(f"SELECT key, value FROM parquet_kv_metadata('{path}')").rows(con)
+        assert (b"owner", b"evert") in written
+
+    def test_the_result_is_what_copy_returns(self, con: duckdb.Connection, tmp_path: Path) -> None:
+        orders = duckdb.table("orders")
+        ((count, files),) = orders.to_parquet(con, str(tmp_path / "f.parquet"), return_files=True)
+        assert count == 5
+        assert files == [str(tmp_path / "f.parquet")]
+        stats = orders.to_parquet(con, str(tmp_path / "s"), partition_by="country", return_stats=True)
+        assert len(stats) == 3  # one row per file, one file per country
+        assert all(row[0].endswith(".parquet") and {"country"} <= set(row[5]) for row in stats)
+        assert sorted(row[1] for row in stats) == [1, 1, 3]
+
+    def test_json_and_any_format_by_name(self, con: duckdb.Connection, tmp_path: Path) -> None:
+        import json
+
+        duckdb.table("orders").select("id").to_json(con, str(tmp_path / "a.json"), array=True)
+        assert json.loads((tmp_path / "a.json").read_text()) == [{"id": i} for i in range(1, 6)]
+        assert duckdb.table("orders").copy_to(con, str(tmp_path / "c.csv"), format="csv", header=True) == [(5,)]
+        # A name no extension could ever supply, so the engine's autoloader
+        # is not part of the test.
+        with pytest.raises(exceptions.CatalogError, match="Copy Function with name nope"):
+            duckdb.table("orders").copy_to(con, str(tmp_path / "x.nope"), format="nope")
+
+    def test_with_no_options_the_engine_picks_the_format_from_the_path(
+        self, con: duckdb.Connection, tmp_path: Path
+    ) -> None:
+        # `COPY ... TO 'x.parquet'` with no option list at all is valid, and
+        # the most natural call of a generic sink. A path is a path.
+        target = tmp_path / "bare.parquet"
+        assert duckdb.table("orders").copy_to(con, target) == [(5,)]
+        assert duckdb.sql(f"SELECT count(*) FROM read_parquet('{target}')").rows(con) == [(5,)]
+        assert "(" not in duckdb.table("orders")._sql_and_values(lambda q: f"COPY ({q}) TO 'x'")[0].split("TO")[1]
+
+    def test_a_param_in_an_option_is_refused(self, con: duckdb.Connection, tmp_path: Path) -> None:
+        # COPY takes no parameters, so a `param()` in an option would render
+        # as NULL with nothing to bind it; that used to surface as the
+        # engine's "NULL is not supported" or "parameters not used".
+        with pytest.raises(TypeError, match="option 'delimiter' holds param\\('x'\\)"):
+            duckdb.table("orders").to_csv(con, tmp_path / "p.csv", delimiter=param("x"), parameters={"x": "|"})
+        with pytest.raises(TypeError, match="option 'force_quote' holds param"):
+            duckdb.table("orders").to_csv(con, tmp_path / "p.csv", force_quote=[col("id"), param("y")])
+
+    def test_a_plan_literal_binds_while_an_option_literal_is_written(
+        self, con: duckdb.Connection, tmp_path: Path
+    ) -> None:
+        # One statement with both: the filter's 'nl' is bound as $1, the
+        # option's '|' is written into the text, whatever the sink is
+        # doing when the options render.
+        path = tmp_path / "both.csv"
+        plan = duckdb.table("orders").filter(col("country") == "nl")
+        assert plan.to_csv(con, path, delimiter="|", force_quote=[lit("country")], header=False) == [(3,)]
+        assert path.read_text().splitlines()[0] == '1|"nl"|120'
+        sql, values = plan._sql_and_values(
+            lambda q: f"COPY ({q}) TO 'x'{duckdb.frame._options_clause({'delimiter': '|'})}"
+        )
+        assert values == ["nl"]
+        assert sql.endswith("(DELIMITER '|')")
+
+    def test_bound_writes_through_every_sink(self, con: duckdb.Connection, tmp_path: Path) -> None:
+        bound = duckdb.table("orders").select("id").on(con)
+        assert bound.copy_to(tmp_path / "b.parquet") == [(5,)]
+        assert bound.to_json(tmp_path / "b.json", array=True) == [(5,)]
+        assert bound.to_parquet(tmp_path / "c.parquet") == [(5,)]
+
+    def test_the_rest_of_the_family_is_sql(self, con: duckdb.Connection, tmp_path: Path) -> None:
+        # EXPORT DATABASE and COPY FROM DATABASE are statements, not plans;
+        # they ride sql() and run() like any other.
+        assert duckdb.sql(f"EXPORT DATABASE '{tmp_path / 'exp'}' (FORMAT parquet)").rows(con) == []
+        assert (tmp_path / "exp" / "schema.sql").exists()
+        con.run("ATTACH ':memory:' AS other")
+        con.run("COPY FROM DATABASE memory TO other")
+        assert duckdb.sql("SELECT count(*) FROM other.orders").rows(con) == [(5,)]
