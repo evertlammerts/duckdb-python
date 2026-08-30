@@ -2,7 +2,7 @@
 
 A connection is somewhere to run things, and nothing else holds one. Plans are
 built with `duckdb.table` and `duckdb.sql`, which need no connection, and are
-run by passing one: `plan.fetchall(con)`.
+run by passing one: `plan.rows(con)`, or `plan.on(con).rows()`.
 
 `run()` executes a statement and reports how many rows it changed. There is no
 cursor here and no fetch family; those belong to PEP 249 and live in
@@ -19,7 +19,7 @@ from . import _duckdb
 from .exceptions import InterfaceError
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
     from types import TracebackType
 
 __all__ = ["Connection", "connect"]
@@ -57,17 +57,41 @@ class LiveResult:
         self.close()
 
 
+class _Catalog:
+    """What connections to one database share: a count of the statements that may have changed it.
+
+    A stub answer depends on the functions and types the catalog holds, and
+    a sibling connection can change those. Each connection remembers the
+    count its answers were given under and forgets them when it has moved.
+    """
+
+    def __init__(self) -> None:
+        self.generation = 0
+        self.lock = threading.Lock()
+
+    def changed(self) -> None:
+        """Note a statement that may have changed what a query binds to."""
+        with self.lock:
+            self.generation += 1
+
+
 class Connection:
     """A connection to a database."""
 
-    def __init__(self, database: _duckdb.Database) -> None:
+    def __init__(self, database: _duckdb.Database, catalog: _Catalog | None = None) -> None:
         self._database: _duckdb.Database | None = database
         self._raw: _duckdb.Connection | None = database.connect()
+        #: Shared with the connections `duplicate()` makes from this one, so a
+        #: change through any of them is seen by all. Two connections opened
+        #: separately to one file share nothing here, and a change through
+        #: one is not seen by the other until it runs a changing statement.
+        self._catalog = catalog if catalog is not None else _Catalog()
         #: Answers to stub questions asked of this connection. A stub names no
         #: table, so its answer survives DDL, but it does depend on this
         #: connection's settings, which is why it is kept here and not shared.
         self._stub_answers: dict[str, object] = {}
         self._stub_lock = threading.Lock()
+        self._stub_generation = self._catalog.generation
         #: Results plans are still reading. Weak, so a result that has been
         #: consumed and dropped leaves on its own; `close()` closes the rest.
         #: Guarded, because plans run from any thread and close from another.
@@ -83,8 +107,7 @@ class Connection:
         leaves the answers alone and anything else forgets them.
         """
         if _may_change_binding(sql):
-            with self._stub_lock:
-                self._stub_answers.clear()
+            self._catalog.changed()
         return self._track(self._engine().execute(sql, parameters))
 
     def _track(self, result: _duckdb.Result) -> LiveResult:
@@ -116,12 +139,53 @@ class Connection:
         with self._execute(sql, parameters) as result:
             return result.drain()
 
+    def create_macro(
+        self,
+        name: str,
+        parameters: Iterable[str | tuple[str, object]],
+        body: object,
+        *,
+        replace: bool = False,
+        temporary: bool = False,
+    ) -> None:
+        """Define a macro from an expression or a plan.
+
+        An expression makes a scalar macro, a plan a table macro. `parameters`
+        are names, or (name, default) pairs. The body is rendered as written,
+        with `col(name)` referring to a parameter, and the engine checks it
+        when the macro is defined. Literals in the body are written into it,
+        since a definition has no parameters to bind.
+        """
+        from .expr import Expr, qualified, quote, render_literal, suspended_sinks
+        from .frame import Frame, NeedsConnection
+
+        signature = ", ".join(
+            quote(p) if isinstance(p, str) else f"{quote(p[0])} := {render_literal(p[1])}" for p in parameters
+        )
+        with suspended_sinks():
+            if isinstance(body, Expr):
+                definition = body.fragment()
+            elif isinstance(body, Frame):
+                # Rendered blind first, so `col(name)` can mean a parameter
+                # the engine only knows once the macro exists. A body that
+                # needs its inputs' columns, a suffixed join, renders here.
+                try:
+                    definition = "TABLE " + body.render()
+                except NeedsConnection:
+                    definition = "TABLE " + body._definition(self)
+            else:
+                message = f"a macro body is an expression or a plan, not {type(body).__name__}"
+                raise TypeError(message)
+        prefix = "CREATE OR REPLACE" if replace else "CREATE"
+        kind = "TEMP MACRO" if temporary else "MACRO"
+        self.run(f"{prefix} {kind} {qualified(name)}({signature}) AS {definition}")
+
     def duplicate(self) -> Connection:
         """A second connection to the same database, with its own transaction."""
         if self._database is None:
             message = "connection is closed"
             raise InterfaceError(message)
-        return Connection(self._database)
+        return Connection(self._database, self._catalog)
 
     def close(self) -> None:
         """Close the connection, releasing the database. Idempotent.
@@ -165,9 +229,18 @@ _READ_ONLY = frozenset({"SELECT", "WITH", "FROM", "VALUES", "DESCRIBE", "SUMMARI
 
 
 def _may_change_binding(sql: str) -> bool:
-    """Whether a statement could change how a later query binds."""
-    first = sql.lstrip().split(None, 1)[0].upper() if sql.strip() else ""
-    return first not in _READ_ONLY
+    """Whether a statement could change how a later query binds.
+
+    Decided by the first keyword, looking past `EXPLAIN` and `EXPLAIN
+    ANALYZE`: the latter runs the statement it wraps, so `EXPLAIN ANALYZE
+    SET ...` changes as much as the `SET` would.
+    """
+    words = sql.upper().split()
+    if words and words[0] == "EXPLAIN":
+        words = words[1:]
+        if words and words[0] == "ANALYZE":
+            words = words[1:]
+    return bool(words) and words[0] not in _READ_ONLY
 
 
 def connect(database: str = ":memory:", **options: str) -> Connection:

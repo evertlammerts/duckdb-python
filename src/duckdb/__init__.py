@@ -25,14 +25,17 @@ from .expr import (
     star,
     when,
 )
-from .frame import Column, Declared, Frame, declare, sql, table
+from .frame import Bound, Column, Declared, Frame, NeedsConnection, Step, declare, sql, table, values
 
 __all__ = [
+    "Bound",
     "Column",
     "Connection",
     "Declared",
     "Expr",
     "Frame",
+    "NeedsConnection",
+    "Step",
     "__version__",
     "coalesce",
     "col",
@@ -58,6 +61,7 @@ __all__ = [
     "sql_expr",
     "star",
     "table",
+    "values",
     "when",
 ]
 

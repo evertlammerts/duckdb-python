@@ -251,6 +251,11 @@ class Cursor:
         249 leaves it undefined only when the statement produces rows, and it
         stays -1 in that case.
         """
+        # A statement run zero times is still the last one asked for, so the
+        # metadata of whatever ran before must not survive it.
+        self._require_open()._claim_result_slot(self)
+        self._description = None
+        self._rowcount = -1
         total = 0
         counted = False
         for parameters in seq_of_parameters:

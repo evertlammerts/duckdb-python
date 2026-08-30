@@ -47,7 +47,11 @@ class Warning(Exception):
 
 
 class Error(Exception):
-    """Base of every error this package raises."""
+    """Base of every error the engine reports, and of `InterfaceError`.
+
+    A plan refused before the engine sees it raises Python's own
+    `TypeError` or `ValueError` instead, `NeedsConnection` among them.
+    """
 
 
 class InterfaceError(Error):

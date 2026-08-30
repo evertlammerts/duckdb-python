@@ -113,6 +113,30 @@ ConversionContext::ConversionContext() {
 	one_microsecond = timedelta_cls(0, 0, 1);
 }
 
+// Whether values of this type convert to something Python can hash. A LIST
+// or ARRAY becomes a list, a STRUCT or MAP a dict, and a UNION whatever its
+// active member is.
+bool KeysHashable(const LogicalType &type) {
+	switch (type.GetTypeId()) {
+	case LogicalTypeId::LIST:
+	case LogicalTypeId::ARRAY:
+	case LogicalTypeId::STRUCT:
+	case LogicalTypeId::MAP:
+		return false;
+	case LogicalTypeId::UNION: {
+		const auto members = type.GetUnionMemberCount();
+		for (duckdb::cxx::idx_t i = 0; i < members; i++) {
+			if (!KeysHashable(type.GetUnionMemberType(i))) {
+				return false;
+			}
+		}
+		return true;
+	}
+	default:
+		return true;
+	}
+}
+
 nb::object ValueToPython(const Value &value, ConversionContext &ctx) {
 	if (value.IsNull()) {
 		return nb::none();
@@ -211,9 +235,21 @@ nb::object ValueToPython(const Value &value, ConversionContext &ctx) {
 		return out;
 	}
 	case LogicalTypeId::MAP: {
-		nb::dict out;
+		// A dict, when the key type allows it. A MAP keyed by a LIST or a
+		// STRUCT has keys that arrive as lists and dicts, which cannot be
+		// hashed; such a map becomes a list of (key, value) pairs instead of
+		// failing the whole fetch. Decided from the type, so every map in a
+		// column, the empty ones included, comes back in the same shape.
 		const auto count = value.GetChildCount();
-		// Children alternate key, value.
+		if (!KeysHashable(type.GetMapKeyType())) {
+			nb::list pairs;
+			for (duckdb::cxx::idx_t i = 0; i + 1 < count; i += 2) {
+				pairs.append(nb::make_tuple(ValueToPython(value.GetChild(i), ctx),
+				                            ValueToPython(value.GetChild(i + 1), ctx)));
+			}
+			return pairs;
+		}
+		nb::dict out;
 		for (duckdb::cxx::idx_t i = 0; i + 1 < count; i += 2) {
 			out[ValueToPython(value.GetChild(i), ctx)] = ValueToPython(value.GetChild(i + 1), ctx);
 		}

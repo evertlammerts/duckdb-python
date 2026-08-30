@@ -368,6 +368,16 @@ class TestFailedExecute:
 class TestExecutemanyRowcount:
     """rowcount is the total across parameter sets, as sqlite3 reports."""
 
+    def test_an_empty_sequence_leaves_no_earlier_query_behind(self, con: dbapi.Connection) -> None:
+        # A statement run zero times is still the last one asked for.
+        cur = con.cursor()
+        cur.execute("SELECT 1 AS one")
+        cur.executemany("CREATE TABLE IF NOT EXISTS t (x INTEGER)", [])
+        assert cur.description is None
+        assert cur.rowcount == -1
+        with pytest.raises(dbapi.InterfaceError):
+            cur.fetchone()
+
     def test_insert_totals_across_sets(self, con: dbapi.Connection) -> None:
         cur = con.cursor()
         cur.execute("CREATE TABLE t (v INTEGER)")

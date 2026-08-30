@@ -59,7 +59,7 @@ def query_text(path: Path) -> str:
 
 def answer(connection: duckdb.Connection, name: str) -> list[tuple[object, ...]]:
     """What the original query returns, for the verb version to match."""
-    return duckdb.sql(query_text(Path(__file__).parent / "tpch" / f"{name}.sql")).fetchall(connection)
+    return duckdb.sql(query_text(Path(__file__).parent / "tpch" / f"{name}.sql")).rows(connection)
 
 
 def date(text: str) -> Expr:
@@ -79,7 +79,7 @@ def test_the_sql_bridge_carries_every_query(tpch: duckdb.Connection, path: Path)
     This is the floor. The bridge is what makes an unexpressible query a
     non-problem, so it has to hold for all 22.
     """
-    rows = duckdb.sql(query_text(path)).fetchall(tpch)
+    rows = duckdb.sql(query_text(path)).rows(tpch)
     assert isinstance(rows, list)
 
 
@@ -112,7 +112,7 @@ class TestExpressedDirectly:
             )
             .sort(col("l_returnflag"), col("l_linestatus"))
         )
-        assert actual.fetchall(tpch) == answer(tpch, "q01")
+        assert actual.rows(tpch) == answer(tpch, "q01")
 
     def test_q03(self, tpch: duckdb.Connection) -> None:
         customer = duckdb.table("customer").filter(col("c_mktsegment") == "BUILDING")
@@ -127,7 +127,7 @@ class TestExpressedDirectly:
             .sort(col("revenue").desc(), col("o_orderdate"))
             .limit(10)
         )
-        assert actual.fetchall(tpch) == answer(tpch, "q03")
+        assert actual.rows(tpch) == answer(tpch, "q03")
 
     def test_q05(self, tpch: duckdb.Connection) -> None:
         orders = duckdb.table("orders").filter(
@@ -150,7 +150,7 @@ class TestExpressedDirectly:
             .agg(revenue().sum().alias("revenue"))
             .sort(col("revenue").desc())
         )
-        assert actual.fetchall(tpch) == answer(tpch, "q05")
+        assert actual.rows(tpch) == answer(tpch, "q05")
 
     def test_q06(self, tpch: duckdb.Connection) -> None:
         # The simplest shape in the set: restrict, then one aggregate.
@@ -164,7 +164,7 @@ class TestExpressedDirectly:
             )
             .aggregate((col("l_extendedprice") * col("l_discount")).sum().alias("revenue"))
         )
-        assert actual.fetchall(tpch) == answer(tpch, "q06")
+        assert actual.rows(tpch) == answer(tpch, "q06")
 
     def test_q07(self, tpch: duckdb.Connection) -> None:
         # `nation` is joined twice. SQL tells the two apart with the aliases
@@ -189,7 +189,7 @@ class TestExpressedDirectly:
             .agg(col("volume").sum().alias("revenue"))
             .sort(col("n_name"), col("n_name_cust"), col("l_year"))
         )
-        assert actual.fetchall(tpch) == answer(tpch, "q07")
+        assert actual.rows(tpch) == answer(tpch, "q07")
 
     def test_q08(self, tpch: duckdb.Connection) -> None:
         # The customer's nation is joined first, so it keeps the plain names
@@ -219,7 +219,7 @@ class TestExpressedDirectly:
             )
             .sort(col("o_year"))
         )
-        assert actual.fetchall(tpch) == answer(tpch, "q08")
+        assert actual.rows(tpch) == answer(tpch, "q08")
 
     def test_q09(self, tpch: duckdb.Connection) -> None:
         actual = (
@@ -242,7 +242,7 @@ class TestExpressedDirectly:
             .agg(col("amount").sum().alias("sum_profit"))
             .sort(col("nation"), col("o_year").desc())
         )
-        assert actual.fetchall(tpch) == answer(tpch, "q09")
+        assert actual.rows(tpch) == answer(tpch, "q09")
 
     def test_q10(self, tpch: duckdb.Connection) -> None:
         orders = duckdb.table("orders").filter(
@@ -271,7 +271,7 @@ class TestExpressedDirectly:
             .sort(col("revenue").desc())
             .limit(20)
         )
-        assert actual.fetchall(tpch) == answer(tpch, "q10")
+        assert actual.rows(tpch) == answer(tpch, "q10")
 
     def test_q11(self, tpch: duckdb.Connection) -> None:
         german = (
@@ -292,7 +292,7 @@ class TestExpressedDirectly:
             .filter(col("value") > threshold.scalar())
             .sort(col("value").desc())
         )
-        assert actual.fetchall(tpch) == answer(tpch, "q11")
+        assert actual.rows(tpch) == answer(tpch, "q11")
 
     def test_q12(self, tpch: duckdb.Connection) -> None:
         urgent = (col("o_orderpriority") == "1-URGENT") | (col("o_orderpriority") == "2-HIGH")
@@ -313,7 +313,7 @@ class TestExpressedDirectly:
             )
             .sort(col("l_shipmode"))
         )
-        assert actual.fetchall(tpch) == answer(tpch, "q12")
+        assert actual.rows(tpch) == answer(tpch, "q12")
 
     def test_q14(self, tpch: duckdb.Connection) -> None:
         lineitem = duckdb.table("lineitem").filter(
@@ -323,7 +323,7 @@ class TestExpressedDirectly:
         actual = lineitem.join(duckdb.table("part"), on=col("l.l_partkey") == col("r.p_partkey")).aggregate(
             (sql_expr("100.00") * promo / revenue().sum()).alias("promo_revenue")
         )
-        assert actual.fetchall(tpch) == answer(tpch, "q14")
+        assert actual.rows(tpch) == answer(tpch, "q14")
 
     def test_q15(self, tpch: duckdb.Connection) -> None:
         # The query the graph was built for: `totals` feeds both the join and
@@ -342,7 +342,7 @@ class TestExpressedDirectly:
             .select("s_suppkey", "s_name", "s_address", "s_phone", "total_revenue")
             .sort(col("s_suppkey"))
         )
-        assert actual.fetchall(tpch) == answer(tpch, "q15")
+        assert actual.rows(tpch) == answer(tpch, "q15")
 
     def test_q16(self, tpch: duckdb.Connection) -> None:
         complained = (
@@ -361,7 +361,7 @@ class TestExpressedDirectly:
             .agg(col("ps_suppkey").n_unique().alias("supplier_cnt"))
             .sort(col("supplier_cnt").desc(), col("p_brand"), col("p_type"), col("p_size"))
         )
-        assert actual.fetchall(tpch) == answer(tpch, "q16")
+        assert actual.rows(tpch) == answer(tpch, "q16")
 
     def test_q18(self, tpch: duckdb.Connection) -> None:
         heavy = (
@@ -389,7 +389,7 @@ class TestExpressedDirectly:
             .sort(col("o_totalprice").desc(), col("o_orderdate"))
             .limit(100)
         )
-        assert actual.fetchall(tpch) == answer(tpch, "q18")
+        assert actual.rows(tpch) == answer(tpch, "q18")
 
     def test_q19(self, tpch: duckdb.Connection) -> None:
         def branch(brand: str, containers: list[str], quantity: int, size: int) -> Expr:
@@ -412,7 +412,7 @@ class TestExpressedDirectly:
             )
             .aggregate(revenue().sum().alias("revenue"))
         )
-        assert actual.fetchall(tpch) == answer(tpch, "q19")
+        assert actual.rows(tpch) == answer(tpch, "q19")
 
 
 class TestExpressedAfterRewriting:
@@ -458,7 +458,7 @@ class TestExpressedAfterRewriting:
             .sort(col("s_acctbal").desc(), col("n_name"), col("s_name"), col("p_partkey"))
             .limit(100)
         )
-        assert actual.fetchall(tpch) == answer(tpch, "q02")
+        assert actual.rows(tpch) == answer(tpch, "q02")
 
     def test_q04(self, tpch: duckdb.Connection) -> None:
         # EXISTS becomes a semi join: the left rows that have a match, without
@@ -475,7 +475,7 @@ class TestExpressedAfterRewriting:
             .agg(sql_expr("count(*)").alias("order_count"))
             .sort(col("o_orderpriority"))
         )
-        assert actual.fetchall(tpch) == answer(tpch, "q04")
+        assert actual.rows(tpch) == answer(tpch, "q04")
 
     def test_q13(self, tpch: duckdb.Connection) -> None:
         # The original puts the comment test in the LEFT JOIN's ON clause. On
@@ -494,7 +494,7 @@ class TestExpressedAfterRewriting:
             .agg(sql_expr("count(*)").alias("custdist"))
             .sort(col("custdist").desc(), col("c_count").desc())
         )
-        assert actual.fetchall(tpch) == answer(tpch, "q13")
+        assert actual.rows(tpch) == answer(tpch, "q13")
 
     def test_q17(self, tpch: duckdb.Connection) -> None:
         # avg(l_quantity) correlated on l_partkey, decorrelated into a grouped
@@ -514,7 +514,7 @@ class TestExpressedAfterRewriting:
             .filter(col("l_quantity") < col("threshold"))
             .aggregate((col("l_extendedprice").sum() / sql_expr("7.0")).alias("avg_yearly"))
         )
-        assert actual.fetchall(tpch) == answer(tpch, "q17")
+        assert actual.rows(tpch) == answer(tpch, "q17")
 
     def test_q20(self, tpch: duckdb.Connection) -> None:
         # Two nested IN subqueries, which `isin` takes directly, around a sum
@@ -548,7 +548,7 @@ class TestExpressedAfterRewriting:
             .select("s_name", "s_address")
             .sort(col("s_name"))
         )
-        assert actual.fetchall(tpch) == answer(tpch, "q20")
+        assert actual.rows(tpch) == answer(tpch, "q20")
 
     def test_q21(self, tpch: duckdb.Connection) -> None:
         # EXISTS and NOT EXISTS over the same table become a semi join and an
@@ -574,7 +574,7 @@ class TestExpressedAfterRewriting:
             .sort(col("numwait").desc(), col("s_name"))
             .limit(100)
         )
-        assert actual.fetchall(tpch) == answer(tpch, "q21")
+        assert actual.rows(tpch) == answer(tpch, "q21")
 
     def test_q22(self, tpch: duckdb.Connection) -> None:
         # The scalar subquery here is uncorrelated, so `scalar()` takes it as
@@ -596,7 +596,7 @@ class TestExpressedAfterRewriting:
             .agg(sql_expr("count(*)").alias("numcust"), col("c_acctbal").sum().alias("totacctbal"))
             .sort(col("cntrycode"))
         )
-        assert actual.fetchall(tpch) == answer(tpch, "q22")
+        assert actual.rows(tpch) == answer(tpch, "q22")
 
 
 def test_every_query_is_classified_and_proven() -> None:

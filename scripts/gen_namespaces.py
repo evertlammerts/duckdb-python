@@ -105,7 +105,7 @@ def catalog(connection: object) -> list[tuple[Any, ...]]:
           AND NOT list_contains(parameter_types, 'LAMBDA')
         ORDER BY function_name, len(parameter_types)
     """
-    return sql(query).fetchall(connection)  # type: ignore[arg-type]
+    return sql(query).rows(connection)  # type: ignore[arg-type]
 
 
 class Entry:

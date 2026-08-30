@@ -186,6 +186,12 @@ jobs:
       # not accepted in place of it.
       - run: uv run --no-sync mypy
       - run: uv run --no-sync pytest
+      # The generated surfaces are read from the engine's catalog; a stale
+      # file would advertise functions this engine does not have.
+      - name: Generated files match the generators
+        run: |
+          uv run --no-sync python scripts/gen_aggregates.py --check
+          uv run --no-sync python scripts/gen_namespaces.py --check
 
   coverage:
     name: Seam coverage

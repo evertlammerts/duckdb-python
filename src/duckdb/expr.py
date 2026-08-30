@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import copy
 import datetime
 import decimal
 import uuid
@@ -25,7 +26,7 @@ from ._aggregates import AggregateMethods
 from ._namespaces import DateMethods, ListMethods, StringMethods
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator
+    from collections.abc import Iterable, Iterator, Mapping
 
 __all__ = [
     "Expr",
@@ -82,10 +83,13 @@ LITERAL_TYPES = (
     datetime.timedelta,
     decimal.Decimal,
     uuid.UUID,
+    dict,
 )
 
 # Widening order for the numeric literals, so a list of mixed numbers gets an
-# element type that none of them overflows.
+# element type that none of them overflows. Numbers are the only values that
+# widen: the engine refuses a list or a map that mixes text and numbers, and
+# a claimed VARCHAR would only move that refusal from the SQL to the binding.
 _NUMERIC_RANK = {"INTEGER": 1, "BIGINT": 2, "HUGEINT": 3, "DOUBLE": 4}
 
 _INT32 = 2**31
@@ -99,8 +103,6 @@ def _widen(types: list[str]) -> str | None:
         return unique[0]
     if all(t in _NUMERIC_RANK for t in unique):
         return "DOUBLE" if "DOUBLE" in unique else max(unique, key=lambda t: _NUMERIC_RANK[t])
-    if "VARCHAR" in unique:
-        return "VARCHAR"
     return None
 
 
@@ -141,6 +143,25 @@ def sql_type_of(value: object) -> str | None:
             return None
         element = _widen([t for t in element_types if t is not None])
         return f"{element}[]" if element else None
+    if isinstance(value, dict):
+        # One rule for a dict, shared with `render_literal` and with the
+        # converter in pyconv.cpp: text keys make a STRUCT, any other keys a
+        # MAP. An empty dict is an empty STRUCT, which has no type to bind as
+        # and is written into the SQL instead.
+        if not value:
+            return None
+        if all(isinstance(k, str) for k in value):
+            fields = [(k, sql_type_of(v)) for k, v in value.items()]
+            if any(t is None for _, t in fields):
+                return None
+            return "STRUCT(" + ", ".join(f"{quote(k)} {t}" for k, t in fields) + ")"
+        key_types = [sql_type_of(k) for k in value]
+        value_types = [sql_type_of(v) for v in value.values()]
+        if any(t is None for t in key_types) or any(t is None for t in value_types):
+            return None
+        key = _widen([t for t in key_types if t is not None])
+        val = _widen([t for t in value_types if t is not None])
+        return f"MAP({key}, {val})" if key and val else None
     return None
 
 
@@ -153,7 +174,7 @@ def _needs_param(value: object) -> bool:
     # inlining keeps DuckDB's own literal typing.
     return isinstance(
         value,
-        (str, bytes, list, tuple, datetime.date, datetime.time, datetime.timedelta, decimal.Decimal, uuid.UUID),
+        (str, bytes, list, tuple, dict, datetime.date, datetime.time, datetime.timedelta, decimal.Decimal, uuid.UUID),
     )
 
 
@@ -203,6 +224,14 @@ def render_literal(value: object) -> str:
         return f"UUID '{value}'"
     if isinstance(value, (list, tuple)):
         return "[" + ", ".join(render_literal(item) for item in value) + "]"
+    if isinstance(value, dict):
+        # The schema oracle's form only; a dict binds as a parameter when a
+        # sink is active. Text keys are a struct, anything else a map.
+        if all(isinstance(k, str) for k in value):
+            entries = ", ".join(f"{render_literal(k)}: {render_literal(v)}" for k, v in value.items())
+            return "{" + entries + "}"
+        entries = ", ".join(f"{render_literal(k)}: {render_literal(v)}" for k, v in value.items())
+        return "MAP {" + entries + "}"
     message = f"cannot render a literal of type {type(value).__name__}: {value!r}"
     raise TypeError(message)
 
@@ -260,11 +289,26 @@ def rendering_steps(names: dict[int, str]) -> Iterator[None]:
         _step_names.reset(token)
 
 
-def subqueries(expression: Expr) -> list[PlanBase]:
-    """Every plan an expression refers to, in tree order, each once."""
+def _children(value: object) -> Iterable[object]:
+    """What an expression-tree walk descends into: the fields of a node, the items of a container.
+
+    The one definition of a child, so that `subqueries` and `rebind` cannot
+    disagree about a field that holds its expressions in a list or a dict.
+    """
+    if isinstance(value, Expr):
+        return vars(value).values()
+    if isinstance(value, (list, tuple)):
+        return value
+    if isinstance(value, dict):
+        return value.values()
+    return ()
+
+
+def subqueries(value: object) -> list[PlanBase]:
+    """Every plan an expression (or a container of them) refers to, in tree order, each once."""
     found: list[PlanBase] = []
     seen: set[int] = set()
-    stack: list[object] = [expression]
+    stack: list[object] = [value]
     while stack:
         item = stack.pop()
         if isinstance(item, SubQuery):
@@ -272,11 +316,34 @@ def subqueries(expression: Expr) -> list[PlanBase]:
                 seen.add(id(item.query))
                 found.append(item.query)
             continue
-        if isinstance(item, Expr):
-            stack.extend(reversed(list(vars(item).values())))
-        elif isinstance(item, (list, tuple)):
-            stack.extend(reversed(item))
+        stack.extend(reversed(list(_children(item))))
     return found
+
+
+def rebind(value: Any, mapping: Mapping[int, PlanBase]) -> Any:
+    """A copy in which every subquery over a plan in `mapping` points at its replacement.
+
+    Keyed by the identity of the plan the subquery was built over. Takes an
+    expression or a container of them, and returns the very same object when
+    nothing inside it is affected, so a step untouched by a `bind()` keeps
+    its expressions by identity.
+    """
+    if isinstance(value, SubQuery):
+        target = mapping.get(id(value.query))
+        return value._with(query=target) if target is not None and target is not value.query else value
+    if isinstance(value, Expr):
+        changed = {n: c for n, a in vars(value).items() if (c := rebind(a, mapping)) is not a}
+        return value._with(**changed) if changed else value
+    if isinstance(value, (list, tuple, dict)):
+        items = [rebind(v, mapping) for v in _children(value)]
+        if all(a is b for a, b in zip(items, _children(value), strict=True)):
+            return value
+        if isinstance(value, dict):
+            return dict(zip(value, items, strict=True))
+        if isinstance(value, tuple) and hasattr(value, "_fields"):
+            return type(value)(*items)  # a NamedTuple takes its members one by one
+        return type(value)(items)
+    return value
 
 
 def active_sink() -> ParamSink | None:
@@ -551,6 +618,23 @@ class Expr(AggregateMethods, Namespaces):
         """Cast to a SQL type, written as text."""
         return Cast(self, type_text)
 
+    def try_cast(self, type_text: str) -> Expr:
+        """Cast to a SQL type, giving NULL where the cast would fail."""
+        return Cast(self, type_text, safe=True)
+
+    def where(self, predicate: object) -> Expr:
+        """Aggregate only the rows where the predicate holds: `sum(x) FILTER (WHERE ...)`.
+
+        Applies to an aggregate call, `count_all()` included. Put it before
+        `.over()` when the aggregate is a window. Which calls aggregate is the
+        engine's to say: extensions add aggregates, so there is no closed list
+        here, and a scalar call is refused when the plan is bound or run.
+        """
+        if not isinstance(self, (Func, Distinct)):
+            message = "where() applies to an aggregate call, as col('x').sum() or fn('sum', ...)"
+            raise TypeError(message)
+        return self._with(_filter=_lift(predicate))
+
     def over(
         self,
         partition_by: Iterable[object] | object | None = None,
@@ -595,7 +679,14 @@ class Expr(AggregateMethods, Namespaces):
         return Func(function, [*lifted[:position], self, *lifted[position:]])
 
     def __repr__(self) -> str:
-        return f"<Expr {self.fragment()}>"
+        # Rendered into a sink and read back, so a parameter shows its name
+        # and a literal its value, where a blind render shows NULL and text.
+        with ParamSink() as sink:
+            text = self.fragment()
+        for position, (kind, value, _) in reversed(list(enumerate(sink.entries, 1))):
+            shown = f"${value}" if kind == "reference" else render_literal(value)
+            text = text.replace(f"${position}", shown)
+        return f"<Expr {text}>"
 
 
 class Col(Expr):
@@ -635,7 +726,13 @@ class Lit(Expr):
 
     def __init__(self, value: object) -> None:
         super().__init__()
-        self.value = value
+        # A snapshot: a plan is a value, so a list or dict the caller goes on
+        # changing must not change the plan with it.
+        try:
+            self.value = copy.deepcopy(value) if isinstance(value, (list, tuple, dict)) else value
+        except (TypeError, copy.Error) as reason:
+            message = f"a literal holds a value that is not plain data: {reason}"
+            raise TypeError(message) from None
 
     def fragment(self) -> str:
         sink = active_sink()
@@ -717,15 +814,17 @@ class Postfix(Expr):
 
 
 class Cast(Expr):
-    """An explicit cast."""
+    """An explicit cast, or a TRY_CAST that gives NULL instead of failing."""
 
-    def __init__(self, operand: Expr, type_text: str) -> None:
+    def __init__(self, operand: Expr, type_text: str, *, safe: bool = False) -> None:
         super().__init__()
         self.operand = operand
         self.type_text = type_text
+        self.safe = safe
 
     def fragment(self) -> str:
-        return f"CAST({self.operand.fragment()} AS {self.type_text})"
+        keyword = "TRY_CAST" if self.safe else "CAST"
+        return f"{keyword}({self.operand.fragment()} AS {self.type_text})"
 
 
 class In(Expr):
@@ -800,13 +899,14 @@ class Func(Expr):
         self.name = name
         self.args = args
         self._ignore_nulls = False
+        self._filter: Expr | None = None
 
     def fragment(self) -> str:
         rendered = ", ".join(a.fragment() for a in self.args)
         # IGNORE NULLS goes inside the call, where DuckDB reads it; after the
         # closing parenthesis it is a syntax error.
         tail = " IGNORE NULLS" if self._ignore_nulls else ""
-        return f"{self.name}({rendered}{tail})"
+        return f"{self.name}({rendered}{tail})" + _filter_clause(self._filter)
 
 
 class Distinct(Expr):
@@ -816,9 +916,15 @@ class Distinct(Expr):
         super().__init__()
         self.name = name
         self.operand = operand
+        self._filter: Expr | None = None
 
     def fragment(self) -> str:
-        return f"{self.name}(DISTINCT {self.operand.fragment()})"
+        return f"{self.name}(DISTINCT {self.operand.fragment()})" + _filter_clause(self._filter)
+
+
+def _filter_clause(predicate: Expr | None) -> str:
+    """The FILTER clause of an aggregate, if it has one."""
+    return f" FILTER (WHERE {predicate.fragment()})" if predicate is not None else ""
 
 
 class Concat(Expr):
@@ -970,7 +1076,7 @@ def count_all() -> Expr:
     Not a method, because it counts rows rather than a column's values.
     `col("x").count()` skips NULLs; this does not.
     """
-    return Raw("count(*)")
+    return Func("count", [Star()])
 
 
 def _window(name: str) -> Any:
@@ -1004,14 +1110,3 @@ __all__ += [
     "row_number",
     "sql_type_of",
 ]
-
-
-def render_with_params(expression: Expr) -> tuple[str, list[tuple[str, Any, str | None]]]:
-    """Render an expression with a fresh sink, returning the SQL and its bindings."""
-    with ParamSink() as sink:
-        return expression.fragment(), list(sink.entries)
-
-
-def iter_entries(sink: ParamSink) -> Iterator[tuple[str, Any, str | None]]:
-    """The sink's bindings in render order."""
-    yield from sink.entries

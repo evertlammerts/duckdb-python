@@ -36,10 +36,11 @@ minversion = "8.0"
 testpaths = ["tests"]
 # strict-markers so a typo in a marker fails instead of silently selecting
 # nothing; filterwarnings=error so a warning is a result, not a scroll-by.
-addopts = "-ra --verbose --strict-markers --strict-config"
+addopts = "-ra --verbose --strict-markers --strict-config -m 'not corpus'"
 filterwarnings = ["error"]
 markers = [
     "freethreaded: only meaningful on a free-threaded interpreter",
+    "corpus: runs the engine's sqllogictest corpus; needs a duckdb checkout and a minute (pytest -m corpus)",
 ]
 
 [tool.ruff]

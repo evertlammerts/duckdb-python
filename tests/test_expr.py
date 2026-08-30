@@ -143,7 +143,6 @@ class TestSqlTypeOf:
             (b"x", "BLOB"),
             ([1, 2], "INTEGER[]"),
             ([1, 1.5], "DOUBLE[]"),
-            (["a", 1], "VARCHAR[]"),
         ],
     )
     def test_types(self, value: object, expected: str) -> None:
@@ -151,8 +150,12 @@ class TestSqlTypeOf:
 
     def test_ambiguous_values_have_no_type(self) -> None:
         # An empty list has no element type, so it stays inline rather than
-        # being bound as something invented.
+        # being bound as something invented. A list or map mixing text and
+        # numbers has none either: the engine refuses to combine BIGINT and
+        # VARCHAR, so a claimed VARCHAR[] only moved that refusal.
         assert sql_type_of([]) is None
+        assert sql_type_of(["a", 1]) is None
+        assert sql_type_of({1: "a", "x": "b"}) is None
 
 
 class TestOperatorsEvaluate:
