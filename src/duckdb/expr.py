@@ -26,7 +26,7 @@ from ._aggregates import AggregateMethods
 from ._namespaces import DateMethods, ListMethods, StringMethods
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Mapping
+    from collections.abc import Iterable, Iterator
 
 __all__ = [
     "Expr",
@@ -290,17 +290,15 @@ def rendering_steps(names: dict[int, str]) -> Iterator[None]:
 
 
 def _children(value: object) -> Iterable[object]:
-    """What an expression-tree walk descends into: the fields of a node, the items of a container.
+    """What an expression-tree walk descends into: the fields of a node, the items of a list or tuple.
 
-    The one definition of a child, so that `subqueries` and `rebind` cannot
-    disagree about a field that holds its expressions in a list or a dict.
+    The one definition of a child, so that a field holding its expressions
+    in a list is walked like any other.
     """
     if isinstance(value, Expr):
         return vars(value).values()
     if isinstance(value, (list, tuple)):
         return value
-    if isinstance(value, dict):
-        return value.values()
     return ()
 
 
@@ -318,32 +316,6 @@ def subqueries(value: object) -> list[PlanBase]:
             continue
         stack.extend(reversed(list(_children(item))))
     return found
-
-
-def rebind(value: Any, mapping: Mapping[int, PlanBase]) -> Any:
-    """A copy in which every subquery over a plan in `mapping` points at its replacement.
-
-    Keyed by the identity of the plan the subquery was built over. Takes an
-    expression or a container of them, and returns the very same object when
-    nothing inside it is affected, so a step untouched by a `bind()` keeps
-    its expressions by identity.
-    """
-    if isinstance(value, SubQuery):
-        target = mapping.get(id(value.query))
-        return value._with(query=target) if target is not None and target is not value.query else value
-    if isinstance(value, Expr):
-        changed = {n: c for n, a in vars(value).items() if (c := rebind(a, mapping)) is not a}
-        return value._with(**changed) if changed else value
-    if isinstance(value, (list, tuple, dict)):
-        items = [rebind(v, mapping) for v in _children(value)]
-        if all(a is b for a, b in zip(items, _children(value), strict=True)):
-            return value
-        if isinstance(value, dict):
-            return dict(zip(value, items, strict=True))
-        if isinstance(value, tuple) and hasattr(value, "_fields"):
-            return type(value)(*items)  # a NamedTuple takes its members one by one
-        return type(value)(items)
-    return value
 
 
 def active_sink() -> ParamSink | None:

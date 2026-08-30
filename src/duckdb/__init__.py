@@ -25,13 +25,12 @@ from .expr import (
     star,
     when,
 )
-from .frame import Bound, Column, Declared, Frame, NeedsConnection, Step, declare, sql, table, values
+from .frame import Bound, Column, Frame, NeedsConnection, Step, sql, table, values
 
 __all__ = [
     "Bound",
     "Column",
     "Connection",
-    "Declared",
     "Expr",
     "Frame",
     "NeedsConnection",
@@ -42,7 +41,6 @@ __all__ = [
     "connect",
     "count_all",
     "dbapi",
-    "declare",
     "dense_rank",
     "duckdb_version",
     "exceptions",

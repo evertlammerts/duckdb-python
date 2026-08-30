@@ -19,20 +19,18 @@ them. Types, and any name the engine chose, are asked for.
 Nothing a connection said is ever stored on a plan. A schema is one catalog's
 answer at one moment, and a plan that remembered it would render one way here
 and the same way somewhere the answer differs. Shapes are worked out afresh
-against whichever connection is running, and a source may instead be given a
-schema outright, which is a statement by the caller rather than a memory.
+against whichever connection is running. The one schema a caller states is
+a `values()` plan's, which is a statement by the caller rather than a memory.
 """
 
 from __future__ import annotations
 
-import contextlib
 import dataclasses
 import html
 import re
 from collections.abc import Iterable, Sized
-from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
-from ._types import canonical
 from .connection import Connection, LiveResult
 from .exceptions import Error
 from .expr import (
@@ -47,7 +45,6 @@ from .expr import (
     count_all,
     qualified,
     quote,
-    rebind,
     render_literal,
     rendering_steps,
     subqueries,
@@ -57,19 +54,7 @@ from .expr import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
 
-__all__ = [
-    "Bound",
-    "Checked",
-    "Column",
-    "Declared",
-    "Frame",
-    "NeedsConnection",
-    "Step",
-    "declare",
-    "sql",
-    "table",
-    "values",
-]
+__all__ = ["Bound", "Column", "Frame", "NeedsConnection", "Step", "sql", "table", "values"]
 
 
 class Column(NamedTuple):
@@ -86,11 +71,6 @@ class Column(NamedTuple):
 
 #: What a step produces, in order.
 Shape = tuple[Column, ...]
-
-#: How a step works out its own shape from its inputs' shapes. Returning None
-#: means only the engine knows, so the shape is bound instead.
-ShapeRule = "Callable[[tuple[Shape, ...]], Shape | None]"
-
 
 #: How many stub answers one connection keeps. The keys are query text, so a
 #: long-running process could otherwise accumulate them without bound.
@@ -311,14 +291,8 @@ class Step:
 
     A step is data, not a closure: what it renders to, what it produces, and
     which expressions it holds are all functions of the record. That is what
-    lets `bind()` rewrite a step's expressions, and lets a plan be pickled,
-    compared, and read.
+    lets a plan be pickled, compared, and read.
     """
-
-    #: Whether `shape()` must see its inputs' types, not just their names.
-    #: With a connection, such a step has its inputs typed by the engine
-    #: before it is asked; without one, it sees whatever is known.
-    needs_types: ClassVar[bool] = False
 
     def __post_init__(self) -> None:
         """Checks on the arguments. Steps with arguments to check override this."""
@@ -334,10 +308,6 @@ class Step:
 
     def shape(self, shapes: tuple[Shape, ...]) -> Shape | None:
         """What this step produces, from its inputs' shapes; None if only the engine knows."""
-        return None
-
-    def shape_alone(self) -> Shape | None:
-        """What this step produces when an input's shape is unknown; None unless the step fixes its own."""
         return None
 
     def needs_shapes(self) -> bool:
@@ -360,16 +330,6 @@ class Step:
 
     def __hash__(self) -> int:
         return hash(_comparable(self))
-
-    def rewrite(self, mapping: dict[int, Frame]) -> Step:
-        """This step with each subquery over a plan in `mapping` pointing at its replacement."""
-        changes = {}
-        for field in dataclasses.fields(self):
-            value = getattr(self, field.name)
-            rebound = rebind(value, mapping)
-            if rebound is not value:
-                changes[field.name] = rebound
-        return dataclasses.replace(self, **changes) if changes else self
 
 
 def _comparable(value: object) -> object:
@@ -422,85 +382,6 @@ class Sql(Step):
 
 
 @dataclasses.dataclass(frozen=True, eq=False)
-class Declared(Step):
-    """A relation variable: a name with a heading, standing for a relation.
-
-    The heading is a signature, not a claim about any table, so nothing can
-    make it stale. `Frame.bind()` closes the hole with a plan and checks that
-    plan against the heading.
-    """
-
-    name: str
-    heading: Shape
-
-    def render(self, names: tuple[str, ...], shapes: tuple[Shape | None, ...]) -> str:
-        """The heading's columns out of the catalog's relation of this name.
-
-        An open hole is the catalog's to satisfy, and it satisfies the names
-        the heading gives: a wider table is narrowed to them, and a missing
-        one is the engine's error. The types are not checked on this path;
-        `bind()` is the checked one.
-        """
-        return f"SELECT {', '.join(quote(c.name) for c in self.heading)} FROM {qualified(self.name)}"
-
-    def shape(self, shapes: tuple[Shape, ...]) -> Shape | None:
-        """The heading, which needs no engine."""
-        return self.heading
-
-
-@dataclasses.dataclass(frozen=True, eq=False)
-class Checked(Step):
-    """A plan bound to a declared relation, narrowed to that relation's heading and held to it.
-
-    `bind()` puts one of these between the heading and the plan filling it.
-    The plan may carry more columns than the heading names; the hole sees
-    exactly the heading's columns, in the heading's order, so everything
-    derived from the heading stays true. A column the heading names must be
-    there, with the declared type where one was given. Names are checked as
-    soon as the plan's are known; a type is checked when both sides know it,
-    which is at the latest the first time the plan resolves on a connection,
-    where the engine has typed every column. The heading is a promise the
-    caller made; this is where it is kept.
-    """
-
-    name: str
-    heading: Shape
-
-    needs_types: ClassVar[bool] = True
-
-    def render(self, names: tuple[str, ...], shapes: tuple[Shape | None, ...]) -> str:
-        """The heading's columns out of the bound plan."""
-        return f"SELECT {', '.join(quote(c.name) for c in self.heading)} FROM {names[0]}"
-
-    def shape(self, shapes: tuple[Shape, ...]) -> Shape | None:
-        """The heading, once the plan is shown to fit it; the engine's type spellings where known."""
-        supplied = {column.name: column for column in shapes[0]}
-        missing = [column.name for column in self.heading if column.name not in supplied]
-        if missing:
-            message = (
-                f"{self.name!r} is declared with columns {[c.name for c in self.heading]}, "
-                f"but the plan bound to it has {list(supplied)}"
-            )
-            raise ValueError(message)
-        merged: list[Column] = []
-        for wanted in self.heading:
-            got = supplied[wanted.name]
-            if wanted.type is not None and got.type is not None and canonical(wanted.type) != canonical(got.type):
-                message = (
-                    f"{self.name!r} declares {wanted.name} as {wanted.type}, but the plan bound to it has {got.type}"
-                )
-                raise ValueError(message)
-            # A declared type stands in for one not yet known; once both are
-            # known they agree, so the engine's spelling is the one kept.
-            merged.append(Column(wanted.name, got.type if got.type is not None else wanted.type))
-        return tuple(merged)
-
-    def shape_alone(self) -> Shape | None:
-        """The heading: what the caller said, until the plan's own columns are known."""
-        return self.heading
-
-
-@dataclasses.dataclass(frozen=True, eq=False)
 class Values(Step):
     """Rows given in memory."""
 
@@ -523,8 +404,8 @@ class Values(Step):
             return f"SELECT {_as_stub(self.heading)} WHERE FALSE"
         rendered = ", ".join("(" + ", ".join(v.fragment() for v in row) + ")" for row in self.rows)
         columns = ", ".join(quote(c.name) for c in self.heading)
-        # A declared type is a cast, so the shape this step reports is what
-        # the engine produces. A column declared without one takes the type
+        # A type given is a cast, so the shape this step reports is what
+        # the engine produces. A column given without one takes the type
         # the engine infers from the values.
         selected = ", ".join(
             f"{quote(c.name)}::{c.type} AS {quote(c.name)}" if c.type is not None else quote(c.name)
@@ -1008,31 +889,18 @@ class Frame(PlanBase):
         for node in self._order() if order is None else order:
             if only is not None and id(node) not in only:
                 continue
-            given: tuple[Shape | None, ...]
-            if connection is not None and node._step.needs_types:
-                given = tuple(typed(parent) for parent in node._inputs)
-            else:
-                given = tuple(known.get(id(parent)) for parent in node._inputs)
-            # Blind, an unknown shape is left unknown and the walk goes on: a
-            # bound heading further up answers for itself, and a plan whose
-            # own shape stays unknown is the one that needs the engine.
-            shape = node._derived(given) if all(g is not None for g in given) else node._step.shape_alone()
+            given = tuple(known[id(parent)] for parent in node._inputs)
+            shape = node._step.shape(given)
             if shape is None:
                 if connection is None:
-                    continue
+                    message = (
+                        "which columns this step produces is the engine's to say; pass a connection "
+                        "(only a plan built from values() can answer without one)"
+                    )
+                    raise NeedsConnection(message)
                 shape = node._ask(connection, typed)
             known[id(node)] = shape
-        if only is None and id(self) not in known:
-            message = (
-                "working out these columns means asking the engine, so it needs a connection; "
-                "pass one, or build on a declared relation"
-            )
-            raise NeedsConnection(message)
         return known
-
-    def _derived(self, given: tuple[Shape | None, ...]) -> Shape | None:
-        """This step's shape from its inputs' shapes alone; None when only the engine knows."""
-        return self._step.shape(cast("tuple[Shape, ...]", given))
 
     def _ask(self, connection: Connection, typed: Callable[[Frame], Shape]) -> Shape:
         """Ask the engine about this step alone.
@@ -1112,58 +980,6 @@ class Frame(PlanBase):
         This reads the rows, unlike `.schema`, which only asks the binder.
         """
         return self._derive(Describe())
-
-    # -- relation variables
-
-    def bind(self, **relations: Frame) -> Frame:
-        """Close declared relations with plans, by name.
-
-        Substitution, done here and before any engine is involved. Each plan
-        is checked against the heading it fills, as far as its columns can be
-        worked out without a connection. A hole left open is still a hole;
-        executing such a plan means the catalog supplies the name.
-        """
-        order = self._order()
-        holes: dict[str, Declared] = {}
-        for node in order:
-            if not isinstance(node._step, Declared):
-                continue
-            earlier = holes.get(node._step.name)
-            if earlier is not None and earlier != node._step:
-                message = (
-                    f"{node._step.name!r} is declared twice with different headings: "
-                    f"{list(earlier.heading)} and {list(node._step.heading)}"
-                )
-                raise ValueError(message)
-            holes[node._step.name] = node._step
-        unknown = sorted(set(relations) - set(holes))
-        if unknown:
-            message = f"no declared relation named {', '.join(repr(n) for n in unknown)}"
-            raise ValueError(message)
-        filled = {name: Frame(Checked(name, holes[name].heading), (plan,)) for name, plan in relations.items()}
-        for frame in filled.values():
-            # Names, and the types both sides know, are checked here. The
-            # rest is checked by the same step when the plan first resolves
-            # on a connection.
-            with contextlib.suppress(NeedsConnection):
-                frame.resolve()
-        # Substitution, bottom-up. A step whose inputs or expressions changed
-        # is rebuilt; its expressions are rewritten so that a subquery over
-        # a replaced plan points at the replacement. Each bound branch gets
-        # its own copies, which is what lets one plan be bound twice and the
-        # branches combined.
-        rebuilt: dict[int, Frame] = {}
-        for node in order:
-            if isinstance(node._step, Declared) and node._step.name in relations:
-                rebuilt[id(node)] = filled[node._step.name]
-                continue
-            inputs = tuple(rebuilt[id(p)] for p in node._inputs)
-            step = node._step.rewrite(rebuilt) if node._uses else node._step
-            if inputs == node._inputs and step is node._step:
-                rebuilt[id(node)] = node
-                continue
-            rebuilt[id(node)] = Frame(step, inputs)
-        return rebuilt[id(self)]
 
     # -- verbs
 
@@ -1759,21 +1575,3 @@ def values(rows: Iterable[Iterable[object]], columns: Iterable[str | tuple[str, 
     """
     heading = tuple(Column(c, None) if isinstance(c, str) else Column(*c) for c in columns)
     return Frame(Values(tuple(tuple(Lit(v) for v in row) for row in rows), heading))
-
-
-def declare(name: str, heading: Iterable[tuple[str, str | None]]) -> Frame:
-    """A relation the caller will supply, with the columns the plan will use.
-
-    A plan built on one is a function over relations: it works out its
-    columns from the heading with no engine, renders with the hole as a bare
-    name, and is closed with `plan.bind(name=some_plan)`. The plan bound may
-    carry more columns; the hole sees the heading's, in the heading's order,
-    and each must be there with the declared type. Executed with the hole
-    still open, the catalog supplies the name.
-
-        lineitem = declare("lineitem", [("l_shipdate", "DATE"), ("l_quantity", "DECIMAL(15,2)")])
-        recent = lineitem.filter(col("l_shipdate") > date(1998, 9, 1))
-        recent.bind(lineitem=table("lineitem")).rows(con)
-    """
-    shape = tuple(Column(column, type_text) for column, type_text in heading)
-    return Frame(Declared(name, _require_unique(shape, "declare")))

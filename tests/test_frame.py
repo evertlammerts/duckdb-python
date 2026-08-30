@@ -8,7 +8,6 @@ a WITH, a name that turns into syntax.
 from __future__ import annotations
 
 import datetime
-import decimal
 import gc
 import pathlib
 import pickle
@@ -17,7 +16,7 @@ from typing import TYPE_CHECKING, cast
 import pytest
 
 import duckdb
-from duckdb import _duckdb, col, declare, exceptions, lit, param, sql_expr, star
+from duckdb import _duckdb, col, exceptions, lit, param, sql_expr, star
 from duckdb.expr import ParamSink, Star, render_literal, suspended_sinks
 
 if TYPE_CHECKING:
@@ -653,10 +652,12 @@ class TestTheEngineIsAskedSparingly:
         assert frame.types(con) == ["INTEGER"]
         assert calls == ['SELECT * FROM "orders"']
 
-    def test_a_declared_source_is_asked_nothing(self, con: duckdb.Connection, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_a_typed_values_source_is_asked_nothing(
+        self, con: duckdb.Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # A schema the caller stated is not a memory of an engine, so it needs
         # no connection and no reflection.
-        stated = declare("orders", [("id", "INTEGER"), ("amount", "INTEGER")])
+        stated = duckdb.values([], columns=[("id", "INTEGER"), ("amount", "INTEGER")])
         calls = record_binds(con, monkeypatch)
         assert stated.filter(col("amount") > 0).types(con) == ["INTEGER", "INTEGER"]
         assert calls == []
@@ -954,10 +955,10 @@ class TestAPlanHoldsNothing:
         elsewhere.run("CREATE TABLE orders AS SELECT 42 AS id, 'zz' AS country, 900 AS amount")
         assert plan.rows(elsewhere) == [(42,)]
 
-    def test_a_declared_source_resolves_with_no_engine(self) -> None:
+    def test_a_typed_values_source_resolves_with_no_engine(self) -> None:
         # A stated schema as an ordinary option: say
         # what a source holds and the whole plan works out its columns alone.
-        orders = declare("orders", [("id", "INTEGER"), ("amount", "INTEGER")])
+        orders = duckdb.values([], columns=[("id", "INTEGER"), ("amount", "INTEGER")])
         plan = orders.filter(col("amount") > 0).with_columns(doubled=col("amount")).select("id", "doubled")
         assert plan.columns() == ["id", "doubled"]
 
@@ -978,7 +979,7 @@ class TestAPlanHoldsNothing:
 
     def test_asking_for_columns_without_a_connection_says_so(self) -> None:
         plan = duckdb.table("orders").filter(col("amount") > 0)
-        with pytest.raises(ValueError, match="needs a connection"):
+        with pytest.raises(ValueError, match="pass a connection"):
             plan.columns()
 
     def test_running_needs_a_connection(self) -> None:
@@ -1055,16 +1056,6 @@ class TestNothingAnEngineSaidIsKept:
         assert plan.rows(con) == [(1, 2)]
         con.run("ALTER TABLE t DROP COLUMN b")
         assert plan.rows(con) == [(1, 2)]
-
-    def test_a_stated_schema_is_not_a_memory(self, con: duckdb.Connection) -> None:
-        # Declaring is the caller speaking, not the engine being remembered, so
-        # it holds wherever the plan goes and is the caller's to keep true.
-        stated = declare("orders", [("id", "INTEGER"), ("amount", "INTEGER")])
-        plan = stated.with_columns(doubled=col("amount") * 2)
-        assert plan.columns() == ["id", "amount", "doubled"]
-        first, second = self.two_databases()
-        assert plan.columns(first) == ["id", "amount", "doubled"]
-        assert plan.columns(second) == ["id", "amount", "doubled"]
 
 
 class TestRenderIsTotal:
@@ -1270,76 +1261,6 @@ class TestParametersAreSupplied:
         assert "nl" in plan.preview(con, parameters=values)
 
 
-class TestDeclaredRelations:
-    """A hole with a heading, closed by `bind`."""
-
-    def heading(self) -> list[tuple[str, str]]:
-        return [("id", "INTEGER"), ("country", "VARCHAR"), ("amount", "INTEGER")]
-
-    def test_columns_come_from_the_heading(self) -> None:
-        plan = declare("src", self.heading()).filter(col("amount") > 0).select("id", "country")
-        assert plan.columns() == ["id", "country"]
-        assert plan.types() == ["INTEGER", "VARCHAR"]
-
-    def test_the_hole_renders_as_its_name(self) -> None:
-        assert 'FROM "src"' in declare("src", self.heading()).filter(col("amount") > 0).render()
-
-    def test_bind_substitutes_a_plan(self, con: duckdb.Connection) -> None:
-        plan = declare("src", self.heading()).filter(col("amount") > 100).select("id")
-        assert plan.bind(src=duckdb.table("orders")).rows(con) == [(1,), (3,)]
-        assert plan.bind(src=duckdb.table("orders").filter(col("country") == "nl")).rows(con) == [(1,), (3,)]
-
-    def test_an_open_hole_is_supplied_by_the_catalog(self, con: duckdb.Connection) -> None:
-        plan = declare("orders", self.heading()).filter(col("amount") > 100).select("id")
-        assert plan.rows(con) == [(1,), (3,)]
-
-    def test_bind_checks_names(self) -> None:
-        plan = declare("src", self.heading()).select("id")
-        with pytest.raises(ValueError, match="declared with columns"):
-            plan.bind(src=declare("other", [("a", "INTEGER"), ("b", "INTEGER")]))
-
-    def test_bind_cannot_check_what_only_the_engine_knows(self, con: duckdb.Connection) -> None:
-        # A raw SQL source has no derivable columns, so the check waits for a
-        # connection, where the engine says what the source has.
-        plan = declare("src", self.heading()).select("id")
-        bound = plan.bind(src=duckdb.sql("SELECT 1 AS a"))
-        with pytest.raises(ValueError, match="declared with columns"):
-            bound.rows(con)
-
-    def test_bind_checks_types_where_known(self) -> None:
-        plan = declare("src", [("id", "INTEGER")]).select("id")
-        with pytest.raises(ValueError, match="declares id as INTEGER"):
-            plan.bind(src=declare("other", [("id", "VARCHAR")]))
-
-    def test_bind_refuses_an_unknown_name(self) -> None:
-        with pytest.raises(ValueError, match="no declared relation named 'nope'"):
-            declare("src", self.heading()).bind(nope=duckdb.table("orders"))
-
-    def test_a_partial_bind_leaves_a_hole(self, con: duckdb.Connection) -> None:
-        left, right = declare("l", [("id", "INTEGER")]), declare("countries", [("code", "VARCHAR")])
-        plan = left.join(right, on=col("l.id") == col("r.code"), how="cross")
-        half = plan.bind(l=duckdb.table("orders").select("id"))
-        assert 'FROM "countries"' in half.render()
-        assert half.count(con) == 10
-
-    def test_bind_reaches_a_subquery_over_the_relation(self, con: duckdb.Connection) -> None:
-        # The subquery holds the plan it saw before the bind; the rebuilt step
-        # answers for it, so the bound plan is still one step, computed once.
-        src = declare("src", self.heading())
-        plan = src.filter(col("amount") > src.aggregate(col("amount").mean().alias("m")).scalar()).select("id")
-        bound = plan.bind(src=duckdb.table("orders"))
-        assert bound.render().count('"orders"') == 1
-        assert bound.rows(con) == [(3,)]
-
-    def test_a_heading_may_not_repeat_a_name(self) -> None:
-        with pytest.raises(ValueError, match="declare would produce 'id' more than once"):
-            declare("src", [("id", "INTEGER"), ("id", "INTEGER")])
-
-    def test_table_no_longer_asserts_a_schema(self) -> None:
-        with pytest.raises(TypeError):
-            duckdb.table("orders", schema=[("id", "INTEGER")])  # type: ignore[call-arg]
-
-
 class TestAggregatesAreRealMethods:
     """Written out, so they type, complete and can be checked."""
 
@@ -1482,9 +1403,9 @@ class TestExpressionNamespaces:
 class TestReviewRoundThree:
     """Bugs found once plans stopped holding connections and the namespaces were generated.
 
-    Join keys given as one name, a subquery over a declared hole, stub answers
-    kept across a `SET`, one duplicate name hiding another, results and
-    threads around `close()`, and functions filed in the wrong namespace.
+    Join keys given as one name, stub answers kept across a `SET`, one
+    duplicate name hiding another, results and threads around `close()`,
+    and functions filed in the wrong namespace.
     """
 
     def test_a_using_join_with_a_suffix_folds_the_key(self, con: duckdb.Connection) -> None:
@@ -1498,18 +1419,6 @@ class TestReviewRoundThree:
         assert joined.rows(con) == [(1, 10, 20)]
         assert "amount_r" in joined.preview(con)
 
-    def test_bind_reaches_a_hole_used_directly_as_a_subquery(self, con: duckdb.Connection) -> None:
-        # The replacement entry skipped the alias bookkeeping, so a
-        # subquery holding the hole itself kept rendering the hole's name and
-        # ran against whatever table happened to have it.
-        con.run("CREATE TABLE a AS SELECT 1 AS id, 10 AS amount")
-        con.run("CREATE TABLE src AS SELECT 999 AS amount")
-        hole = declare("src", [("id", "INTEGER"), ("amount", "INTEGER")])
-        plan = hole.filter(col("amount") < hole.aggregate(col("amount").max().alias("m")).scalar() + 1)
-        bound = plan.bind(src=duckdb.table("a"))
-        assert '"src"' not in bound.render()
-        assert bound.rows(con) == [(1, 10)]
-
     def test_a_setting_change_forgets_stub_answers(self, con: duckdb.Connection) -> None:
         # A stub answer depends on settings, and settings change
         # through run(); the answer was kept across it.
@@ -1521,27 +1430,6 @@ class TestReviewRoundThree:
             assert plan.types(con)[-1] == "INTEGER"
         finally:
             con.run("SET integer_division = false")
-
-    def test_bind_checks_a_plan_that_cannot_resolve_for_its_own_reasons(self) -> None:
-        # Every ValueError from resolve() was taken to mean "needs a
-        # connection"; a bound plan's own defect was swallowed with it.
-        bad = declare("t", [("a", "INTEGER"), ("b", "INTEGER")]).rename(a="x", b="x")
-        outer = declare("src", [("x", "INTEGER")]).select("x")
-        with pytest.raises(ValueError, match="rename would produce 'x' more than once"):
-            outer.bind(src=bad)
-
-    def test_two_holes_of_one_name_must_agree(self, con: duckdb.Connection) -> None:
-        # Holes were keyed by name, so two different headings under
-        # one name were both replaced and checked against only the last.
-        left = declare("dup", [("x", "INTEGER")]).select("x")
-        right = declare("dup", [("y", "INTEGER")]).select("y")
-        with pytest.raises(ValueError, match="declared twice with different headings"):
-            left.union(right).bind(dup=duckdb.table("orders"))
-
-    def test_two_holes_of_one_name_and_heading_are_one_relation(self, con: duckdb.Connection) -> None:
-        heading = [("id", "INTEGER"), ("country", "VARCHAR"), ("amount", "INTEGER")]
-        left, right = declare("o", heading).select("id"), declare("o", heading).select("id")
-        assert left.union(right).bind(o=duckdb.table("orders")).count(con) == 10
 
     def test_close_closes_every_live_result_even_if_one_refuses(self, con: duckdb.Connection) -> None:
         # One result whose close raised left the rest open and the
@@ -1621,23 +1509,12 @@ class TestReviewRoundThree:
 
 
 class TestReviewRoundFour:
-    """Bugs found in `bind()`, the stub cache and the generated namespaces.
+    """Bugs found in the stub cache and the generated namespaces.
 
-    A bound copy renaming its own hole, a `SET` that ran as a plan but was
-    not forgotten, list functions with the subject in the wrong position,
-    conversion overloads winning over extraction, and a cache cleared
-    wholesale at its limit.
+    A `SET` that ran as a plan but was not forgotten, list functions with
+    the subject in the wrong position, conversion overloads winning over
+    extraction, and a cache cleared wholesale at its limit.
     """
-
-    def test_bound_and_unbound_descendants_of_one_hole_coexist(self, con: duckdb.Connection) -> None:
-        # The alias backfill was global, so the bound copy's name
-        # overwrote the hole's own, and the unbound branch named a CTE twice.
-        con.run("CREATE TABLE catalog_x AS SELECT 1 AS v")
-        con.run("CREATE TABLE x AS SELECT 2 AS v")
-        hole = declare("x", [("v", "INTEGER")])
-        step = hole.select(col("v"))
-        both = step.bind(x=duckdb.table("catalog_x")).union(step)
-        assert sorted(both.rows(con)) == [(1,), (2,)]
 
     def test_a_setting_changed_through_a_plan_forgets_stub_answers(self, con: duckdb.Connection) -> None:
         # Only run() forgot; a SET executed as a plan did not.
@@ -1775,71 +1652,7 @@ class TestReviewRoundFour:
 
 
 class TestScopeStepOne:
-    """Binding one declared relation twice, and `group_by` given an expression."""
-
-    def heading(self) -> list[tuple[str, str]]:
-        return [("v", "INTEGER")]
-
-    def two_tables(self, con: duckdb.Connection) -> None:
-        con.run("CREATE TABLE t1 AS SELECT 1 AS v")
-        con.run("CREATE TABLE t2 AS SELECT 100 AS v")
-
-    def test_one_hole_bound_twice_with_a_shared_subquery(self, con: duckdb.Connection) -> None:
-        # Why steps are records rather than closures. With closures, two bindings
-        # of one step both claimed the original and the second branch's
-        # subquery resolved to the first branch's step; the guard refused it.
-        # With steps as data, bind() rewrites each branch's expressions, so
-        # each subquery points at its own binding and the union is right.
-        self.two_tables(con)
-        hole = declare("y", self.heading())
-        step = hole.filter(col("v") <= hole.scalar())
-        a, b = step.bind(y=duckdb.table("t1")), step.bind(y=duckdb.table("t2"))
-        assert a.rows(con) == [(1,)]
-        assert b.rows(con) == [(100,)]
-        assert sorted(a.union(b).rows(con)) == [(1,), (100,)]
-        assert a.union(b).render().count('"t1"') == 1
-
-    def test_a_shared_predicate_across_a_bound_and_a_catalog_plan(self, con: duckdb.Connection) -> None:
-        # One expression object in a bound plan and
-        # in a plan whose hole is left to the catalog: the bound plan's copy
-        # is rewritten, the other keeps the original, and both are right.
-        self.two_tables(con)
-        con.run("CREATE TABLE s AS SELECT 100 AS v")
-        hole = declare("s", self.heading())
-        predicate = col("v") <= hole.scalar()
-        bound = hole.filter(predicate).bind(s=duckdb.table("t1"))
-        other = duckdb.table("t2").filter(predicate)
-        assert bound.rows(con) == [(1,)]
-        assert other.rows(con) == [(100,)]
-        assert sorted(bound.union(other).rows(con)) == [(1,), (100,)]
-
-    def test_without_a_subquery_the_same_shapes_are_fine(self, con: duckdb.Connection) -> None:
-        # The refusal is about subqueries only: with none, two bindings of one
-        # step combine, and so do a binding and the catalog-resolved original.
-        self.two_tables(con)
-        hole = declare("x", self.heading())
-        step = hole.filter(col("v") > 0)
-        assert sorted(step.bind(x=duckdb.table("t1")).union(step.bind(x=duckdb.table("t2"))).rows(con)) == [
-            (1,),
-            (100,),
-        ]
-
-    def test_binding_in_stages_and_partially(self, con: duckdb.Connection) -> None:
-        # The shapes the guard must not disturb: a replacement that carries a
-        # hole of its own, and a hole left to the catalog beside a bound one.
-        self.two_tables(con)
-        inner, outer = declare("inner_h", self.heading()), declare("outer_h", self.heading())
-        staged = outer.filter(col("v") > 0).bind(outer_h=inner.filter(col("v") < 50))
-        assert '"inner_h"' in staged.render()
-        assert staged.bind(inner_h=duckdb.table("t1")).rows(con) == [(1,)]
-        by_catalog = declare("t1", self.heading()).union(declare("nope", self.heading()))
-        assert sorted(by_catalog.bind(nope=duckdb.table("t2")).rows(con)) == [(1,), (100,)]
-
-    def test_a_subquery_over_another_hole_only_one_bound(self, con: duckdb.Connection) -> None:
-        self.two_tables(con)
-        con.run("CREATE TABLE m AS SELECT 5 AS v")
-        m, n = declare("m", self.heading()), declare("n", self.heading())
-        assert m.filter(col("v") < n.scalar()).bind(n=duckdb.table("t2")).rows(con) == [(5,)]
+    """`group_by` given an expression."""
 
     @pytest.mark.parametrize(
         ("keys", "expected"),
@@ -1900,8 +1713,6 @@ class TestErrorModel:
             orders.filter(col("id") == param("n")).rows(con)
         with pytest.raises(ValueError, match="not used by this plan"):
             orders.rows(con, parameters={"stray": 1})
-        with pytest.raises(ValueError, match="declared with columns"):
-            declare("h", [("a", "INTEGER")]).select("a").bind(h=declare("o", [("b", "INTEGER")]))
         with pytest.raises(ValueError, match="copy option name"):
             orders.to_csv(con, "x.csv", **{"bad name": 1})  # type: ignore[arg-type]
 
@@ -2109,8 +1920,7 @@ class TestEgressNames:
 class TestStepsAsData:
     """A step is a record of its verb and arguments, not a closure.
 
-    That is what lets a plan be pickled, compared, read, and rebound with
-    one declared relation filled in twice.
+    That is what lets a plan be pickled, compared, and read.
     """
 
     def test_a_step_is_readable(self) -> None:
@@ -2138,14 +1948,6 @@ class TestStepsAsData:
         assert copy.render() == plan.render()
         assert copy.rows(con) == plan.rows(con)
 
-    def test_a_declared_plan_pickles_and_binds_after(self, con: duckdb.Connection) -> None:
-        import pickle
-
-        hole = declare("src", [("id", "INTEGER"), ("amount", "INTEGER")])
-        plan = hole.filter(col("amount") > hole.aggregate(col("amount").mean().alias("m")).scalar())
-        copy = pickle.loads(pickle.dumps(plan))
-        assert copy.bind(src=duckdb.table("orders")).select("id").rows(con) == [(3,)]
-
     def test_two_plans_built_the_same_way_have_equal_steps(self) -> None:
         a = duckdb.table("orders").filter(col("amount") > 100)
         b = duckdb.table("orders").filter(col("amount") > 100)
@@ -2153,31 +1955,11 @@ class TestStepsAsData:
         assert a.inputs[0].step == b.inputs[0].step
         assert a.step != duckdb.table("orders").filter(col("amount") > 101).step
 
-    def test_bind_leaves_untouched_steps_by_identity(self) -> None:
-        # A step whose inputs and expressions did not change is the same
-        # object after a bind, so a large plan is not copied for one hole.
-        hole = declare("src", [("v", "INTEGER")])
-        base = duckdb.table("orders").select("id")
-        combined = base.union(hole.select("v"))
-        bound = combined.bind(src=duckdb.table("t"))
-        assert bound.inputs[0] is base
-        assert bound is not combined
-
-    def test_bind_rewrites_only_the_affected_subquery(self) -> None:
-        hole = declare("src", [("v", "INTEGER")])
-        other = duckdb.table("elsewhere").select("v")
-        plan = hole.filter(col("v").isin(other) & (col("v") > hole.aggregate(col("v").max().alias("m")).scalar()))
-        bound = plan.bind(src=duckdb.table("t"))
-        rendered = bound.render()
-        assert '"elsewhere"' in rendered
-        assert '"src"' not in rendered
-        assert other in bound._uses
-
 
 class TestReviewRoundFive:
     """Bugs found in `values()`, `Bound`, the step records and the harness.
 
-    A literal that aliased the caller's dict, a declared type that was a
+    A literal that aliased the caller's dict, a values() type that was a
     claim rather than a cast, verbs given nothing, a notebook repr that
     raised, and the dict rule disagreeing between Python and C++.
     """
@@ -2194,18 +1976,15 @@ class TestReviewRoundFive:
         assert plain.rows(con) == [({"a": 1}, [1, 2])]
         assert aliased.rows(con) == [({"a": 1}, [1, 2])]
 
-    def test_a_declared_values_type_is_a_cast(self, con: duckdb.Connection) -> None:
-        # What the shape says is what the engine produces, so the
-        # heading check on bind() means something for a values() plan.
+    def test_a_values_type_given_is_a_cast(self, con: duckdb.Connection) -> None:
+        # What the shape says is what the engine produces: `types()` and
+        # `types(con)` agree because the type given is made true by a cast.
         plan = duckdb.values([(1,)], columns=[("id", "VARCHAR")])
         assert plan.types() == ["VARCHAR"]
         assert plan.rows(con) == [("1",)]
         assert plan.types(con) == ["VARCHAR"]
         nulls = duckdb.values([(None,)], columns=[("id", "INTEGER")])
         assert nulls.types(con) == ["INTEGER"]
-        with pytest.raises(ValueError, match="declares id as INTEGER"):
-            declare("h", [("id", "INTEGER")]).bind(h=plan)
-        assert declare("h", [("id", "VARCHAR")]).bind(h=plan).rows(con) == [("1",)]
 
     def test_an_empty_map_has_the_shape_of_its_column(self, con: duckdb.Connection) -> None:
         # Decided by the key type, so an empty map and a full one
@@ -2262,7 +2041,7 @@ class TestReviewRoundFive:
             plan.join(duckdb.sql("SELECT 1 AS b"), on=[])
         with pytest.raises(ValueError, match="unknown join kind"):
             plan.join(duckdb.sql("SELECT 1 AS b"), on="a", how="sideways")
-        typed = declare("t", [("a", "INTEGER")])
+        typed = duckdb.values([], columns=[("a", "INTEGER")])
         assert typed.aggregate(group_by="a").columns() == ["a"]
         assert typed.distinct().columns() == ["a"]
 
@@ -2316,18 +2095,18 @@ class TestReviewRoundFive:
         assert Filter(col("v") > 1) in {Filter(col("v") > 1)}
         assert Filter(col("v") > 1) not in {Filter(col("v") > 2)}
 
-    def test_bind_rewrites_a_subquery_held_in_a_list(self, con: duckdb.Connection) -> None:
-        # Case branches and window partitions keep their
-        # expressions in lists; one walker serves every container.
-        hole = declare("src", [("id", "INTEGER"), ("amount", "INTEGER")])
-        threshold = hole.aggregate(col("amount").mean().alias("m")).scalar()
-        cased = hole.select("id", duckdb.when(col("amount") > threshold).then("big").otherwise("small").alias("size"))
-        ranked = hole.select("id", col("amount").sum().over(partition_by=col("amount") > threshold).alias("share"))
+    def test_a_subquery_held_in_a_list_is_a_step_of_the_plan(self, con: duckdb.Connection) -> None:
+        # Case branches and window partitions keep their expressions in
+        # lists; one walker finds a subquery in every container.
+        orders = duckdb.table("orders")
+        threshold = orders.aggregate(col("amount").mean().alias("m")).scalar()
+        cased = orders.select("id", duckdb.when(col("amount") > threshold).then("big").otherwise("small").alias("size"))
+        ranked = orders.select("id", col("amount").sum().over(partition_by=col("amount") > threshold).alias("share"))
         for plan in (cased, ranked):
-            bound = plan.bind(src=duckdb.table("orders"))
-            assert '"src"' not in bound.render()
-            assert bound.count(con) == 5
-        assert cased.bind(src=duckdb.table("orders")).filter(col("size") == "big").count(con) == 1
+            assert len(plan._uses) == 1  # the aggregate the scalar was made from, once
+            assert plan.render().count("avg(") == 1
+            assert plan.count(con) == 5
+        assert cased.filter(col("size") == "big").count(con) == 1
 
     def test_a_dict_means_the_same_thing_at_every_site(self, con: duckdb.Connection) -> None:
         # Text keys make a STRUCT, other keys a MAP, an empty
@@ -2370,44 +2149,12 @@ class TestReviewRoundFive:
 
 
 class TestReviewRoundSix:
-    """Bugs found in the round-5 fixes: a heading not kept, parameters invisible to equality, and pickles.
+    """Bugs found in the round-5 fixes: parameters invisible to equality, macro bodies, and pickles.
 
-    A declared type that was never checked for a computed column, two plans
-    bound to different parameters comparing equal, a macro body resolved
-    further than its rendering needed, type synonyms refused, and construction
-    checks skipped on unpickling.
+    Two plans bound to different parameters comparing equal, a macro body
+    resolved further than its rendering needed, and construction checks
+    skipped on unpickling.
     """
-
-    def test_a_heading_is_kept_where_the_types_are(self, con: duckdb.Connection) -> None:
-        # A computed column's type is the engine's to say, so the promise in
-        # the heading is checked the first time the plan resolves on a
-        # connection, where that type exists. DATE + 1 is a date, and used to
-        # come back as one with no error anywhere.
-        hole = declare("h", [("amount", "INTEGER")])
-        plan = hole.select((col("amount") + 1).alias("amount"))
-        dated = duckdb.sql("SELECT DATE '2020-01-01' AS d").select(col("d").alias("amount"))
-        bound = plan.bind(h=dated)  # nothing to refuse yet: the type is unknown blind
-        with pytest.raises(ValueError, match="declares amount as INTEGER, but the plan bound to it has DATE"):
-            bound.rows(con)
-        with pytest.raises(ValueError, match="declares amount as INTEGER"):
-            bound.types(con)
-        right = duckdb.sql("SELECT 41 AS n").select(col("n").alias("amount"))
-        assert plan.bind(h=right).rows(con) == [(42,)]
-        assert plan.bind(h=right).types(con) == ["INTEGER"]
-        # A mismatch both sides know blind is still refused at bind time.
-        with pytest.raises(ValueError, match="declares id as INTEGER"):
-            declare("v", [("id", "INTEGER")]).bind(v=duckdb.values([(1,)], columns=[("id", "VARCHAR")]))
-
-    def test_a_bound_plan_still_derives_its_columns_blind(self) -> None:
-        # The heading answers for a bound table until the engine has said
-        # what the table has, so binding a table loses nothing blind.
-        hole = declare("h", [("amount", "INTEGER"), ("note", None)])
-        assert hole.bind(h=duckdb.table("t")).columns() == ["amount", "note"]
-        assert hole.select("amount").bind(h=duckdb.table("t")).types() == ["INTEGER"]
-        computed = hole.select((col("amount") + 1).alias("amount")).bind(h=duckdb.table("t"))
-        assert computed.columns() == ["amount"]
-        with pytest.raises(duckdb.NeedsConnection):
-            computed.types()  # an expression's type is the engine's to say, bound or not
 
     def test_steps_differ_by_parameter_and_by_literal(self) -> None:
         by_a = duckdb.table("orders").filter(col("c") == param("a")).step
@@ -2442,63 +2189,6 @@ class TestReviewRoundSix:
         plan = duckdb.values([(1, "a")], columns=["n", "s"]).filter(col("n") > 0)
         assert pickle.loads(pickle.dumps(plan)).render() == plan.render()
 
-    def test_type_synonyms_fit_a_heading(self, con: duckdb.Connection) -> None:
-        text = duckdb.values([(1,)], columns=[("id", "TEXT")])
-        assert declare("h", [("id", "VARCHAR")]).bind(h=text).rows(con) == [("1",)]
-        assert declare("h", [("id", "string")]).bind(h=text).types() == ["TEXT"]
-        wide = duckdb.values([(1,)], columns=[("d", "DECIMAL")])
-        assert declare("h", [("d", "numeric(18, 3)")]).bind(h=wide).rows(con) == [(decimal.Decimal("1.000"),)]
-        with pytest.raises(ValueError, match="declares id as INT"):
-            declare("h", [("id", "INT")]).bind(h=text)
-
-    def test_the_alias_table_is_the_engines(self, con: duckdb.Connection) -> None:
-        from duckdb._types import ALIASES
-
-        listed = duckdb.sql(
-            "SELECT lower(type_name), logical_type FROM duckdb_types() "
-            "WHERE database_name = 'system' AND type_name <> logical_type"
-        ).rows(con)
-        assert dict(listed) == ALIASES
-
-    @pytest.mark.parametrize(
-        ("written", "engine"),
-        [
-            ("text", "VARCHAR"),
-            ("VARCHAR(20)", "VARCHAR"),
-            ("int[]", "INTEGER[]"),
-            ("int4[3]", "INTEGER[3]"),
-            ("decimal", "DECIMAL(18,3)"),
-            ("Numeric( 10, 2 )", "DECIMAL(10,2)"),
-            ("timestamptz", "TIMESTAMP WITH TIME ZONE"),
-            ("struct(a text, b int[])", "STRUCT(a VARCHAR, b INTEGER[])"),
-            ('struct("a, b" text)', 'STRUCT("a, b" VARCHAR)'),
-            ("map(int, text)", "MAP(INTEGER, VARCHAR)"),
-            ("union(n int, s text)", "UNION(n INTEGER, s VARCHAR)"),
-            ("GEOMETRY", "GEOMETRY"),
-            ("some_extension_type", "SOME_EXTENSION_TYPE"),
-        ],
-    )
-    def test_a_written_type_canonicalises_to_the_engines_spelling(self, written: str, engine: str) -> None:
-        from duckdb._types import canonical
-
-        assert canonical(written) == engine
-        assert canonical(engine) == engine
-
-    def test_rebind_rebuilds_a_namedtuple_member_by_member(self) -> None:
-        from typing import NamedTuple
-
-        from duckdb.expr import SubQuery, rebind
-
-        class Pair(NamedTuple):
-            name: str
-            query: object
-
-        before, after = duckdb.sql("SELECT 1 AS v"), duckdb.sql("SELECT 2 AS v")
-        rebound = rebind(Pair("x", SubQuery(before)), {id(before): after})
-        assert isinstance(rebound, Pair)
-        assert rebound.name == "x"
-        assert cast("SubQuery", rebound.query).query is after
-
     def test_a_literal_that_is_not_plain_data_is_refused_in_the_librarys_words(self) -> None:
         import threading
 
@@ -2507,27 +2197,12 @@ class TestReviewRoundSix:
 
 
 class TestReviewRoundSeven:
-    """Seams the model's wording glossed: an open hole's width, a shared catalog, a wrapped statement.
+    """Seams the model's wording glossed: a shared catalog, a wrapped statement, a reused scalar.
 
-    A hole left to the catalog rendered every column the table had while
-    its heading named two; stub answers outlived a sibling connection's
-    DDL and an `EXPLAIN ANALYZE` around a `SET`; a doubled quote in a
-    struct member's name split the name; and the once-only evaluation of a
-    reused `scalar()` was true but held by nothing.
+    Stub answers outlived a sibling connection's DDL and an `EXPLAIN
+    ANALYZE` around a `SET`, and the once-only evaluation of a reused
+    `scalar()` was true but held by nothing.
     """
-
-    def test_an_open_hole_is_as_wide_as_its_heading(self, con: duckdb.Connection) -> None:
-        # The catalog may satisfy a hole with a wider table; the hole sees
-        # the heading's columns, so names stay the addressing scheme.
-        hole = declare("orders", [("id", "INTEGER"), ("amount", "INTEGER")])
-        plan = hole.filter(col("amount") > 100)
-        assert plan.columns(con) == ["id", "amount"]
-        assert plan.rows(con) == [(1, 120), (3, 300)]
-        assert plan.to_dicts(con)[0] == {"id": 1, "amount": 120}
-        assert "country" not in plan.render()
-        missing = declare("orders", [("id", "INTEGER"), ("nothing", None)])
-        with pytest.raises(exceptions.Error):
-            missing.rows(con)
 
     def test_a_sibling_connections_ddl_is_seen(self) -> None:
         first = duckdb.connect()
@@ -2568,12 +2243,6 @@ class TestReviewRoundSeven:
         from duckdb.connection import _may_change_binding
 
         assert _may_change_binding(statement) is changes
-
-    def test_a_doubled_quote_in_a_member_name_is_read_as_one(self) -> None:
-        from duckdb._types import canonical
-
-        assert canonical('STRUCT("a""b" INTEGER, c INTEGER)') == 'STRUCT("a""b" INTEGER, c INTEGER)'
-        assert canonical('struct("a, ""b""" text)') == 'STRUCT("a, ""b""" VARCHAR)'
 
     def test_a_reused_scalar_is_evaluated_once(self, con: duckdb.Connection) -> None:
         # One CTE in the text, and the engine computes it once: a sequence

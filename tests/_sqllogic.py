@@ -30,7 +30,6 @@ from typing import TYPE_CHECKING, cast
 
 import duckdb
 from duckdb import exceptions, sql
-from duckdb._types import canonical, is_numeric
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -59,6 +58,27 @@ IGNORED = re.compile(
     r"^\s*pragma\s+((enable|disable)_verification|verify_[a-z_]+|disable_verify_[a-z_]+)\s*;?\s*$", re.IGNORECASE
 )
 HASHED = re.compile(r"^\d+ values hashing to [0-9a-f]+$")
+#: The engine's names for the types whose values compare as numbers.
+NUMERIC_TYPES = {
+    "TINYINT",
+    "SMALLINT",
+    "INTEGER",
+    "BIGINT",
+    "HUGEINT",
+    "UTINYINT",
+    "USMALLINT",
+    "UINTEGER",
+    "UBIGINT",
+    "UHUGEINT",
+    "FLOAT",
+    "DOUBLE",
+    "DECIMAL",
+    "BIGNUM",
+}
+#: The spellings of a boolean the engine's runner accepts.
+BOOLEAN_TEXT = {"true": True, "1": True, "false": False, "0": False}
+#: The type a `query` line's letter stands for, when the binder gave none.
+_LETTER_TYPES = {"I": "BIGINT", "R": "DOUBLE"}
 
 
 @dataclass
@@ -291,11 +311,13 @@ def close_enough(expected: str, actual: str, column_type: str) -> bool:
         return True
     if expected.startswith(("<REGEX>:", "<!REGEX>:")):
         return matches_regex(actual, expected)
-    kind = canonical(column_type) if column_type else ""
+    kind = _type_head(column_type)
     if kind == "BOOLEAN":
-        truth = {"true": True, "1": True, "false": False, "0": False}
-        return truth.get(expected.lower()) == truth.get(actual.lower())
-    if column_type and is_numeric(column_type):
+        # A value outside the table, a list of booleans or garbage, matches
+        # nothing; the text rule already said they differ.
+        known = BOOLEAN_TEXT.get(expected.lower())
+        return known is not None and known == BOOLEAN_TEXT.get(actual.lower())
+    if kind in NUMERIC_TYPES:
         if expected.upper() == "NULL" or actual.upper() == "NULL":
             return expected.upper() == actual.upper()
         if expected.lower() == actual.lower() and expected.lower() in {"nan", "-nan", "inf", "-inf"}:
@@ -307,6 +329,11 @@ def close_enough(expected: str, actual: str, column_type: str) -> bool:
         except (ValueError, decimal.InvalidOperation):
             return False
     return False
+
+
+def _type_head(type_text: str) -> str:
+    """`DECIMAL` for `DECIMAL(18,3)`, `INTEGER` for `INTEGER[]`: the engine's type name without its arguments."""
+    return re.split(r"[(\[]", type_text.strip().upper(), maxsplit=1)[0]
 
 
 def matches_regex(text: str, expectation: str) -> bool:
@@ -360,9 +387,6 @@ def compare(record: Record, rows: list[tuple[object, ...]], column_types: list[s
             if not close_enough(w, g, column_type):
                 return False
     return True
-
-
-_LETTER_TYPES = {"I": "BIGINT", "R": "DOUBLE"}
 
 
 def placeholders(text: str, tmp: Path, cwd: Path, test_name: str) -> str:

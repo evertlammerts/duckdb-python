@@ -167,6 +167,10 @@ def test_an_expected_error_matches_as_the_engines_runner_matches_it() -> None:
         ("<REGEX>:a.*", "abc", "VARCHAR", True),
         ("<REGEX>:b.*", "abc", "VARCHAR", False),
         ("1.00", "1", "DECIMAL(18,3)", True),
+        ("[true]", "[false]", "BOOLEAN[]", False),
+        ("[true]", "[true]", "BOOLEAN[]", True),
+        ("x", "y", "BOOLEAN", False),
+        ("NULL", "true", "BOOLEAN", False),
     ],
 )
 def test_values_compare_by_the_columns_type(expected: str, actual: str, column_type: str, verdict: bool) -> None:
