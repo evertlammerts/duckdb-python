@@ -19,14 +19,16 @@ import contextvars
 import copy
 import datetime
 import decimal
+import inspect
 import uuid
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from ._aggregates import AggregateMethods
-from ._namespaces import DateMethods, ListMethods, StringMethods
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator
+    from collections.abc import Callable, Iterable, Iterator
+
+    from ._func_namespaces import DtExpr, JsonExpr, ListExpr, StrExpr
 
 __all__ = [
     "Expr",
@@ -355,12 +357,63 @@ def suspended_sinks() -> Iterator[None]:
 
 
 def _coerce(other: object) -> Expr | Any:
-    """An Expr passes through, a literal wraps, anything else defers to Python."""
+    """An Expr passes through, a literal wraps, a callable becomes a lambda, anything else defers to Python."""
     if isinstance(other, Expr):
         return other
     if other is None or isinstance(other, LITERAL_TYPES):
         return Lit(other)
+    if callable(other):
+        return _as_lambda(other)
     return NotImplemented
+
+
+def _as_lambda(function: Callable[..., object]) -> Expr:
+    """A SQL lambda from a Python one, by running it once with a variable per parameter.
+
+    The function is called at build time with expressions standing for its
+    parameters, so whatever it returns is the body, already a tree; the
+    names in the SQL are the Python parameters' own. It must build an
+    expression: a plain value is taken as a constant body, and anything
+    else is refused here, where the mistake is.
+
+    Every parameter becomes a lambda variable, so the signature must be
+    plain positional names: no defaults, which would silently pick a
+    different engine overload, and no keyword-only, `*args` or `**kwargs`
+    parameters. A callable with no parameters is refused too: a SQL lambda
+    has no zero-variable form, and a bare function where a value was meant
+    is usually a call that was never made.
+    """
+    label = getattr(function, "__name__", None) or repr(function)
+    try:
+        parameters = list(inspect.signature(function).parameters.values())
+    except (TypeError, ValueError):
+        message = f"cannot read the signature of {label} to build a SQL lambda from it"
+        raise TypeError(message) from None
+    if not parameters:
+        message = f"a SQL lambda takes at least one parameter and {label} takes none; did you mean to call it?"
+        raise TypeError(message)
+    plain = (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    for parameter in parameters:
+        if parameter.kind not in plain or parameter.default is not inspect.Parameter.empty:
+            message = (
+                f"cannot build a SQL lambda from {label}: every parameter becomes a lambda "
+                f"variable, so the signature must be plain positional names without defaults, "
+                f"and `{parameter}` ({parameter.kind.description}) is not one"
+            )
+            raise TypeError(message)
+    names = [p.name for p in parameters]
+    try:
+        body = function(*(Variable(name) for name in names))
+    except TypeError as reason:
+        message = f"while building a SQL lambda from {label}: {reason}"
+        raise TypeError(message) from reason
+    if not isinstance(body, Expr) and not (body is None or isinstance(body, LITERAL_TYPES)):
+        message = (
+            f"the lambda returned {body!r}, which is not an expression; it runs once, at build "
+            f"time, on expressions rather than values, so its body must be built from them"
+        )
+        raise TypeError(message)
+    return Lambda(names, _lift(body))
 
 
 def _lift(value: object) -> Expr:
@@ -375,30 +428,46 @@ def _as_list(value: object) -> list[Any]:
     return list(value) if isinstance(value, (list, tuple)) else [value]
 
 
-class Namespaces:
-    """The function namespaces on an expression, generated from the engine's catalog.
+class FuncNamespaces:
+    """The function namespace entries, on their own class because `str` and `list` shadow builtins."""
 
-    On their own class because their names shadow `str` and `list`, which the
-    annotations in `Expr` use.
-    """
+    def str(self) -> StrExpr:
+        """This expression as text: the string functions, `col("s").str().upper()`.
 
-    @property
-    def str(self) -> StringMethods:
-        """Text functions: `col("name").str.upper()`."""
-        return StringMethods(self)  # type: ignore[arg-type]
+        A function namespace is a method scope, not a cast: nothing is
+        checked here, and the engine still judges every call. The families
+        exist for two reasons: without them, every engine function would be
+        a method on every expression, several hundred names after each dot;
+        and the family prefixes could not be dropped, since `.list().min()`
+        can mean `list_min` only while `.min()` still means the aggregate.
+        """
+        from ._func_namespaces import StrExpr
 
-    @property
-    def dt(self) -> DateMethods:
-        """Date and time functions: `col("placed").dt.year()`."""
-        return DateMethods(self)  # type: ignore[arg-type]
+        return StrExpr(cast("Expr", self))
 
-    @property
-    def list(self) -> ListMethods:
-        """List functions: `col("tags").list.contains("vip")`."""
-        return ListMethods(self)  # type: ignore[arg-type]
+    def dt(self) -> DtExpr:
+        """This expression as a date, time or timestamp: `col("placed").dt().year()`."""
+        from ._func_namespaces import DtExpr
+
+        return DtExpr(cast("Expr", self))
+
+    def list(self) -> ListExpr:
+        """This expression as a list: `col("tags").list().contains("vip")`."""
+        from ._func_namespaces import ListExpr
+
+        return ListExpr(cast("Expr", self))
+
+    def json(self) -> JsonExpr:
+        """This expression as a JSON document: `col("payload").json().extract("$.id")`.
+
+        JSON is text underneath, so the string functions are in scope too.
+        """
+        from ._func_namespaces import JsonExpr
+
+        return JsonExpr(cast("Expr", self))
 
 
-class Expr(AggregateMethods, Namespaces):
+class Expr(AggregateMethods, FuncNamespaces):
     """One node of an expression tree."""
 
     def __init__(self) -> None:
@@ -688,6 +757,49 @@ class Col(Expr):
         return qualified(self.name)
 
 
+class FamilyExpr(Expr):
+    """A function namespace over an expression: the same expression, with one family's methods in scope.
+
+    Entering one (`.str()`, `.dt()`, `.list()`, `.json()`) asserts how the
+    expression is meant; it changes nothing about the expression, which is
+    why this renders as what it wraps and keeps its alias and order. A
+    family class is a method scope, not a type: the engine still owns the
+    types and judges every call.
+    """
+
+    #: Method name to (function, position of the expression, parameter types),
+    #: filled in by each generated family class; the tests read it.
+    SPEC: ClassVar[dict[str, tuple[str, int, list[str]]]] = {}
+
+    def __init__(self, inner: Expr) -> None:
+        super().__init__()
+        self.inner = inner
+        # A name or direction set before entering the family must survive it.
+        self._alias = inner._alias
+        self._order = inner._order
+
+    def fragment(self) -> str:
+        return self.inner.fragment()
+
+    # The aggregate builders gate on what the call really is, which only the
+    # wrapped expression can answer; they apply there and keep the family in
+    # scope, so entering one before or after them reads the same.
+
+    def where(self, predicate: object) -> Expr:
+        """`Expr.where`, applied to the wrapped aggregate call."""
+        return self._rewrapped(self.inner.where(predicate))
+
+    def ignore_nulls(self) -> Expr:
+        """`Expr.ignore_nulls`, applied to the wrapped function call."""
+        return self._rewrapped(self.inner.ignore_nulls())
+
+    def _rewrapped(self, inner: Expr) -> Expr:
+        wrapped = type(self)(inner)
+        wrapped._alias = self._alias
+        wrapped._order = self._order
+        return wrapped
+
+
 class Star(Expr):
     """`*`, optionally excluding or renaming columns."""
 
@@ -842,6 +954,34 @@ class Like(Expr):
         if self.escape is not None:
             rendered += f" ESCAPE {render_literal(self.escape)}"
         return rendered + ")"
+
+
+class Variable(Expr):
+    """A lambda's parameter: a name bound inside the lambda, not a column.
+
+    Inside the body the engine gives the name to the variable even when a
+    column has it too, so the Python parameter's name decides what it
+    shadows.
+    """
+
+    def __init__(self, name: str) -> None:
+        super().__init__()
+        self.name = name
+
+    def fragment(self) -> str:
+        return quote(self.name)
+
+
+class Lambda(Expr):
+    """A SQL lambda: `lambda x: body`, as `list_filter` and its siblings take."""
+
+    def __init__(self, names: list[str], body: Expr) -> None:
+        super().__init__()
+        self.names = names
+        self.body = body
+
+    def fragment(self) -> str:
+        return f"lambda {', '.join(quote(name) for name in self.names)}: {self.body.fragment()}"
 
 
 class SubQuery(Expr):

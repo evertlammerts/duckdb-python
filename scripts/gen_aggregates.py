@@ -1,8 +1,10 @@
 """Generate duckdb/_aggregates.py: the aggregate shortcuts on Expr, as real methods.
 
 They used to be served by `__getattr__` over a table, which typed every call
-as Any, hid the names from completion, and could not be checked. The table is
-here; the methods are written out so they can be.
+as Any, hid the names from completion, and could not be checked. The table
+lives in func_namespaces.toml under `[aggregates]`; the methods are written
+out so they can be. Every entry is checked to exist as an aggregate in the
+engine's catalog, so a bump that drops one fails here.
 
     gen_aggregates.py [--check]
 """
@@ -11,38 +13,19 @@ from __future__ import annotations
 
 import argparse
 import sys
+import tomllib
 from pathlib import Path
+
 
 #: Method name to SQL function. The Python name follows pandas and Polars where
 #: they agree with each other; the SQL name is DuckDB's.
-AGGREGATES: dict[str, tuple[str, str]] = {
-    "sum": ("sum", "The sum of the values."),
-    "mean": ("avg", "The average of the values."),
-    "avg": ("avg", "The average of the values. The same as `mean`."),
-    "min": ("min", "The smallest value."),
-    "max": ("max", "The largest value."),
-    "count": ("count", "How many values are not NULL. For rows, use `count_all()`."),
-    "median": ("median", "The middle value."),
-    "std": ("stddev_samp", "The sample standard deviation."),
-    "var": ("var_samp", "The sample variance."),
-    "first": ("first", "The first value seen. Order it with `.over()` or `sort` to make that mean something."),
-    "last": ("last", "The last value seen."),
-    "any_value": ("any_value", "Any one of the values, whichever is cheapest."),
-    "bit_and": ("bit_and", "The bitwise AND of the values."),
-    "bit_or": ("bit_or", "The bitwise OR of the values."),
-    "bool_and": ("bool_and", "Whether every value is true."),
-    "bool_or": ("bool_or", "Whether any value is true."),
-    "product": ("product", "The product of the values."),
-    "string_agg": ("string_agg", "The values joined as text. Pass the separator as an argument."),
-    "skewness": ("skewness", "The skewness of the distribution."),
-    "kurtosis": ("kurtosis", "The kurtosis of the distribution."),
-    "entropy": ("entropy", "The entropy of the distribution."),
-    "array_agg": ("array_agg", "The values gathered into a list."),
-    "mode": ("mode", "The most frequent value."),
-    "quantile": ("quantile_cont", "The value at a quantile, interpolated. Pass the quantile, 0 to 1."),
-    "arg_min": ("arg_min", "The value of the argument where this is smallest."),
-    "arg_max": ("arg_max", "The value of the argument where this is largest."),
-}
+def load_aggregates() -> dict[str, tuple[str, str]]:
+    """The aggregate table, from the shared function table beside this script."""
+    table = tomllib.loads((Path(__file__).with_name("func_namespaces.toml")).read_text())
+    return {method: (spec["sql"], spec["doc"]) for method, spec in table["aggregates"]["methods"].items()}
+
+
+AGGREGATES = load_aggregates()
 
 HEADER = '''"""Aggregate shortcuts on Expr, one real method per function.
 
@@ -84,11 +67,26 @@ def render() -> str:
     return "".join(out)
 
 
+def verify(connection: object) -> list[str]:
+    """The table entries the engine's catalog has no aggregate for."""
+    import duckdb
+
+    query = "SELECT DISTINCT function_name FROM duckdb_functions() WHERE function_type = 'aggregate'"
+    known = {row[0] for row in duckdb.sql(query).rows(connection)}  # type: ignore[arg-type]
+    return sorted({function for function, _ in AGGREGATES.values()} - known)
+
+
 def main() -> int:
     """Write the module, or check that the committed one is current."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="fail if the committed file is stale")
     args = parser.parse_args()
+    import duckdb
+
+    missing = verify(duckdb.connect())
+    if missing:
+        print(f"not aggregate functions in this engine's catalog: {', '.join(missing)}", file=sys.stderr)
+        return 1
     target = Path(__file__).resolve().parent.parent / "src" / "duckdb" / "_aggregates.py"
     text = render()
     if args.check:

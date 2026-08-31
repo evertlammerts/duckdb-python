@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, cast
 import pytest
 
 import duckdb
-from duckdb import _duckdb, col, exceptions, lit, param, sql_expr, star
+from duckdb import _duckdb, col, exceptions, fn, lit, param, sql_expr, star
 from duckdb.expr import ParamSink, Star, render_literal, suspended_sinks
 
 if TYPE_CHECKING:
@@ -1070,7 +1070,7 @@ class TestRenderIsTotal:
     def test_the_blind_form_gives_the_same_rows(self, con: duckdb.Connection) -> None:
         # Blind, a set column that already existed moves to the end; that is
         # the price of not knowing. The values are the same either way.
-        plan = duckdb.table("orders").with_columns(country=col("country").str.upper(), big=col("amount") > 100)
+        plan = duckdb.table("orders").with_columns(country=col("country").str().upper(), big=col("amount") > 100)
         resolved = plan.rows(con)
         blind = duckdb.sql(plan.render()).rows(con)
         assert plan.columns(con) == ["id", "country", "amount", "big"]
@@ -1321,46 +1321,91 @@ class TestWindowFrames:
             col("v").ignore_nulls()
 
 
-class TestExpressionNamespaces:
-    """`.str`, `.dt` and `.list`, generated from the engine's catalog."""
+class TestFunctionNamespaces:
+    """`.str()`, `.dt()`, `.list()` and `.json()`: families of engine functions, entered by a call.
+
+    The entry returns the same expression with one family's methods in
+    scope, so chaining always yields an expression; what a method returns
+    is scoped by the engine's own return type for it.
+    """
 
     def test_string_methods(self, con: duckdb.Connection) -> None:
         plan = duckdb.sql("SELECT 'Hello World' AS s").select(
-            col("s").str.upper().alias("u"), col("s").str.contains("World").alias("c"), col("s").str.length().alias("n")
+            col("s").str().upper().alias("u"),
+            col("s").str().contains("World").alias("c"),
+            col("s").str().length().alias("n"),
         )
         assert plan.rows(con) == [("HELLO WORLD", True, 11)]
 
     def test_date_methods(self, con: duckdb.Connection) -> None:
         plan = duckdb.sql("SELECT DATE '2026-03-15' AS d").select(
-            col("d").dt.year().alias("y"), col("d").dt.trunc("month").alias("m"), col("d").dt.dayname().alias("n")
+            col("d").dt().year().alias("y"),
+            col("d").dt().trunc("month").alias("m"),
+            col("d").dt().dayname().alias("n"),
         )
         assert plan.rows(con) == [(2026, datetime.datetime(2026, 3, 1), "Sunday")]
 
     def test_list_methods(self, con: duckdb.Connection) -> None:
         plan = duckdb.sql("SELECT [3, 1, 2] AS l").select(
-            col("l").list.sort().alias("s"), col("l").list.contains(2).alias("c"), col("l").list.unique().alias("u")
+            col("l").list().sort().alias("s"),
+            col("l").list().contains(2).alias("c"),
+            col("l").list().unique().alias("u"),
         )
         assert plan.rows(con) == [([1, 2, 3], True, 3)]
 
+    def test_json_methods(self, con: duckdb.Connection) -> None:
+        plan = duckdb.sql("""SELECT '{"a": [1, 2], "b": "x"}' AS j""").select(
+            col("j").json().extract("$.a").alias("a"),
+            col("j").json().keys().alias("k"),
+            col("j").json().valid().alias("v"),
+        )
+        assert plan.rows(con) == [("[1,2]", ["a", "b"], True)]
+
+    def test_the_entry_is_an_expression_and_chains_stay_in_family(self, con: duckdb.Connection) -> None:
+        from duckdb._func_namespaces import JsonExpr, ListExpr, StrExpr
+
+        # Entering a namespace changes nothing about the SQL.
+        assert col("s").str().fragment() == col("s").fragment()
+        plan = duckdb.sql("SELECT 'x' AS s").select(col("s").str().alias("copy"))
+        assert plan.rows(con) == [("x",)]
+        # A method's return is scoped by the engine's return type for it.
+        assert isinstance(col("s").str().upper().lower(), StrExpr)
+        assert isinstance(col("j").json().keys(), ListExpr)  # VARCHAR[] comes back a list
+        assert isinstance(col("j").json().extract("$.a"), JsonExpr)
+        assert duckdb.sql("SELECT 'Hi There' AS s").select(
+            col("s").str().lower().string_split(" ").contains("hi").alias("hit")
+        ).rows(con) == [(True,)]
+
+    def test_json_is_text_underneath(self, con: duckdb.Connection) -> None:
+        # JsonExpr inherits the string methods, as the engine accepts
+        # VARCHAR wherever JSON goes and back.
+        plan = duckdb.sql("""SELECT '{"a": 1}' AS j""").select(col("j").json().extract("$.a").length().alias("n"))
+        assert plan.rows(con) == [(1,)]
+
     def test_arguments_are_bound(self) -> None:
         with ParamSink() as sink:
-            sql = col("s").str.contains("x'; DROP TABLE t; --").fragment()
+            sql = col("s").str().contains("x'; DROP TABLE t; --").fragment()
         assert "DROP" not in sql
         assert sink.entries[0][1] == "x'; DROP TABLE t; --"
 
     def test_every_generated_function_exists_in_this_engine(self, con: duckdb.Connection) -> None:
-        from duckdb import _namespaces
+        from duckdb import _func_namespaces
 
         known = {row[0] for row in duckdb.sql("SELECT DISTINCT function_name FROM duckdb_functions()").rows(con)}
         missing = [
             f"{cls.__name__}.{method} -> {function}"
-            for cls in (_namespaces.StringMethods, _namespaces.DateMethods, _namespaces.ListMethods)
+            for cls in (
+                _func_namespaces.StrExpr,
+                _func_namespaces.DtExpr,
+                _func_namespaces.ListExpr,
+                _func_namespaces.JsonExpr,
+            )
             for method, (function, _, _) in cls.SPEC.items()
             if function not in known
         ]
         assert not missing, missing
 
-    @pytest.mark.parametrize("namespace", ["str", "dt", "list"])
+    @pytest.mark.parametrize("namespace", ["str", "dt", "list", "json"])
     def test_every_generated_method_calls_its_function_the_right_way_round(
         self, con: duckdb.Connection, namespace: str
     ) -> None:
@@ -1370,19 +1415,29 @@ class TestExpressionNamespaces:
         matches. Any other complaint is the engine judging the values, which is
         not what this checks, so only that error class fails the test.
         """
-        from duckdb import _namespaces
+        from duckdb import _func_namespaces
 
-        cls = {"str": _namespaces.StringMethods, "dt": _namespaces.DateMethods, "list": _namespaces.ListMethods}[
-            namespace
-        ]
-        subject = {"str": "'abc'", "dt": "TIMESTAMP '2026-03-15 10:00:00'", "list": "[1, 2, 3]"}[namespace]
+        cls = {
+            "str": _func_namespaces.StrExpr,
+            "dt": _func_namespaces.DtExpr,
+            "list": _func_namespaces.ListExpr,
+            "json": _func_namespaces.JsonExpr,
+        }[namespace]
+        subject = {
+            "str": "'abc'",
+            "dt": "TIMESTAMP '2026-03-15 10:00:00'",
+            "list": "[1, 2, 3]",
+            "json": "'{\"a\": [1, 2]}'",
+        }[namespace]
         source = duckdb.sql(f"SELECT {subject} AS x")
         wrong = []
         for method, (_function, position, types) in cls.SPEC.items():
+            if "LAMBDA" in types:
+                continue  # the lambda methods take a Python callable, tested with TestLambdas
             others = [t for i, t in enumerate(types) if i != position]
             # A macro carries no types; give it one value per leading slot.
             arguments = [_argument_for(t) for t in others] if types else [1] * position
-            call = getattr(col("x").__getattribute__(namespace), method)
+            call = getattr(getattr(col("x"), namespace)(), method)
             try:
                 source.select(call(*arguments).alias("v")).columns(con)
             except exceptions.Error as error:
@@ -1394,10 +1449,12 @@ class TestExpressionNamespaces:
         import sys
 
         sys.path.insert(0, str(pathlib.Path(__file__).parent.parent / "scripts"))
-        from gen_namespaces import catalog, classify, render
+        from gen_func_namespaces import build, render
 
-        committed = (pathlib.Path(__file__).parent.parent / "src" / "duckdb" / "_namespaces.py").read_text()
-        assert committed == render(classify(catalog(con))), "run scripts/gen_namespaces.py"
+        committed = (pathlib.Path(__file__).parent.parent / "src" / "duckdb" / "_func_namespaces.py").read_text()
+        resolved, report = build(con)
+        assert not report["problems"], report["problems"]
+        assert committed == render(resolved), "run scripts/gen_func_namespaces.py"
 
 
 class TestReviewRoundThree:
@@ -1542,26 +1599,28 @@ class TestReviewRoundFour:
     def test_list_prepend_puts_the_list_second(self, con: duckdb.Connection) -> None:
         # Every list function had its subject hardwired first;
         # `list_prepend(element, list)` does not.
-        assert duckdb.sql("SELECT [1, 2] AS l").select(col("l").list.prepend(0).alias("p")).rows(con) == [([0, 1, 2],)]
+        assert duckdb.sql("SELECT [1, 2] AS l").select(col("l").list().prepend(0).alias("p")).rows(con) == [
+            ([0, 1, 2],)
+        ]
 
     def test_timezone_binds_the_family_its_docstring_describes(self, con: duckdb.Connection) -> None:
         # The two-argument conversion family had won, under the
         # one-argument extraction's description.
-        from duckdb._namespaces import DateMethods
+        from duckdb._func_namespaces import DtExpr
 
-        assert DateMethods.SPEC["timezone"][1] == 0
-        assert "offset" in (DateMethods.timezone.__doc__ or "")
+        assert DtExpr.SPEC["timezone"][1] == 0
+        assert "offset" in (DtExpr.timezone.__doc__ or "")
         plan = duckdb.sql("SELECT TIMESTAMPTZ '2026-03-15 10:00:00+00' AS ts").select(
-            col("ts").dt.timezone().alias("z")
+            col("ts").dt().timezone().alias("z")
         )
         assert plan.rows(con)[0][0] is not None
 
     def test_nothing_numeric_is_filed_under_dt(self) -> None:
         # Any overload with a temporal first parameter admitted a
         # function; `isfinite(DATE)` brought the whole of isfinite along.
-        from duckdb._namespaces import DateMethods
+        from duckdb._func_namespaces import DtExpr
 
-        assert not {"isfinite", "isinf", "generate_series", "range"} & set(DateMethods.SPEC)
+        assert not {"isfinite", "isinf", "generate_series", "range"} & set(DtExpr.SPEC)
 
     def test_a_result_tracked_after_close_is_refused_and_closed(self) -> None:
         # A result that raced close() was tracked into an empty set
@@ -1618,12 +1677,13 @@ class TestReviewRoundFour:
         assert f"q{frame._STUB_LIMIT + 2}" in con._stub_answers
 
     def test_no_generated_docstring_has_a_double_period(self) -> None:
-        # A description ending in a period once produced `..` in the generated text.
+        # A description ending in a period once produced `..` in the generated
+        # text. A truncation ellipsis is deliberate and the one exception.
         import inspect
 
-        from duckdb import _namespaces
+        from duckdb import _func_namespaces
 
-        assert ".." not in inspect.getsource(_namespaces)
+        assert ".." not in inspect.getsource(_func_namespaces).replace("...", "")
 
     @pytest.mark.parametrize("how", sorted(["semi", "anti"]))
     def test_a_join_kind_row_decides_what_it_keeps(self, con: duckdb.Connection, how: str) -> None:
@@ -1645,7 +1705,7 @@ class TestReviewRoundFour:
     def test_render_with_a_connection_is_the_executed_text(self, con: duckdb.Connection) -> None:
         # The blind form and the executed form can order a
         # replaced column differently; render(con) gives the executed one.
-        plan = duckdb.table("orders").with_columns(country=col("country").str.upper())
+        plan = duckdb.table("orders").with_columns(country=col("country").str().upper())
         assert "COLUMNS(lambda" in plan.render()
         assert "REPLACE" in plan.render(con)
         assert duckdb.sql(plan.render(con)).columns(con) == plan.columns(con)
@@ -2450,3 +2510,248 @@ class TestTableFunctionSources:
         plan = duckdb.table_function("range", sql_expr("2 + 1"))
         assert plan.render() == 'SELECT * FROM "range"((2 + 1))'
         assert plan.count(con) == 3
+
+
+class TestLambdas:
+    """A Python lambda stands for a SQL one: run once at build time, on expressions, not values.
+
+    The body is whatever expression the callable builds; the SQL variable
+    takes the Python parameter's own name; anything that is not an
+    expression is refused where the mistake is.
+    """
+
+    def test_filter_transform_and_reduce(self, con: duckdb.Connection) -> None:
+        plan = duckdb.sql("SELECT ['a', 'bb', 'ccc'] AS tags").select(
+            col("tags").list().filter(lambda x: x.str().length() > 1).alias("kept"),
+            col("tags").list().transform(lambda x: x.str().upper()).alias("loud"),
+            col("tags").list().reduce(lambda acc, x: acc.concat(x)).alias("folded"),
+        )
+        assert plan.rows(con) == [(["bb", "ccc"], ["A", "BB", "CCC"], "abbccc")]
+
+    def test_the_variable_is_named_by_the_python_parameter(self) -> None:
+        rendered = col("xs").list().transform(lambda price: price * 2).fragment()
+        assert rendered == 'list_transform("xs", lambda "price": ("price" * 2))'
+
+    def test_the_body_may_use_the_rows_own_columns(self, con: duckdb.Connection) -> None:
+        plan = duckdb.sql("SELECT [1, 5, 9] AS l, 4 AS threshold").select(
+            col("l").list().filter(lambda x: x > col("threshold")).alias("big")
+        )
+        assert plan.rows(con) == [([5, 9],)]
+
+    def test_values_in_the_body_are_bound(self, con: duckdb.Connection) -> None:
+        plan = duckdb.sql("SELECT ['a'] AS l").select(col("l").list().transform(lambda x: x.concat("!")).alias("s"))
+        sql, values = plan._sql_and_values()
+        assert "'!'" not in sql
+        assert values == ["!"]
+        assert plan.rows(con) == [(["a!"],)]
+
+    def test_nested_lambdas_and_shadowing(self, con: duckdb.Connection) -> None:
+        deep = duckdb.sql("SELECT [[1, 2], [3]] AS n").select(
+            col("n").list().transform(lambda xs: xs.list().transform(lambda x: x + 1)).alias("deep")
+        )
+        assert deep.rows(con) == [([[2, 3], [4]],)]
+        # The same name at both depths: the inner variable wins over the
+        # outer, as it does in SQL, so the inner body sees elements. Were
+        # the outer list in scope instead, list + 1 would not bind.
+        shadowed = col("n").list().transform(lambda x: x.list().transform(lambda x: x + 1))
+        assert shadowed.fragment() == 'list_transform("n", lambda "x": list_transform("x", lambda "x": ("x" + 1)))'
+        plan = duckdb.sql("SELECT [[1, 2], [3]] AS n").select(shadowed.alias("v"))
+        assert plan.rows(con) == [([[2, 3], [4]],)]
+
+    def test_a_constant_body_is_a_constant(self, con: duckdb.Connection) -> None:
+        # `lambda x: 1` is legal SQL; a Python value lifts to a literal body.
+        assert duckdb.sql("SELECT [7, 8] AS l").select(col("l").list().transform(lambda x: 1).alias("ones")).rows(
+            con
+        ) == [([1, 1],)]
+
+    def test_a_body_that_is_not_an_expression_is_refused(self) -> None:
+        with pytest.raises(TypeError, match="not an expression"):
+            col("l").list().filter(lambda x: {1, 2})
+        # A Python `if` on the element fails at build time: an expression
+        # refuses to be a condition. The SQL conditional is when().
+        with pytest.raises(TypeError, match="no truth value"):
+            col("l").list().transform(lambda x: 0 if x > 1 else x)
+        kept = col("l").list().transform(lambda x: duckdb.when(x > 1).then(0).otherwise(x))
+        assert "CASE WHEN" in kept.fragment()
+
+    def test_a_lambda_reaches_any_function_through_fn(self, con: duckdb.Connection) -> None:
+        plan = duckdb.sql("SELECT [1, 5] AS l").select(fn("list_filter", col("l"), lambda x: x > 2).alias("big"))
+        assert plan.rows(con) == [([5],)]
+
+    def test_a_plan_holding_a_lambda_is_still_a_value(self, con: duckdb.Connection) -> None:
+        # The callable is gone after construction: only the tree remains.
+        plan = duckdb.sql("SELECT [1, 5, 9] AS l").select(col("l").list().filter(lambda x: x > 4).alias("big"))
+        again = pickle.loads(pickle.dumps(plan))
+        assert again.render() == plan.render()
+        assert again.rows(con) == [([5, 9],)]
+
+    def test_a_function_that_takes_no_parameters_is_refused(self) -> None:
+        def threshold() -> int:
+            return 5
+
+        # The classic forgotten call, a bare function as an operand, fails
+        # at the line that wrote it: a SQL lambda has no zero-variable form.
+        with pytest.raises(TypeError, match="did you mean to call it"):
+            col("amount") > threshold  # noqa: B015  # the comparison raising is the point
+        with pytest.raises(TypeError, match="takes none"):
+            col("l").list().transform(threshold)
+
+    def test_a_parameter_default_is_refused(self) -> None:
+        # Every parameter becomes a lambda variable, so `y=1` would not
+        # default at all: it would bind the engine's (element, index)
+        # overload and silently add the position instead of the constant.
+        with pytest.raises(TypeError, match="without defaults"):
+            col("l").list().transform(lambda x, y=1: x + y)
+
+    def test_a_signature_that_is_not_plain_positional_is_refused(self) -> None:
+        def keyword_only(*, x: object) -> object:
+            return x
+
+        def variadic(*args: object) -> object:
+            return args[0]
+
+        with pytest.raises(TypeError, match="keyword-only"):
+            col("l").list().filter(keyword_only)
+        with pytest.raises(TypeError, match="variadic"):
+            col("l").list().filter(variadic)
+
+    def test_a_body_that_fails_names_the_function(self) -> None:
+        # `len(Variable(...))` raises deep inside the callable; the error
+        # says whose body was being built when it did.
+        with pytest.raises(TypeError, match="while building a SQL lambda from len"):
+            col("x") == len  # noqa: B015  # the comparison raising is the point
+
+    def test_a_lambda_operand_is_built_and_left_to_the_engine(self, con: duckdb.Connection) -> None:
+        # A lambda is valid SQL anywhere an expression goes; where the
+        # engine cannot fold one it says so at bind time, which is its
+        # call, not ours.
+        expression = col("x") > (lambda y: y + 1)
+        assert expression.fragment() == '("x" > lambda "y": ("y" + 1))'
+        with pytest.raises(exceptions.Error, match="invalid lambda"):
+            duckdb.sql("SELECT 1 AS x").select(expression.alias("v")).rows(con)
+
+
+class TestReviewRoundEight:
+    """The family wrapper made transparent, and the function table made the reviewed truth.
+
+    Entering a family dropped the alias and sort direction, hid an
+    aggregate from `where()`, and sent a resolvable select list to the
+    engine; `concat_ws` glued with the column and `list_where` shadowed
+    the FILTER builder; macros and ambiguous overloads slipped past the
+    generator, which now refuses both until the table decides.
+    """
+
+    def test_a_family_entry_keeps_the_alias_and_order(self, con: duckdb.Connection) -> None:
+        assert col("s").alias("keep").str()._alias == "keep"
+        assert col("s").desc().str().as_order() == '"s" DESC'
+        plan = (
+            duckdb.sql("SELECT 1 AS s UNION ALL SELECT 2")
+            .sort(col("s").desc().str())
+            .select(col("s").str().alias("kept"))
+        )
+        assert plan.columns(con) == ["kept"]
+        assert [r[0] for r in plan.rows(con)] == [2, 1]
+
+    def test_the_filter_builder_works_through_a_family_entry(self, con: duckdb.Connection) -> None:
+        expression = col("v").min().str().where(col("v").is_not_null())
+        assert 'FILTER (WHERE ("v" IS NOT NULL))' in expression.fragment()
+        plan = duckdb.sql("SELECT unnest(['b', NULL, 'a']) AS v").aggregate(expression.alias("m"))
+        assert plan.rows(con) == [("a",)]
+        # And it still refuses where the wrapped thing is no call at all.
+        with pytest.raises(TypeError, match="aggregate call"):
+            col("v").str().where(col("v").is_not_null())
+
+    def test_ignore_nulls_works_through_a_family_entry(self) -> None:
+        from duckdb import last_value
+
+        expression = last_value(col("v")).str().ignore_nulls()
+        assert 'last_value("v" IGNORE NULLS)' in expression.fragment()
+
+    def test_a_family_passthrough_still_resolves_without_a_connection(self) -> None:
+        frame = duckdb.values([("a", 1)], columns=["s", "n"])
+        assert frame.select(col("n"), col("s").str()).columns() == ["n", "s"]
+        assert frame.select(col("s").str().alias("copy")).columns() == ["copy"]
+
+    def test_concat_ws_joins_with_the_separator_not_the_column(self, con: duckdb.Connection) -> None:
+        assert col("s").str().concat_ws(", ", col("t")).fragment() == 'concat_ws(\', \', "s", "t")'
+        plan = duckdb.sql("SELECT 'X' AS s, 'Y' AS t").select(col("s").str().concat_ws(", ", col("t")).alias("j"))
+        assert plan.rows(con) == [("X, Y",)]
+
+    def test_mask_is_list_where_and_where_is_never_shadowed(self, con: duckdb.Connection) -> None:
+        plan = duckdb.sql("SELECT [1, 2, 3] AS l").select(col("l").list().mask([True, False, True]).alias("kept"))
+        assert plan.rows(con) == [([1, 3],)]
+        # `.where` after a list chain is the FILTER builder, never list_where.
+        chained = col("l").list().sort().where(col("k") == 1)
+        assert "FILTER" in chained.fragment()
+        assert "list_where" not in chained.fragment()
+
+    def test_a_macro_backed_method_keeps_the_family_in_scope(self, con: duckdb.Connection) -> None:
+        plan = duckdb.sql("SELECT [3, 1] AS l").select(
+            col("l").list().prepend(2).sort().alias("s"),
+            col("l").list().append(2).contains(2).alias("c"),
+            col("l").list().reverse().first().alias("f"),
+            col("l").list().string_agg().upper().alias("j"),
+        )
+        assert plan.rows(con) == [([1, 2, 3], True, 1, "3,1")]
+
+    def test_json_parse_returns_a_document(self, con: duckdb.Connection) -> None:
+        plan = duckdb.sql("""SELECT '{"a": 1}' AS t""").select(col("t").json().parse().keys().alias("k"))
+        assert plan.rows(con) == [(["a"],)]
+
+    def test_the_new_date_methods(self, con: duckdb.Connection) -> None:
+        plan = duckdb.sql("SELECT DATE '2024-02-10' AS d").select(
+            col("d").dt().part("year").alias("y"),
+            col("d").dt().days_in_month().alias("n"),
+        )
+        assert plan.rows(con) == [(2024, 29)]
+
+    def test_generated_docs_come_from_the_bound_overload(self) -> None:
+        from duckdb._func_namespaces import StrExpr
+
+        # md5 has a BLOB overload whose description used to be picked up.
+        assert "string" in (StrExpr.md5.__doc__ or "")
+        assert "blob" not in (StrExpr.md5.__doc__ or "")
+        # A truncated description keeps its ellipsis instead of posing as
+        # a finished sentence.
+        assert "side..." in (StrExpr.ltrim.__doc__ or "")
+
+    def test_every_inherited_string_method_binds_on_a_json_subject(self, con: duckdb.Connection) -> None:
+        """JsonExpr inherits the string methods on the strength of the implicit JSON-to-VARCHAR cast.
+
+        The SPEC checks never see the inherited methods with a JSON
+        subject, so this asks the engine itself: every one must still bind
+        when its subject is a JSON value.
+        """
+        from duckdb._func_namespaces import JsonExpr, StrExpr
+
+        subject = "'{\"a\": [1, 2]}'::JSON"
+        wrong = []
+        for method, (function, position, types) in StrExpr.SPEC.items():
+            if method in JsonExpr.SPEC:
+                continue
+            arguments = ["NULL" if t == "ANY" else f"NULL::{t}" for t in types]
+            arguments[position] = subject
+            try:
+                duckdb.sql(f"SELECT {function}({', '.join(arguments)}) AS v").columns(con)
+            except exceptions.Error as error:
+                wrong.append(f"{method}: {str(error).splitlines()[0][:90]}")
+        assert not wrong, wrong
+
+    def test_the_generator_refuses_what_the_table_cannot_mean(self, con: duckdb.Connection) -> None:
+        import copy
+        import sys
+
+        sys.path.insert(0, str(pathlib.Path(__file__).parent.parent / "scripts"))
+        from gen_func_namespaces import build, load_table
+
+        table = copy.deepcopy(load_table())
+        table["list"]["methods"]["where"] = {"sql": "list_where"}
+        table["json"]["methods"]["extract"] = {"sql": "json_extract"}
+        table["list"]["methods"]["sort"] = {"sql": "list_sort", "returns": "list"}
+        table["dt"]["methods"]["timezone"] = {"sql": "timezone", "types": ["NOPE"]}
+        _, report = build(con, table)
+        problems = "\n".join(report["problems"])
+        assert "shadows Expr's own `where`" in problems
+        assert "disagree on the return class" in problems
+        assert "catalog already says" in problems
+        assert "pinned overload" in problems

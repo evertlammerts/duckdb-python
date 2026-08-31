@@ -191,7 +191,7 @@ jobs:
       - name: Generated files match the generators
         run: |
           uv run --no-sync python scripts/gen_aggregates.py --check
-          uv run --no-sync python scripts/gen_namespaces.py --check
+          uv run --no-sync python scripts/gen_func_namespaces.py --check
 
   coverage:
     name: Seam coverage

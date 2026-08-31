@@ -37,6 +37,7 @@ from .exceptions import Error
 from .expr import (
     Col,
     Expr,
+    FamilyExpr,
     Lit,
     ParamSink,
     PlanBase,
@@ -207,6 +208,9 @@ def _contributed(expression: Expr, source: Shape) -> list[Column] | None:
     sends the step to the binder.
     """
     alias = expression._alias
+    while isinstance(expression, FamilyExpr):
+        # A family wrapper renders as what it wraps, so it resolves as it too.
+        expression = expression.inner
     if isinstance(expression, Star):
         if alias:
             return None

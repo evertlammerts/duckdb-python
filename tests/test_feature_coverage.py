@@ -38,6 +38,7 @@ ENGINE = "engine"
 FEATURES: dict[str, tuple[str, str, str | None]] = {
     "aggregate": (VERB_TESTED, "aggregate(), group_by().agg(), the generated methods", "test_frame.TestAggregation"),
     "alter": (BRIDGE, "ALTER is DDL; run() carries it", None),
+    "aoc24": (ENGINE, "an advent-of-code query workload exercising the engine, not a SQL surface", None),
     "append": (ENGINE, "the C++ appender, not a SQL surface", None),
     "attach": (BRIDGE, "ATTACH is a statement; run() carries it", None),
     "binder": (ENGINE, "name resolution rules; the layer defers to the binder by design", None),
@@ -45,6 +46,7 @@ FEATURES: dict[str, tuple[str, str, str | None]] = {
     "catalog": (BRIDGE, "catalog DDL and lookups; run() and sql() carry them", None),
     "collate": (SQL_EXPR, "COLLATE is expression syntax the verbs do not spell", None),
     "conjunction": (VERB_TESTED, "& | ~ on expressions", "test_expr.TestOperatorsEvaluate"),
+    "connect": (ENGINE, "connection strings and modes; connect() passes them through", None),
     "constraints": (BRIDGE, "constraints are DDL", None),
     "copy": (
         VERB_TESTED,
@@ -63,8 +65,8 @@ FEATURES: dict[str, tuple[str, str, str | None]] = {
     "filter": (VERB_TESTED, "filter()", "test_frame.TestRows"),
     "function": (
         VERB_TESTED,
-        ".str/.dt/.list and fn(), spec-tested against the catalog",
-        "test_frame.TestExpressionNamespaces",
+        ".str()/.dt()/.list()/.json() and fn(), spec-tested against the catalog",
+        "test_frame.TestFunctionNamespaces",
     ),
     "generated_columns": (BRIDGE, "generated columns are DDL", None),
     "index": (BRIDGE, "indexes are DDL", None),
@@ -74,7 +76,7 @@ FEATURES: dict[str, tuple[str, str, str | None]] = {
         "test_frame.TestSinks",
     ),
     "join": (VERB_TESTED, "join() with every kind in _JOIN_KINDS", "test_frame.TestJoins"),
-    "json": (SQL_EXPR, "json functions through fn() or sql_expr(); no .json namespace yet", None),
+    "json": (VERB_TESTED, "the .json() function namespace", "test_frame.TestFunctionNamespaces"),
     "keywords": (ENGINE, "parser keyword handling; identifiers are always quoted here", None),
     "limit": (VERB_TESTED, "limit(), head(), offset()", "test_frame.TestRows"),
     "logging": (ENGINE, "engine logging", None),
@@ -121,10 +123,12 @@ FEATURES: dict[str, tuple[str, str, str | None]] = {
         "test_tpch.TestExpressedDirectly",
     ),
     "transactions": (BRIDGE, "BEGIN/COMMIT/ROLLBACK are statements; the DB-API face owns them", None),
+    "trigger": (BRIDGE, "triggers are DDL; run() carries them", None),
     "types": (VERB_TESTED, "the value bridge, both directions", "test_expr.TestRichLiteralTypes"),
     "udf_function": (ENGINE, "Python functions need engine surface that lands in wave 2", None),
     "update": (BRIDGE, "UPDATE is a statement, not a query; run() carries it", None),
     "upsert": (BRIDGE, "INSERT ... ON CONFLICT is a statement", None),
+    "variant": (ENGINE, "the VARIANT type's semantics; values and cast() reach it and flow through untouched", None),
     "vacuum": (BRIDGE, "VACUUM and ANALYZE are statements", None),
     "variables": (BRIDGE, "SET VARIABLE is a statement", None),
     "vector_types": (ENGINE, "vector layout", None),
@@ -173,7 +177,7 @@ def test_the_corpus_and_the_table_agree() -> None:
 
 
 def test_the_shape_of_the_answer() -> None:
-    """A record more than a gate: how the 72 features split. 23 / 0 / 3 / 24 / 19."""
+    """A record more than a gate: how the 73 features split. 24 / 0 / 2 / 25 / 22."""
     counts = {kind: sum(1 for k, _, _ in FEATURES.values() if k == kind) for kind in KINDS}
-    assert counts[VERB_TESTED] == 23
+    assert counts[VERB_TESTED] == 24
     assert counts[VERB_UNTESTED] == 0, "a verb reaches a feature nothing proves; write the test"
