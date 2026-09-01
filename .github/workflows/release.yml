@@ -1,0 +1,96 @@
+# Publishes the wheel matrix to test.pypi. Dispatched by hand with the version
+# to stamp; nothing publishes on its own.
+#
+# The upload authenticates through test.pypi's trusted publishing: the duckdb
+# project there must list this repository, this file and the test-pypi
+# environment as a publisher. No token is stored anywhere.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: PEP 440 version to stamp and publish, such as 0.0.1.dev1
+        required: true
+        type: string
+
+# Queue releases, never cancel one: a run that is already publishing must
+# finish. The called wheel workflow groups under this run's workflow name, so
+# the two groups cannot collide.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+# The one workflow that reaches an index gets the least token: checkout only.
+# The publish job grants itself the OIDC token it needs; artifact transfer
+# rides the runner's own token, not this one.
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Preflight
+    runs-on: ubuntu-24.04
+    steps:
+      # workflow_dispatch runs on whichever branch the UI picked; a feature
+      # branch reaching the index would be an accident.
+      - name: A release comes from neo
+        if: github.ref != 'refs/heads/neo'
+        run: |
+          echo "dispatch from neo, not ${GITHUB_REF#refs/heads/}" >&2
+          exit 1
+      # The shape tests/test_version.py holds __version__ to, checked here so
+      # a typo fails in seconds rather than after the wheel matrix. The index
+      # never takes a file name twice, so every publish needs a fresh version.
+      - name: The version reads as PEP 440
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          echo "$VERSION" | grep -Eq '^[0-9]+(\.[0-9]+)*((a|b|rc)[0-9]+)?(\.post[0-9]+)?(\.dev[0-9]+)?$' \
+            || { echo "not a PEP 440 version: $VERSION" >&2; exit 1; }
+
+  wheels:
+    name: Build and verify
+    needs: check
+    uses: ./.github/workflows/wheels.yml
+    with:
+      version: ${{ inputs.version }}
+
+  publish:
+    name: Publish to test.pypi
+    needs: wheels
+    runs-on: ubuntu-24.04
+    environment:
+      name: test-pypi
+      url: https://test.pypi.org/project/duckdb/${{ inputs.version }}/
+    permissions:
+      # id-token lets trusted publishing exchange this run's OIDC token for an
+      # upload token; actions lets the job read the run's own artifacts.
+      id-token: write
+      actions: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          merge-multiple: true
+          path: dist
+
+      - name: Every artifact carries the stamped version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          ls -l dist
+          for whl in dist/*.whl; do
+            case "$(basename "$whl")" in
+              duckdb-"$VERSION"-*) ;;
+              *) echo "unexpected artifact: $whl" >&2; exit 1;;
+            esac
+          done
+
+      # Wheels only, deliberately no sdist: building from source needs an
+      # engine bundle at the pinned SHA, which no installer can reach, so an
+      # sdist would only turn "no wheel for this platform" into a CMake error
+      # mid-install.
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/

@@ -2,6 +2,8 @@
 #
 # Two wheels per platform: one stable-ABI wheel covering CPython 3.12 and every
 # later version, and one free-threaded wheel per free-threaded interpreter.
+# release.yml calls this workflow with a version to stamp; a push or pull
+# request builds whatever pyproject.toml already says.
 name: Build and test
 
 on:
@@ -10,11 +12,20 @@ on:
   pull_request:
     branches: [neo]
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        description: Stamp this version into pyproject.toml before building.
+        required: false
+        type: string
+        default: ""
 
 # A newer push to the same ref supersedes whatever is still running. Set on the
 # caller only: engine.yml is reached through workflow_call, and a called
 # workflow's jobs are cancelled with the run that called them, so a second
-# group here would only risk a deadlock.
+# group here would only risk a deadlock. Called from release.yml, this group
+# takes the caller's workflow name, so it cannot collide with the release
+# run's own group.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -72,6 +83,26 @@ jobs:
           path: engine-bundle
 
       - uses: ./.github/actions/engine-bundle
+
+      - name: Stamp the version being released
+        # A push build keeps the checked-in version; only release.yml passes
+        # one in. Through env, so the value reaches the script as data.
+        if: inputs.version != ''
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          PY=$(command -v python3 || command -v python)
+          "$PY" - "$VERSION" <<'EOF'
+          import re
+          import sys
+          from pathlib import Path
+
+          path = Path("pyproject.toml")
+          stamped, count = re.subn(r'(?m)^version = ".+"$', f'version = "{sys.argv[1]}"', path.read_text())
+          if count != 1:
+              sys.exit(f"expected one version line in pyproject.toml, found {count}")
+          path.write_text(stamped)
+          EOF
 
       - name: Build the wheel
         env:

@@ -2,10 +2,11 @@ name: Resolve the engine bundle
 description: >
   Point the build at a downloaded engine bundle by exporting SKBUILD_CMAKE_DEFINE.
 
-  The path is resolved in the shell rather than through ${{ github.workspace }}:
-  that expression yields the HOST path, which is not where the workspace is
-  mounted inside a container, and on Windows it yields backslashes that CMake
-  parses as escapes.
+  The path is resolved in the shell rather than through the github.workspace
+  expression: that one yields the HOST path, which is not where the workspace
+  is mounted inside a container, and on Windows it yields backslashes that
+  CMake parses as escapes. Named without its braces here because the runner
+  evaluates expressions even inside this description.
 
 inputs:
   path:
@@ -21,18 +22,23 @@ runs:
   using: composite
   steps:
     - shell: bash
+      # Through env, never interpolated into the script: extra-defines carries
+      # spaces and semicolons, and the shell must see them as data.
+      env:
+        BUNDLE_PATH: ${{ inputs.path }}
+        EXTRA_DEFINES: ${{ inputs.extra-defines }}
       run: |
         # cygpath -m gives CMake-friendly "D:/a/..." on the Windows runners.
         if command -v cygpath >/dev/null 2>&1; then
-          BUNDLE="$(cygpath -m "$PWD")/${{ inputs.path }}"
+          BUNDLE="$(cygpath -m "$PWD")/$BUNDLE_PATH"
         else
-          BUNDLE="$PWD/${{ inputs.path }}"
+          BUNDLE="$PWD/$BUNDLE_PATH"
         fi
         # The bundle is self-contained: it carries duckdb_cpp.{hpp,cpp}, the two
         # v2 headers, DuckDBCppApi.cmake and the library, so one path serves as
         # both the C++ API directory and the library prefix.
         DEFINES="DUCKDB_CPP_DIR=$BUNDLE;DUCKDB_ROOT=$BUNDLE"
-        if [ -n "${{ inputs.extra-defines }}" ]; then
-          DEFINES="$DEFINES;${{ inputs.extra-defines }}"
+        if [ -n "$EXTRA_DEFINES" ]; then
+          DEFINES="$DEFINES;$EXTRA_DEFINES"
         fi
         echo "SKBUILD_CMAKE_DEFINE=$DEFINES" >> "$GITHUB_ENV"
