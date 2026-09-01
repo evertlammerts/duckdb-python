@@ -211,11 +211,14 @@ class Connection:
         self.run(f"{prefix} {kind} {qualified(name)}({signature}) AS {definition}")
 
     def duplicate(self) -> Connection:
-        """A second connection to the same database, with its own transaction."""
+        """A second connection to the same database, with its own transaction.
+
+        Builds `type(self)`, so a subclass duplicates as itself.
+        """
         if self._database is None:
             message = "connection is closed"
             raise InterfaceError(message)
-        return Connection(self._database, self._catalog)
+        return type(self)(self._database, self._catalog)
 
     def close(self) -> None:
         """Close the connection, releasing the database. Idempotent.

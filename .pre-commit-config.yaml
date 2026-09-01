@@ -1,6 +1,10 @@
 # Fast checks only. Anything needing a built extension (pytest, mypy) runs in
 # CI, not here: a hook that needs a 20-minute engine build is a hook people
 # disable.
+#
+# compat/suite holds the old client's tests verbatim; even a whitespace fixer
+# would drift them from their source.
+exclude: ^compat/suite/
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0

@@ -30,6 +30,12 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.11",
 ]
+# What the adopted old-client tests import at module level. Test-only: the
+# package itself depends on nothing.
+compat = [
+    "numpy",
+    "pandas",
+]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
@@ -47,6 +53,9 @@ markers = [
 line-length = 120
 indent-width = 4
 target-version = "py312"
+# compat/suite holds the old client's tests verbatim; nothing may rewrite
+# them. The harness around them is ours and is linted.
+extend-exclude = ["compat/suite"]
 
 [tool.ruff.lint]
 select = [

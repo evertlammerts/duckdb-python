@@ -117,6 +117,12 @@ def test_null_casts_into_any_target(con: _duckdb.Connection) -> None:
     )
 
 
+def test_a_non_string_parameter_name_is_refused_clearly(con: _duckdb.Connection) -> None:
+    # nanobind's failed cast used to surface as a raw std::bad_cast.
+    with pytest.raises(exceptions.InvalidInputError, match="parameter names must be strings"):
+        con.execute("SELECT $1", {1: 5})  # type: ignore[dict-item]
+
+
 def test_named_parameters(con: _duckdb.Connection) -> None:
     assert con.execute("SELECT $a + $b", {"a": 2, "b": 3}).fetch_all()[0][0] == 5
 

@@ -211,17 +211,23 @@ public:
 	/// thread. Both sides drop the GIL, so the GIL cannot serialise this.
 	void Close() {
 		std::shared_ptr<cxx::QueryResult> released;
+		std::shared_ptr<DatabaseState> dropped;
 		{
 			std::lock_guard<std::mutex> guard(state->lifetime);
 			pending.reset();
 			finished = true;
 			released = std::move(state->result);
 			state->result.reset();
+			// A closed result must pin nothing: holding the database here
+			// kept the file "in use" past a close that had returned, until
+			// garbage collection happened to run.
+			dropped = std::move(owner);
 		}
-		// Drop the last reference, if it is the last, outside the lock and
-		// without the GIL: destruction talks to the engine.
+		// Drop the last references, if they are the last, outside the lock
+		// and without the GIL: destruction talks to the engine.
 		nb::gil_scoped_release unlock;
 		released.reset();
+		dropped.reset();
 	}
 
 	/// Up to `count` more rows, or every remaining row when `count` is zero.
@@ -347,6 +353,12 @@ public:
 		std::vector<cxx::NamedParam> bound;
 		if (nb::isinstance<nb::dict>(parameters)) {
 			for (auto entry : nb::cast<nb::dict>(parameters)) {
+				// Checked, because nanobind's failed cast would surface as a
+				// raw std::bad_cast instead of an error naming the mistake.
+				if (!nb::isinstance<nb::str>(entry.first)) {
+					throw cxx::InvalidInputException(
+					    "Invalid Input Error: parameter names must be strings");
+				}
 				bound.push_back({nb::cast<std::string>(entry.first),
 				                 PythonToValue(connection, entry.second, ctx)});
 			}

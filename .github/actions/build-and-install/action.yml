@@ -19,4 +19,4 @@ runs:
     - shell: bash
       run: |
         uv sync --only-group build --no-install-project --python "${{ inputs.python }}"
-        uv sync --no-build-isolation --group build --group dev --python "${{ inputs.python }}"
+        uv sync --no-build-isolation --group build --group dev --group compat --python "${{ inputs.python }}"
