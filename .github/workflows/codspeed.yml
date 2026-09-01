@@ -1,0 +1,101 @@
+# Nightly instruction-count sweep under Callgrind, compared against the
+# committed benchmarks/baseline.json (report-only; see benchmarks/README.md).
+# Dispatch with regen=true to produce a fresh baseline as an artifact, then
+# commit it together with benchmarks/requirements-bench.txt.
+name: CodSpeed
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      regen:
+        description: Regenerate the baseline instead of comparing.
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  engine:
+    uses: ./.github/workflows/engine.yml
+
+  bench:
+    name: Instruction counts
+    needs: engine
+    runs-on: ubuntu-24.04
+    env:
+      # Hash randomization moves dict-iteration instruction counts run to run;
+      # pinned so the only signal is the code.
+      PYTHONHASHSEED: "0"
+      CODSPEED_ENV: "1"
+      # Callgrind is ~100x; scaled-down Ns keep the sweep inside the job
+      # budget. Counts only compare against a baseline at the same scale.
+      BENCH_SCALE: "10"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: engine-linux-x86_64
+          path: engine-bundle
+
+      - uses: ./.github/actions/engine-bundle
+      - uses: ./.github/actions/build-and-install
+
+      - name: Install the frozen bench pins
+        # After the build, so the pinned data libs override whatever the
+        # groups resolved: counts must match the pins the baseline names.
+        run: uv pip install -r benchmarks/requirements-bench.txt
+
+      - name: Install valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+
+      - name: Run the suite under Callgrind
+        # The venv python directly, not `uv run`: uv would wrap the process
+        # and valgrind must instrument the interpreter itself.
+        run: |
+          mkdir -p profiles
+          valgrind --tool=callgrind --instr-atstart=no \
+            --callgrind-out-file="$PWD/profiles/cg.%p.%n" \
+            "$PWD/.venv/bin/python" -m pytest benchmarks/ \
+            -m "gate or informational" --codspeed -o addopts= -p no:cacheprovider
+
+      - name: Collect the gate list
+        run: |
+          "$PWD/.venv/bin/python" -m pytest benchmarks/ -m gate \
+            --collect-only -q -o addopts= -p no:cacheprovider \
+            | grep '::' > gate_list.txt
+          test -s gate_list.txt
+
+      - name: Compare against the committed baseline
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.regen) }}
+        run: |
+          "$PWD/.venv/bin/python" benchmarks/compare_baseline.py compare \
+            --profiles profiles \
+            --engine-sha "${{ needs.engine.outputs.sha }}"
+
+      - name: Regenerate the baseline
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.regen }}
+        run: |
+          "$PWD/.venv/bin/python" benchmarks/compare_baseline.py regen \
+            --profiles profiles \
+            --out baseline.json \
+            --gate-list gate_list.txt \
+            --git-commit "$GITHUB_SHA" \
+            --engine-sha "${{ needs.engine.outputs.sha }}"
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.regen }}
+        with:
+          name: baseline
+          path: baseline.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: callgrind-profiles
+          path: profiles/

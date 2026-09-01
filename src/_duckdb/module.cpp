@@ -7,17 +7,18 @@
 //===----------------------------------------------------------------------===//
 
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/tuple.h>
 #include <nanobind/stl/vector.h>
 
-#include <algorithm>
 #include <chrono>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
-#include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -29,6 +30,12 @@ namespace cxx = duckdb::cxx;
 
 namespace duckdb_python {
 namespace {
+
+// Step participates in executing the query: WAITING means "call again", never
+// "wait for someone else". Sleeping between calls only serializes the work,
+// so the step loops below run hot, releasing the GIL for one quantum of
+// stepping at a time and retaking it for the Ctrl-C check in between.
+constexpr std::chrono::milliseconds kStepQuantum {20};
 
 // An engine error carries a numeric code; duckdb.exceptions owns the mapping
 // from code to class. One catch clause covers every engine exception, including
@@ -104,9 +111,11 @@ struct ResultState {
 class ChunkView {
 public:
 	// The types ride along because this facade keeps them on the result's
-	// schema, not on the vectors.
-	ChunkView(cxx::DataChunk chunk, std::vector<cxx::LogicalType> types)
-	    : chunk(std::move(chunk)), types(std::move(types)) {
+	// schema, not on the vectors. `row_offset` is how many leading rows a
+	// prior row fetch already consumed; the buffers still cover the whole
+	// chunk, so the converter slices them by it.
+	ChunkView(cxx::DataChunk chunk, std::vector<cxx::LogicalType> types, cxx::idx_t row_offset = 0)
+	    : chunk(std::move(chunk)), types(std::move(types)), row_offset(row_offset) {
 		const auto count = this->chunk.GetVectorCount();
 		vectors.reserve(count);
 		for (cxx::idx_t i = 0; i < count; i++) {
@@ -120,6 +129,10 @@ public:
 
 	cxx::idx_t RowCount() const {
 		return chunk.GetRowCount();
+	}
+
+	cxx::idx_t RowOffset() const {
+		return row_offset;
 	}
 
 	cxx::idx_t ColumnCount() const {
@@ -242,6 +255,7 @@ private:
 	cxx::DataChunk chunk;
 	std::vector<cxx::LogicalType> types;
 	std::vector<cxx::Vector> vectors;
+	cxx::idx_t row_offset;
 };
 
 class Result {
@@ -309,8 +323,7 @@ public:
 			bool cancelled = false;
 			{
 				nb::gil_scoped_release release;
-				const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds {20};
-				std::chrono::milliseconds nap {1};
+				const auto deadline = std::chrono::steady_clock::now() + kStepQuantum;
 				while (std::chrono::steady_clock::now() < deadline) {
 					auto step = live->Step();
 					if (step.status == cxx::QueryResult::StepStatus::CHUNK) {
@@ -326,8 +339,7 @@ public:
 					} else if (step.status == cxx::QueryResult::StepStatus::CANCELLED) {
 						cancelled = true;
 					} else {
-						std::this_thread::sleep_for(nap);
-						nap = std::min(nap * 2, std::chrono::milliseconds {50});
+						// WAITING: stepping is the progress; go again.
 						continue;
 					}
 					break;
@@ -338,12 +350,16 @@ public:
 				PyErr_SetString(module.attr("InterruptError").ptr(), "query was cancelled");
 				throw nb::python_error();
 			}
-			if (PyErr_CheckSignals() != 0) {
-				throw nb::python_error();
-			}
 			if (done) {
+				// The statement completed and its side effects landed; a
+				// signal pending this very batch must not turn that into an
+				// exception a caller would read as "did not happen". It is
+				// delivered at the interpreter's own next check instead.
 				finished = true;
 				return changed;
+			}
+			if (PyErr_CheckSignals() != 0) {
+				throw nb::python_error();
 			}
 		}
 	}
@@ -418,14 +434,15 @@ public:
 
 	/// The next chunk column-wise for the numpy converter, or None at the end.
 	///
-	/// Consumes whole chunks, so it must not be mixed with the row fetches,
-	/// which can leave a partly-read chunk this would hand out again whole.
+	/// A chunk partly consumed by a prior row fetch is handed out whole with
+	/// its row offset, so the converter delivers only the remaining rows.
 	nb::object FetchChunkView() {
 		auto live = Live();
 		if (!pending && (finished || !Advance())) {
 			return nb::none();
 		}
 		auto chunk = std::move(*pending);
+		const auto consumed = offset;
 		pending.reset();
 		offset = 0;
 		const auto schema = live->GetSchema();
@@ -435,55 +452,94 @@ public:
 		for (cxx::idx_t i = 0; i < count; i++) {
 			types.push_back(schema.GetFieldType(i));
 		}
-		return nb::cast(ChunkView(std::move(chunk), std::move(types)));
+		return nb::cast(ChunkView(std::move(chunk), std::move(types), consumed));
+	}
+
+	/// Per-column (type id, decimal scale, enum dictionary or None), from the
+	/// schema alone, so an empty result still assembles with the dtypes its
+	/// rows would have had.
+	std::vector<std::tuple<int, int, std::optional<std::vector<std::string>>>> SchemaTypes() {
+		const auto schema = Live()->GetSchema();
+		std::vector<std::tuple<int, int, std::optional<std::vector<std::string>>>> out;
+		const auto count = schema.GetFieldCount();
+		out.reserve(count);
+		for (cxx::idx_t i = 0; i < count; i++) {
+			const auto type = schema.GetFieldType(i);
+			const auto id = static_cast<int>(type.GetTypeId());
+			int scale = 0;
+			std::optional<std::vector<std::string>> dictionary;
+			if (type.GetTypeId() == cxx::LogicalTypeId::DECIMAL) {
+				scale = static_cast<int>(type.GetDecimalScale());
+			} else if (type.GetTypeId() == cxx::LogicalTypeId::ENUM) {
+				std::vector<std::string> values;
+				const auto size = type.GetEnumSize();
+				values.reserve(size);
+				for (cxx::idx_t v = 0; v < size; v++) {
+					values.push_back(type.GetEnumValue(v));
+				}
+				dictionary = std::move(values);
+			}
+			out.emplace_back(id, scale, std::move(dictionary));
+		}
+		return out;
 	}
 
 private:
 	/// Step until a chunk arrives or the result ends. False once it has ended.
 	bool Advance() {
-		// Grows 1ms to 50ms while the engine's workers hold the query.
-		std::chrono::milliseconds nap {1};
 		while (true) {
-			// StepResult carries a DataChunk and so is not default
-			// constructible; build it in place from the call.
 			// The reference is taken before the GIL is dropped and held for
-			// the whole call, so a concurrent Close cannot free it here.
+			// the whole quantum, so a concurrent Close cannot free it here.
 			auto live = Live();
-			auto step = [&live] {
-				// The engine runs on its own threads and may block; never hold
-				// the GIL across it, or a callback into Python deadlocks.
+			bool got_chunk = false;
+			bool cancelled = false;
+			{
+				// The engine may run this thread's share of the query inside
+				// Step; never hold the GIL across it, or a callback into
+				// Python deadlocks.
 				nb::gil_scoped_release release;
-				return live->Step();
-			}();
-			// Step does a bounded amount of work, so this is where a Ctrl-C
-			// lands; the caller's close tears the query down. A no-op off the
-			// main thread, where Python runs no signal handlers.
-			if (PyErr_CheckSignals() != 0) {
-				throw nb::python_error();
+				const auto deadline = std::chrono::steady_clock::now() + kStepQuantum;
+				while (std::chrono::steady_clock::now() < deadline) {
+					auto step = live->Step();
+					if (step.status == cxx::QueryResult::StepStatus::CHUNK) {
+						pending = std::move(step.chunk);
+						offset = 0;
+						got_chunk = true;
+					} else if (step.status == cxx::QueryResult::StepStatus::FINISHED) {
+						finished = true;
+					} else if (step.status == cxx::QueryResult::StepStatus::CANCELLED) {
+						cancelled = true;
+					} else {
+						// WAITING: stepping is the progress; go again.
+						continue;
+					}
+					break;
+				}
 			}
-			switch (step.status) {
-			case cxx::QueryResult::StepStatus::CHUNK:
-				pending = std::move(step.chunk);
-				offset = 0;
-				return true;
-			case cxx::QueryResult::StepStatus::FINISHED:
-				finished = true;
-				return false;
-			case cxx::QueryResult::StepStatus::CANCELLED: {
+			if (cancelled) {
 				nb::object module = nb::module_::import_("duckdb.exceptions");
 				PyErr_SetString(module.attr("InterruptError").ptr(), "query was cancelled");
 				throw nb::python_error();
 			}
-			case cxx::QueryResult::StepStatus::WAITING: {
-				// A bounded nap instead of the engine's unbounded Wait, so the
-				// signal check above keeps running while the engine's own
-				// threads hold the query; Wait can otherwise park this thread
-				// until the next chunk, which for a big aggregate is the end.
-				nb::gil_scoped_release release;
-				std::this_thread::sleep_for(nap);
-				nap = std::min(nap * 2, std::chrono::milliseconds {50});
-				break;
+			if (got_chunk) {
+				// The chunk was parked before this check, so a Ctrl-C on a
+				// chunk boundary loses no rows: a caller that catches it
+				// finds the chunk still pending and can keep fetching. A
+				// no-op off the main thread, where Python runs no signal
+				// handlers.
+				if (PyErr_CheckSignals() != 0) {
+					throw nb::python_error();
+				}
+				return true;
 			}
+			if (finished) {
+				// End of stream: a pending signal is delivered at the
+				// interpreter's own next check, never as a raise that hides
+				// the completion.
+				return false;
+			}
+			if (PyErr_CheckSignals() != 0) {
+				throw nb::python_error();
 			}
 		}
 	}
@@ -666,15 +722,19 @@ NB_MODULE(_duckdb, m) {
 	    .def("fetch_rows",
 	         [state](Result &self, size_t count) { return self.FetchRows(state->conversion, count); },
 	         nb::arg("count"))
-	    .def("fetch_chunk_view", &Result::FetchChunkView);
+	    .def("fetch_chunk_view", &Result::FetchChunkView)
+	    .def_prop_ro("schema_types", &Result::SchemaTypes);
 
 	nb::class_<ChunkView>(m, "ChunkView")
 	    .def_prop_ro("row_count", &ChunkView::RowCount)
+	    .def_prop_ro("row_offset", &ChunkView::RowOffset)
 	    .def_prop_ro("column_count", &ChunkView::ColumnCount)
 	    .def("type_id", &ChunkView::TypeId, nb::arg("column"))
 	    .def("type_text", &ChunkView::TypeText, nb::arg("column"))
-	    .def("data", &ChunkView::Data, nb::arg("column"))
-	    .def("validity", &ChunkView::Validity, nb::arg("column"))
+	    // keep_alive: the memoryviews borrow the chunk's memory, so the view
+	    // object must outlive them whatever the caller drops.
+	    .def("data", &ChunkView::Data, nb::arg("column"), nb::keep_alive<0, 1>())
+	    .def("validity", &ChunkView::Validity, nb::arg("column"), nb::keep_alive<0, 1>())
 	    .def("decimal_scale", &ChunkView::DecimalScale, nb::arg("column"))
 	    .def("enum_values", &ChunkView::EnumValues, nb::arg("column"))
 	    .def("values",

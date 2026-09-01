@@ -87,9 +87,12 @@ class TestToNumpy:
     def test_enum_becomes_strings_with_none_for_null(self, con: duckdb.Connection) -> None:
         con.run("CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')")
         out = duckdb.sql("SELECT unnest(['ok', NULL, 'happy']::mood[]) AS m").to_numpy(con)
-        values = out["m"].data if isinstance(out["m"], np.ma.MaskedArray) else out["m"]
-        assert values[0] == "ok"
-        assert values[2] == "happy"
+        column = out["m"]
+        assert isinstance(column, np.ma.MaskedArray)
+        assert column.mask.tolist() == [False, True, False]
+        assert column.data[0] == "ok"
+        assert column.data[1] is None
+        assert column.data[2] == "happy"
 
     def test_an_empty_result_keeps_its_dtypes(self, con: duckdb.Connection) -> None:
         out = duckdb.sql("SELECT 1::BIGINT AS v, 'x' AS s WHERE FALSE").to_numpy(con)
@@ -152,3 +155,78 @@ class TestBoundEgress:
         bound = duckdb.sql("SELECT 1 AS v").on(con)
         assert bound.to_numpy()["v"].tolist() == [1]
         assert bound.to_pandas()["v"].tolist() == [1]
+
+
+class TestTemporalInfinities:
+    def test_infinite_dates_clamp_like_the_row_path(self, con: duckdb.Connection) -> None:
+        plan = duckdb.sql("SELECT 'infinity'::DATE AS pos, '-infinity'::DATE AS neg")
+        frame = plan.to_pandas(con)
+        assert frame["pos"][0].date() == datetime.date.max
+        assert frame["neg"][0].date() == datetime.date.min
+        out = plan.to_numpy(con)
+        assert out["pos"][0] == np.datetime64("9999-12-31", "us")
+        assert out["neg"][0] == np.datetime64("0001-01-01", "us")
+
+    def test_infinite_timestamps_agree_with_the_row_path(self, con: duckdb.Connection) -> None:
+        plan = duckdb.sql("SELECT 'infinity'::TIMESTAMP AS pos, '-infinity'::TIMESTAMP AS neg")
+        frame = plan.to_pandas(con)
+        rows = plan.rows(con)
+        assert frame["pos"][0].to_pydatetime() == rows[0][0] == datetime.datetime.max
+        assert frame["neg"][0].to_pydatetime() == rows[0][1] == datetime.datetime.min
+
+    def test_infinite_coarse_timestamps_clamp_in_their_unit(self, con: duckdb.Connection) -> None:
+        frame = duckdb.sql("SELECT 'infinity'::TIMESTAMP_S AS s, 'infinity'::TIMESTAMP_MS AS ms").to_pandas(con)
+        assert frame["s"][0].year == 9999
+        assert frame["ms"][0].year == 9999
+
+    def test_infinite_timestamptz_stays_aware(self, con: duckdb.Connection) -> None:
+        frame = duckdb.sql("SELECT 'infinity'::TIMESTAMPTZ AS ts").to_pandas(con)
+        value = frame["ts"][0]
+        assert value.tzinfo is not None
+        assert value.year == 9999
+
+
+class TestEmptyResults:
+    def test_empty_decimal_and_enum_keep_their_dtypes(self, con: duckdb.Connection) -> None:
+        con.run("CREATE TYPE empty_mood AS ENUM ('sad', 'ok')")
+        frame = duckdb.sql("SELECT 1.5::DECIMAL(9,2) AS d, 'ok'::empty_mood AS m WHERE FALSE").to_pandas(con)
+        assert frame["d"].dtype == np.dtype("float64")
+        assert isinstance(frame["m"].dtype, pd.CategoricalDtype)
+        assert list(frame["m"].dtype.categories) == ["sad", "ok"]
+
+    def test_empty_timestamptz_is_utc_aware(self, con: duckdb.Connection) -> None:
+        frame = duckdb.sql("SELECT TIMESTAMPTZ '2024-01-01' AS ts WHERE FALSE").to_pandas(con)
+        assert str(frame["ts"].dtype) == "datetime64[us, UTC]"
+
+    def test_empty_date_follows_date_as_object(self, con: duckdb.Connection) -> None:
+        plan = duckdb.sql("SELECT DATE '2024-01-01' AS d WHERE FALSE")
+        assert plan.to_pandas(con, date_as_object=True)["d"].dtype == np.dtype(object)
+        assert plan.to_pandas(con)["d"].dtype == np.dtype("datetime64[us]")
+
+    def test_empty_interval_is_timedelta(self, con: duckdb.Connection) -> None:
+        frame = duckdb.sql("SELECT INTERVAL 1 DAY AS iv WHERE FALSE").to_pandas(con)
+        assert frame["iv"].dtype == np.dtype("timedelta64[us]")
+
+
+class TestChunkViewContract:
+    def test_buffers_keep_the_chunk_alive(self, con: duckdb.Connection) -> None:
+        import gc
+
+        result = con._execute("SELECT i::BIGINT AS a FROM range(3) t(i)")
+        view = result.result.fetch_chunk_view()
+        assert view is not None
+        buffer = view.data(0)
+        assert buffer is not None
+        del view
+        gc.collect()
+        assert list(np.frombuffer(buffer, dtype="int64")) == [0, 1, 2]
+        result.close()
+
+    def test_a_partly_fetched_chunk_carries_its_offset(self, con: duckdb.Connection) -> None:
+        result = con._execute("SELECT i::BIGINT AS a FROM range(6) t(i)")
+        assert result.fetch_rows(2) == [(0,), (1,)]
+        view = result.result.fetch_chunk_view()
+        assert view is not None
+        assert view.row_offset == 2
+        assert view.row_count == 6
+        result.close()

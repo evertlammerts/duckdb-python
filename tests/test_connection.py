@@ -156,13 +156,18 @@ class TestPublicInterrupt:
         # however long the statement would run.
         con = duckdb.connect()
         interrupter = threading.Timer(0.3, _thread.interrupt_main)
+        # The rescue bounds a lost Ctrl-C: the query dies as InterruptError,
+        # failing this test promptly instead of hanging the whole suite.
+        rescue = threading.Timer(10, con.interrupt)
         interrupter.start()
+        rescue.start()
         started = time.monotonic()
         try:
             with pytest.raises(KeyboardInterrupt):
                 con.run("SELECT * FROM range(20_000_000_000)")
         finally:
             interrupter.cancel()
+            rescue.cancel()
         assert time.monotonic() - started < 5, "the interrupt did not land between step batches"
         assert duckdb.sql("SELECT 1").rows(con) == [(1,)]
 
@@ -173,13 +178,17 @@ class TestPublicInterrupt:
         # granularity instead, measured at seconds, not tested here.
         con = duckdb.connect()
         interrupter = threading.Timer(0.3, _thread.interrupt_main)
+        # Same rescue as the drain test: a lost Ctrl-C fails fast, never hangs.
+        rescue = threading.Timer(10, con.interrupt)
         interrupter.start()
+        rescue.start()
         started = time.monotonic()
         try:
             with pytest.raises(KeyboardInterrupt):
                 duckdb.sql("SELECT i, md5(i::VARCHAR) FROM range(8_000_000) t(i)").rows(con)
         finally:
             interrupter.cancel()
+            rescue.cancel()
         assert time.monotonic() - started < 3, "the interrupt did not land between chunks"
         assert duckdb.sql("SELECT 1").rows(con) == [(1,)]
 

@@ -13,6 +13,10 @@ class ChunkView:
     @property
     def row_count(self) -> int: ...
     @property
+    def row_offset(self) -> int:
+        """Leading rows a prior row fetch already consumed; the buffers still cover the whole chunk."""
+
+    @property
     def column_count(self) -> int: ...
     def type_id(self, column: int) -> int:
         """The facade's LogicalTypeId value for the column."""
@@ -57,7 +61,15 @@ class Result:
         """Up to `count` more rows, or every remaining row when `count` is zero."""
 
     def fetch_chunk_view(self) -> ChunkView | None:
-        """The next chunk column-wise, or None at the end. Not to be mixed with the row fetches."""
+        """The next chunk column-wise, or None at the end.
+
+        After a row fetch, the chunk arrives whole with its row offset set,
+        so a consumer delivers only the remaining rows.
+        """
+
+    @property
+    def schema_types(self) -> list[tuple[int, int, list[str] | None]]:
+        """Per-column (type id, decimal scale, enum dictionary or None), from the schema alone."""
 
 class Connection:
     def execute(self, sql: str, parameters: Sequence[Any] | Mapping[str, Any] | None = None) -> Result:

@@ -46,15 +46,17 @@ class Recorder:
     def __init__(self) -> None:
         self.outcomes: collections.Counter[str] = collections.Counter()
         self.signatures: collections.Counter[str] = collections.Counter()
+        self._call_passed: set[str] = set()
 
     def _failure(self, report: pytest.TestReport | pytest.CollectReport) -> None:
         crash = getattr(report.longrepr, "reprcrash", None)
         if crash is not None:
-            message = str(crash.message).splitlines()[0]
+            lines = str(crash.message).splitlines()
         elif report.longrepr is not None:
-            message = str(report.longrepr).splitlines()[-1]
+            lines = str(report.longrepr).splitlines()[-1:]
         else:
-            message = "unknown failure"
+            lines = []
+        message = lines[0] if lines else "unknown failure"
         self.signatures[message[:150]] += 1
         if ENVIRONMENT.search(message):
             self.outcomes["environment"] += 1
@@ -68,6 +70,7 @@ class Recorder:
         if report.when == "call":
             if report.passed:
                 self.outcomes["passed"] += 1
+                self._call_passed.add(report.nodeid)
             elif report.skipped:
                 if hasattr(report, "wasxfail"):
                     self.outcomes["recorded divergence"] += 1
@@ -80,6 +83,13 @@ class Recorder:
                 self.outcomes["skipped"] += 1
             else:
                 self._failure(report)
+        elif report.when == "teardown" and report.failed:
+            # A test whose fixtures failed to tear down did not fully pass;
+            # counting it as passed would overstate the parity number.
+            if report.nodeid in self._call_passed:
+                self._call_passed.discard(report.nodeid)
+                self.outcomes["passed"] -= 1
+            self._failure(report)
 
     def pytest_collectreport(self, report: pytest.CollectReport) -> None:
         """Tally a file that failed or skipped at collection."""

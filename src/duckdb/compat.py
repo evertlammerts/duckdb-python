@@ -140,14 +140,22 @@ class CompatRelation:
 
     def fetchone(self) -> tuple[Any, ...] | None:
         """The next row, running the relation first if nothing is held."""
-        rows = self._held().fetch_rows(1)
+        held = self._held()
+        try:
+            rows = held.fetch_rows(1)
+        except InterfaceError:
+            raise self._stale() from None
         return rows[0] if rows else None
 
     def fetchmany(self, size: int = 1) -> list[tuple[Any, ...]]:
         """Up to `size` rows, running the relation first if nothing is held."""
         if size <= 0:
             return []
-        return self._held().fetch_rows(size)
+        held = self._held()
+        try:
+            return held.fetch_rows(size)
+        except InterfaceError:
+            raise self._stale() from None
 
     def fetchall(self) -> list[tuple[Any, ...]]:
         """Every row: the rest of a held result, or a fresh run each call."""
@@ -155,7 +163,10 @@ class CompatRelation:
             message = "result closed"
             raise InvalidInputException(message)
         if self._result is not None:
-            rows = self._result.fetch_all()
+            try:
+                rows = self._result.fetch_all()
+            except InterfaceError:
+                raise self._stale() from None
             self._close_result()
             return rows
         with self._connection._execute(self._sql) as result:
@@ -171,7 +182,14 @@ class CompatRelation:
         if self._result is not None:
             result = self._result
             self._result = None
-            return fetch_numpy(result.result)
+            try:
+                return fetch_numpy(result.result)
+            except InterfaceError:
+                raise self._stale() from None
+            finally:
+                # A conversion that failed midway must not orphan the open
+                # result: one live result would block the next statement.
+                result.close()
         with self._connection._execute(self._sql) as result:
             return fetch_numpy(result.result)
 
@@ -185,7 +203,12 @@ class CompatRelation:
         if self._result is not None:
             result = self._result
             self._result = None
-            return to_dataframe(result.result, date_as_object=date_as_object)
+            try:
+                return to_dataframe(result.result, date_as_object=date_as_object)
+            except InterfaceError:
+                raise self._stale() from None
+            finally:
+                result.close()
         with self._connection._execute(self._sql) as result:
             return to_dataframe(result.result, date_as_object=date_as_object)
 
@@ -196,8 +219,14 @@ class CompatRelation:
     @property
     def description(self) -> list[tuple[Any, ...]]:
         """Column metadata, from the held result or from binding the text."""
+        if self._closed:
+            message = "result closed"
+            raise InvalidInputException(message)
         if self._result is not None:
-            schema = self._result.result.schema
+            try:
+                schema = self._result.result.schema
+            except InterfaceError:
+                raise self._stale() from None
         else:
             schema, _ = self._connection._engine().bind(self._sql)
         return [(column, type_text, None, None, None, None, None) for column, type_text in schema]
@@ -206,6 +235,15 @@ class CompatRelation:
         if self._result is not None:
             self._result.close()
             self._result = None
+
+    def _stale(self) -> InvalidInputError:
+        # The held result was force-closed under us, by the connection's
+        # close cascade; adopt the closed state so every fetch reports it
+        # with the one exception this class promises.
+        self._result = None
+        self._closed = True
+        message = "result closed"
+        return InvalidInputException(message)
 
     def _held(self) -> LiveResult:
         if self._closed:
@@ -346,16 +384,36 @@ class CompatConnection(Connection):
         as the old client did.
         """
         child = cast("CompatConnection", self.duplicate())
+        # The child shares the instance holder: any live cursor keeps the
+        # path's shared-database cache entry alive, as the old client did.
+        child._instance = self._instance
         self._cursors.add(child)
         return child
 
     def close(self) -> None:
-        """Close this connection and every cursor made from it."""
+        """Close this connection and every cursor made from it.
+
+        Every step runs whatever any one of them raises: close must always
+        mean closed, never a connection left usable because one cursor's
+        close failed first.
+        """
+        failures: list[BaseException] = []
         for child in list(self._cursors):
-            child.close()
-        self._release_held()
+            try:
+                child.close()
+            except Exception as error:  # every cursor must be tried
+                failures.append(error)
+        try:
+            self._release_held()
+        except Exception as error:
+            failures.append(error)
         self._instance = None
-        super().close()
+        try:
+            super().close()
+        except Exception as error:
+            failures.append(error)
+        if failures:
+            raise failures[0]
 
     def _release_held(self) -> None:
         if self._held is not None:

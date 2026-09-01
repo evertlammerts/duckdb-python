@@ -70,26 +70,16 @@ _NULLABLE_PD = {
     "float64": "Float64",
 }
 
-#: An empty result carries no chunks, so its dtypes come from the schema text.
-_TEXT_DTYPE = {
-    "BOOLEAN": "bool",
-    "TINYINT": "int8",
-    "SMALLINT": "int16",
-    "INTEGER": "int32",
-    "BIGINT": "int64",
-    "UTINYINT": "uint8",
-    "USMALLINT": "uint16",
-    "UINTEGER": "uint32",
-    "UBIGINT": "uint64",
-    "FLOAT": "float32",
-    "DOUBLE": "float64",
-    "DATE": "datetime64[us]",
-    "TIMESTAMP": "datetime64[us]",
-    "TIMESTAMP_S": "datetime64[s]",
-    "TIMESTAMP_MS": "datetime64[ms]",
-    "TIMESTAMP_NS": "datetime64[ns]",
-    "TIMESTAMP WITH TIME ZONE": "datetime64[us]",
-    "INTERVAL": "timedelta64[us]",
+#: The engine's temporal infinity sentinels, and where they clamp to. The row
+#: egress clamps them to Python's date/datetime min and max; these are the
+#: same instants as epoch counts, so both paths agree.
+_DATE_INF = 2147483647
+_DATE_CLAMP = (2932896, -719162)
+_TS_INF = 9223372036854775807
+_TS_CLAMP = {
+    "s": (253402300799, -62135596800),
+    "ms": (253402300799999, -62135596800000),
+    "us": (253402300799999999, -62135596800000000),
 }
 
 
@@ -116,12 +106,13 @@ def _convert_column(np: Any, view: _duckdb.ChunkView, column: int, count: int) -
         return np.frombuffer(view.data(column), dtype=dtype).copy(), mask, "numeric", None
 
     if type_id == _DATE:
-        days = np.frombuffer(view.data(column), dtype="int32")
+        days = np.frombuffer(view.data(column), dtype="int32").copy()
         if mask is not None:
             # NULL slots hold undefined day counts; zeroed before the unit
             # conversion, or extreme garbage overflows datetime64.
-            days = days.copy()
             days[mask] = 0
+        days[days == _DATE_INF] = _DATE_CLAMP[0]
+        days[days == -_DATE_INF] = _DATE_CLAMP[1]
         # DATE maps to datetime64[us], matching the old client.
         return days.astype("datetime64[D]").astype("datetime64[us]"), mask, "date", "us"
 
@@ -130,6 +121,11 @@ def _convert_column(np: Any, view: _duckdb.ChunkView, column: int, count: int) -
         raw = np.frombuffer(view.data(column), dtype="int64").copy()
         if mask is not None:
             raw[mask] = 0
+        if unit != "ns":
+            # In nanoseconds the sentinel already is the last representable
+            # instant, so it needs no clamp; the negative one is NaT + 1.
+            raw[raw == _TS_INF] = _TS_CLAMP[unit][0]
+            raw[raw == -_TS_INF] = _TS_CLAMP[unit][1]
         values = raw.view(f"datetime64[{unit}]")
         return values, mask, ("datetimetz" if type_id == _TS_TZ else "datetime"), unit
 
@@ -174,24 +170,56 @@ def _convert_column(np: Any, view: _duckdb.ChunkView, column: int, count: int) -
     return values, mask, "object", None
 
 
+def _empty_column(np: Any, type_id: int, enum_values: Any) -> tuple[Any, Any, str, Any]:
+    """A zero-row column with the dtype and kind its rows would have had."""
+    dtype = _NUMERIC_DTYPE.get(type_id)
+    if dtype is not None:
+        return np.empty(0, dtype=dtype), None, "numeric", None
+    if type_id == _DATE:
+        return np.empty(0, dtype="datetime64[us]"), None, "date", "us"
+    unit = _TS_UNIT.get(type_id)
+    if unit is not None:
+        kind = "datetimetz" if type_id == _TS_TZ else "datetime"
+        return np.empty(0, dtype=f"datetime64[{unit}]"), None, kind, unit
+    if type_id == _INTERVAL:
+        return np.empty(0, dtype="timedelta64[us]"), None, "timedelta", None
+    if type_id == _DECIMAL:
+        return np.empty(0, dtype="float64"), None, "numeric", None
+    if type_id == _ENUM:
+        return np.empty(0, dtype="int64"), None, "enum", list(enum_values or [])
+    return np.empty(0, dtype=object), None, "object", None
+
+
 def _result_to_columns(result: _duckdb.Result) -> list[tuple[str, Any, Any, str, Any]]:
     """Consume a seam result into per-column (name, values, mask, kind, meta)."""
     import numpy as np
 
     schema = result.schema
+    types_meta = result.schema_types
     names = [name for name, _ in schema]
     pieces: list[list[tuple[Any, Any, str, Any]]] = [[] for _ in names]
     while (view := result.fetch_chunk_view()) is not None:
         count = view.row_count
+        skip = view.row_offset
         for i in range(len(names)):
-            pieces[i].append(_convert_column(np, view, i, count))
+            values, mask, kind, meta = _convert_column(np, view, i, count)
+            if skip:
+                # A prior row fetch consumed the chunk's head; only the rest
+                # is delivered, or mixed fetch styles repeat rows.
+                values = values[skip:]
+                if mask is not None:
+                    mask = mask[skip:]
+                    if not mask.any():
+                        mask = None
+            pieces[i].append((values, mask, kind, meta))
     result.close()
 
     out: list[tuple[str, Any, Any, str, Any]] = []
     for i, name in enumerate(names):
         if not pieces[i]:
-            dtype = _TEXT_DTYPE.get(schema[i][1].split("(")[0].strip().upper(), object)
-            out.append((name, np.empty(0, dtype=dtype), None, "numeric" if dtype is not object else "object", None))
+            type_id, _, enum_values = types_meta[i]
+            values, mask, kind, meta = _empty_column(np, type_id, enum_values)
+            out.append((name, values, mask, kind, meta))
             continue
         kind = pieces[i][-1][2]
         meta = pieces[i][-1][3]

@@ -38,6 +38,13 @@ compat = [
     "pandas",
     "pandas-stubs",
 ]
+# The benchmark harness. CI installs the frozen pins in
+# benchmarks/requirements-bench.txt instead; keep both in step.
+bench = [
+    "pytest-codspeed>=5",
+    "numpy",
+    "pandas",
+]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
@@ -98,6 +105,8 @@ convention = "google"
 # Test names are the documentation; a docstring per assertion adds noise.
 # Explanations that matter live in comments at the point they apply.
 "tests/*" = ["D100", "D101", "D102", "D103"]
+# Benchmark names are the documentation, same as tests.
+"benchmarks/*" = ["D103"]
 
 [tool.mypy]
 files = ["src/duckdb", "tests", "scripts"]
