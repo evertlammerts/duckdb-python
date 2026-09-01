@@ -37,6 +37,8 @@ from .expr import qualified, quote
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
+    import pandas
+
 __all__ = [
     "BINARY",
     "DATETIME",
@@ -159,6 +161,38 @@ class CompatRelation:
         with self._connection._execute(self._sql) as result:
             return result.fetch_all()
 
+    def fetchnumpy(self) -> dict[str, Any]:
+        """The relation as numpy arrays: the rest of a held result, or a fresh run."""
+        from ._numpy import fetch_numpy
+
+        if self._closed:
+            message = "result closed"
+            raise InvalidInputException(message)
+        if self._result is not None:
+            result = self._result
+            self._result = None
+            return fetch_numpy(result.result)
+        with self._connection._execute(self._sql) as result:
+            return fetch_numpy(result.result)
+
+    def fetchdf(self, date_as_object: bool = False) -> pandas.DataFrame:
+        """The relation as a pandas DataFrame: the rest of a held result, or a fresh run."""
+        from ._numpy import to_dataframe
+
+        if self._closed:
+            message = "result closed"
+            raise InvalidInputException(message)
+        if self._result is not None:
+            result = self._result
+            self._result = None
+            return to_dataframe(result.result, date_as_object=date_as_object)
+        with self._connection._execute(self._sql) as result:
+            return to_dataframe(result.result, date_as_object=date_as_object)
+
+    #: The old client's aliases for `fetchdf`.
+    df = fetchdf
+    to_df = fetchdf
+
     @property
     def description(self) -> list[tuple[Any, ...]]:
         """Column metadata, from the held result or from binding the text."""
@@ -236,6 +270,35 @@ class CompatConnection(Connection):
     def fetchall(self) -> list[tuple[Any, ...]]:
         """Every remaining row of the held result."""
         return self._require_held().fetch_all()
+
+    def fetchnumpy(self) -> dict[str, Any]:
+        """The held result as numpy arrays, consuming it."""
+        from ._numpy import fetch_numpy
+
+        result = self._require_held()
+        try:
+            return fetch_numpy(result.result)
+        finally:
+            self._release_held()
+
+    def fetchdf(self, date_as_object: bool = False) -> pandas.DataFrame | None:
+        """The held result as a pandas DataFrame, or None when nothing is held.
+
+        None rather than an error on the empty case, because the old
+        client's `df()` answered that way after the result was consumed.
+        """
+        if self._held is None:
+            return None
+        from ._numpy import to_dataframe
+
+        try:
+            return to_dataframe(self._held.result, date_as_object=date_as_object)
+        finally:
+            self._release_held()
+
+    #: The old client's aliases for `fetchdf`.
+    df = fetchdf
+    fetch_df = fetchdf
 
     @property
     def description(self) -> list[tuple[Any, ...]] | None:

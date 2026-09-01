@@ -6,6 +6,8 @@ __pycache__/
 .venv/
 .venv-*/
 /engine-bundle/
+# debris from adopted compat tests run outside the harness's scratch cwd
+/test.db
 
 # Coverage artefacts
 .coverage

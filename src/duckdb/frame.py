@@ -57,6 +57,8 @@ from .expr import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
 
+    import pandas
+
 __all__ = [
     "Bound",
     "Column",
@@ -1386,6 +1388,39 @@ class Frame(PlanBase):
         names = self.columns(connection)
         return [dict(zip(names, row, strict=True)) for row in self.rows(connection, parameters=parameters)]
 
+    def to_numpy(self, connection: Connection, *, parameters: Mapping[str, object] | None = None) -> dict[str, Any]:
+        """Every column as a numpy array; columns holding NULLs come back masked.
+
+        Converted chunk by chunk from the engine's own buffers, never through
+        row tuples. numpy is imported here, not when duckdb is.
+        """
+        from ._numpy import fetch_numpy
+
+        connection = self._on(connection)
+        sql, values = self._sql_and_values(connection=connection, parameters=parameters)
+        with connection._execute(sql, values) as result:
+            return fetch_numpy(result.result)
+
+    def to_pandas(
+        self,
+        connection: Connection,
+        *,
+        parameters: Mapping[str, object] | None = None,
+        date_as_object: bool = False,
+    ) -> pandas.DataFrame:
+        """The rows as a pandas DataFrame.
+
+        Columns holding NULLs get pandas nullable dtypes with `pd.NA`;
+        columns without get plain numpy dtypes. ENUM becomes Categorical,
+        TIMESTAMPTZ comes back UTC-aware, and DATE follows `date_as_object`.
+        """
+        from ._numpy import to_dataframe
+
+        connection = self._on(connection)
+        sql, values = self._sql_and_values(connection=connection, parameters=parameters)
+        with connection._execute(sql, values) as result:
+            return to_dataframe(result.result, date_as_object=date_as_object)
+
     def on(self, connection: Connection) -> Bound:
         """This plan on a connection, so the terminals take no argument.
 
@@ -1552,6 +1587,16 @@ class Bound:
     def to_dicts(self, *, parameters: Mapping[str, object] | None = None) -> list[dict[str, Any]]:
         """Every row, as a dict keyed by column name."""
         return self.plan.to_dicts(self.connection, parameters=parameters)
+
+    def to_numpy(self, *, parameters: Mapping[str, object] | None = None) -> dict[str, Any]:
+        """Every column as a numpy array; columns holding NULLs come back masked."""
+        return self.plan.to_numpy(self.connection, parameters=parameters)
+
+    def to_pandas(
+        self, *, parameters: Mapping[str, object] | None = None, date_as_object: bool = False
+    ) -> pandas.DataFrame:
+        """The rows as a pandas DataFrame."""
+        return self.plan.to_pandas(self.connection, parameters=parameters, date_as_object=date_as_object)
 
     def count(self, *, parameters: Mapping[str, object] | None = None) -> int:
         """How many rows the plan produces."""

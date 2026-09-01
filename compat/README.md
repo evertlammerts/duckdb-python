@@ -9,7 +9,9 @@ Rules:
 
 - Files under `suite/` are never edited to pass. A failure here is data:
   surface this client does not have, a deliberate divergence for the
-  behavior-change log, or a real bug.
+  behavior-change log (`BEHAVIOR.md`, beside this file), or a real bug. A
+  test asserting a recorded divergence is xfailed from `conftest.py` with a
+  reason naming its log entry.
 - The slice grows deliberately, file by file. Copy new files verbatim from
   the same source and record the source SHA here.
 - Nothing here implies the old surface will be reproduced as-is. What the

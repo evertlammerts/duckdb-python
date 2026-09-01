@@ -30,11 +30,13 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.11",
 ]
-# What the adopted old-client tests import at module level. Test-only: the
-# package itself depends on nothing.
+# What the adopted old-client tests import at module level, plus the stubs
+# that type the egress surface. Test-only: the package itself depends on
+# nothing.
 compat = [
     "numpy",
     "pandas",
+    "pandas-stubs",
 ]
 
 [tool.pytest.ini_options]
@@ -89,6 +91,10 @@ convention = "google"
 # back to its own handling when the other operand is not ours. That value's
 # type is not expressible, so the return annotations admit Any.
 "src/duckdb/expr.py" = ["ANN401"]
+# The converter passes the numpy module itself around and builds heterogeneous
+# column tuples; naming their types would mean importing numpy to annotate a
+# zero-dependency package.
+"src/duckdb/_numpy.py" = ["ANN401"]
 # Test names are the documentation; a docstring per assertion adds noise.
 # Explanations that matter live in comments at the point they apply.
 "tests/*" = ["D100", "D101", "D102", "D103"]

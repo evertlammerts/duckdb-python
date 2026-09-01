@@ -94,6 +94,156 @@ struct ResultState {
 	std::shared_ptr<cxx::QueryResult> result;
 };
 
+/// One fetched chunk, column-wise, for the numpy converter in duckdb/_numpy.py.
+///
+/// Fixed-width columns hand out zero-copy memoryviews over the flattened
+/// vector data; everything else falls back to per-cell objects. The views
+/// borrow the chunk's memory, so they are valid only while this object
+/// lives: the converter copies out of them within one loop iteration and
+/// never keeps one.
+class ChunkView {
+public:
+	// The types ride along because this facade keeps them on the result's
+	// schema, not on the vectors.
+	ChunkView(cxx::DataChunk chunk, std::vector<cxx::LogicalType> types)
+	    : chunk(std::move(chunk)), types(std::move(types)) {
+		const auto count = this->chunk.GetVectorCount();
+		vectors.reserve(count);
+		for (cxx::idx_t i = 0; i < count; i++) {
+			cxx::Vector vector = this->chunk.GetVector(i);
+			// Dictionary, constant and other encodings become flat data
+			// plus validity, the one layout the buffer views can serve.
+			vector.Flatten();
+			vectors.push_back(std::move(vector));
+		}
+	}
+
+	cxx::idx_t RowCount() const {
+		return chunk.GetRowCount();
+	}
+
+	cxx::idx_t ColumnCount() const {
+		return static_cast<cxx::idx_t>(vectors.size());
+	}
+
+	int TypeId(cxx::idx_t column) const {
+		return static_cast<int>(Type(column).GetTypeId());
+	}
+
+	std::string TypeText(cxx::idx_t column) const {
+		return Type(column).ToText();
+	}
+
+	/// Zero-copy view over the flattened data, or None without a fixed-width layout.
+	nb::object Data(cxx::idx_t column) {
+		const size_t element = ElementSize(column);
+		if (element == 0) {
+			return nb::none();
+		}
+		const auto view = vectors.at(column).GetView();
+		return Memoryview(view.data, element * chunk.GetRowCount());
+	}
+
+	/// Validity bitmask as 64-bit words, LSB first, or None when all rows are valid.
+	nb::object Validity(cxx::idx_t column) {
+		const auto view = vectors.at(column).GetView();
+		if (!view.validity) {
+			return nb::none();
+		}
+		const size_t words = (chunk.GetRowCount() + 63) / 64;
+		return Memoryview(view.validity, words * sizeof(uint64_t));
+	}
+
+	/// A DECIMAL column's scale, so the converter never parses type text.
+	int DecimalScale(cxx::idx_t column) const {
+		return static_cast<int>(Type(column).GetDecimalScale());
+	}
+
+	/// The ENUM dictionary, index to string, for categorical assembly.
+	std::vector<std::string> EnumValues(cxx::idx_t column) const {
+		const auto &type = Type(column);
+		std::vector<std::string> out;
+		const auto count = type.GetEnumSize();
+		out.reserve(count);
+		for (cxx::idx_t i = 0; i < count; i++) {
+			out.push_back(type.GetEnumValue(i));
+		}
+		return out;
+	}
+
+	/// Per-cell object fallback for the columns Data() cannot serve.
+	nb::list Values(cxx::idx_t column, ConversionContext &ctx) {
+		auto &vector = vectors.at(column);
+		nb::list out;
+		const auto count = chunk.GetRowCount();
+		for (cxx::idx_t row = 0; row < count; row++) {
+			out.append(ValueToPython(vector.GetValue(row), ctx));
+		}
+		return out;
+	}
+
+private:
+	const cxx::LogicalType &Type(cxx::idx_t column) const {
+		return types.at(column);
+	}
+
+	/// Bytes per element for the fixed-width layouts, 0 for everything else.
+	size_t ElementSize(cxx::idx_t column) const {
+		using Id = cxx::LogicalTypeId;
+		const auto &type = Type(column);
+		switch (type.GetTypeId()) {
+		case Id::BOOLEAN:
+		case Id::TINYINT:
+		case Id::UTINYINT:
+			return 1;
+		case Id::SMALLINT:
+		case Id::USMALLINT:
+			return 2;
+		case Id::INTEGER:
+		case Id::UINTEGER:
+		case Id::DATE:
+		case Id::FLOAT:
+			return 4;
+		case Id::BIGINT:
+		case Id::UBIGINT:
+		case Id::DOUBLE:
+		case Id::TIMESTAMP:
+		case Id::TIMESTAMP_SEC:
+		case Id::TIMESTAMP_MS:
+		case Id::TIMESTAMP_NS:
+		case Id::TIMESTAMP_TZ:
+			return 8;
+		case Id::INTERVAL:
+			return 16;
+		case Id::DECIMAL: {
+			// The storage tier follows the width; the int128 tier has no
+			// numpy dtype and goes per-cell.
+			const auto width = type.GetDecimalWidth();
+			return width <= 4 ? 2 : width <= 9 ? 4 : width <= 18 ? 8 : 0;
+		}
+		case Id::ENUM: {
+			const auto size = type.GetEnumSize();
+			return size < 256 ? 1 : size < 65536 ? 2 : 4;
+		}
+		default:
+			return 0;
+		}
+	}
+
+	static nb::object Memoryview(const void *data, size_t bytes) {
+		PyObject *view = PyMemoryView_FromMemory(const_cast<char *>(static_cast<const char *>(data)),
+		                                         static_cast<Py_ssize_t>(bytes), PyBUF_READ);
+		if (!view) {
+			throw nb::python_error();
+		}
+		return nb::steal(view);
+	}
+
+	cxx::DataChunk chunk;
+	std::vector<cxx::LogicalType> types;
+	std::vector<cxx::Vector> vectors;
+};
+
 class Result {
 public:
 	Result(std::shared_ptr<DatabaseState> owner, cxx::QueryResult result)
@@ -264,6 +414,28 @@ public:
 	/// Drain the result into a list of row tuples.
 	nb::list FetchAll(ConversionContext &ctx) {
 		return FetchRows(ctx, 0);
+	}
+
+	/// The next chunk column-wise for the numpy converter, or None at the end.
+	///
+	/// Consumes whole chunks, so it must not be mixed with the row fetches,
+	/// which can leave a partly-read chunk this would hand out again whole.
+	nb::object FetchChunkView() {
+		auto live = Live();
+		if (!pending && (finished || !Advance())) {
+			return nb::none();
+		}
+		auto chunk = std::move(*pending);
+		pending.reset();
+		offset = 0;
+		const auto schema = live->GetSchema();
+		std::vector<cxx::LogicalType> types;
+		const auto count = schema.GetFieldCount();
+		types.reserve(count);
+		for (cxx::idx_t i = 0; i < count; i++) {
+			types.push_back(schema.GetFieldType(i));
+		}
+		return nb::cast(ChunkView(std::move(chunk), std::move(types)));
 	}
 
 private:
@@ -493,7 +665,21 @@ NB_MODULE(_duckdb, m) {
 	    .def_prop_ro("result_type", &Result::ResultType)
 	    .def("fetch_rows",
 	         [state](Result &self, size_t count) { return self.FetchRows(state->conversion, count); },
-	         nb::arg("count"));
+	         nb::arg("count"))
+	    .def("fetch_chunk_view", &Result::FetchChunkView);
+
+	nb::class_<ChunkView>(m, "ChunkView")
+	    .def_prop_ro("row_count", &ChunkView::RowCount)
+	    .def_prop_ro("column_count", &ChunkView::ColumnCount)
+	    .def("type_id", &ChunkView::TypeId, nb::arg("column"))
+	    .def("type_text", &ChunkView::TypeText, nb::arg("column"))
+	    .def("data", &ChunkView::Data, nb::arg("column"))
+	    .def("validity", &ChunkView::Validity, nb::arg("column"))
+	    .def("decimal_scale", &ChunkView::DecimalScale, nb::arg("column"))
+	    .def("enum_values", &ChunkView::EnumValues, nb::arg("column"))
+	    .def("values",
+	         [state](ChunkView &self, cxx::idx_t column) { return self.Values(column, state->conversion); },
+	         nb::arg("column"));
 
 	m.def("library_version", []() { return cxx::LibraryVersion(); },
 	      "The version of the DuckDB engine this extension is linked against.");

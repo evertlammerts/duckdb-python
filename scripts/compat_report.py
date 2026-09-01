@@ -23,6 +23,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -68,7 +69,10 @@ class Recorder:
             if report.passed:
                 self.outcomes["passed"] += 1
             elif report.skipped:
-                self.outcomes["skipped"] += 1
+                if hasattr(report, "wasxfail"):
+                    self.outcomes["recorded divergence"] += 1
+                else:
+                    self.outcomes["skipped"] += 1
             else:
                 self._failure(report)
         elif report.when == "setup" and not report.passed:
@@ -112,6 +116,9 @@ def main() -> int:
     suite = Path(__file__).resolve().parent.parent / "compat" / "suite"
     outcomes: collections.Counter[str] = collections.Counter()
     signatures: collections.Counter[str] = collections.Counter()
+    # A scratch working directory: the adopted tests write files like test.db
+    # into their cwd, which must never be the repository.
+    scratch = tempfile.mkdtemp(prefix="compat-")
     for path in sorted(suite.rglob("test_*.py")):
         name = str(path.relative_to(suite))
         try:
@@ -121,6 +128,7 @@ def main() -> int:
                 text=True,
                 timeout=FILE_TIMEOUT,
                 env=environment,
+                cwd=scratch,
             )
         except subprocess.TimeoutExpired:
             outcomes["hung"] += 1
