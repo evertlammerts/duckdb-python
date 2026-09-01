@@ -82,12 +82,9 @@ could not be dropped (`.list().min()` can mean `list_min` only because
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar
+from typing import ClassVar
 
 from .expr import Expr, FamilyExpr
-
-if TYPE_CHECKING:
-    pass
 '''
 
 
@@ -271,11 +268,22 @@ def build(connection: object, table: dict[str, Any] | None = None) -> tuple[dict
             if declared is not None and declared not in CLASSES:
                 problems.append(f"{family}.{method}: `returns` must be one of {sorted(CLASSES)}, not {declared!r}")
                 continue
+            # The catalog spells an optional parameter as `size[` / `value]`;
+            # the brackets are notation, not part of the name.
+            names = [p.strip("[]") for i, p in enumerate(params) if i != subject]
+            renamed = spec.get("params")
+            if renamed is not None:
+                if len(renamed) != len(names):
+                    problems.append(
+                        f"{family}.{method}: `params` gives {len(renamed)} names where the overload has {len(names)}"
+                    )
+                    continue
+                names = [str(p) for p in renamed]
             methods[method] = {
                 "function": function,
                 "subject": subject,
                 "types": types,
-                "params": [p for i, p in enumerate(params) if i != subject],
+                "params": names,
                 "returns": CLASSES[declared] if declared else _return_class(return_type),
                 "lambda": int(spec.get("lambda", 0)),
                 "doc": spec.get("doc") or _one_line(description) or f"The `{function}` function.",

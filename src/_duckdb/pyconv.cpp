@@ -1,9 +1,9 @@
 //===----------------------------------------------------------------------===//
 //                         DuckDB
 //
-// pyconv.cpp
+// src/_duckdb/pyconv.cpp
 //
-// Conversion between DuckDB values and Python objects.
+//
 //===----------------------------------------------------------------------===//
 
 #include "pyconv.hpp"
@@ -33,8 +33,8 @@ namespace {
 // DuckDB reserves the extremes of the storage type for the infinite dates,
 // which have no Python counterpart. The previous client clamped them to
 // date/datetime min and max, and the adopted test suite expects that, so the
-// behaviour carries over as a documented divergence: an infinite date returned
-// this way no longer round-trips as infinite.
+// behaviour deliberately carries over: an infinite date returned this way no
+// longer round-trips as infinite.
 constexpr int32_t DATE_POSITIVE_INFINITY = 2147483647;
 constexpr int32_t DATE_NEGATIVE_INFINITY = -2147483647;
 constexpr int64_t TIMESTAMP_POSITIVE_INFINITY = 9223372036854775807LL;
@@ -113,6 +113,8 @@ ConversionContext::ConversionContext() {
 	one_microsecond = timedelta_cls(0, 0, 1);
 }
 
+namespace {
+
 // Whether values of this type convert to something Python can hash. A LIST
 // or ARRAY becomes a list, a STRUCT or MAP a dict, and a UNION whatever its
 // active member is.
@@ -136,6 +138,8 @@ bool KeysHashable(const LogicalType &type) {
 		return true;
 	}
 }
+
+} // namespace
 
 nb::object ValueToPython(const Value &value, ConversionContext &ctx) {
 	if (value.IsNull()) {
@@ -185,7 +189,7 @@ nb::object ValueToPython(const Value &value, ConversionContext &ctx) {
 		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_ms_t>().millis * 1'000, false, value);
 	case LogicalTypeId::TIMESTAMP_NS:
 		// Python datetime resolves to microseconds, so sub-microsecond digits
-		// are dropped. Documented divergence, not a rounding bug.
+		// are dropped. A deliberate divergence, not a rounding bug.
 		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_ns_t>().nanos / 1'000, false, value);
 	case LogicalTypeId::TIMESTAMP_TZ_NS:
 		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_tz_ns_t>().nanos / 1'000, true, value);
@@ -200,8 +204,8 @@ nb::object ValueToPython(const Value &value, ConversionContext &ctx) {
 	case LogicalTypeId::INTERVAL: {
 		const auto interval = value.Get<duckdb::cxx::interval_t>();
 		// A month is not a fixed duration, so this mapping is lossy for any
-		// interval carrying months. Recorded as a documented divergence; the
-		// previous client folded months at 30 days and we match it.
+		// interval carrying months. A deliberate divergence: the previous
+		// client folded months at 30 days and this matches it.
 		return ctx.timedelta_cls(static_cast<int64_t>(interval.months) * 30 + interval.days, 0,
 		                         interval.micros);
 	}

@@ -314,7 +314,7 @@ class TestSample:
 class TestReshaping:
     def test_unnest_expands_a_list(self, con: duckdb.Connection) -> None:
         rows = duckdb.sql("SELECT 1 AS k, [10, 20] AS xs").unnest("xs")
-        assert rows.rows(con) == [(1, 10), (2 - 1, 20)]
+        assert rows.rows(con) == [(1, 10), (1, 20)]
 
     def test_unnest_keeps_the_column_where_it_was(self, con: duckdb.Connection) -> None:
         rows = duckdb.sql("SELECT [1, 2] AS xs, 'tail' AS t").unnest("xs")
@@ -2749,9 +2749,22 @@ class TestReviewRoundEight:
         table["json"]["methods"]["extract"] = {"sql": "json_extract"}
         table["list"]["methods"]["sort"] = {"sql": "list_sort", "returns": "list"}
         table["dt"]["methods"]["timezone"] = {"sql": "timezone", "types": ["NOPE"]}
+        table["dt"]["methods"]["part"] = {"sql": "date_part", "subject": 1, "params": ["a", "b"]}
         _, report = build(con, table)
         problems = "\n".join(report["problems"])
         assert "shadows Expr's own `where`" in problems
         assert "disagree on the return class" in problems
         assert "catalog already says" in problems
         assert "pinned overload" in problems
+        assert "`params` gives 2 names where the overload has 1" in problems
+
+    def test_catalog_parameter_names_are_cleaned_and_renameable(self) -> None:
+        import inspect
+
+        from duckdb._func_namespaces import DtExpr, ListExpr
+
+        # The catalog spells list_resize's optional parameter `size[`; the
+        # brackets are notation, not part of the name.
+        assert "Arguments: size." in (ListExpr.resize.__doc__ or "")
+        # And it calls date_part's specifier `ts`; the table renames it.
+        assert list(inspect.signature(DtExpr.part).parameters)[1] == "part"

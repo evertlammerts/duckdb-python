@@ -72,8 +72,8 @@ def test_uuid_becomes_a_uuid(con: _duckdb.Connection) -> None:
 
 
 def test_nanosecond_timestamps_truncate_to_microseconds(con: _duckdb.Connection) -> None:
-    # Python's datetime resolves to microseconds. Documented divergence, so pin
-    # it rather than let a future change round instead of truncate.
+    # Python's datetime resolves to microseconds. A deliberate divergence, so
+    # pin it rather than let a future change round instead of truncate.
     assert scalar(con, "SELECT TIMESTAMP_NS '2026-08-27 13:45:06.123456789'") == datetime.datetime(
         2026, 8, 27, 13, 45, 6, 123456
     )
@@ -88,7 +88,7 @@ class TestInfinity:
     """DuckDB's infinite dates have no Python counterpart.
 
     They are clamped to date/datetime min and max, matching the previous client
-    and the adopted suite. A documented divergence: a clamped value no longer
+    and the adopted suite. A deliberate divergence: a clamped value no longer
     round-trips as infinite.
     """
 

@@ -71,8 +71,8 @@ def main() -> int:
 
     if functions < 100.0:
         # A bound method with no test at all is a different problem from a few
-        # uncovered branches, and DESIGN asks for every seam entry point to
-        # have a direct test.
+        # uncovered branches, so every seam entry point must have a direct
+        # test.
         print("FAIL: some seam functions are never executed", file=sys.stderr)
         return 1
     if lines < args.min_lines:

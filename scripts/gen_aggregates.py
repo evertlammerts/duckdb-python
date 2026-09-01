@@ -17,8 +17,6 @@ import tomllib
 from pathlib import Path
 
 
-#: Method name to SQL function. The Python name follows pandas and Polars where
-#: they agree with each other; the SQL name is DuckDB's.
 def load_aggregates() -> dict[str, tuple[str, str]]:
     """The aggregate table, from the shared function table beside this script."""
     table = tomllib.loads((Path(__file__).with_name("func_namespaces.toml")).read_text())
@@ -58,7 +56,7 @@ def render() -> str:
     for method, (function, _) in AGGREGATES.items():
         out.append(f'        "{method}": "{function}",\n')
     out.append("    }\n\n")
-    out.append("    def _call(self, function: str, *args: object) -> Expr:  # pragma: no cover - Expr defines it\n")
+    out.append("    def _call(self, function: str, *args: object) -> Expr:  # pragma: no cover (Expr defines it)\n")
     out.append("        raise NotImplementedError\n")
     for method, (function, doc) in AGGREGATES.items():
         out.append(f"\n    def {method}(self, *args: object) -> Expr:\n")
@@ -85,7 +83,7 @@ def main() -> int:
 
     missing = verify(duckdb.connect())
     if missing:
-        print(f"not aggregate functions in this engine's catalog: {', '.join(missing)}", file=sys.stderr)
+        print(f"no aggregate in this engine's catalog for: {', '.join(missing)}", file=sys.stderr)
         return 1
     target = Path(__file__).resolve().parent.parent / "src" / "duckdb" / "_aggregates.py"
     text = render()

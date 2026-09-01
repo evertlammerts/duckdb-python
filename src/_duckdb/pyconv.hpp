@@ -1,9 +1,9 @@
 //===----------------------------------------------------------------------===//
 //                         DuckDB
 //
-// pyconv.hpp
+// src/_duckdb/pyconv.hpp
 //
-// Conversion between DuckDB values and Python objects.
+//
 //===----------------------------------------------------------------------===//
 
 #pragma once

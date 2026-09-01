@@ -6,7 +6,7 @@ concrete leaf per engine error code that carries a distinct meaning.
 The leaves are derived from the engine's error-code space, not from the
 previous client's class list. Some of its classes drew distinctions the V2 code
 space does not make, and inventing leaves the engine cannot produce would mean
-raising them from guesswork. Those go in the behaviour-change log instead.
+raising them from guesswork, so those classes are deliberately gone.
 """
 
 from __future__ import annotations

@@ -48,7 +48,7 @@ class AggregateMethods:
         "arg_max": "arg_max",
     }
 
-    def _call(self, function: str, *args: object) -> Expr:  # pragma: no cover - Expr defines it
+    def _call(self, function: str, *args: object) -> Expr:  # pragma: no cover (Expr defines it)
         raise NotImplementedError
 
     def sum(self, *args: object) -> Expr:

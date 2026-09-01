@@ -9,7 +9,8 @@
 #
 # Each entry:
 #   method = { sql = "engine_function" [, subject = N] [, types = [...]]
-#              [, returns = "family"] [, lambda = N] [, doc = "..."] }.
+#              [, returns = "family"] [, params = [...]] [, lambda = N]
+#              [, doc = "..."] }.
 # subject is where the expression goes among the arguments (default first).
 # types pins one catalog overload where the fitting ones disagree on the
 # return class; the generator refuses the ambiguity until a pin decides it.
@@ -17,6 +18,8 @@
 # type for a macro, so the family of the result is declared here, validated
 # by hand against the macro's definition, and only where the macro returns
 # its family's kind of value whatever it is given.
+# params renames the method's parameters, for the entries whose catalog
+# names are wrong (date_part calls its specifier `ts`).
 # lambda marks a Python-callable argument and its arity.
 # `covers` names the rule (in gen_func_namespaces.py) for the catalog
 # functions this family must account for; anything covered but unlisted
@@ -57,7 +60,7 @@ contains = { sql = "contains" }
 damerau_levenshtein = { sql = "damerau_levenshtein" }
 format = { sql = "format" }
 from_base64 = { sql = "from_base64" }
-hamming = { sql = "hamming" }
+hamming = { sql = "hamming", doc = "The number of positions with different characters, for two strings of equal length" }
 ilike_escape = { sql = "ilike_escape" }
 instr = { sql = "instr" }
 jaccard = { sql = "jaccard" }
@@ -143,7 +146,7 @@ century = { sql = "century" }
 day = { sql = "day" }
 dayname = { sql = "dayname" }
 # A macro: day(last_day(date)), so it returns a number whatever it is given.
-days_in_month = { sql = "days_in_month" }
+days_in_month = { sql = "days_in_month", doc = "How many days the date's month has" }
 dayofmonth = { sql = "dayofmonth" }
 dayofweek = { sql = "dayofweek" }
 dayofyear = { sql = "dayofyear" }
@@ -166,7 +169,7 @@ month = { sql = "month" }
 monthname = { sql = "monthname" }
 nanosecond = { sql = "nanosecond" }
 normalized_interval = { sql = "normalized_interval" }
-part = { sql = "date_part", subject = 1 }
+part = { sql = "date_part", subject = 1, params = ["part"] }
 quarter = { sql = "quarter" }
 second = { sql = "second" }
 strftime = { sql = "strftime", doc = "Format as text, with a strftime pattern" }
@@ -202,65 +205,65 @@ ignore = [
 ]
 [list.methods]
 aggregate = { sql = "list_aggregate" }
-any_value = { sql = "list_any_value" }
+any_value = { sql = "list_any_value", doc = "Any one element, whichever is cheapest" }
 # A macro: list_concat(l, list_value(e)), a list whatever it is given.
 append = { sql = "list_append", returns = "list" }
-approx_count_distinct = { sql = "list_approx_count_distinct" }
-avg = { sql = "list_avg" }
-bit_and = { sql = "list_bit_and" }
-bit_or = { sql = "list_bit_or" }
-bit_xor = { sql = "list_bit_xor" }
-bool_and = { sql = "list_bool_and" }
-bool_or = { sql = "list_bool_or" }
+approx_count_distinct = { sql = "list_approx_count_distinct", doc = "An approximate count of the distinct elements" }
+avg = { sql = "list_avg", doc = "The average of the elements" }
+bit_and = { sql = "list_bit_and", doc = "The bitwise AND of the elements" }
+bit_or = { sql = "list_bit_or", doc = "The bitwise OR of the elements" }
+bit_xor = { sql = "list_bit_xor", doc = "The bitwise XOR of the elements" }
+bool_and = { sql = "list_bool_and", doc = "Whether every element is true" }
+bool_or = { sql = "list_bool_or", doc = "Whether any element is true" }
 contains = { sql = "list_contains" }
 cosine_distance = { sql = "list_cosine_distance" }
 cosine_similarity = { sql = "list_cosine_similarity" }
-count = { sql = "list_count" }
+count = { sql = "list_count", doc = "How many elements are not NULL" }
 distance = { sql = "list_distance" }
 distinct = { sql = "list_distinct" }
-entropy = { sql = "list_entropy" }
+entropy = { sql = "list_entropy", doc = "The entropy of the elements" }
 extract = { sql = "list_extract" }
 filter = { sql = "list_filter", lambda = 1, doc = "The elements the function holds for: `lambda x: x > 0`" }
-first = { sql = "list_first" }
+first = { sql = "list_first", doc = "The first element" }
 flatten = { sql = "flatten" }
 grade_up = { sql = "list_grade_up" }
 has_all = { sql = "list_has_all" }
 has_any = { sql = "list_has_any" }
-histogram = { sql = "list_histogram" }
+histogram = { sql = "list_histogram", doc = "How often each element occurs, as a map" }
 inner_product = { sql = "list_inner_product" }
 intersect = { sql = "list_intersect" }
-kurtosis = { sql = "list_kurtosis" }
-kurtosis_pop = { sql = "list_kurtosis_pop" }
-last = { sql = "list_last" }
-mad = { sql = "list_mad" }
-max = { sql = "list_max" }
-median = { sql = "list_median" }
-min = { sql = "list_min" }
+kurtosis = { sql = "list_kurtosis", doc = "The kurtosis of the elements" }
+kurtosis_pop = { sql = "list_kurtosis_pop", doc = "The population kurtosis of the elements" }
+last = { sql = "list_last", doc = "The last element" }
+mad = { sql = "list_mad", doc = "The median absolute deviation of the elements" }
+max = { sql = "list_max", doc = "The largest element" }
+median = { sql = "list_median", doc = "The middle element" }
+min = { sql = "list_min", doc = "The smallest element" }
 mask = { sql = "list_where", doc = "The elements where the matching boolean is true" }
-mode = { sql = "list_mode" }
+mode = { sql = "list_mode", doc = "The most frequent element" }
 negative_inner_product = { sql = "list_negative_inner_product" }
 position = { sql = "list_position" }
 # A macro: list_concat(list_value(e), l), a list whatever it is given.
 prepend = { sql = "list_prepend", subject = 1, returns = "list" }
-product = { sql = "list_product" }
+product = { sql = "list_product", doc = "The product of the elements" }
 reduce = { sql = "list_reduce", lambda = 2, doc = "The list folded to one value, left to right: `lambda acc, x: acc + x`" }
 resize = { sql = "list_resize" }
 # A macro: l[:-:-1], a slice, so a list whatever it is given.
-reverse = { sql = "list_reverse", returns = "list" }
+reverse = { sql = "list_reverse", returns = "list", doc = "The elements in reverse order" }
 reverse_sort = { sql = "list_reverse_sort" }
 select = { sql = "list_select" }
-sem = { sql = "list_sem" }
-skewness = { sql = "list_skewness" }
+sem = { sql = "list_sem", doc = "The standard error of the mean of the elements" }
+skewness = { sql = "list_skewness", doc = "The skewness of the elements" }
 sort = { sql = "list_sort" }
-stddev_pop = { sql = "list_stddev_pop" }
-stddev_samp = { sql = "list_stddev_samp" }
+stddev_pop = { sql = "list_stddev_pop", doc = "The population standard deviation of the elements" }
+stddev_samp = { sql = "list_stddev_samp", doc = "The sample standard deviation of the elements" }
 # A macro: list_aggr(l, 'string_agg'), and string_agg always returns text.
-string_agg = { sql = "list_string_agg", returns = "str" }
-sum = { sql = "list_sum" }
+string_agg = { sql = "list_string_agg", returns = "str", doc = "The elements joined as text, separated by commas" }
+sum = { sql = "list_sum", doc = "The sum of the elements" }
 transform = { sql = "list_transform", lambda = 1, doc = "Each element through the function: `lambda x: x * 2`" }
 unique = { sql = "list_unique" }
-var_pop = { sql = "list_var_pop" }
-var_samp = { sql = "list_var_samp" }
+var_pop = { sql = "list_var_pop", doc = "The population variance of the elements" }
+var_samp = { sql = "list_var_samp", doc = "The sample variance of the elements" }
 
 [json]
 blurb = "JSON functions, applied to this expression as the document."
@@ -283,7 +286,7 @@ ignore = [
 # The pins below choose the single-path (or no-path) overload; each of these
 # functions also takes a list of paths and then returns a list, which would
 # leave the return class ambiguous.
-array_length = { sql = "json_array_length", types = ["JSON"] }
+array_length = { sql = "json_array_length", types = ["JSON"], doc = "How many elements the array holds" }
 contains = { sql = "json_contains" }
 deep_merge = { sql = "json_deep_merge" }
 exists = { sql = "json_exists", types = ["JSON", "VARCHAR"] }
@@ -292,22 +295,24 @@ extract_path = { sql = "json_extract_path", types = ["JSON", "VARCHAR"] }
 extract_path_text = { sql = "json_extract_path_text", types = ["JSON", "VARCHAR"] }
 extract_string = { sql = "json_extract_string", types = ["JSON", "VARCHAR"] }
 insert = { sql = "json_insert" }
-keys = { sql = "json_keys" }
+keys = { sql = "json_keys", doc = "The keys of the object, as a list" }
 merge_patch_diff = { sql = "json_merge_patch_diff" }
-normalize = { sql = "json_normalize" }
+normalize = { sql = "json_normalize", doc = "The document minified, with object keys sorted" }
 # A macro: json_extract(x, '$'), and a scalar-path json_extract returns JSON.
-parse = { sql = "json", returns = "json" }
-pretty = { sql = "json_pretty" }
+parse = { sql = "json", returns = "json", doc = "The text parsed as a JSON document, minified" }
+pretty = { sql = "json_pretty", doc = "The document printed with indentation" }
 remove = { sql = "json_remove" }
 replace = { sql = "json_replace" }
 set = { sql = "json_set" }
-strip_nulls = { sql = "json_strip_nulls" }
-structure = { sql = "json_structure" }
+strip_nulls = { sql = "json_strip_nulls", doc = "The document without its null-valued object fields" }
+structure = { sql = "json_structure", doc = "The shape of the document, with types in place of values" }
 transform = { sql = "json_transform" }
 transform_strict = { sql = "json_transform_strict" }
-type = { sql = "json_type", types = ["JSON"] }
-valid = { sql = "json_valid" }
+type = { sql = "json_type", types = ["JSON"], doc = "The type of the top value: OBJECT, ARRAY, VARCHAR and so on" }
+valid = { sql = "json_valid", doc = "Whether the text is valid JSON" }
 value = { sql = "json_value", types = ["JSON", "VARCHAR"] }
+# Python method names follow pandas and Polars where those two agree with
+# each other; the SQL name is DuckDB's.
 [aggregates]
 blurb = "The aggregate functions reachable as methods on every expression."
 [aggregates.methods]

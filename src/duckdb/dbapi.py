@@ -137,7 +137,8 @@ Timestamp = datetime.datetime
 
 def DateFromTicks(ticks: float) -> datetime.date:
     """The date of a Unix timestamp."""
-    # date.fromtimestamp takes no keyword arguments; only datetime does.
+    # date.fromtimestamp has no tz parameter and reads local time, so the
+    # date is taken from an aware datetime instead.
     return datetime.datetime.fromtimestamp(ticks, tz=datetime.UTC).date()
 
 

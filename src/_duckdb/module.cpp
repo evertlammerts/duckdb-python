@@ -1,9 +1,9 @@
 //===----------------------------------------------------------------------===//
 //                         DuckDB
 //
-// module.cpp
+// src/_duckdb/module.cpp
 //
-// Entry point of the duckdb Python extension module (_duckdb).
+//
 //===----------------------------------------------------------------------===//
 
 #include <nanobind/nanobind.h>

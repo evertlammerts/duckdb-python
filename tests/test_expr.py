@@ -260,8 +260,8 @@ class TestAggregatesAndWindows:
         assert [r[0] for r in rows] == [1, 2, 3]
 
     def test_unknown_attribute_still_raises(self) -> None:
-        # __getattr__ serves the aggregate shortcuts, so it must not swallow
-        # ordinary typos into a callable that fails later.
+        # A typo must stay an AttributeError, never resolve into a callable
+        # that fails later.
         with pytest.raises(AttributeError, match="no_such_aggregate"):
             _ = col("x").no_such_aggregate  # type: ignore[attr-defined]
 
@@ -425,10 +425,10 @@ class TestEveryAdvertisedFunctionExecutes:
     """Execute every shortcut the DSL offers, against the real engine.
 
     Rendering tests cannot catch a wrong function name: `count_distinct("c")`
-    is a perfectly well-formed string that DuckDB has never heard of. Line
-    coverage cannot catch it either, because one dict literal and a three-line
-    `__getattr__` serve all thirty names, so exercising one covers the same
-    lines as exercising all of them.
+    is a perfectly well-formed string that DuckDB has never heard of. The
+    methods are generated from one table, and the generator checks each name
+    against the catalog; executing every call is what proves the shape each
+    method renders is one the engine accepts.
 
     That gap shipped a broken `n_unique`. This closes it by construction.
     """

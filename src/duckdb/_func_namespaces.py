@@ -14,12 +14,9 @@ could not be dropped (`.list().min()` can mean `list_min` only because
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar
+from typing import ClassVar
 
 from .expr import Expr, FamilyExpr
-
-if TYPE_CHECKING:
-    pass
 
 
 class StrExpr(FamilyExpr):
@@ -131,7 +128,10 @@ class StrExpr(FamilyExpr):
         return self._call("from_base64", *args)
 
     def hamming(self, *args: object) -> Expr:
-        """The Hamming distance between to strings, i.e., the number of position... Arguments: s2. SQL: `hamming`."""
+        """The number of positions with different characters, for two strings of equal length.
+
+        Arguments: s2. SQL: `hamming`.
+        """
         return self._call("hamming", *args)
 
     def ilike_escape(self, *args: object) -> Expr:
@@ -493,7 +493,7 @@ class DtExpr(FamilyExpr):
         return self._call("dayofyear", *args)
 
     def days_in_month(self, *args: object) -> Expr:
-        """The `days_in_month` function. SQL: `days_in_month`."""
+        """How many days the date's month has. SQL: `days_in_month`."""
         return self._call("days_in_month", *args)
 
     def decade(self, *args: object) -> Expr:
@@ -572,9 +572,9 @@ class DtExpr(FamilyExpr):
         """Normalizes an INTERVAL to an equivalent interval. SQL: `normalized_interval`."""
         return DtExpr(self._call("normalized_interval", *args))
 
-    def part(self, ts: object, *args: object) -> Expr:
-        """Get subfield (equivalent to extract). Arguments: ts. SQL: `date_part`."""
-        return self._call_at("date_part", 1, ts, *args)
+    def part(self, part: object, *args: object) -> Expr:
+        """Get subfield (equivalent to extract). Arguments: part. SQL: `date_part`."""
+        return self._call_at("date_part", 1, part, *args)
 
     def quarter(self, *args: object) -> Expr:
         """Extract the quarter component from a date or timestamp. SQL: `quarter`."""
@@ -711,7 +711,7 @@ class ListExpr(FamilyExpr):
         return self._call("list_aggregate", *args)
 
     def any_value(self, *args: object) -> Expr:
-        """The `list_any_value` function. SQL: `list_any_value`."""
+        """Any one element, whichever is cheapest. SQL: `list_any_value`."""
         return self._call("list_any_value", *args)
 
     def append(self, *args: object) -> ListExpr:
@@ -719,31 +719,31 @@ class ListExpr(FamilyExpr):
         return ListExpr(self._call("list_append", *args))
 
     def approx_count_distinct(self, *args: object) -> Expr:
-        """The `list_approx_count_distinct` function. SQL: `list_approx_count_distinct`."""
+        """An approximate count of the distinct elements. SQL: `list_approx_count_distinct`."""
         return self._call("list_approx_count_distinct", *args)
 
     def avg(self, *args: object) -> Expr:
-        """The `list_avg` function. SQL: `list_avg`."""
+        """The average of the elements. SQL: `list_avg`."""
         return self._call("list_avg", *args)
 
     def bit_and(self, *args: object) -> Expr:
-        """The `list_bit_and` function. SQL: `list_bit_and`."""
+        """The bitwise AND of the elements. SQL: `list_bit_and`."""
         return self._call("list_bit_and", *args)
 
     def bit_or(self, *args: object) -> Expr:
-        """The `list_bit_or` function. SQL: `list_bit_or`."""
+        """The bitwise OR of the elements. SQL: `list_bit_or`."""
         return self._call("list_bit_or", *args)
 
     def bit_xor(self, *args: object) -> Expr:
-        """The `list_bit_xor` function. SQL: `list_bit_xor`."""
+        """The bitwise XOR of the elements. SQL: `list_bit_xor`."""
         return self._call("list_bit_xor", *args)
 
     def bool_and(self, *args: object) -> Expr:
-        """The `list_bool_and` function. SQL: `list_bool_and`."""
+        """Whether every element is true. SQL: `list_bool_and`."""
         return self._call("list_bool_and", *args)
 
     def bool_or(self, *args: object) -> Expr:
-        """The `list_bool_or` function. SQL: `list_bool_or`."""
+        """Whether any element is true. SQL: `list_bool_or`."""
         return self._call("list_bool_or", *args)
 
     def contains(self, *args: object) -> Expr:
@@ -765,7 +765,7 @@ class ListExpr(FamilyExpr):
         return self._call("list_cosine_similarity", *args)
 
     def count(self, *args: object) -> Expr:
-        """The `list_count` function. SQL: `list_count`."""
+        """How many elements are not NULL. SQL: `list_count`."""
         return self._call("list_count", *args)
 
     def distance(self, *args: object) -> Expr:
@@ -780,7 +780,7 @@ class ListExpr(FamilyExpr):
         return ListExpr(self._call("list_distinct", *args))
 
     def entropy(self, *args: object) -> Expr:
-        """The `list_entropy` function. SQL: `list_entropy`."""
+        """The entropy of the elements. SQL: `list_entropy`."""
         return self._call("list_entropy", *args)
 
     def extract(self, *args: object) -> Expr:
@@ -796,7 +796,7 @@ class ListExpr(FamilyExpr):
         return ListExpr(self._call("list_filter", function, *args))
 
     def first(self, *args: object) -> Expr:
-        """The `list_first` function. SQL: `list_first`."""
+        """The first element. SQL: `list_first`."""
         return self._call("list_first", *args)
 
     def flatten(self, *args: object) -> ListExpr:
@@ -816,7 +816,7 @@ class ListExpr(FamilyExpr):
         return self._call("list_has_any", *args)
 
     def histogram(self, *args: object) -> Expr:
-        """The `list_histogram` function. SQL: `list_histogram`."""
+        """How often each element occurs, as a map. SQL: `list_histogram`."""
         return self._call("list_histogram", *args)
 
     def inner_product(self, *args: object) -> Expr:
@@ -831,19 +831,19 @@ class ListExpr(FamilyExpr):
         return ListExpr(self._call("list_intersect", *args))
 
     def kurtosis(self, *args: object) -> Expr:
-        """The `list_kurtosis` function. SQL: `list_kurtosis`."""
+        """The kurtosis of the elements. SQL: `list_kurtosis`."""
         return self._call("list_kurtosis", *args)
 
     def kurtosis_pop(self, *args: object) -> Expr:
-        """The `list_kurtosis_pop` function. SQL: `list_kurtosis_pop`."""
+        """The population kurtosis of the elements. SQL: `list_kurtosis_pop`."""
         return self._call("list_kurtosis_pop", *args)
 
     def last(self, *args: object) -> Expr:
-        """The `list_last` function. SQL: `list_last`."""
+        """The last element. SQL: `list_last`."""
         return self._call("list_last", *args)
 
     def mad(self, *args: object) -> Expr:
-        """The `list_mad` function. SQL: `list_mad`."""
+        """The median absolute deviation of the elements. SQL: `list_mad`."""
         return self._call("list_mad", *args)
 
     def mask(self, *args: object) -> ListExpr:
@@ -851,19 +851,19 @@ class ListExpr(FamilyExpr):
         return ListExpr(self._call("list_where", *args))
 
     def max(self, *args: object) -> Expr:
-        """The `list_max` function. SQL: `list_max`."""
+        """The largest element. SQL: `list_max`."""
         return self._call("list_max", *args)
 
     def median(self, *args: object) -> Expr:
-        """The `list_median` function. SQL: `list_median`."""
+        """The middle element. SQL: `list_median`."""
         return self._call("list_median", *args)
 
     def min(self, *args: object) -> Expr:
-        """The `list_min` function. SQL: `list_min`."""
+        """The smallest element. SQL: `list_min`."""
         return self._call("list_min", *args)
 
     def mode(self, *args: object) -> Expr:
-        """The `list_mode` function. SQL: `list_mode`."""
+        """The most frequent element. SQL: `list_mode`."""
         return self._call("list_mode", *args)
 
     def negative_inner_product(self, *args: object) -> Expr:
@@ -885,7 +885,7 @@ class ListExpr(FamilyExpr):
         return ListExpr(self._call_at("list_prepend", 1, e, *args))
 
     def product(self, *args: object) -> Expr:
-        """The `list_product` function. SQL: `list_product`."""
+        """The product of the elements. SQL: `list_product`."""
         return self._call("list_product", *args)
 
     def reduce(self, function: object, *args: object) -> Expr:
@@ -897,11 +897,11 @@ class ListExpr(FamilyExpr):
         return self._call("list_reduce", function, *args)
 
     def resize(self, *args: object) -> ListExpr:
-        """Resizes the `list` to contain `size` elements. Arguments: size[. SQL: `list_resize`."""
+        """Resizes the `list` to contain `size` elements. Arguments: size. SQL: `list_resize`."""
         return ListExpr(self._call("list_resize", *args))
 
     def reverse(self, *args: object) -> ListExpr:
-        """The `list_reverse` function. SQL: `list_reverse`."""
+        """The elements in reverse order. SQL: `list_reverse`."""
         return ListExpr(self._call("list_reverse", *args))
 
     def reverse_sort(self, *args: object) -> ListExpr:
@@ -916,11 +916,11 @@ class ListExpr(FamilyExpr):
         return ListExpr(self._call("list_select", *args))
 
     def sem(self, *args: object) -> Expr:
-        """The `list_sem` function. SQL: `list_sem`."""
+        """The standard error of the mean of the elements. SQL: `list_sem`."""
         return self._call("list_sem", *args)
 
     def skewness(self, *args: object) -> Expr:
-        """The `list_skewness` function. SQL: `list_skewness`."""
+        """The skewness of the elements. SQL: `list_skewness`."""
         return self._call("list_skewness", *args)
 
     def sort(self, *args: object) -> ListExpr:
@@ -928,19 +928,19 @@ class ListExpr(FamilyExpr):
         return ListExpr(self._call("list_sort", *args))
 
     def stddev_pop(self, *args: object) -> Expr:
-        """The `list_stddev_pop` function. SQL: `list_stddev_pop`."""
+        """The population standard deviation of the elements. SQL: `list_stddev_pop`."""
         return self._call("list_stddev_pop", *args)
 
     def stddev_samp(self, *args: object) -> Expr:
-        """The `list_stddev_samp` function. SQL: `list_stddev_samp`."""
+        """The sample standard deviation of the elements. SQL: `list_stddev_samp`."""
         return self._call("list_stddev_samp", *args)
 
     def string_agg(self, *args: object) -> StrExpr:
-        """The `list_string_agg` function. SQL: `list_string_agg`."""
+        """The elements joined as text, separated by commas. SQL: `list_string_agg`."""
         return StrExpr(self._call("list_string_agg", *args))
 
     def sum(self, *args: object) -> Expr:
-        """The `list_sum` function. SQL: `list_sum`."""
+        """The sum of the elements. SQL: `list_sum`."""
         return self._call("list_sum", *args)
 
     def transform(self, function: object, *args: object) -> ListExpr:
@@ -956,11 +956,11 @@ class ListExpr(FamilyExpr):
         return self._call("list_unique", *args)
 
     def var_pop(self, *args: object) -> Expr:
-        """The `list_var_pop` function. SQL: `list_var_pop`."""
+        """The population variance of the elements. SQL: `list_var_pop`."""
         return self._call("list_var_pop", *args)
 
     def var_samp(self, *args: object) -> Expr:
-        """The `list_var_samp` function. SQL: `list_var_samp`."""
+        """The sample variance of the elements. SQL: `list_var_samp`."""
         return self._call("list_var_samp", *args)
 
 
@@ -996,7 +996,7 @@ class JsonExpr(StrExpr):
     }
 
     def array_length(self, *args: object) -> Expr:
-        """The `json_array_length` function. SQL: `json_array_length`."""
+        """How many elements the array holds. SQL: `json_array_length`."""
         return self._call("json_array_length", *args)
 
     def contains(self, *args: object) -> Expr:
@@ -1032,7 +1032,7 @@ class JsonExpr(StrExpr):
         return JsonExpr(self._call("json_insert", *args))
 
     def keys(self, *args: object) -> ListExpr:
-        """The `json_keys` function. SQL: `json_keys`."""
+        """The keys of the object, as a list. SQL: `json_keys`."""
         return ListExpr(self._call("json_keys", *args))
 
     def merge_patch_diff(self, *args: object) -> JsonExpr:
@@ -1040,15 +1040,15 @@ class JsonExpr(StrExpr):
         return JsonExpr(self._call("json_merge_patch_diff", *args))
 
     def normalize(self, *args: object) -> StrExpr:
-        """The `json_normalize` function. SQL: `json_normalize`."""
+        """The document minified, with object keys sorted. SQL: `json_normalize`."""
         return StrExpr(self._call("json_normalize", *args))
 
     def parse(self, *args: object) -> JsonExpr:
-        """The `json` function. SQL: `json`."""
+        """The text parsed as a JSON document, minified. SQL: `json`."""
         return JsonExpr(self._call("json", *args))
 
     def pretty(self, *args: object) -> StrExpr:
-        """The `json_pretty` function. SQL: `json_pretty`."""
+        """The document printed with indentation. SQL: `json_pretty`."""
         return StrExpr(self._call("json_pretty", *args))
 
     def remove(self, *args: object) -> JsonExpr:
@@ -1064,11 +1064,11 @@ class JsonExpr(StrExpr):
         return JsonExpr(self._call("json_set", *args))
 
     def strip_nulls(self, *args: object) -> JsonExpr:
-        """The `json_strip_nulls` function. SQL: `json_strip_nulls`."""
+        """The document without its null-valued object fields. SQL: `json_strip_nulls`."""
         return JsonExpr(self._call("json_strip_nulls", *args))
 
     def structure(self, *args: object) -> JsonExpr:
-        """The `json_structure` function. SQL: `json_structure`."""
+        """The shape of the document, with types in place of values. SQL: `json_structure`."""
         return JsonExpr(self._call("json_structure", *args))
 
     def transform(self, *args: object) -> Expr:
@@ -1080,11 +1080,11 @@ class JsonExpr(StrExpr):
         return self._call("json_transform_strict", *args)
 
     def type(self, *args: object) -> StrExpr:
-        """The `json_type` function. SQL: `json_type`."""
+        """The type of the top value: OBJECT, ARRAY, VARCHAR and so on. SQL: `json_type`."""
         return StrExpr(self._call("json_type", *args))
 
     def valid(self, *args: object) -> Expr:
-        """The `json_valid` function. SQL: `json_valid`."""
+        """Whether the text is valid JSON. SQL: `json_valid`."""
         return self._call("json_valid", *args)
 
     def value(self, *args: object) -> StrExpr:

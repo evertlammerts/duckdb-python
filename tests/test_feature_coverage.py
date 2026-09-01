@@ -113,7 +113,11 @@ FEATURES: dict[str, tuple[str, str, str | None]] = {
         "scalar() and isin(plan), uncorrelated; correlated is the bridge",
         "test_frame.TestSubqueries",
     ),
-    "table_function": (BRIDGE, "table functions in FROM ride sql()", None),
+    "table_function": (
+        VERB_TESTED,
+        "table_function(), and read_csv/read_parquet/read_json as sources",
+        "test_frame.TestTableFunctionSources",
+    ),
     "timezone": (SQL_EXPR, "AT TIME ZONE is expression syntax; .dt reaches the functions", None),
     "topn": (ENGINE, "the top-N optimisation; sort().limit() is what triggers it", None),
     "tpcds": (BRIDGE, "the dsdgen extension", None),
@@ -177,7 +181,7 @@ def test_the_corpus_and_the_table_agree() -> None:
 
 
 def test_the_shape_of_the_answer() -> None:
-    """A record more than a gate: how the 73 features split. 24 / 0 / 2 / 25 / 22."""
+    """A record more than a gate: how the 73 features split. 25 / 0 / 2 / 24 / 22."""
     counts = {kind: sum(1 for k, _, _ in FEATURES.values() if k == kind) for kind in KINDS}
-    assert counts[VERB_TESTED] == 24
+    assert counts[VERB_TESTED] == 25
     assert counts[VERB_UNTESTED] == 0, "a verb reaches a feature nothing proves; write the test"

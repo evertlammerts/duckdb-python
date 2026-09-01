@@ -1056,7 +1056,7 @@ class Frame(PlanBase):
         # it: one stub, over typed inputs.
         shape = _completer(shapes, connection)(self)
         unresolved = [column.name for column in shape if column.type is None]
-        if unresolved:  # pragma: no cover - the binder types everything it returns
+        if unresolved:  # pragma: no cover (the binder types everything it returns)
             message = f"no type reported for {unresolved}"
             raise Error(message)
         return [(column.name, type_text) for column in shape if (type_text := column.type) is not None]
@@ -1714,7 +1714,7 @@ def table(name: str) -> Frame:
     """A plan reading a table or view, by name; a file name reads the file.
 
     `table("orders.csv")` and `table("data/*.parquet")` read the files, as
-    `FROM 'orders.csv'` does: the engine picks the reader from the
+    `FROM "orders.csv"` does: the engine picks the reader from the
     extension. For the reader's options, use `read_csv` and its siblings.
 
     The name is quoted, so a name from outside the program cannot turn into

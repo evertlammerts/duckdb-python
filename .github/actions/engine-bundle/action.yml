@@ -1,0 +1,38 @@
+name: Resolve the engine bundle
+description: >
+  Point the build at a downloaded engine bundle by exporting SKBUILD_CMAKE_DEFINE.
+
+  The path is resolved in the shell rather than through ${{ github.workspace }}:
+  that expression yields the HOST path, which is not where the workspace is
+  mounted inside a container, and on Windows it yields backslashes that CMake
+  parses as escapes.
+
+inputs:
+  path:
+    description: Bundle directory, relative to the workspace.
+    required: false
+    default: engine-bundle
+  extra-defines:
+    description: Extra semicolon-separated CMake defines, appended verbatim.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        # cygpath -m gives CMake-friendly "D:/a/..." on the Windows runners.
+        if command -v cygpath >/dev/null 2>&1; then
+          BUNDLE="$(cygpath -m "$PWD")/${{ inputs.path }}"
+        else
+          BUNDLE="$PWD/${{ inputs.path }}"
+        fi
+        # The bundle is self-contained: it carries duckdb_cpp.{hpp,cpp}, the two
+        # v2 headers, DuckDBCppApi.cmake and the library, so one path serves as
+        # both the C++ API directory and the library prefix.
+        DEFINES="DUCKDB_CPP_DIR=$BUNDLE;DUCKDB_ROOT=$BUNDLE"
+        if [ -n "${{ inputs.extra-defines }}" ]; then
+          DEFINES="$DEFINES;${{ inputs.extra-defines }}"
+        fi
+        echo "SKBUILD_CMAKE_DEFINE=$DEFINES" >> "$GITHUB_ENV"

@@ -49,8 +49,8 @@ class TestModuleInterface:
         ],
     )
     def test_ticks_constructors(self, constructor: str, expected: object) -> None:
-        # date.fromtimestamp takes no keyword arguments, unlike datetime's,
-        # so the obvious implementation raises TypeError at runtime.
+        # Read in UTC: date.fromtimestamp has no tz parameter and reads local
+        # time, so tick zero must be 1970-01-01 wherever this runs.
         assert getattr(dbapi, constructor)(0) == expected
 
     def test_binary_constructor(self) -> None:

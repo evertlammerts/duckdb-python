@@ -87,7 +87,7 @@ __version__: str = _package_version("duckdb")
 def duckdb_version() -> str:
     """Version of the DuckDB engine this package is linked against.
 
-    Distinct from :data:`__version__`: the package and the engine are versioned
+    Distinct from `__version__`: the package and the engine are versioned
     separately and released on their own cadences.
     """
     return library_version()

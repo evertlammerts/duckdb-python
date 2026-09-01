@@ -60,7 +60,7 @@ class PlanBase:
     it into the SQL.
     """
 
-    def render(self, shapes: Any = None) -> str:  # pragma: no cover - abstract
+    def render(self, connection: Any = None) -> str:  # pragma: no cover (abstract)
         raise NotImplementedError
 
 
