@@ -33,6 +33,12 @@ struct ConversionContext {
 	nb::object uuid_cls;
 	nb::object int_cls;
 
+	/// Context for exact scaleb on the int128 decimal tier: its precision
+	/// clears the 39 digits an int128 can carry, so it never rounds.
+	nb::object decimal_context;
+	/// 2^64 as a Python int, for combining 128-bit limbs exactly.
+	nb::object two_pow_64;
+
 	/// Epochs and the unit, cached because both directions offset from them
 	/// per value.
 	nb::object epoch_date;

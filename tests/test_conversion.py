@@ -142,3 +142,83 @@ def test_engine_errors_surface_as_typed_exceptions(con: _duckdb.Connection) -> N
         con.execute("SELECT * FROM no_such_table").fetch_all()
     with pytest.raises(exceptions.ParserError):
         con.execute("SELECT FROM WHERE").fetch_all()
+
+
+class TestBulkRowConversion:
+    # The row path converts column-at-a-time off the flattened vectors; these
+    # pin the indexing edges that per-value conversion never had.
+
+    def test_lists_with_null_and_empty_rows_interleaved(self, con: _duckdb.Connection) -> None:
+        rows = con.execute(
+            "SELECT CASE WHEN i % 3 = 0 THEN NULL WHEN i % 3 = 1 THEN [] ELSE [i, i + 1] END AS l FROM range(7) t(i)"
+        ).fetch_all()
+        assert rows == [(None,), ([],), ([2, 3],), (None,), ([],), ([5, 6],), (None,)]
+
+    def test_a_partial_fetch_slices_nested_children_correctly(self, con: _duckdb.Connection) -> None:
+        result = con.execute("SELECT [i, i * 2] AS l FROM range(5) t(i)")
+        assert result.fetch_rows(2) == [([0, 0],), ([1, 2],)]
+        assert result.fetch_rows(0) == [([2, 4],), ([3, 6],), ([4, 8],)]
+
+    def test_structs_with_null_rows_and_nested_fields(self, con: _duckdb.Connection) -> None:
+        rows = con.execute(
+            "SELECT CASE WHEN i = 1 THEN NULL ELSE {'x': i, 'y': [i, NULL], 'z': 'v' || i} END AS st FROM range(3) t(i)"
+        ).fetch_all()
+        assert rows == [
+            ({"x": 0, "y": [0, None], "z": "v0"},),
+            (None,),
+            ({"x": 2, "y": [2, None], "z": "v2"},),
+        ]
+
+    def test_maps_with_null_and_empty_rows(self, con: _duckdb.Connection) -> None:
+        rows = con.execute(
+            "SELECT CASE WHEN i = 0 THEN NULL WHEN i = 1 THEN MAP([], []) "
+            "ELSE MAP(['a', 'b'], [i, i + 1]) END AS m FROM range(4) t(i)"
+        ).fetch_all()
+        assert rows == [(None,), ({},), ({"a": 2, "b": 3},), ({"a": 3, "b": 4},)]
+
+    def test_arrays_with_null_rows_and_nesting(self, con: _duckdb.Connection) -> None:
+        rows = con.execute(
+            "SELECT a FROM (VALUES ([0, 1, 2]::INTEGER[3]), (NULL), ([2, 3, 4]::INTEGER[3])) v(a)"
+        ).fetch_all()
+        assert rows == [([0, 1, 2],), (None,), ([2, 3, 4],)]
+        nested = con.execute("SELECT [[1, 2], [3, 4]]::INTEGER[2][2] AS a").fetch_all()
+        assert nested == [([[1, 2], [3, 4]],)]
+
+    def test_deep_nesting_and_null_elements(self, con: _duckdb.Connection) -> None:
+        assert con.execute("SELECT {'m': MAP(['a'], [[1, 2]])} AS deep").fetch_all() == [({"m": {"a": [1, 2]}},)]
+        assert con.execute("SELECT MAP(['a', 'b'], [NULL, {'x': NULL}]) AS m").fetch_all() == [
+            ({"a": None, "b": {"x": None}},)
+        ]
+
+    def test_nested_values_survive_chunk_boundaries(self, con: _duckdb.Connection) -> None:
+        rows = con.execute("SELECT i, [i, NULL, i * 2] AS l, {'k': 'v' || i} AS s FROM range(10000) t(i)").fetch_all()
+        assert len(rows) == 10000
+        assert rows[9999] == (9999, [9999, None, 19998], {"k": "v9999"})
+
+    def test_int128_values_are_exact_at_the_extremes(self, con: _duckdb.Connection) -> None:
+        top = 170141183460469231731687303715884105727
+        rows = con.execute(f"SELECT {top}::HUGEINT AS h, (-{top})::HUGEINT AS n, (2::UHUGEINT ^ 127) AS u").fetch_all()
+        assert rows == [(top, -top, 2**127)]
+
+    def test_wide_decimals_keep_value_and_scale(self, con: _duckdb.Connection) -> None:
+        rows = con.execute(
+            "SELECT 12345678901234567890.123456::DECIMAL(38,6) AS d, 1.250::DECIMAL(28,3) AS t, "
+            "(-0.000001)::DECIMAL(38,6) AS n"
+        ).fetch_all()
+        assert rows[0][0] == decimal.Decimal("12345678901234567890.123456")
+        assert str(rows[0][1]) == "1.250"
+        assert rows[0][2] == decimal.Decimal("-0.000001")
+
+    def test_uuid_bytes_round_the_flipped_sign_bit(self, con: _duckdb.Connection) -> None:
+        rows = con.execute(
+            "SELECT '550e8400-e29b-41d4-a716-446655440000'::UUID AS u, "
+            "'00000000-0000-0000-0000-000000000000'::UUID AS z, "
+            "'ffffffff-ffff-ffff-ffff-ffffffffffff'::UUID AS f"
+        ).fetch_all()
+        assert rows == [
+            (
+                uuid.UUID("550e8400-e29b-41d4-a716-446655440000"),
+                uuid.UUID(int=0),
+                uuid.UUID("ffffffff-ffff-ffff-ffff-ffffffffffff"),
+            )
+        ]

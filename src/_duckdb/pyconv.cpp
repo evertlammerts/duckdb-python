@@ -109,9 +109,12 @@ ConversionContext::ConversionContext() {
 	timedelta_cls = datetime.attr("timedelta");
 	timezone_cls = datetime.attr("timezone");
 	timezone_utc = timezone_cls.attr("utc");
-	decimal_cls = nb::module_::import_("decimal").attr("Decimal");
+	nb::object decimal = nb::module_::import_("decimal");
+	decimal_cls = decimal.attr("Decimal");
+	decimal_context = decimal.attr("Context")(nb::arg("prec") = 45);
 	uuid_cls = nb::module_::import_("uuid").attr("UUID");
 	int_cls = nb::module_::import_("builtins").attr("int");
+	two_pow_64 = int_cls("18446744073709551616");
 	epoch_date = date_cls(1970, 1, 1);
 	epoch_naive = datetime_cls(1970, 1, 1);
 	epoch_aware = datetime_cls(1970, 1, 1, 0, 0, 0, 0, timezone_utc);
@@ -277,31 +280,7 @@ nb::object ValueToPython(const Value &value, ConversionContext &ctx) {
 
 namespace {
 
-// Writes rows [start, start + tuples.size()) of one column into the pre-made
-// tuples, dispatching on the type once and reading the flattened view
-// directly. `convert` returns a NEW reference, or nullptr with a Python error
-// set. Stable-ABI calls only: this extension builds under Py_LIMITED_API.
-template <class CONVERT>
-void FillColumn(std::vector<nb::object> &tuples, const duckdb::cxx::VectorView &view, duckdb::cxx::idx_t start,
-                duckdb::cxx::idx_t column, CONVERT &&convert) {
-	const auto rows = tuples.size();
-	for (size_t r = 0; r < rows; r++) {
-		const auto element = view.SelAt(start + r);
-		PyObject *object = nullptr;
-		if (!view.RowIsValid(element)) {
-			object = Py_NewRef(Py_None);
-		} else {
-			object = convert(element);
-			if (object == nullptr) {
-				throw nb::python_error();
-			}
-		}
-		// SetItem steals `object` whatever it returns.
-		if (PyTuple_SetItem(tuples[r].ptr(), static_cast<Py_ssize_t>(column), object) != 0) {
-			throw nb::python_error();
-		}
-	}
-}
+namespace cxx = duckdb::cxx;
 
 // The exact text of an int64-tier decimal: digits with the point placed by
 // the scale, so Decimal(text) preserves both value and scale.
@@ -318,12 +297,370 @@ std::string DecimalText(int64_t raw, uint8_t scale) {
 	return negative ? "-" + digits : digits;
 }
 
+// A 128-bit value as an exact Python int: upper * 2^64 + lower, with the
+// upper limb already lifted so one function serves both signednesses.
+nb::object CombineLimbs(ConversionContext &ctx, nb::object upper, uint64_t lower) {
+	if (!upper.is_valid()) {
+		throw nb::python_error();
+	}
+	nb::object shifted = nb::steal(PyNumber_Multiply(upper.ptr(), ctx.two_pow_64.ptr()));
+	if (!shifted.is_valid()) {
+		throw nb::python_error();
+	}
+	nb::object low = nb::steal(PyLong_FromUnsignedLongLong(lower));
+	if (!low.is_valid()) {
+		throw nb::python_error();
+	}
+	nb::object combined = nb::steal(PyNumber_Add(shifted.ptr(), low.ptr()));
+	if (!combined.is_valid()) {
+		throw nb::python_error();
+	}
+	return combined;
+}
+
+/// Stores converted elements for a parent to assemble rows from.
+struct VectorSink {
+	std::vector<nb::object> &out;
+
+	void operator()(size_t position, PyObject *object) const {
+		out[position] = nb::steal(object);
+	}
+};
+
+// Converts elements [first, last) of a vector, handing each converted value
+// to `sink(position, object)` as a new reference, position relative to
+// `first`. The type is dispatched once and the flattened view read directly;
+// nested types recurse into their children, and the per-value path stays the
+// fallback for the rare rest. Stable-ABI calls only: this extension builds
+// under Py_LIMITED_API.
+template <class SINK>
+void EmitElements(cxx::Vector &vector, const LogicalType &type, cxx::idx_t first, cxx::idx_t last,
+                  ConversionContext &ctx, SINK &&sink) {
+	using Id = LogicalTypeId;
+	// Dictionary, constant and other encodings become flat data plus
+	// validity, the one layout the typed reads below can serve. Flattening
+	// also drops any selection, so element indices equal row indices, which
+	// the nested cases below rely on for their child ranges.
+	vector.Flatten();
+	const auto view = vector.GetView();
+	const auto typed = [&](auto convert) {
+		for (cxx::idx_t e = first; e < last; e++) {
+			const auto element = view.SelAt(e);
+			PyObject *object = nullptr;
+			if (!view.RowIsValid(element)) {
+				object = Py_NewRef(Py_None);
+			} else {
+				object = convert(element);
+				if (object == nullptr) {
+					throw nb::python_error();
+				}
+			}
+			sink(static_cast<size_t>(e - first), object);
+		}
+	};
+	switch (type.GetTypeId()) {
+	case Id::BOOLEAN:
+		typed([&](cxx::idx_t i) { return Py_NewRef(view.Data<bool>()[i] ? Py_True : Py_False); });
+		break;
+	case Id::TINYINT:
+		typed([&](cxx::idx_t i) { return PyLong_FromLong(view.Data<int8_t>()[i]); });
+		break;
+	case Id::SMALLINT:
+		typed([&](cxx::idx_t i) { return PyLong_FromLong(view.Data<int16_t>()[i]); });
+		break;
+	case Id::INTEGER:
+		typed([&](cxx::idx_t i) { return PyLong_FromLong(view.Data<int32_t>()[i]); });
+		break;
+	case Id::BIGINT:
+		typed([&](cxx::idx_t i) { return PyLong_FromLongLong(view.Data<int64_t>()[i]); });
+		break;
+	case Id::UTINYINT:
+		typed([&](cxx::idx_t i) { return PyLong_FromUnsignedLong(view.Data<uint8_t>()[i]); });
+		break;
+	case Id::USMALLINT:
+		typed([&](cxx::idx_t i) { return PyLong_FromUnsignedLong(view.Data<uint16_t>()[i]); });
+		break;
+	case Id::UINTEGER:
+		typed([&](cxx::idx_t i) { return PyLong_FromUnsignedLong(view.Data<uint32_t>()[i]); });
+		break;
+	case Id::UBIGINT:
+		typed([&](cxx::idx_t i) { return PyLong_FromUnsignedLongLong(view.Data<uint64_t>()[i]); });
+		break;
+	case Id::FLOAT:
+		typed([&](cxx::idx_t i) { return PyFloat_FromDouble(view.Data<float>()[i]); });
+		break;
+	case Id::DOUBLE:
+		typed([&](cxx::idx_t i) { return PyFloat_FromDouble(view.Data<double>()[i]); });
+		break;
+	case Id::VARCHAR:
+		typed([&](cxx::idx_t i) {
+			const auto &text = view.Data<cxx::varchar_t>()[i];
+			return PyUnicode_FromStringAndSize(text.data(), text.size());
+		});
+		break;
+	case Id::BLOB:
+		typed([&](cxx::idx_t i) {
+			const auto &blob = view.Data<cxx::blob_t>()[i];
+			return PyBytes_FromStringAndSize(blob.data(), blob.size());
+		});
+		break;
+	case Id::DATE:
+		typed([&](cxx::idx_t i) {
+			return EpochDate(ctx, view.Data<cxx::date_t>()[i].days, [&] { return vector.GetValue(i).ToText(); })
+			    .release()
+			    .ptr();
+		});
+		break;
+	case Id::TIME:
+		typed([&](cxx::idx_t i) {
+			return TimeFromMicros(ctx, view.Data<cxx::dtime_t>()[i].micros).release().ptr();
+		});
+		break;
+	case Id::TIMESTAMP:
+	case Id::TIMESTAMP_TZ:
+	case Id::TIMESTAMP_SEC:
+	case Id::TIMESTAMP_MS:
+	case Id::TIMESTAMP_NS:
+	case Id::TIMESTAMP_TZ_NS: {
+		const auto id = type.GetTypeId();
+		const bool utc = id == Id::TIMESTAMP_TZ || id == Id::TIMESTAMP_TZ_NS;
+		typed([&](cxx::idx_t i) {
+			const auto raw = view.Data<int64_t>()[i];
+			// The sub-microsecond floor of the ns variants matches the
+			// per-value path.
+			const auto micros = id == Id::TIMESTAMP_SEC                               ? raw * 1'000'000
+			                    : id == Id::TIMESTAMP_MS                              ? raw * 1'000
+			                    : id == Id::TIMESTAMP_NS || id == Id::TIMESTAMP_TZ_NS ? raw / 1'000
+			                                                                          : raw;
+			return EpochDateTime(ctx, micros, utc, [&] { return vector.GetValue(i).ToText(); }).release().ptr();
+		});
+		break;
+	}
+	case Id::HUGEINT:
+		typed([&](cxx::idx_t i) {
+			const auto &limbs = view.Data<cxx::int128_t>()[i];
+			return CombineLimbs(ctx, nb::steal(PyLong_FromLongLong(limbs.upper)), limbs.lower).release().ptr();
+		});
+		break;
+	case Id::UHUGEINT:
+		typed([&](cxx::idx_t i) {
+			const auto &limbs = view.Data<cxx::uint128_t>()[i];
+			return CombineLimbs(ctx, nb::steal(PyLong_FromUnsignedLongLong(limbs.upper)), limbs.lower)
+			    .release()
+			    .ptr();
+		});
+		break;
+	case Id::UUID:
+		typed([&](cxx::idx_t i) {
+			const auto decoded = view.Data<cxx::uuid_t>()[i].Decode();
+			nb::bytes canonical(reinterpret_cast<const char *>(decoded.bytes), sizeof(decoded.bytes));
+			return ctx.uuid_cls(nb::arg("bytes") = canonical).release().ptr();
+		});
+		break;
+	case Id::DECIMAL: {
+		const auto width = type.GetDecimalWidth();
+		const auto scale = static_cast<uint8_t>(type.GetDecimalScale());
+		if (width > 18) {
+			typed([&](cxx::idx_t i) {
+				const auto &limbs = view.Data<cxx::int128_t>()[i];
+				nb::object unscaled = CombineLimbs(ctx, nb::steal(PyLong_FromLongLong(limbs.upper)), limbs.lower);
+				// scaleb under the wide context is exact: Decimal(int) never
+				// rounds, and the context precision clears int128's digits.
+				return ctx.decimal_cls(unscaled)
+				    .attr("scaleb")(-static_cast<int>(scale), ctx.decimal_context)
+				    .release()
+				    .ptr();
+			});
+			break;
+		}
+		typed([&](cxx::idx_t i) {
+			const int64_t raw = width <= 4   ? view.Data<int16_t>()[i]
+			                    : width <= 9 ? view.Data<int32_t>()[i]
+			                                 : view.Data<int64_t>()[i];
+			return ctx.decimal_cls(DecimalText(raw, scale)).release().ptr();
+		});
+		break;
+	}
+	case Id::ENUM: {
+		// The dictionary becomes Python strings once; every row is then one
+		// new reference into it.
+		const auto size = type.GetEnumSize();
+		std::vector<nb::object> dictionary;
+		dictionary.reserve(size);
+		for (cxx::idx_t v = 0; v < size; v++) {
+			dictionary.push_back(nb::cast(type.GetEnumValue(v)));
+		}
+		typed([&](cxx::idx_t i) {
+			const auto code = size < 256     ? static_cast<cxx::idx_t>(view.Data<uint8_t>()[i])
+			                  : size < 65536 ? static_cast<cxx::idx_t>(view.Data<uint16_t>()[i])
+			                                 : static_cast<cxx::idx_t>(view.Data<uint32_t>()[i]);
+			return Py_NewRef(dictionary.at(code).ptr());
+		});
+		break;
+	}
+	case Id::LIST:
+	case Id::MAP: {
+		// Both lay out as list entries over child vectors: one child of
+		// elements for LIST, the keys and the values for MAP. Only the slice
+		// the served rows reference is converted.
+		const auto *entries = view.Data<cxx::list_entry_t>();
+		auto lo = std::numeric_limits<uint64_t>::max();
+		uint64_t hi = 0;
+		for (cxx::idx_t e = first; e < last; e++) {
+			const auto element = view.SelAt(e);
+			if (view.RowIsValid(element)) {
+				lo = std::min(lo, entries[element].offset);
+				hi = std::max(hi, entries[element].offset + entries[element].length);
+			}
+		}
+		if (lo > hi) {
+			lo = hi = 0;
+		}
+		const bool is_map = type.GetTypeId() == Id::MAP;
+		std::vector<nb::object> keys(is_map ? hi - lo : 0);
+		std::vector<nb::object> values(hi - lo);
+		if (hi > lo) {
+			if (is_map) {
+				auto key_vector = vector.GetChild(0);
+				auto value_vector = vector.GetChild(1);
+				const auto key_type = type.GetMapKeyType();
+				const auto value_type = type.GetMapValueType();
+				EmitElements(key_vector, key_type, lo, hi, ctx, VectorSink {keys});
+				EmitElements(value_vector, value_type, lo, hi, ctx, VectorSink {values});
+			} else {
+				auto child = vector.GetChild(0);
+				const auto child_type = type.GetListChildType();
+				EmitElements(child, child_type, lo, hi, ctx, VectorSink {values});
+			}
+		}
+		// A MAP keyed by an unhashable type becomes (key, value) pairs, the
+		// same shape the per-value path gives, decided from the type so every
+		// row of the column matches.
+		const bool hashable = is_map && KeysHashable(type.GetMapKeyType());
+		for (cxx::idx_t e = first; e < last; e++) {
+			const auto element = view.SelAt(e);
+			if (!view.RowIsValid(element)) {
+				sink(static_cast<size_t>(e - first), Py_NewRef(Py_None));
+				continue;
+			}
+			const auto &entry = entries[element];
+			const auto base = entry.offset - lo;
+			nb::object row;
+			if (!is_map) {
+				row = nb::steal(PyList_New(static_cast<Py_ssize_t>(entry.length)));
+				if (!row.is_valid()) {
+					throw nb::python_error();
+				}
+				for (uint64_t j = 0; j < entry.length; j++) {
+					if (PyList_SetItem(row.ptr(), static_cast<Py_ssize_t>(j),
+					                   Py_NewRef(values[base + j].ptr())) != 0) {
+						throw nb::python_error();
+					}
+				}
+			} else if (hashable) {
+				row = nb::steal(PyDict_New());
+				if (!row.is_valid()) {
+					throw nb::python_error();
+				}
+				for (uint64_t j = 0; j < entry.length; j++) {
+					if (PyDict_SetItem(row.ptr(), keys[base + j].ptr(), values[base + j].ptr()) != 0) {
+						throw nb::python_error();
+					}
+				}
+			} else {
+				row = nb::steal(PyList_New(static_cast<Py_ssize_t>(entry.length)));
+				if (!row.is_valid()) {
+					throw nb::python_error();
+				}
+				for (uint64_t j = 0; j < entry.length; j++) {
+					nb::object pair = nb::steal(PyTuple_New(2));
+					if (!pair.is_valid()) {
+						throw nb::python_error();
+					}
+					if (PyTuple_SetItem(pair.ptr(), 0, Py_NewRef(keys[base + j].ptr())) != 0 ||
+					    PyTuple_SetItem(pair.ptr(), 1, Py_NewRef(values[base + j].ptr())) != 0) {
+						throw nb::python_error();
+					}
+					if (PyList_SetItem(row.ptr(), static_cast<Py_ssize_t>(j), pair.release().ptr()) != 0) {
+						throw nb::python_error();
+					}
+				}
+			}
+			sink(static_cast<size_t>(e - first), row.release().ptr());
+		}
+		break;
+	}
+	case Id::ARRAY: {
+		const auto size = type.GetArraySize();
+		auto child = vector.GetChild(0);
+		const auto child_type = type.GetArrayChildType();
+		std::vector<nb::object> elements(static_cast<size_t>(last - first) * size);
+		if (!elements.empty()) {
+			EmitElements(child, child_type, first * size, last * size, ctx, VectorSink {elements});
+		}
+		for (cxx::idx_t e = first; e < last; e++) {
+			const auto element = view.SelAt(e);
+			if (!view.RowIsValid(element)) {
+				sink(static_cast<size_t>(e - first), Py_NewRef(Py_None));
+				continue;
+			}
+			nb::object row = nb::steal(PyList_New(static_cast<Py_ssize_t>(size)));
+			if (!row.is_valid()) {
+				throw nb::python_error();
+			}
+			const auto base = static_cast<size_t>(e - first) * size;
+			for (cxx::idx_t j = 0; j < size; j++) {
+				if (PyList_SetItem(row.ptr(), static_cast<Py_ssize_t>(j),
+				                   Py_NewRef(elements[base + j].ptr())) != 0) {
+					throw nb::python_error();
+				}
+			}
+			sink(static_cast<size_t>(e - first), row.release().ptr());
+		}
+		break;
+	}
+	case Id::STRUCT: {
+		const auto fields = type.GetStructChildCount();
+		std::vector<std::vector<nb::object>> columns(fields);
+		std::vector<nb::object> names(fields);
+		for (cxx::idx_t f = 0; f < fields; f++) {
+			columns[f].resize(static_cast<size_t>(last - first));
+			auto child = vector.GetChild(f);
+			const auto field_type = type.GetStructChildType(f);
+			EmitElements(child, field_type, first, last, ctx, VectorSink {columns[f]});
+			names[f] = nb::cast(type.GetStructChildName(f));
+		}
+		for (cxx::idx_t e = first; e < last; e++) {
+			const auto element = view.SelAt(e);
+			if (!view.RowIsValid(element)) {
+				sink(static_cast<size_t>(e - first), Py_NewRef(Py_None));
+				continue;
+			}
+			nb::object row = nb::steal(PyDict_New());
+			if (!row.is_valid()) {
+				throw nb::python_error();
+			}
+			for (cxx::idx_t f = 0; f < fields; f++) {
+				if (PyDict_SetItem(row.ptr(), names[f].ptr(), columns[f][e - first].ptr()) != 0) {
+					throw nb::python_error();
+				}
+			}
+			sink(static_cast<size_t>(e - first), row.release().ptr());
+		}
+		break;
+	}
+	default:
+		// UNION, BIT, BIGNUM, VARIANT, TIME_TZ, TIME_NS, and whatever a
+		// newer engine adds: one cell at a time through the per-value path.
+		typed([&](cxx::idx_t i) { return ValueToPython(vector.GetValue(i), ctx).release().ptr(); });
+		break;
+	}
+}
+
 } // namespace
 
 void AppendChunkRows(const duckdb::cxx::DataChunk &chunk, const std::vector<LogicalType> &types,
                      duckdb::cxx::idx_t start, duckdb::cxx::idx_t end, ConversionContext &ctx, nb::list &out) {
-	namespace cxx = duckdb::cxx;
-	using Id = LogicalTypeId;
 	const auto columns = chunk.GetVectorCount();
 	const auto rows = end - start;
 	// The tuples are built first and filled column by column, held here so an
@@ -339,143 +676,12 @@ void AppendChunkRows(const duckdb::cxx::DataChunk &chunk, const std::vector<Logi
 	}
 	for (cxx::idx_t c = 0; c < columns; c++) {
 		auto vector = chunk.GetVector(c);
-		// Dictionary, constant and other encodings become flat data plus
-		// validity, the one layout the typed reads below can serve.
-		vector.Flatten();
-		const auto view = vector.GetView();
-		const auto &type = types.at(c);
-		// Nested, HUGEINT, UUID, wide DECIMAL, the exotic strings: one cell
-		// at a time through the per-value path.
-		const auto fallback = [&](cxx::idx_t i) { return ValueToPython(vector.GetValue(i), ctx).release().ptr(); };
-		switch (type.GetTypeId()) {
-		case Id::BOOLEAN:
-			FillColumn(tuples, view, start, c,
-			           [&](cxx::idx_t i) { return Py_NewRef(view.Data<bool>()[i] ? Py_True : Py_False); });
-			break;
-		case Id::TINYINT:
-			FillColumn(tuples, view, start, c,
-			           [&](cxx::idx_t i) { return PyLong_FromLong(view.Data<int8_t>()[i]); });
-			break;
-		case Id::SMALLINT:
-			FillColumn(tuples, view, start, c,
-			           [&](cxx::idx_t i) { return PyLong_FromLong(view.Data<int16_t>()[i]); });
-			break;
-		case Id::INTEGER:
-			FillColumn(tuples, view, start, c,
-			           [&](cxx::idx_t i) { return PyLong_FromLong(view.Data<int32_t>()[i]); });
-			break;
-		case Id::BIGINT:
-			FillColumn(tuples, view, start, c,
-			           [&](cxx::idx_t i) { return PyLong_FromLongLong(view.Data<int64_t>()[i]); });
-			break;
-		case Id::UTINYINT:
-			FillColumn(tuples, view, start, c,
-			           [&](cxx::idx_t i) { return PyLong_FromUnsignedLong(view.Data<uint8_t>()[i]); });
-			break;
-		case Id::USMALLINT:
-			FillColumn(tuples, view, start, c,
-			           [&](cxx::idx_t i) { return PyLong_FromUnsignedLong(view.Data<uint16_t>()[i]); });
-			break;
-		case Id::UINTEGER:
-			FillColumn(tuples, view, start, c,
-			           [&](cxx::idx_t i) { return PyLong_FromUnsignedLong(view.Data<uint32_t>()[i]); });
-			break;
-		case Id::UBIGINT:
-			FillColumn(tuples, view, start, c,
-			           [&](cxx::idx_t i) { return PyLong_FromUnsignedLongLong(view.Data<uint64_t>()[i]); });
-			break;
-		case Id::FLOAT:
-			FillColumn(tuples, view, start, c,
-			           [&](cxx::idx_t i) { return PyFloat_FromDouble(view.Data<float>()[i]); });
-			break;
-		case Id::DOUBLE:
-			FillColumn(tuples, view, start, c,
-			           [&](cxx::idx_t i) { return PyFloat_FromDouble(view.Data<double>()[i]); });
-			break;
-		case Id::VARCHAR:
-			FillColumn(tuples, view, start, c, [&](cxx::idx_t i) {
-				const auto &text = view.Data<cxx::varchar_t>()[i];
-				return PyUnicode_FromStringAndSize(text.data(), text.size());
-			});
-			break;
-		case Id::BLOB:
-			FillColumn(tuples, view, start, c, [&](cxx::idx_t i) {
-				const auto &blob = view.Data<cxx::blob_t>()[i];
-				return PyBytes_FromStringAndSize(blob.data(), blob.size());
-			});
-			break;
-		case Id::DATE:
-			FillColumn(tuples, view, start, c, [&](cxx::idx_t i) {
-				return EpochDate(ctx, view.Data<cxx::date_t>()[i].days,
-				                 [&] { return vector.GetValue(i).ToText(); })
-				    .release()
-				    .ptr();
-			});
-			break;
-		case Id::TIME:
-			FillColumn(tuples, view, start, c, [&](cxx::idx_t i) {
-				return TimeFromMicros(ctx, view.Data<cxx::dtime_t>()[i].micros).release().ptr();
-			});
-			break;
-		case Id::TIMESTAMP:
-		case Id::TIMESTAMP_TZ:
-		case Id::TIMESTAMP_SEC:
-		case Id::TIMESTAMP_MS:
-		case Id::TIMESTAMP_NS:
-		case Id::TIMESTAMP_TZ_NS: {
-			const auto id = type.GetTypeId();
-			const bool utc = id == Id::TIMESTAMP_TZ || id == Id::TIMESTAMP_TZ_NS;
-			FillColumn(tuples, view, start, c, [&](cxx::idx_t i) {
-				const auto raw = view.Data<int64_t>()[i];
-				// The sub-microsecond floor of the ns variants matches the
-				// per-value path above.
-				const auto micros = id == Id::TIMESTAMP_SEC                            ? raw * 1'000'000
-				                    : id == Id::TIMESTAMP_MS                           ? raw * 1'000
-				                    : id == Id::TIMESTAMP_NS || id == Id::TIMESTAMP_TZ_NS ? raw / 1'000
-				                                                                          : raw;
-				return EpochDateTime(ctx, micros, utc, [&] { return vector.GetValue(i).ToText(); })
-				    .release()
-				    .ptr();
-			});
-			break;
-		}
-		case Id::DECIMAL: {
-			const auto width = type.GetDecimalWidth();
-			if (width > 18) {
-				// The int128 tier's text form needs 128-bit division.
-				FillColumn(tuples, view, start, c, fallback);
-				break;
+		EmitElements(vector, types.at(c), start, end, ctx, [&](size_t position, PyObject *object) {
+			// SetItem steals `object` whatever it returns.
+			if (PyTuple_SetItem(tuples[position].ptr(), static_cast<Py_ssize_t>(c), object) != 0) {
+				throw nb::python_error();
 			}
-			const auto scale = static_cast<uint8_t>(type.GetDecimalScale());
-			FillColumn(tuples, view, start, c, [&](cxx::idx_t i) {
-				const int64_t raw = width <= 4   ? view.Data<int16_t>()[i]
-				                    : width <= 9 ? view.Data<int32_t>()[i]
-				                                 : view.Data<int64_t>()[i];
-				return ctx.decimal_cls(DecimalText(raw, scale)).release().ptr();
-			});
-			break;
-		}
-		case Id::ENUM: {
-			// The dictionary becomes Python strings once; every row is then
-			// one new reference into it.
-			const auto size = type.GetEnumSize();
-			std::vector<nb::object> dictionary;
-			dictionary.reserve(size);
-			for (cxx::idx_t v = 0; v < size; v++) {
-				dictionary.push_back(nb::cast(type.GetEnumValue(v)));
-			}
-			FillColumn(tuples, view, start, c, [&](cxx::idx_t i) {
-				const auto code = size < 256     ? static_cast<cxx::idx_t>(view.Data<uint8_t>()[i])
-				                  : size < 65536 ? static_cast<cxx::idx_t>(view.Data<uint16_t>()[i])
-				                                 : static_cast<cxx::idx_t>(view.Data<uint32_t>()[i]);
-				return Py_NewRef(dictionary.at(code).ptr());
-			});
-			break;
-		}
-		default:
-			FillColumn(tuples, view, start, c, fallback);
-			break;
-		}
+		});
 	}
 	for (auto &row : tuples) {
 		out.append(row);
