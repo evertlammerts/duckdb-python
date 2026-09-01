@@ -49,7 +49,11 @@ constexpr int64_t TIMESTAMP_NEGATIVE_INFINITY = -9223372036854775807LL;
 	                             "Conversion Error: " + what + " " + rendered +
 	                                 " is outside the range Python's datetime can represent");
 }
-nb::object EpochDate(ConversionContext &ctx, int32_t days, const Value &value) {
+// `text` renders the offending value for the error message and runs only on
+// that path, so the bulk row converter can defer building a Value until a
+// value actually fails.
+template <class TEXT>
+nb::object EpochDate(ConversionContext &ctx, int32_t days, TEXT &&text) {
 	if (days == DATE_POSITIVE_INFINITY) {
 		return ctx.date_cls.attr("max");
 	}
@@ -59,7 +63,7 @@ nb::object EpochDate(ConversionContext &ctx, int32_t days, const Value &value) {
 	try {
 		return ctx.epoch_date + ctx.timedelta_cls(days, 0, 0);
 	} catch (const nb::python_error &) {
-		ThrowUnrepresentable("date", value.ToText());
+		ThrowUnrepresentable("date", text());
 	}
 }
 
@@ -69,7 +73,8 @@ nb::object TimeFromMicros(ConversionContext &ctx, int64_t micros) {
 	return (ctx.epoch_naive + ctx.timedelta_cls(0, 0, micros)).attr("time")();
 }
 
-nb::object EpochDateTime(ConversionContext &ctx, int64_t micros, bool utc, const Value &value) {
+template <class TEXT>
+nb::object EpochDateTime(ConversionContext &ctx, int64_t micros, bool utc, TEXT &&text) {
 	// Keep the infinities as aware as the column they came from: mixing an
 	// aware value with a naive one raises TypeError on comparison.
 	if (micros == TIMESTAMP_POSITIVE_INFINITY) {
@@ -84,7 +89,7 @@ nb::object EpochDateTime(ConversionContext &ctx, int64_t micros, bool utc, const
 	try {
 		return epoch + ctx.timedelta_cls(0, 0, micros);
 	} catch (const nb::python_error &) {
-		ThrowUnrepresentable("timestamp", value.ToText());
+		ThrowUnrepresentable("timestamp", text());
 	}
 }
 
@@ -176,23 +181,23 @@ nb::object ValueToPython(const Value &value, ConversionContext &ctx) {
 		return nb::bytes(blob.data(), blob.size());
 	}
 	case LogicalTypeId::DATE:
-		return EpochDate(ctx, value.Get<duckdb::cxx::date_t>().days, value);
+		return EpochDate(ctx, value.Get<duckdb::cxx::date_t>().days, [&value] { return value.ToText(); });
 	case LogicalTypeId::TIME:
 		return TimeFromMicros(ctx, value.Get<duckdb::cxx::dtime_t>().micros);
 	case LogicalTypeId::TIMESTAMP:
-		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_t>().micros, false, value);
+		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_t>().micros, false, [&value] { return value.ToText(); });
 	case LogicalTypeId::TIMESTAMP_TZ:
-		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_tz_t>().micros, true, value);
+		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_tz_t>().micros, true, [&value] { return value.ToText(); });
 	case LogicalTypeId::TIMESTAMP_SEC:
-		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_s_t>().seconds * 1'000'000, false, value);
+		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_s_t>().seconds * 1'000'000, false, [&value] { return value.ToText(); });
 	case LogicalTypeId::TIMESTAMP_MS:
-		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_ms_t>().millis * 1'000, false, value);
+		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_ms_t>().millis * 1'000, false, [&value] { return value.ToText(); });
 	case LogicalTypeId::TIMESTAMP_NS:
 		// Python datetime resolves to microseconds, so sub-microsecond digits
 		// are dropped. A deliberate divergence, not a rounding bug.
-		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_ns_t>().nanos / 1'000, false, value);
+		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_ns_t>().nanos / 1'000, false, [&value] { return value.ToText(); });
 	case LogicalTypeId::TIMESTAMP_TZ_NS:
-		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_tz_ns_t>().nanos / 1'000, true, value);
+		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_tz_ns_t>().nanos / 1'000, true, [&value] { return value.ToText(); });
 	case LogicalTypeId::TIME_NS:
 		// Same microsecond floor as TIMESTAMP_NS.
 		return TimeFromMicros(ctx, value.Get<duckdb::cxx::dtime_ns_t>().nanos / 1'000);
@@ -267,6 +272,213 @@ nb::object ValueToPython(const Value &value, ConversionContext &ctx) {
 		// Degrading to the SQL text keeps unknown types readable instead of
 		// failing the whole fetch.
 		return nb::cast(value.ToText());
+	}
+}
+
+namespace {
+
+// Writes rows [start, start + tuples.size()) of one column into the pre-made
+// tuples, dispatching on the type once and reading the flattened view
+// directly. `convert` returns a NEW reference, or nullptr with a Python error
+// set. Stable-ABI calls only: this extension builds under Py_LIMITED_API.
+template <class CONVERT>
+void FillColumn(std::vector<nb::object> &tuples, const duckdb::cxx::VectorView &view, duckdb::cxx::idx_t start,
+                duckdb::cxx::idx_t column, CONVERT &&convert) {
+	const auto rows = tuples.size();
+	for (size_t r = 0; r < rows; r++) {
+		const auto element = view.SelAt(start + r);
+		PyObject *object = nullptr;
+		if (!view.RowIsValid(element)) {
+			object = Py_NewRef(Py_None);
+		} else {
+			object = convert(element);
+			if (object == nullptr) {
+				throw nb::python_error();
+			}
+		}
+		// SetItem steals `object` whatever it returns.
+		if (PyTuple_SetItem(tuples[r].ptr(), static_cast<Py_ssize_t>(column), object) != 0) {
+			throw nb::python_error();
+		}
+	}
+}
+
+// The exact text of an int64-tier decimal: digits with the point placed by
+// the scale, so Decimal(text) preserves both value and scale.
+std::string DecimalText(int64_t raw, uint8_t scale) {
+	const bool negative = raw < 0;
+	const auto magnitude = negative ? ~static_cast<uint64_t>(raw) + 1 : static_cast<uint64_t>(raw);
+	std::string digits = std::to_string(magnitude);
+	if (scale > 0) {
+		if (digits.size() <= scale) {
+			digits.insert(0, scale + 1 - digits.size(), '0');
+		}
+		digits.insert(digits.size() - scale, ".");
+	}
+	return negative ? "-" + digits : digits;
+}
+
+} // namespace
+
+void AppendChunkRows(const duckdb::cxx::DataChunk &chunk, const std::vector<LogicalType> &types,
+                     duckdb::cxx::idx_t start, duckdb::cxx::idx_t end, ConversionContext &ctx, nb::list &out) {
+	namespace cxx = duckdb::cxx;
+	using Id = LogicalTypeId;
+	const auto columns = chunk.GetVectorCount();
+	const auto rows = end - start;
+	// The tuples are built first and filled column by column, held here so an
+	// exception mid-fill releases them (tuple dealloc accepts empty slots).
+	std::vector<nb::object> tuples;
+	tuples.reserve(rows);
+	for (cxx::idx_t r = 0; r < rows; r++) {
+		PyObject *row = PyTuple_New(static_cast<Py_ssize_t>(columns));
+		if (row == nullptr) {
+			throw nb::python_error();
+		}
+		tuples.emplace_back(nb::steal(row));
+	}
+	for (cxx::idx_t c = 0; c < columns; c++) {
+		auto vector = chunk.GetVector(c);
+		// Dictionary, constant and other encodings become flat data plus
+		// validity, the one layout the typed reads below can serve.
+		vector.Flatten();
+		const auto view = vector.GetView();
+		const auto &type = types.at(c);
+		// Nested, HUGEINT, UUID, wide DECIMAL, the exotic strings: one cell
+		// at a time through the per-value path.
+		const auto fallback = [&](cxx::idx_t i) { return ValueToPython(vector.GetValue(i), ctx).release().ptr(); };
+		switch (type.GetTypeId()) {
+		case Id::BOOLEAN:
+			FillColumn(tuples, view, start, c,
+			           [&](cxx::idx_t i) { return Py_NewRef(view.Data<bool>()[i] ? Py_True : Py_False); });
+			break;
+		case Id::TINYINT:
+			FillColumn(tuples, view, start, c,
+			           [&](cxx::idx_t i) { return PyLong_FromLong(view.Data<int8_t>()[i]); });
+			break;
+		case Id::SMALLINT:
+			FillColumn(tuples, view, start, c,
+			           [&](cxx::idx_t i) { return PyLong_FromLong(view.Data<int16_t>()[i]); });
+			break;
+		case Id::INTEGER:
+			FillColumn(tuples, view, start, c,
+			           [&](cxx::idx_t i) { return PyLong_FromLong(view.Data<int32_t>()[i]); });
+			break;
+		case Id::BIGINT:
+			FillColumn(tuples, view, start, c,
+			           [&](cxx::idx_t i) { return PyLong_FromLongLong(view.Data<int64_t>()[i]); });
+			break;
+		case Id::UTINYINT:
+			FillColumn(tuples, view, start, c,
+			           [&](cxx::idx_t i) { return PyLong_FromUnsignedLong(view.Data<uint8_t>()[i]); });
+			break;
+		case Id::USMALLINT:
+			FillColumn(tuples, view, start, c,
+			           [&](cxx::idx_t i) { return PyLong_FromUnsignedLong(view.Data<uint16_t>()[i]); });
+			break;
+		case Id::UINTEGER:
+			FillColumn(tuples, view, start, c,
+			           [&](cxx::idx_t i) { return PyLong_FromUnsignedLong(view.Data<uint32_t>()[i]); });
+			break;
+		case Id::UBIGINT:
+			FillColumn(tuples, view, start, c,
+			           [&](cxx::idx_t i) { return PyLong_FromUnsignedLongLong(view.Data<uint64_t>()[i]); });
+			break;
+		case Id::FLOAT:
+			FillColumn(tuples, view, start, c,
+			           [&](cxx::idx_t i) { return PyFloat_FromDouble(view.Data<float>()[i]); });
+			break;
+		case Id::DOUBLE:
+			FillColumn(tuples, view, start, c,
+			           [&](cxx::idx_t i) { return PyFloat_FromDouble(view.Data<double>()[i]); });
+			break;
+		case Id::VARCHAR:
+			FillColumn(tuples, view, start, c, [&](cxx::idx_t i) {
+				const auto &text = view.Data<cxx::varchar_t>()[i];
+				return PyUnicode_FromStringAndSize(text.data(), text.size());
+			});
+			break;
+		case Id::BLOB:
+			FillColumn(tuples, view, start, c, [&](cxx::idx_t i) {
+				const auto &blob = view.Data<cxx::blob_t>()[i];
+				return PyBytes_FromStringAndSize(blob.data(), blob.size());
+			});
+			break;
+		case Id::DATE:
+			FillColumn(tuples, view, start, c, [&](cxx::idx_t i) {
+				return EpochDate(ctx, view.Data<cxx::date_t>()[i].days,
+				                 [&] { return vector.GetValue(i).ToText(); })
+				    .release()
+				    .ptr();
+			});
+			break;
+		case Id::TIME:
+			FillColumn(tuples, view, start, c, [&](cxx::idx_t i) {
+				return TimeFromMicros(ctx, view.Data<cxx::dtime_t>()[i].micros).release().ptr();
+			});
+			break;
+		case Id::TIMESTAMP:
+		case Id::TIMESTAMP_TZ:
+		case Id::TIMESTAMP_SEC:
+		case Id::TIMESTAMP_MS:
+		case Id::TIMESTAMP_NS:
+		case Id::TIMESTAMP_TZ_NS: {
+			const auto id = type.GetTypeId();
+			const bool utc = id == Id::TIMESTAMP_TZ || id == Id::TIMESTAMP_TZ_NS;
+			FillColumn(tuples, view, start, c, [&](cxx::idx_t i) {
+				const auto raw = view.Data<int64_t>()[i];
+				// The sub-microsecond floor of the ns variants matches the
+				// per-value path above.
+				const auto micros = id == Id::TIMESTAMP_SEC                            ? raw * 1'000'000
+				                    : id == Id::TIMESTAMP_MS                           ? raw * 1'000
+				                    : id == Id::TIMESTAMP_NS || id == Id::TIMESTAMP_TZ_NS ? raw / 1'000
+				                                                                          : raw;
+				return EpochDateTime(ctx, micros, utc, [&] { return vector.GetValue(i).ToText(); })
+				    .release()
+				    .ptr();
+			});
+			break;
+		}
+		case Id::DECIMAL: {
+			const auto width = type.GetDecimalWidth();
+			if (width > 18) {
+				// The int128 tier's text form needs 128-bit division.
+				FillColumn(tuples, view, start, c, fallback);
+				break;
+			}
+			const auto scale = static_cast<uint8_t>(type.GetDecimalScale());
+			FillColumn(tuples, view, start, c, [&](cxx::idx_t i) {
+				const int64_t raw = width <= 4   ? view.Data<int16_t>()[i]
+				                    : width <= 9 ? view.Data<int32_t>()[i]
+				                                 : view.Data<int64_t>()[i];
+				return ctx.decimal_cls(DecimalText(raw, scale)).release().ptr();
+			});
+			break;
+		}
+		case Id::ENUM: {
+			// The dictionary becomes Python strings once; every row is then
+			// one new reference into it.
+			const auto size = type.GetEnumSize();
+			std::vector<nb::object> dictionary;
+			dictionary.reserve(size);
+			for (cxx::idx_t v = 0; v < size; v++) {
+				dictionary.push_back(nb::cast(type.GetEnumValue(v)));
+			}
+			FillColumn(tuples, view, start, c, [&](cxx::idx_t i) {
+				const auto code = size < 256     ? static_cast<cxx::idx_t>(view.Data<uint8_t>()[i])
+				                  : size < 65536 ? static_cast<cxx::idx_t>(view.Data<uint16_t>()[i])
+				                                 : static_cast<cxx::idx_t>(view.Data<uint32_t>()[i]);
+				return Py_NewRef(dictionary.at(code).ptr());
+			});
+			break;
+		}
+		default:
+			FillColumn(tuples, view, start, c, fallback);
+			break;
+		}
+	}
+	for (auto &row : tuples) {
+		out.append(row);
 	}
 }
 

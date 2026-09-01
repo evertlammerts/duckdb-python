@@ -227,12 +227,14 @@ private:
 		case Id::TIMESTAMP_TZ:
 			return 8;
 		case Id::INTERVAL:
+		case Id::HUGEINT:
+		case Id::UHUGEINT:
 			return 16;
 		case Id::DECIMAL: {
-			// The storage tier follows the width; the int128 tier has no
-			// numpy dtype and goes per-cell.
+			// The storage tier follows the width; the widest tier is int128,
+			// which the converter reads as two 64-bit limbs.
 			const auto width = type.GetDecimalWidth();
-			return width <= 4 ? 2 : width <= 9 ? 4 : width <= 18 ? 8 : 0;
+			return width <= 4 ? 2 : width <= 9 ? 4 : width <= 18 ? 8 : 16;
 		}
 		case Id::ENUM: {
 			const auto size = type.GetEnumSize();
@@ -408,8 +410,18 @@ public:
 			// Anything left over from the previous call comes first.
 			if (pending) {
 				const auto available = pending->GetRowCount();
-				while (offset < available && (count == 0 || nb::len(rows) < count)) {
-					rows.append(RowAt(*pending, offset++, ctx));
+				if (offset < available) {
+					auto want = available - offset;
+					if (count != 0) {
+						const auto remaining = count - nb::len(rows);
+						if (remaining < want) {
+							want = remaining;
+						}
+					}
+					AppendChunkRows(*pending, RowTypes(), offset, offset + want, ctx, rows);
+					// Advanced only on success, so a failed conversion can
+					// be retried from the same row.
+					offset += want;
 				}
 				if (offset < available) {
 					return rows; // count reached mid-chunk
@@ -544,18 +556,26 @@ private:
 		}
 	}
 
-	static nb::tuple RowAt(const cxx::DataChunk &chunk, cxx::idx_t row, ConversionContext &ctx) {
-		const auto columns = chunk.GetVectorCount();
-		nb::list values;
-		for (cxx::idx_t c = 0; c < columns; c++) {
-			values.append(ValueToPython(chunk.GetVector(c).GetValue(row), ctx));
+	/// The columns' logical types, cached: the row path dispatches on them
+	/// per chunk, and this facade keeps them on the schema, not the vectors.
+	const std::vector<cxx::LogicalType> &RowTypes() {
+		if (!row_types) {
+			const auto schema = Live()->GetSchema();
+			std::vector<cxx::LogicalType> types;
+			const auto count = schema.GetFieldCount();
+			types.reserve(count);
+			for (cxx::idx_t i = 0; i < count; i++) {
+				types.push_back(schema.GetFieldType(i));
+			}
+			row_types = std::move(types);
 		}
-		return nb::tuple(values);
+		return *row_types;
 	}
 
 	std::shared_ptr<DatabaseState> owner;
 	std::shared_ptr<ResultState> state;
 	std::optional<cxx::DataChunk> pending;
+	std::optional<std::vector<cxx::LogicalType>> row_types;
 	cxx::idx_t offset = 0;
 	bool finished = false;
 };

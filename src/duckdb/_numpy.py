@@ -38,6 +38,8 @@ _USMALLINT = 29
 _UINTEGER = 30
 _UBIGINT = 31
 _TS_TZ = 32
+_UHUGEINT = 49
+_HUGEINT = 50
 _ENUM = 104
 
 _NUMERIC_DTYPE = {
@@ -92,6 +94,21 @@ def _mask(np: Any, validity: Any, count: int) -> Any:
     return mask if mask.any() else None
 
 
+def _int128_to_float(np: Any, data: Any, mask: Any, *, signed: bool) -> Any:
+    """int128 limbs to float64: upper * 2^64 + lower, the same mapping the engine's own double cast uses."""
+    limbs = np.frombuffer(data, dtype=np.dtype([("lower", "<u8"), ("upper", "<i8" if signed else "<u8")]))
+    upper = limbs["upper"].astype("float64")
+    lower = limbs["lower"].astype("float64")
+    if mask is not None:
+        # NULL slots hold undefined limbs; zeroed so the arithmetic below
+        # never manufactures infinities.
+        upper = upper.copy()
+        lower = lower.copy()
+        upper[mask] = 0.0
+        lower[mask] = 0.0
+    return upper * 18446744073709551616.0 + lower
+
+
 def _convert_column(np: Any, view: _duckdb.ChunkView, column: int, count: int) -> tuple[Any, Any, str, Any]:
     """One chunk column as (values, mask, kind, meta).
 
@@ -140,16 +157,21 @@ def _convert_column(np: Any, view: _duckdb.ChunkView, column: int, count: int) -
         return total.view("timedelta64[us]"), mask, "timedelta", None
 
     if type_id == _DECIMAL:
-        data = view.data(column)
-        if data is None:
-            # The int128 storage tier has no numpy dtype: per-cell objects.
-            values = np.array([float(v) if v is not None else np.nan for v in view.values(column)], dtype="float64")
-        else:
-            element = len(data) // count if count else 8
-            ints = np.frombuffer(data, dtype=f"int{8 * element}")
-            values = ints.astype("float64") / (10.0 ** view.decimal_scale(column))
         # DECIMAL maps to float64 on this path, matching the old client;
         # exact Decimals come from the row egress.
+        data = view.data(column)
+        assert data is not None  # every decimal tier has a fixed-width layout
+        element = len(data) // count if count else 8
+        if element == 16:
+            ints = _int128_to_float(np, data, mask, signed=True)
+        else:
+            ints = np.frombuffer(data, dtype=f"int{8 * element}").astype("float64")
+        return ints / (10.0 ** view.decimal_scale(column)), mask, "numeric", None
+
+    if type_id in (_HUGEINT, _UHUGEINT):
+        # float64 like the old client: the vector layout is worth the
+        # precision loss past 2^53; exact ints come from the row egress.
+        values = _int128_to_float(np, view.data(column), mask, signed=type_id == _HUGEINT)
         return values, mask, "numeric", None
 
     if type_id == _ENUM:
@@ -183,7 +205,7 @@ def _empty_column(np: Any, type_id: int, enum_values: Any) -> tuple[Any, Any, st
         return np.empty(0, dtype=f"datetime64[{unit}]"), None, kind, unit
     if type_id == _INTERVAL:
         return np.empty(0, dtype="timedelta64[us]"), None, "timedelta", None
-    if type_id == _DECIMAL:
+    if type_id in (_DECIMAL, _HUGEINT, _UHUGEINT):
         return np.empty(0, dtype="float64"), None, "numeric", None
     if type_id == _ENUM:
         return np.empty(0, dtype="int64"), None, "enum", list(enum_values or [])

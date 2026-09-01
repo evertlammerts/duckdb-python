@@ -10,6 +10,8 @@
 
 #include <nanobind/nanobind.h>
 
+#include <vector>
+
 #include "duckdb_cpp.hpp"
 
 namespace duckdb_python {
@@ -44,6 +46,13 @@ struct ConversionContext {
 
 /// One DuckDB value as a Python object. NULL becomes None.
 nb::object ValueToPython(const duckdb::cxx::Value &value, ConversionContext &ctx);
+
+/// Rows [start, end) of a chunk appended to `out` as tuples, converted
+/// column-at-a-time from the flattened vector data. `types` carries the
+/// columns' logical types, which this facade keeps on the result's schema,
+/// not on the vectors.
+void AppendChunkRows(const duckdb::cxx::DataChunk &chunk, const std::vector<duckdb::cxx::LogicalType> &types,
+                     duckdb::cxx::idx_t start, duckdb::cxx::idx_t end, ConversionContext &ctx, nb::list &out);
 
 /// One Python object as a DuckDB value, for binding as a parameter.
 duckdb::cxx::Value PythonToValue(duckdb::cxx::Connection &connection, nb::handle object,
