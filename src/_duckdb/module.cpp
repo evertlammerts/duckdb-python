@@ -11,10 +11,13 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
+#include <algorithm>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -140,13 +143,59 @@ public:
 	/// Run the statement to completion and report how many rows it changed.
 	///
 	/// Side effects land when a result is drained, so a statement whose result
-	/// is dropped without draining never takes effect at all.
+	/// is dropped without draining never takes effect at all. Stepped here
+	/// rather than by the engine's blocking drain, so a Ctrl-C can land midway.
+	/// The GIL stays released for whole batches of stepping and is retaken a
+	/// few times a second for the signal check: this loop does no Python work,
+	/// and per-chunk GIL churn starves every other Python thread, the one
+	/// delivering the Ctrl-C included. The count of a changed-rows result
+	/// travels as a chunk the stepping consumes, so it is harvested here.
 	cxx::idx_t Drain() {
-		auto live = Live();
 		pending.reset();
-		finished = true;
-		nb::gil_scoped_release release;
-		return live->Drain();
+		cxx::idx_t changed = 0;
+		while (true) {
+			auto live = Live();
+			bool done = false;
+			bool cancelled = false;
+			{
+				nb::gil_scoped_release release;
+				const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds {20};
+				std::chrono::milliseconds nap {1};
+				while (std::chrono::steady_clock::now() < deadline) {
+					auto step = live->Step();
+					if (step.status == cxx::QueryResult::StepStatus::CHUNK) {
+						if (step.chunk.GetRowCount() > 0 &&
+						    live->GetResultType() == cxx::QueryResult::ResultType::CHANGED_ROWS) {
+							changed += static_cast<cxx::idx_t>(
+							    step.chunk.GetVector(0).GetValue(0).Get<int64_t>());
+						}
+						continue;
+					}
+					if (step.status == cxx::QueryResult::StepStatus::FINISHED) {
+						done = true;
+					} else if (step.status == cxx::QueryResult::StepStatus::CANCELLED) {
+						cancelled = true;
+					} else {
+						std::this_thread::sleep_for(nap);
+						nap = std::min(nap * 2, std::chrono::milliseconds {50});
+						continue;
+					}
+					break;
+				}
+			}
+			if (cancelled) {
+				nb::object module = nb::module_::import_("duckdb.exceptions");
+				PyErr_SetString(module.attr("InterruptError").ptr(), "query was cancelled");
+				throw nb::python_error();
+			}
+			if (PyErr_CheckSignals() != 0) {
+				throw nb::python_error();
+			}
+			if (done) {
+				finished = true;
+				return changed;
+			}
+		}
 	}
 
 	/// Release the result so the connection can run another query.
@@ -214,6 +263,8 @@ public:
 private:
 	/// Step until a chunk arrives or the result ends. False once it has ended.
 	bool Advance() {
+		// Grows 1ms to 50ms while the engine's workers hold the query.
+		std::chrono::milliseconds nap {1};
 		while (true) {
 			// StepResult carries a DataChunk and so is not default
 			// constructible; build it in place from the call.
@@ -226,6 +277,12 @@ private:
 				nb::gil_scoped_release release;
 				return live->Step();
 			}();
+			// Step does a bounded amount of work, so this is where a Ctrl-C
+			// lands; the caller's close tears the query down. A no-op off the
+			// main thread, where Python runs no signal handlers.
+			if (PyErr_CheckSignals() != 0) {
+				throw nb::python_error();
+			}
 			switch (step.status) {
 			case cxx::QueryResult::StepStatus::CHUNK:
 				pending = std::move(step.chunk);
@@ -240,8 +297,13 @@ private:
 				throw nb::python_error();
 			}
 			case cxx::QueryResult::StepStatus::WAITING: {
+				// A bounded nap instead of the engine's unbounded Wait, so the
+				// signal check above keeps running while the engine's own
+				// threads hold the query; Wait can otherwise park this thread
+				// until the next chunk, which for a big aggregate is the end.
 				nb::gil_scoped_release release;
-				live->Wait();
+				std::this_thread::sleep_for(nap);
+				nap = std::min(nap * 2, std::chrono::milliseconds {50});
 				break;
 			}
 			}

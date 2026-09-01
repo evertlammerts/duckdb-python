@@ -11,15 +11,16 @@ cursor here and no fetch family; those belong to PEP 249 and live in
 
 from __future__ import annotations
 
+import contextlib
 import threading
 import weakref
 from typing import TYPE_CHECKING, Any
 
 from . import _duckdb
-from .exceptions import InterfaceError
+from .exceptions import Error, InterfaceError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Iterable, Iterator, Mapping, Sequence
     from types import TracebackType
 
 __all__ = ["Connection", "connect"]
@@ -138,6 +139,35 @@ class Connection:
         # means the next statement could not start.
         with self._execute(sql, parameters) as result:
             return result.drain()
+
+    def interrupt(self) -> None:
+        """Cancel the query this connection is running.
+
+        Made to be called from another thread while a query runs; the query
+        fails with `InterruptError`. A Ctrl-C in the querying thread does
+        the same without this being called.
+        """
+        self._engine().interrupt()
+
+    @contextlib.contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Run the block as one transaction: COMMIT on success, ROLLBACK on any error.
+
+        Statements and plans inside the block run on this connection, so
+        they share the transaction. The engine refuses a nested BEGIN in
+        its own words.
+        """
+        self.run("BEGIN TRANSACTION")
+        try:
+            yield
+        except BaseException:
+            # A rollback that fails must not hide the error that caused it;
+            # a closed connection has discarded the transaction already.
+            with contextlib.suppress(Error):
+                self.run("ROLLBACK")
+            raise
+        else:
+            self.run("COMMIT")
 
     def create_macro(
         self,
