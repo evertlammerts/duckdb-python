@@ -545,3 +545,101 @@ class TestRelationVerbs:
         with pytest.raises(exceptions.ProgrammingError, match="not found"):
             relation.sum("v -- a trailing comment")
         assert relation.max("case when s = 'a--b' then 1 else 0 end").fetchall() == [(1,)]
+
+
+class TestDogfoodedVerbs:
+    # The writers ride the native COPY sinks; the expression face rides the
+    # native expression layer. These gate the translation boundaries.
+
+    def test_write_csv_roundtrips_through_the_native_sink(self, tmp_path: Path) -> None:
+        con = compat.connect()
+        con.run("CREATE TABLE w AS SELECT i AS a, 'v' || i AS b FROM range(3) t(i)")
+        target = str(tmp_path / "out.csv")
+        con.table("w").write_csv(target, sep="|", header=True)
+        back = con.table_function("read_csv", [target]).order("a").fetchall()
+        assert back == [(0, "v0"), (1, "v1"), (2, "v2")]
+
+    def test_write_parquet_roundtrips(self, tmp_path: Path) -> None:
+        con = compat.connect()
+        con.run("CREATE TABLE p AS SELECT i AS a FROM range(4) t(i)")
+        target = str(tmp_path / "out.parquet")
+        con.table("p").to_parquet(target, compression="zstd")
+        assert con.table_function("read_parquet", [target]).sum("a").fetchone() == (6,)
+
+    def test_update_with_expression_and_condition(self) -> None:
+        con = compat.connect()
+        con.run("CREATE TABLE u AS SELECT i AS a, 0 AS b FROM range(4) t(i)")
+        con.table("u").update({"b": compat.ColumnExpression("a") + 10}, condition=compat.SQLExpression("a >= 2"))
+        assert con.table("u").order("a").fetchall() == [(0, 0), (1, 0), (2, 12), (3, 13)]
+
+    def test_select_types_and_contains(self) -> None:
+        con = compat.connect()
+        relation = con.sql("SELECT 1::INTEGER AS i, 'x' AS s, 2.5::DOUBLE AS d")
+        assert relation is not None
+        assert relation.select_types(["INTEGER", "DOUBLE"]).columns == ["i", "d"]
+        assert "s" in relation
+        assert "nope" not in relation
+
+    def test_fetch_df_chunk_walks_the_held_result(self) -> None:
+        con = compat.connect()
+        con.execute("SELECT i FROM range(5000) t(i)")
+        first = con.fetch_df_chunk()
+        rest = con.fetch_df_chunk(10)
+        tail = con.fetch_df_chunk()
+        assert len(first) == 2048
+        assert len(first) + len(rest) == 5000
+        assert len(tail) == 0
+        assert list(tail.columns) == ["i"]
+
+
+class TestExpressionCompat:
+    def test_expression_join_condition(self) -> None:
+        con = compat.connect()
+        con.run("CREATE TABLE ea AS SELECT 1 AS x")
+        con.run("CREATE TABLE eb AS SELECT 1 AS x, 9 AS y")
+        expr = compat.ColumnExpression("ea.x") == compat.ColumnExpression("eb.x")
+        assert con.table("ea").join(con.table("eb"), expr).fetchall() == [(1, 1, 9)]
+
+    def test_strings_are_values_like_the_old_expression_objects(self) -> None:
+        con = compat.connect()
+        relation = con.sql("SELECT 'active' AS state")
+        assert relation is not None
+        keep = relation.filter(compat.ColumnExpression("state") == "active")
+        assert keep.fetchall() == [("active",)]
+
+    def test_case_expression_chains(self) -> None:
+        con = compat.connect()
+        relation = con.sql("SELECT unnest([1, 2, 3]) AS v")
+        assert relation is not None
+        expr = (
+            compat.CaseExpression(compat.ColumnExpression("v") == 1, "one")
+            .when(compat.ColumnExpression("v") == 2, "two")
+            .otherwise("many")
+            .alias("label")
+        )
+        assert relation.project(expr).fetchall() == [("one",), ("two",), ("many",)]
+
+    def test_star_exclude_and_membership(self) -> None:
+        con = compat.connect()
+        relation = con.sql("SELECT 1 AS a, 2 AS b, 3 AS c")
+        assert relation is not None
+        assert relation.project(compat.StarExpression(exclude=["b"])).columns == ["a", "c"]
+        picky = relation.filter(compat.ColumnExpression("a").isin(1, 5))
+        assert picky.fetchall() == [(1, 2, 3)]
+        assert relation.filter(compat.ColumnExpression("a").isnotnull()).fetchall() == [(1, 2, 3)]
+
+    def test_sort_takes_expressions(self) -> None:
+        con = compat.connect()
+        relation = con.sql("SELECT unnest([2, 1, 3]) AS v")
+        assert relation is not None
+        assert relation.sort(compat.ColumnExpression("v").desc()).fetchall() == [(3,), (2,), (1,)]
+
+    def test_function_and_coalesce(self) -> None:
+        con = compat.connect()
+        relation = con.sql("SELECT NULL::INTEGER AS a, 4 AS b")
+        assert relation is not None
+        picked = relation.project(
+            compat.CoalesceOperator(compat.ColumnExpression("a"), compat.ColumnExpression("b")).alias("c"),
+            compat.FunctionExpression("greatest", compat.ColumnExpression("b"), 7).alias("g"),
+        )
+        assert picked.fetchall() == [(4, 7)]

@@ -227,15 +227,12 @@ def _empty_column(np: Any, type_id: int, enum_values: Any) -> tuple[Any, Any, st
     return np.empty(0, dtype=object), None, "object", None
 
 
-def _result_to_columns(result: _duckdb.Result) -> list[tuple[str, Any, Any, str, Any]]:
-    """Consume a seam result into per-column (name, values, mask, kind, meta)."""
-    import numpy as np
-
-    schema = result.schema
-    types_meta = result.schema_types
-    names = [name for name, _ in schema]
+def _columns_from_views(
+    np: Any, names: list[str], views: Any, types_meta: list[tuple[int, int, Any]]
+) -> list[tuple[str, Any, Any, str, Any]]:
+    """Chunk views into per-column (name, values, mask, kind, meta)."""
     pieces: list[list[tuple[Any, Any, str, Any]]] = [[] for _ in names]
-    while (view := result.fetch_chunk_view()) is not None:
+    for view in views:
         count = view.row_count
         skip = view.row_offset
         for i in range(len(names)):
@@ -249,7 +246,6 @@ def _result_to_columns(result: _duckdb.Result) -> list[tuple[str, Any, Any, str,
                     if not mask.any():
                         mask = None
             pieces[i].append((values, mask, kind, meta))
-    result.close()
 
     out: list[tuple[str, Any, Any, str, Any]] = []
     for i, name in enumerate(names):
@@ -267,6 +263,21 @@ def _result_to_columns(result: _duckdb.Result) -> list[tuple[str, Any, Any, str,
             mask = None
         out.append((name, values, mask, kind, meta))
     return out
+
+
+def _all_views(result: _duckdb.Result) -> Any:
+    while (view := result.fetch_chunk_view()) is not None:
+        yield view
+
+
+def _result_to_columns(result: _duckdb.Result) -> list[tuple[str, Any, Any, str, Any]]:
+    """Consume a seam result into per-column (name, values, mask, kind, meta)."""
+    import numpy as np
+
+    names = [name for name, _ in result.schema]
+    columns = _columns_from_views(np, names, _all_views(result), result.schema_types)
+    result.close()
+    return columns
 
 
 def fetch_numpy(result: _duckdb.Result) -> dict[str, Any]:
@@ -294,11 +305,15 @@ def to_dataframe(result: _duckdb.Result, *, date_as_object: bool = False) -> pan
     ENUM becomes Categorical, TIMESTAMPTZ comes back UTC-aware, and DATE
     follows `date_as_object`.
     """
+    return _frame_from_columns(_result_to_columns(result), date_as_object=date_as_object)
+
+
+def _frame_from_columns(converted: list[tuple[str, Any, Any, str, Any]], *, date_as_object: bool) -> pandas.DataFrame:
     import numpy as np
     import pandas as pd
 
     columns: dict[str, Any] = {}
-    for name, values, mask, kind, meta in _result_to_columns(result):
+    for name, values, mask, kind, meta in converted:
         if kind == "numeric":
             if mask is not None:
                 series = pd.Series(values).astype(_NULLABLE_PD[values.dtype.name])  # type: ignore[call-overload]

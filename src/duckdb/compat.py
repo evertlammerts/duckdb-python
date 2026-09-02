@@ -58,9 +58,11 @@ from .exceptions import (
 from .expr import qualified, quote
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
 
     import pandas
+
+    from .expr import Expr, ThenBuilder
 
 __all__ = [
     "BINARY",
@@ -69,15 +71,22 @@ __all__ = [
     "ROWID",
     "STRING",
     "BinderException",
+    "CaseExpression",
     "CatalogException",
+    "CoalesceOperator",
+    "ColumnExpression",
     "CompatConnection",
     "CompatRelation",
     "ConnectionException",
+    "ConstantExpression",
     "ConversionException",
     "DataError",
     "DatabaseError",
+    "DefaultExpression",
     "Error",
+    "Expression",
     "FatalException",
+    "FunctionExpression",
     "HTTPException",
     "IOException",
     "IntegrityError",
@@ -93,9 +102,11 @@ __all__ = [
     "ParserException",
     "PermissionException",
     "ProgrammingError",
+    "SQLExpression",
     "SequenceException",
     "SerializationException",
     "StandardException",
+    "StarExpression",
     "SyntaxException",
     "TransactionException",
     "TypeMismatchException",
@@ -200,16 +211,11 @@ def _materialized_relation(
     side effects. The text is O(rows) and re-parsed per run, so this suits
     the small row sets RETURNING produces, not bulk results.
     """
-    from .expr import render_literal
+    from .expr import suspended_sinks
+    from .frame import values as frame_values
 
-    if rows:
-        casts = ", ".join(f"CAST(c{i} AS {kind}) AS {quote(name)}" for i, (name, kind) in enumerate(schema))
-        rendered = ", ".join("(" + ", ".join(render_literal(value) for value in row) + ")" for row in rows)
-        columns = ", ".join(f"c{i}" for i in range(len(schema)))
-        sql = f"SELECT {casts} FROM (VALUES {rendered}) AS materialized({columns})"
-    else:
-        empty = ", ".join(f"CAST(NULL AS {kind}) AS {quote(name)}" for name, kind in schema)
-        sql = f"SELECT {empty} WHERE FALSE"
+    with suspended_sinks():
+        sql = frame_values([tuple(row) for row in rows], builtins.list(schema)).render()
     return CompatRelation(connection, sql, kind="MATERIALIZED_RELATION")
 
 
@@ -219,6 +225,263 @@ def _quantile_parameter(q: object) -> str:
     if isinstance(q, (list, tuple)):
         return "[" + ", ".join(str(float(value)) for value in q) + "]"
     return str(float(cast("float", q)))
+
+
+def _operand(value: object) -> str:
+    """A verb operand as SQL text: expressions render, strings pass through."""
+    from .expr import Expr, suspended_sinks
+
+    if isinstance(value, CompatExpression):
+        value = value._value()
+    if isinstance(value, Expr):
+        with suspended_sinks():
+            return value.fragment()
+    return str(value)
+
+
+class CompatExpression:
+    """An old-client expression: the native expression layer under the old names.
+
+    Wraps a native `Expr` (or a CASE mid-build), so the semantics are the
+    native layer's: a bare value operand is a value, matching the old
+    Expression objects, whose divergent string-as-column reading lived in
+    the text verbs, not here.
+    """
+
+    __slots__ = ("_case", "_expr")
+
+    def __init__(self, expr: Expr | None = None, case: ThenBuilder | None = None) -> None:
+        self._expr = expr
+        self._case = case
+
+    def _value(self) -> Expr:
+        if self._expr is not None:
+            return self._expr
+        # A CASE nothing finished: unmatched rows are NULL, as the old
+        # client's implicit else was.
+        return cast("ThenBuilder", self._case).end()
+
+    def __repr__(self) -> str:
+        from .expr import suspended_sinks
+
+        with suspended_sinks():
+            return self._value().fragment()
+
+    def _binary(self, other: object, operate: Callable[[Expr, Expr], Expr]) -> CompatExpression:
+        return CompatExpression(operate(self._value(), _expression_operand(other)))
+
+    def __eq__(self, other: object) -> CompatExpression:  # type: ignore[override]
+        return self._binary(other, lambda a, b: a == b)
+
+    def __ne__(self, other: object) -> CompatExpression:  # type: ignore[override]
+        return self._binary(other, lambda a, b: a != b)
+
+    __hash__ = None  # type: ignore[assignment]
+
+    def __lt__(self, other: object) -> CompatExpression:
+        return self._binary(other, lambda a, b: a < b)
+
+    def __le__(self, other: object) -> CompatExpression:
+        return self._binary(other, lambda a, b: a <= b)
+
+    def __gt__(self, other: object) -> CompatExpression:
+        return self._binary(other, lambda a, b: a > b)
+
+    def __ge__(self, other: object) -> CompatExpression:
+        return self._binary(other, lambda a, b: a >= b)
+
+    def __add__(self, other: object) -> CompatExpression:
+        return self._binary(other, lambda a, b: a + b)
+
+    def __radd__(self, other: object) -> CompatExpression:
+        return CompatExpression(_expression_operand(other) + self._value())
+
+    def __sub__(self, other: object) -> CompatExpression:
+        return self._binary(other, lambda a, b: a - b)
+
+    def __rsub__(self, other: object) -> CompatExpression:
+        return CompatExpression(_expression_operand(other) - self._value())
+
+    def __mul__(self, other: object) -> CompatExpression:
+        return self._binary(other, lambda a, b: a * b)
+
+    def __rmul__(self, other: object) -> CompatExpression:
+        return CompatExpression(_expression_operand(other) * self._value())
+
+    def __truediv__(self, other: object) -> CompatExpression:
+        return self._binary(other, lambda a, b: a / b)
+
+    def __rtruediv__(self, other: object) -> CompatExpression:
+        return CompatExpression(_expression_operand(other) / self._value())
+
+    def __floordiv__(self, other: object) -> CompatExpression:
+        return self._binary(other, lambda a, b: a // b)
+
+    def __mod__(self, other: object) -> CompatExpression:
+        return self._binary(other, lambda a, b: a % b)
+
+    def __pow__(self, other: object) -> CompatExpression:
+        return self._binary(other, lambda a, b: a**b)
+
+    def __and__(self, other: object) -> CompatExpression:
+        return self._binary(other, lambda a, b: a & b)
+
+    def __or__(self, other: object) -> CompatExpression:
+        return self._binary(other, lambda a, b: a | b)
+
+    def __invert__(self) -> CompatExpression:
+        return CompatExpression(~self._value())
+
+    def __neg__(self) -> CompatExpression:
+        return CompatExpression(-self._value())
+
+    def alias(self, name: str) -> CompatExpression:
+        """The expression under an output name."""
+        return CompatExpression(self._value().alias(name))
+
+    def cast(self, type: object) -> CompatExpression:
+        """Cast to a SQL type, written as text."""
+        return CompatExpression(self._value().cast(str(type)))
+
+    def asc(self) -> CompatExpression:
+        """Ascending sort order."""
+        return CompatExpression(self._value().asc())
+
+    def desc(self) -> CompatExpression:
+        """Descending sort order."""
+        return CompatExpression(self._value().desc())
+
+    def nulls_first(self) -> CompatExpression:
+        """NULLs before values in a sort."""
+        return CompatExpression(self._value().nulls_first())
+
+    def nulls_last(self) -> CompatExpression:
+        """NULLs after values in a sort."""
+        return CompatExpression(self._value().nulls_last())
+
+    def between(self, lower: object, upper: object) -> CompatExpression:
+        """Inclusive range."""
+        return CompatExpression(self._value().between(_expression_operand(lower), _expression_operand(upper)))
+
+    def isin(self, *values: object) -> CompatExpression:
+        """Membership in the listed values."""
+        return CompatExpression(self._value().isin([_expression_operand(v) for v in values]))
+
+    def isnotin(self, *values: object) -> CompatExpression:
+        """Absence from the listed values."""
+        return ~self.isin(*values)
+
+    def isnull(self) -> CompatExpression:
+        """IS NULL, under its old name."""
+        return CompatExpression(self._value().is_null())
+
+    def isnotnull(self) -> CompatExpression:
+        """IS NOT NULL, under its old name."""
+        return CompatExpression(self._value().is_not_null())
+
+    def collate(self, collation: str) -> CompatExpression:
+        """The expression under a collation."""
+        from .expr import sql_expr, suspended_sinks
+
+        with suspended_sinks():
+            rendered = self._value().fragment()
+        return CompatExpression(sql_expr(f"({rendered} COLLATE {collation})"))
+
+    def when(self, condition: object, value: object) -> CompatExpression:
+        """Another CASE branch, the old two-argument form."""
+        if self._case is None:
+            message = "when() can only be chained on a CASE expression"
+            raise InvalidInputException(message)
+        return CompatExpression(case=self._case.when(_expression_operand(condition)).then(_expression_operand(value)))
+
+    def otherwise(self, value: object) -> CompatExpression:
+        """The CASE fallback, completing the expression."""
+        if self._case is None:
+            message = "otherwise() can only be chained on a CASE expression"
+            raise InvalidInputException(message)
+        return CompatExpression(self._case.otherwise(_expression_operand(value)))
+
+    def get_name(self) -> str:
+        """The rendered name, unquoted when it is one plain identifier."""
+        rendered = repr(self)
+        if rendered.startswith('"') and rendered.endswith('"') and '"' not in rendered[1:-1].replace('""', ""):
+            return rendered[1:-1].replace('""', '"')
+        return rendered
+
+    def show(self) -> None:
+        """Print the expression, as the old client's did."""
+        print(repr(self))
+
+
+def _expression_operand(value: object) -> Expr:
+    from .expr import Expr, lit
+
+    if isinstance(value, CompatExpression):
+        return value._value()
+    if isinstance(value, Expr):
+        return value
+    return lit(value)
+
+
+def ColumnExpression(*parts: str) -> CompatExpression:
+    """A column reference, dotted or given in parts."""
+    from .expr import col
+
+    return CompatExpression(col(".".join(parts)))
+
+
+def ConstantExpression(value: object) -> CompatExpression:
+    """A literal value."""
+    from .expr import lit
+
+    return CompatExpression(lit(value))
+
+
+def FunctionExpression(function_name: str, *args: object) -> CompatExpression:
+    """Any function by name."""
+    from .expr import fn
+
+    return CompatExpression(fn(function_name, *(_expression_operand(a) for a in args)))
+
+
+def CaseExpression(condition: object, value: object) -> CompatExpression:
+    """A CASE with its first branch; chain `.when(...)` and `.otherwise(...)`."""
+    from .expr import when as native_when
+
+    return CompatExpression(case=native_when(_expression_operand(condition)).then(_expression_operand(value)))
+
+
+def StarExpression(*, exclude: Iterable[object] | None = None) -> CompatExpression:
+    """`*`, optionally excluding columns by name or column expression."""
+    from .expr import star
+
+    names = [entry if isinstance(entry, str) else cast("CompatExpression", entry).get_name() for entry in exclude or []]
+    return CompatExpression(star(exclude=names))
+
+
+def SQLExpression(expression: str) -> CompatExpression:
+    """A raw SQL fragment, spliced unchanged."""
+    from .expr import sql_expr
+
+    return CompatExpression(sql_expr(expression))
+
+
+def DefaultExpression() -> CompatExpression:
+    """The DEFAULT marker, for inserts."""
+    from .expr import sql_expr
+
+    return CompatExpression(sql_expr("DEFAULT"))
+
+
+def CoalesceOperator(*args: object) -> CompatExpression:
+    """The first argument that is not NULL."""
+    from .expr import coalesce
+
+    return CompatExpression(coalesce(*(_expression_operand(a) for a in args)))
+
+
+#: The old class name, for isinstance checks in migrating code.
+Expression = CompatExpression
 
 
 class CompatRelation:
@@ -238,6 +501,7 @@ class CompatRelation:
         alias: str | None = None,
         table: str | None = None,
         kind: str | None = None,
+        name: str | None = None,
     ) -> None:
         #: Held strongly, so a relation keeps its cursor alive (old GH-315).
         self._connection = connection
@@ -247,6 +511,9 @@ class CompatRelation:
         #: table-relation verb, as it was on the old client.
         self._table = table
         self._kind = kind
+        #: A table or view relation joins under its own name, as it did on
+        #: the old client, so conditions may qualify columns with it.
+        self._name = name
         self._number = next(_relation_numbers)
         self._result: LiveResult | None = None
         self._closed = False
@@ -286,22 +553,25 @@ class CompatRelation:
     @property
     def alias(self) -> str:
         """The name this relation joins under, generated when none was set."""
-        return self._relation_alias or f"unnamed_relation_{self._number}"
+        return self._relation_alias or self._name or f"unnamed_relation_{self._number}"
 
     def set_alias(self, alias: str) -> CompatRelation:
         """The same relation under a name later fragments can reference."""
-        return CompatRelation(self._connection, self._sql, alias, table=self._table, kind=self._kind)
+        return CompatRelation(self._connection, self._sql, alias, table=self._table, kind=self._kind, name=self._name)
 
-    def filter(self, condition: str) -> CompatRelation:
-        """The rows where the SQL fragment holds."""
-        return CompatRelation(self._connection, f"SELECT * FROM {self._source()} WHERE {condition}")
+    def filter(self, condition: object) -> CompatRelation:
+        """The rows where the condition holds, given as SQL text or an expression."""
+        return CompatRelation(self._connection, f"SELECT * FROM {self._source()} WHERE {_operand(condition)}")
 
-    def project(self, columns: str) -> CompatRelation:
-        """The columns of the SQL select list."""
-        return CompatRelation(self._connection, f"SELECT {columns} FROM {self._source()}")
+    def project(self, *columns: object, groups: str = "") -> CompatRelation:
+        """The listed columns or expressions; `groups` was accepted and ignored there too."""
+        rendered = ", ".join(_operand(column) for column in columns)
+        return CompatRelation(self._connection, f"SELECT {rendered} FROM {self._source()}")
 
-    def aggregate(self, aggregates: str, groups: str = "") -> CompatRelation:
-        """Aggregate over the whole relation, or per group."""
+    def aggregate(self, aggregates: object, groups: str = "") -> CompatRelation:
+        """Aggregate over the whole relation, or per group; expressions welcome."""
+        if not isinstance(aggregates, str):
+            aggregates = ", ".join(_operand(a) for a in cast("Iterable[object]", aggregates))
         grouped = f" GROUP BY {groups}" if groups else ""
         return CompatRelation(self._connection, f"SELECT {aggregates} FROM {self._source()}{grouped}")
 
@@ -338,16 +608,26 @@ class CompatRelation:
             raise ConnectionException(_CLOSED_MESSAGE) from None
 
     def select(self, *args: object, groups: str = "") -> CompatRelation:
-        """The old alias of `project`; `groups` was accepted and ignored there too."""
-        return self.project(", ".join(str(argument) for argument in args))
+        """The old alias of `project`."""
+        return self.project(*args)
 
     def order(self, order_expr: str) -> CompatRelation:
         """The rows sorted by the SQL fragment."""
         return CompatRelation(self._connection, f"SELECT * FROM {self._source()} ORDER BY {order_expr}")
 
     def sort(self, *args: object) -> CompatRelation:
-        """The old alias family of `order`, taking the keys as arguments."""
-        return self.order(", ".join(str(argument) for argument in args))
+        """The old alias family of `order`, taking keys as text or expressions."""
+        from .expr import Expr, suspended_sinks
+
+        def key(value: object) -> str:
+            if isinstance(value, CompatExpression):
+                value = value._value()
+            if isinstance(value, Expr):
+                with suspended_sinks():
+                    return value.as_order()
+            return str(value)
+
+        return self.order(", ".join(key(argument) for argument in args))
 
     def limit(self, n: int, offset: int = 0) -> CompatRelation:
         """The first `n` rows, optionally past an offset."""
@@ -368,9 +648,164 @@ class CompatRelation:
         if other._connection._raw is None:
             raise ConnectionException(_CLOSED_MESSAGE)
 
-    def join(self, other_rel: CompatRelation, condition: str, how: str = "inner") -> CompatRelation:
+    def write_csv(
+        self,
+        file_name: str,
+        *,
+        sep: str | None = None,
+        na_rep: str | None = None,
+        header: bool | None = None,
+        quotechar: str | None = None,
+        escapechar: str | None = None,
+        date_format: str | None = None,
+        timestamp_format: str | None = None,
+        quoting: str | int | None = None,
+        encoding: str | None = None,
+        compression: str | None = None,
+        overwrite: bool | None = None,
+        per_thread_output: bool | None = None,
+        use_tmp_file: bool | None = None,
+        partition_by: builtins.list[str] | None = None,
+        write_partition_columns: bool | None = None,
+    ) -> None:
+        """Write the relation as CSV: the old pandas-flavored names over the native COPY sink."""
+        from .expr import star
+        from .frame import sql as frame_sql
+
+        options: dict[str, Any] = {
+            name: value
+            for name, value in (
+                ("sep", sep),
+                ("null", na_rep),
+                ("header", header),
+                ("quote", quotechar),
+                ("escape", escapechar),
+                ("dateformat", date_format),
+                ("timestampformat", timestamp_format),
+                ("encoding", encoding),
+                ("compression", compression),
+                ("overwrite", overwrite),
+                ("per_thread_output", per_thread_output),
+                ("use_tmp_file", use_tmp_file),
+                ("partition_by", partition_by),
+                ("write_partition_columns", write_partition_columns),
+            )
+            if value is not None
+        }
+        if quoting is not None:
+            # The old client accepted csv.QUOTE_ALL (and its name) alone.
+            if str(quoting).lower() not in ("1", "all", "force", "quote_all"):
+                message = f"Unsupported value for 'quoting': {quoting!r}"
+                raise InvalidInputException(message)
+            options["force_quote"] = star()
+        try:
+            frame_sql(self._sql).to_csv(self._connection, file_name, **options)
+        except InterfaceError:
+            raise ConnectionException(_CLOSED_MESSAGE) from None
+
+    to_csv = write_csv
+
+    def write_parquet(
+        self,
+        file_name: str,
+        *,
+        compression: str | None = None,
+        field_ids: object = None,
+        row_group_size_bytes: int | str | None = None,
+        row_group_size: int | None = None,
+        overwrite: bool | None = None,
+        per_thread_output: bool | None = None,
+        use_tmp_file: bool | None = None,
+        partition_by: builtins.list[str] | None = None,
+        write_partition_columns: bool | None = None,
+        append: bool | None = None,
+        filename_pattern: str | None = None,
+        file_size_bytes: str | int | None = None,
+    ) -> None:
+        """Write the relation as Parquet, over the native COPY sink."""
+        from .frame import sql as frame_sql
+
+        options: dict[str, Any] = {
+            name: value
+            for name, value in (
+                ("compression", compression),
+                ("field_ids", field_ids),
+                ("row_group_size_bytes", row_group_size_bytes),
+                ("row_group_size", row_group_size),
+                ("overwrite", overwrite),
+                ("per_thread_output", per_thread_output),
+                ("use_tmp_file", use_tmp_file),
+                ("partition_by", partition_by),
+                ("write_partition_columns", write_partition_columns),
+                ("append", append),
+                ("filename_pattern", filename_pattern),
+                ("file_size_bytes", file_size_bytes),
+            )
+            if value is not None
+        }
+        try:
+            frame_sql(self._sql).to_parquet(self._connection, file_name, **options)
+        except InterfaceError:
+            raise ConnectionException(_CLOSED_MESSAGE) from None
+
+    to_parquet = write_parquet
+
+    def update(self, set: Mapping[str, object], *, condition: object = None) -> None:
+        """UPDATE the table this relation reads; a table-relation verb, as it was."""
+        from .expr import render_literal
+
+        if self._table is None:
+            message = "'DuckDBPyRelation.update' can only be used on a table relation"
+            raise InvalidInputException(message)
+
+        def rendered(value: object) -> str:
+            from .expr import Expr
+
+            if isinstance(value, (CompatExpression, Expr)):
+                return _operand(value)
+            return render_literal(value)
+
+        assignments = ", ".join(f"{quote(name)} = {rendered(value)}" for name, value in set.items())
+        where = f" WHERE {_operand(condition)}" if condition is not None else ""
+        self._statement(f"UPDATE {qualified(self._table)} SET {assignments}{where}")
+
+    def select_types(self, types: Iterable[object]) -> CompatRelation:
+        """The columns whose type matches any of the given type texts."""
+        wanted = {str(entry).strip().upper() for entry in types}
+        keep = [name for name, kind in ((d[0], d[1]) for d in self.description) if str(kind).upper() in wanted]
+        return self.project(", ".join(quote(name) for name in keep))
+
+    select_dtypes = select_types
+
+    def __contains__(self, name: str) -> bool:
+        """Whether the relation has a column of this name."""
+        return name in self.columns
+
+    def fetch_df_chunk(self, vectors_per_chunk: int = 1, *, date_as_object: bool = False) -> pandas.DataFrame:
+        """Up to this many engine chunks of the held result as a DataFrame; empty at the end."""
+        import numpy as np
+
+        from ._numpy import _columns_from_views, _frame_from_columns
+
+        held = self._held()
+        result = held.result
+        names = [name for name, _ in result.schema]
+        views = []
+        try:
+            for _ in range(int(vectors_per_chunk)):
+                view = result.fetch_chunk_view()
+                if view is None:
+                    break
+                views.append(view)
+            meta = result.schema_types
+        except InterfaceError:
+            raise self._stale() from None
+        return _frame_from_columns(_columns_from_views(np, names, views, meta), date_as_object=date_as_object)
+
+    def join(self, other_rel: CompatRelation, condition: object, how: str = "inner") -> CompatRelation:
         """Join on a condition, or by the named columns when the condition is only names."""
         self._combine_guard(other_rel)
+        condition = _operand(condition)
         kind = _JOIN_KINDS.get(how.strip().lower())
         if kind is None:
             message = f"Unsupported join type {how}"
@@ -799,8 +1234,13 @@ class CompatRelation:
     # -- materialization and introspection
 
     def create(self, table_name: str) -> None:
-        """A new table holding this relation's rows, effective immediately."""
-        self._statement(f"CREATE TABLE {qualified(table_name)} AS {self._sql}")
+        """A new table holding this relation's rows, through the native verb."""
+        from .frame import sql as frame_sql
+
+        try:
+            frame_sql(self._sql).create(self._connection, table_name)
+        except InterfaceError:
+            raise ConnectionException(_CLOSED_MESSAGE) from None
 
     to_table = create
 
@@ -813,17 +1253,30 @@ class CompatRelation:
     to_view = create_view
 
     def insert_into(self, table_name: str) -> None:
-        """Append this relation's rows to a table by position."""
-        self._statement(f"INSERT INTO {qualified(table_name)} {self._sql}")
+        """Append this relation's rows to a table by position, through the native verb."""
+        from .frame import sql as frame_sql
+
+        try:
+            frame_sql(self._sql).insert_into(self._connection, table_name)
+        except InterfaceError:
+            raise ConnectionException(_CLOSED_MESSAGE) from None
 
     def insert(self, values: object) -> None:
         """Append one row of values; a table-relation verb, as it was."""
         if self._table is None:
             message = "'DuckDBPyRelation.insert' can only be used on a table relation"
             raise InvalidInputException(message)
-        row = builtins.list(cast("Iterable[Any]", values))
-        placeholders = ", ".join(f"${index + 1}" for index in range(len(row)))
-        self._statement(f"INSERT INTO {qualified(self._table)} VALUES ({placeholders})", row)
+        from .frame import values as frame_values
+
+        # The connection speaks before the row is inspected, as it did on
+        # the old client: the closed words beat an arity complaint.
+        if self._connection._raw is None:
+            raise ConnectionException(_CLOSED_MESSAGE)
+        row = tuple(cast("Iterable[Any]", values))
+        try:
+            frame_values([row], self.columns).insert_into(self._connection, self._table)
+        except InterfaceError:
+            raise ConnectionException(_CLOSED_MESSAGE) from None
 
     def describe(self) -> CompatRelation:
         """The old summary: count/mean/stddev/min/max/median per column, one row each."""
@@ -891,10 +1344,13 @@ class CompatRelation:
         return (len(self), len(self.columns))
 
     def __len__(self) -> int:
-        """The row count, by running a count over the text."""
-        with self._run(f"SELECT count(*) FROM {self._source()}") as result:
-            rows = result.fetch_all()
-        return int(rows[0][0])
+        """The row count, through the native count terminal."""
+        from .frame import sql as frame_sql
+
+        try:
+            return frame_sql(self._sql).count(self._connection)
+        except InterfaceError:
+            raise ConnectionException(_CLOSED_MESSAGE) from None
 
     def __getitem__(self, name: str) -> CompatRelation:
         """A single-column projection, as the old subscript was."""
@@ -1123,6 +1579,24 @@ class CompatConnection(Connection):
         finally:
             self._release_held()
 
+    def fetch_df_chunk(self, vectors_per_chunk: int = 1, *, date_as_object: bool = False) -> pandas.DataFrame:
+        """Up to this many engine chunks of the held result as a DataFrame; empty at the end."""
+        import numpy as np
+
+        from ._numpy import _columns_from_views, _frame_from_columns
+
+        result = self._require_held().result
+        names = [name for name, _ in result.schema]
+        views = []
+        for _ in range(int(vectors_per_chunk)):
+            view = result.fetch_chunk_view()
+            if view is None:
+                break
+            views.append(view)
+        return _frame_from_columns(
+            _columns_from_views(np, names, views, result.schema_types), date_as_object=date_as_object
+        )
+
     #: The old client's aliases for `fetchdf`.
     df = fetchdf
     fetch_df = fetchdf
@@ -1184,23 +1658,25 @@ class CompatConnection(Connection):
 
     def table(self, name: str) -> CompatRelation:
         """A relation reading a table by name."""
-        return CompatRelation(self, f"SELECT * FROM {qualified(name)}", table=name)
+        return CompatRelation(self, f"SELECT * FROM {qualified(name)}", table=name, name=name)
 
     def view(self, name: str) -> CompatRelation:
         """A relation reading a view by name."""
-        return CompatRelation(self, f"SELECT * FROM {qualified(name)}", kind="VIEW_RELATION")
+        return CompatRelation(self, f"SELECT * FROM {qualified(name)}", kind="VIEW_RELATION", name=name)
 
     def table_function(self, name: str, params: object = None) -> CompatRelation:
-        """A relation over a table function, its parameters rendered as literals."""
-        from .expr import render_literal
+        """A relation over a table function, through the native source."""
+        from .expr import suspended_sinks
+        from .frame import table_function as frame_table_function
 
         if params is None:
             params = []
         if not isinstance(params, builtins.list):
             message = "'params' has to be a list of parameters"
             raise InvalidInputException(message)
-        rendered = ", ".join(render_literal(value) for value in params)
-        return CompatRelation(self, f"SELECT * FROM {quote(name)}({rendered})")
+        with suspended_sinks():
+            sql = frame_table_function(name, *params).render()
+        return CompatRelation(self, sql)
 
     def begin(self) -> CompatConnection:
         """BEGIN TRANSACTION, as a method because the old connection had one."""
