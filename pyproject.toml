@@ -175,6 +175,7 @@ include = [
     "external/duckdb/DuckDBConfigVersion.cmake.in",
     "external/duckdb/scripts/*.cmake",
     "external/duckdb/scripts/null.txt",
+    "external/duckdb/scripts/ci/release_version.txt",
 
     # Third-party libraries and extensions
     "external/duckdb/third_party/**",
