@@ -10,7 +10,7 @@ functions, so importing duckdb never drags them in.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     import pandas
@@ -95,18 +95,33 @@ def _mask(np: Any, validity: Any, count: int) -> Any:
 
 
 def _int128_to_float(np: Any, data: Any, mask: Any, *, signed: bool) -> Any:
-    """int128 limbs to float64: upper * 2^64 + lower, the same mapping the engine's own double cast uses."""
-    limbs = np.frombuffer(data, dtype=np.dtype([("lower", "<u8"), ("upper", "<i8" if signed else "<u8")]))
-    upper = limbs["upper"].astype("float64")
-    lower = limbs["lower"].astype("float64")
+    """int128 limbs to float64 the way the engine's own double cast does: sign-magnitude.
+
+    Combining two's-complement limbs directly in float64 cancels
+    catastrophically for negatives: the low limb sits near 2^64, rounds to
+    exactly 2^64, and small negative values collapse to 0.0. The magnitude
+    is negated across the limbs in integer arithmetic first.
+    """
+    kind = "<i8" if signed else "<u8"
+    limbs = np.frombuffer(data, dtype=np.dtype([("lower", "<u8"), ("upper", kind)]))
+    lower = limbs["lower"]
+    upper = limbs["upper"]
     if mask is not None:
-        # NULL slots hold undefined limbs; zeroed so the arithmetic below
-        # never manufactures infinities.
-        upper = upper.copy()
-        lower = lower.copy()
-        upper[mask] = 0.0
-        lower[mask] = 0.0
-    return upper * 18446744073709551616.0 + lower
+        # NULL slots hold undefined limbs; zeroed so masked positions stay
+        # a deterministic 0.0.
+        lower = np.where(mask, np.uint64(0), lower)
+        upper = np.where(mask, 0, upper)
+    scale = 18446744073709551616.0
+    if not signed:
+        return upper.astype("float64") * scale + lower.astype("float64")
+    negative = upper < 0
+    upper_bits = upper.astype("uint64")
+    # Two's-complement negation across the limbs: ~x + 1, with the +1
+    # carrying into the upper limb exactly when the lower limb is zero.
+    magnitude_lower = np.where(negative, ~lower + np.uint64(1), lower)
+    magnitude_upper = np.where(negative, ~upper_bits + (lower == 0).astype("uint64"), upper_bits)
+    combined = magnitude_upper.astype("float64") * scale + magnitude_lower.astype("float64")
+    return np.where(negative, -combined, combined)
 
 
 def _convert_column(np: Any, view: _duckdb.ChunkView, column: int, count: int) -> tuple[Any, Any, str, Any]:
@@ -159,13 +174,13 @@ def _convert_column(np: Any, view: _duckdb.ChunkView, column: int, count: int) -
     if type_id == _DECIMAL:
         # DECIMAL maps to float64 on this path, matching the old client;
         # exact Decimals come from the row egress.
-        data = view.data(column)
-        assert data is not None  # every decimal tier has a fixed-width layout
-        element = len(data) // count if count else 8
+        # Every decimal tier has a fixed-width layout, so data is never None.
+        decimal_data = cast("memoryview", view.data(column))
+        element = len(decimal_data) // count if count else 8
         if element == 16:
-            ints = _int128_to_float(np, data, mask, signed=True)
+            ints = _int128_to_float(np, decimal_data, mask, signed=True)
         else:
-            ints = np.frombuffer(data, dtype=f"int{8 * element}").astype("float64")
+            ints = np.frombuffer(decimal_data, dtype=f"int{8 * element}").astype("float64")
         return ints / (10.0 ** view.decimal_scale(column)), mask, "numeric", None
 
     if type_id in (_HUGEINT, _UHUGEINT):

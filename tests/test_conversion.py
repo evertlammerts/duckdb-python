@@ -196,9 +196,36 @@ class TestBulkRowConversion:
         assert rows[9999] == (9999, [9999, None, 19998], {"k": "v9999"})
 
     def test_int128_values_are_exact_at_the_extremes(self, con: _duckdb.Connection) -> None:
+        # The UHUGEINT operand is a literal: an expression like 2 ^ 127 binds
+        # as DOUBLE and would test nothing.
         top = 170141183460469231731687303715884105727
-        rows = con.execute(f"SELECT {top}::HUGEINT AS h, (-{top})::HUGEINT AS n, (2::UHUGEINT ^ 127) AS u").fetch_all()
-        assert rows == [(top, -top, 2**127)]
+        umax = 340282366920938463463374607431768211455
+        rows = con.execute(f"SELECT {top}::HUGEINT AS h, (-{top})::HUGEINT AS n, {umax}::UHUGEINT AS u").fetch_all()
+        assert rows == [(top, -top, umax)]
+
+    def test_coarse_timestamp_infinities_clamp_like_the_others(self, con: _duckdb.Connection) -> None:
+        for unit in ("TIMESTAMP_S", "TIMESTAMP_MS", "TIMESTAMP_NS"):
+            rows = con.execute(f"SELECT 'infinity'::{unit} AS p, '-infinity'::{unit} AS n").fetch_all()
+            assert rows == [(datetime.datetime.max, datetime.datetime.min)], unit
+
+    def test_an_enum_wider_than_a_byte_uses_its_codes(self, con: _duckdb.Connection) -> None:
+        values = ", ".join(f"'value_{i}'" for i in range(300))
+        con.execute(f"CREATE TYPE wide_mood AS ENUM ({values})").drain()
+        rows = con.execute("SELECT unnest(['value_0', 'value_299', NULL]::wide_mood[]) AS m").fetch_all()
+        assert rows == [("value_0",), ("value_299",), (None,)]
+
+    def test_arrays_slice_correctly_through_a_partial_fetch(self, con: _duckdb.Connection) -> None:
+        result = con.execute("SELECT [i, i + 1, i + 2]::INTEGER[3] AS a FROM range(4) t(i)")
+        assert result.fetch_rows(1) == [([0, 1, 2],)]
+        assert result.fetch_rows(0) == [([1, 2, 3],), ([2, 3, 4],), ([3, 4, 5],)]
+
+    def test_filtered_nested_vectors_flatten_before_reading(self, con: _duckdb.Connection) -> None:
+        rows = con.execute(
+            "SELECT l, s FROM (SELECT [i, NULL, i * 2] AS l, {'k': 'v' || i} AS s, i FROM range(100) t(i)) "
+            "WHERE i % 7 = 0 ORDER BY i"
+        ).fetch_all()
+        assert len(rows) == 15
+        assert rows[1] == ([7, None, 14], {"k": "v7"})
 
     def test_wide_decimals_keep_value_and_scale(self, con: _duckdb.Connection) -> None:
         rows = con.execute(

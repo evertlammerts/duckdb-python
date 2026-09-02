@@ -40,6 +40,16 @@ constexpr int32_t DATE_NEGATIVE_INFINITY = -2147483647;
 constexpr int64_t TIMESTAMP_POSITIVE_INFINITY = 9223372036854775807LL;
 constexpr int64_t TIMESTAMP_NEGATIVE_INFINITY = -9223372036854775807LL;
 
+// The infinity sentinels live in the column's own unit; scaling first
+// overflows (UB) and destroys them, so they pass through unscaled and the
+// microsecond comparison in EpochDateTime still sees them.
+int64_t MicrosFromUnit(int64_t raw, int64_t multiply, int64_t divide) {
+	if (raw == TIMESTAMP_POSITIVE_INFINITY || raw == TIMESTAMP_NEGATIVE_INFINITY) {
+		return raw;
+	}
+	return multiply != 1 ? raw * multiply : raw / divide;
+}
+
 // Python's date stops at year 9999 while DuckDB reaches year 5874897, so a
 // value can be perfectly valid in the engine and unrepresentable here. Report
 // that as a conversion error rather than letting datetime raise OverflowError,
@@ -192,15 +202,15 @@ nb::object ValueToPython(const Value &value, ConversionContext &ctx) {
 	case LogicalTypeId::TIMESTAMP_TZ:
 		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_tz_t>().micros, true, [&value] { return value.ToText(); });
 	case LogicalTypeId::TIMESTAMP_SEC:
-		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_s_t>().seconds * 1'000'000, false, [&value] { return value.ToText(); });
+		return EpochDateTime(ctx, MicrosFromUnit(value.Get<duckdb::cxx::timestamp_s_t>().seconds, 1'000'000, 1), false, [&value] { return value.ToText(); });
 	case LogicalTypeId::TIMESTAMP_MS:
-		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_ms_t>().millis * 1'000, false, [&value] { return value.ToText(); });
+		return EpochDateTime(ctx, MicrosFromUnit(value.Get<duckdb::cxx::timestamp_ms_t>().millis, 1'000, 1), false, [&value] { return value.ToText(); });
 	case LogicalTypeId::TIMESTAMP_NS:
 		// Python datetime resolves to microseconds, so sub-microsecond digits
 		// are dropped. A deliberate divergence, not a rounding bug.
-		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_ns_t>().nanos / 1'000, false, [&value] { return value.ToText(); });
+		return EpochDateTime(ctx, MicrosFromUnit(value.Get<duckdb::cxx::timestamp_ns_t>().nanos, 1, 1'000), false, [&value] { return value.ToText(); });
 	case LogicalTypeId::TIMESTAMP_TZ_NS:
-		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_tz_ns_t>().nanos / 1'000, true, [&value] { return value.ToText(); });
+		return EpochDateTime(ctx, MicrosFromUnit(value.Get<duckdb::cxx::timestamp_tz_ns_t>().nanos, 1, 1'000), true, [&value] { return value.ToText(); });
 	case LogicalTypeId::TIME_NS:
 		// Same microsecond floor as TIMESTAMP_NS.
 		return TimeFromMicros(ctx, value.Get<duckdb::cxx::dtime_ns_t>().nanos / 1'000);
@@ -427,11 +437,12 @@ void EmitElements(cxx::Vector &vector, const LogicalType &type, cxx::idx_t first
 		typed([&](cxx::idx_t i) {
 			const auto raw = view.Data<int64_t>()[i];
 			// The sub-microsecond floor of the ns variants matches the
-			// per-value path.
-			const auto micros = id == Id::TIMESTAMP_SEC                               ? raw * 1'000'000
-			                    : id == Id::TIMESTAMP_MS                              ? raw * 1'000
-			                    : id == Id::TIMESTAMP_NS || id == Id::TIMESTAMP_TZ_NS ? raw / 1'000
-			                                                                          : raw;
+			// per-value path; sentinels pass through in their own unit.
+			const auto micros = id == Id::TIMESTAMP_SEC ? MicrosFromUnit(raw, 1'000'000, 1)
+			                    : id == Id::TIMESTAMP_MS ? MicrosFromUnit(raw, 1'000, 1)
+			                    : id == Id::TIMESTAMP_NS || id == Id::TIMESTAMP_TZ_NS
+			                        ? MicrosFromUnit(raw, 1, 1'000)
+			                        : raw;
 			return EpochDateTime(ctx, micros, utc, [&] { return vector.GetValue(i).ToText(); }).release().ptr();
 		});
 		break;

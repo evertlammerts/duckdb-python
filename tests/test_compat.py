@@ -385,3 +385,132 @@ class TestParityReport:
         assert recorder.outcomes["passed"] == 1
         assert recorder.outcomes["behavior"] == 1
         assert any("teardown boom" in signature for signature in recorder.signatures)
+
+
+class TestStatementDispatch:
+    # sql() classifies by the parsed statement's own type, never by text.
+
+    def test_a_cte_fronted_insert_executes_once(self) -> None:
+        con = compat.connect()
+        con.run("CREATE TABLE t (v INTEGER)")
+        assert con.sql("WITH x AS (SELECT 42 AS v) INSERT INTO t SELECT * FROM x") is None
+        assert con.run("SELECT count(*) FROM t") == 0 or duckdb.table("t").count(con) == 1
+
+    def test_returning_inside_a_string_literal_is_data(self) -> None:
+        con = compat.connect()
+        con.run("CREATE TABLE s (x VARCHAR)")
+        con.run("INSERT INTO s VALUES ('old')")
+        assert con.sql("UPDATE s SET x = 'x returning y'") is None
+        assert duckdb.table("s").rows(con) == [("x returning y",)]
+
+    def test_returning_dml_materializes_and_runs_once(self) -> None:
+        con = compat.connect()
+        con.run("CREATE TABLE t (v INTEGER)")
+        relation = con.sql("INSERT INTO t VALUES (5) RETURNING v")
+        assert relation is not None
+        assert relation.type == "MATERIALIZED_RELATION"
+        assert relation.fetchall() == [(5,)]
+        assert relation.fetchall() == [(5,)]
+        assert duckdb.table("t").count(con) == 1
+        # Verbs compose over the materialized rows, as they did on the old
+        # client's result-backed relations.
+        assert relation.filter("v > 1").fetchall() == [(5,)]
+
+    def test_selects_stay_lazy_and_leave_no_result_open(self) -> None:
+        con = compat.connect()
+        relation = con.sql("SELECT 1 AS a")
+        assert relation is not None
+        # A second statement runs immediately: sql() closed its
+        # classification result before returning.
+        assert con.run("SELECT 1") == 0
+
+    def test_ddl_and_transaction_control_run_on_the_spot(self) -> None:
+        con = compat.connect()
+        assert con.sql("CREATE TABLE u (x INTEGER)") is None
+        assert con.sql("BEGIN") is None
+        con.run("INSERT INTO u VALUES (1)")
+        assert con.sql("ROLLBACK") is None
+        assert duckdb.table("u").count(con) == 0
+
+    def test_executemany_refuses_an_empty_set_in_the_old_words(self) -> None:
+        con = compat.connect()
+        con.run("CREATE TABLE t (v INTEGER)")
+        with pytest.raises(exceptions.InvalidInputError, match="non-empty list of parameter sets"):
+            con.executemany("INSERT INTO t VALUES (?)", [])
+
+
+class TestRelationVerbs:
+    # One gating behavior per verb family; the adopted suite measures, this gates.
+
+    def test_aggregate_shorthand_with_groups_and_projection(self) -> None:
+        con = compat.connect()
+        con.run("CREATE TABLE a AS SELECT unnest([1, 1, 2]) AS g, unnest([10, 20, 30]) AS v")
+        rows = con.table("a").sum("v", groups="g", projected_columns="g").order("g").fetchall()
+        assert rows == [(1, 30), (2, 30)]
+
+    def test_window_shorthand(self) -> None:
+        con = compat.connect()
+        con.run("CREATE TABLE w AS SELECT unnest([1, 1, 2]) AS g, unnest([3, 1, 2]) AS v")
+        rows = con.table("w").row_number("over (partition by g order by v)", "g, v").order("g, v").fetchall()
+        assert rows == [(1, 1, 1), (1, 3, 2), (2, 2, 1)]
+
+    def test_join_using_on_and_literal_condition(self) -> None:
+        con = compat.connect()
+        con.run("CREATE TABLE l AS SELECT 1 AS i")
+        con.run("CREATE TABLE r AS SELECT 1 AS i, 2 AS j")
+        using = con.table("l").join(con.table("r").set_alias("rr"), "i").fetchall()
+        assert using == [(1, 2)]
+        on = con.table("l").set_alias("a").join(con.table("r").set_alias("b"), "a.i = b.i").fetchall()
+        assert on == [(1, 1, 2)]
+        # A boolean literal is a condition, never a USING column.
+        cross_ish = con.table("l").set_alias("c").join(con.table("r").set_alias("d"), "true").fetchall()
+        assert cross_ish == [(1, 1, 2)]
+
+    def test_union_keeps_duplicates(self) -> None:
+        con = compat.connect()
+        one = con.sql("SELECT 1 AS v")
+        assert one is not None
+        assert sorted(one.union(one.set_alias("again")).fetchall()) == [(1,), (1,)]
+
+    def test_describe_shape(self) -> None:
+        con = compat.connect()
+        con.run("CREATE TABLE d AS SELECT 1 AS n, 'x' AS s")
+        rows = con.table("d").describe().fetchall()
+        assert [row[0] for row in rows] == ["count", "mean", "stddev", "min", "max", "median"]
+        assert rows[0][1] == 1.0
+        assert rows[0][2] == "1"
+
+    def test_create_insert_into_and_insert(self) -> None:
+        con = compat.connect()
+        source = con.sql("SELECT 7 AS v")
+        assert source is not None
+        source.create("made")
+        source.insert_into("made")
+        con.table("made").insert([8])
+        assert sorted(con.table("made").fetchall()) == [(7,), (7,), (8,)]
+
+    def test_explain_analyze_differs_from_standard(self) -> None:
+        con = compat.connect()
+        relation = con.sql("SELECT sum(range) FROM range(100)")
+        assert relation is not None
+        standard = relation.explain()
+        analyzed = relation.explain(type="analyze")
+        assert standard != analyzed
+
+    def test_view_relations_say_so(self) -> None:
+        con = compat.connect()
+        con.run("CREATE TABLE vt AS SELECT 1 AS v")
+        con.run("CREATE VIEW vv AS SELECT * FROM vt")
+        assert con.view("vv").type == "VIEW_RELATION"
+        assert con.table("vt").type == "TABLE_RELATION"
+
+    def test_comments_in_aggregate_operands_fail_loudly(self) -> None:
+        # A recorded divergence: the old parser round-trip discarded the
+        # comment silently; here the operand quote-falls-back and the bind
+        # names it. Literals containing -- are data and keep working.
+        con = compat.connect()
+        relation = con.sql("SELECT 'a--b' AS s, 1 AS v")
+        assert relation is not None
+        with pytest.raises(exceptions.ProgrammingError, match="not found"):
+            relation.sum("v -- a trailing comment")
+        assert relation.max("case when s = 'a--b' then 1 else 0 end").fetchall() == [(1,)]

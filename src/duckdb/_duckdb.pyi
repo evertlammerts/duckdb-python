@@ -51,6 +51,15 @@ class Result:
     def result_type(self) -> str:
         """One of "rows", "changed_rows", or "nothing"."""
 
+    @property
+    def statement_type(self) -> str:
+        """The kind of statement this result came from, e.g. "select" or "insert".
+
+        A statement that expands into a group of engine statements (the
+        PIVOT family) cannot answer before its result is stepped and raises
+        InvalidInputError instead.
+        """
+
     def close(self) -> None:
         """Release the result so the connection can run another query."""
 

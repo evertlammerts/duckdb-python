@@ -230,3 +230,37 @@ class TestChunkViewContract:
         assert view.row_offset == 2
         assert view.row_count == 6
         result.close()
+
+
+class TestInt128Egress:
+    def test_hugeint_maps_to_float64_like_the_engine_cast(self, con: duckdb.Connection) -> None:
+        top = 170141183460469231731687303715884105727
+        out = duckdb.sql(f"SELECT (-1)::HUGEINT AS m, (-1000000)::HUGEINT AS n, {top}::HUGEINT AS p").to_numpy(con)
+        engine = duckdb.sql(f"SELECT (-1)::HUGEINT::DOUBLE, (-1000000)::HUGEINT::DOUBLE, {top}::HUGEINT::DOUBLE").rows(
+            con
+        )[0]
+        assert out["m"].dtype == np.dtype("float64")
+        assert (out["m"][0], out["n"][0], out["p"][0]) == engine
+
+    def test_negative_hugeint_extreme_matches_the_engine_cast(self, con: duckdb.Connection) -> None:
+        top = 170141183460469231731687303715884105727
+        out = duckdb.sql(f"SELECT (-{top})::HUGEINT AS n").to_numpy(con)
+        engine = duckdb.sql(f"SELECT (-{top})::HUGEINT::DOUBLE").rows(con)[0][0]
+        assert out["n"][0] == engine
+
+    def test_uhugeint_maps_to_float64(self, con: duckdb.Connection) -> None:
+        umax = 340282366920938463463374607431768211455
+        out = duckdb.sql(f"SELECT {umax}::UHUGEINT AS u").to_numpy(con)
+        assert out["u"][0] == float(umax)
+
+    def test_null_hugeints_come_back_masked(self, con: duckdb.Connection) -> None:
+        out = duckdb.sql("SELECT unnest([(-5)::HUGEINT, NULL, 7::HUGEINT]) AS h").to_numpy(con)
+        assert isinstance(out["h"], np.ma.MaskedArray)
+        assert out["h"].mask.tolist() == [False, True, False]
+        assert out["h"].data[0] == -5.0
+        assert out["h"].data[2] == 7.0
+
+    def test_negative_wide_decimals_are_exact(self, con: duckdb.Connection) -> None:
+        out = duckdb.sql("SELECT (-2.5)::DECIMAL(38,6) AS a, (-0.000001)::DECIMAL(38,6) AS b").to_numpy(con)
+        assert out["a"][0] == -2.5
+        assert out["b"][0] == -0.000001

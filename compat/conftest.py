@@ -29,6 +29,9 @@ DIVERGENT = {
     "test_fetch_dict_key_not_hashable[VARCHAR[]]": (
         "a MAP with unhashable keys comes back as (key, value) pairs, not the old key/value dict of lists"
     ),
+    "test_comment_is_harmless": (
+        "a -- comment in a shorthand aggregate operand is not stripped; it fails loudly as an unknown column"
+    ),
 }
 
 

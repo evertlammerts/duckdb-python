@@ -71,6 +71,11 @@
   identifier, as the old client's fallback did; an operand like `a b`
   that the old parser accidentally read as `a AS b` (and then failed on)
   is quoted here instead and works.
+- A `--` comment inside a shorthand aggregate operand is not stripped:
+  the old client's parser round-trip silently discarded it, here the
+  operand falls back to its quoted form and fails loudly as an unknown
+  column. Block comments and `--` inside string literals are unaffected.
+  (xfail: `test_comment_is_harmless`)
 
 ## Pending
 

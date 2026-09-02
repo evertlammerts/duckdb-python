@@ -306,10 +306,80 @@ public:
 		}
 	}
 
+	/// The kind of SQL statement this result came from, as lowercase text.
+	std::string StatementTypeName() {
+		using Kind = cxx::QueryResult::StatementType;
+		switch (Live()->GetStatementType()) {
+		case Kind::SELECT:
+			return "select";
+		case Kind::INSERT:
+			return "insert";
+		case Kind::UPDATE:
+			return "update";
+		case Kind::CREATE:
+			return "create";
+		case Kind::DELETE:
+			return "delete";
+		case Kind::PREPARE:
+			return "prepare";
+		case Kind::EXECUTE:
+			return "execute";
+		case Kind::ALTER:
+			return "alter";
+		case Kind::TRANSACTION:
+			return "transaction";
+		case Kind::COPY:
+			return "copy";
+		case Kind::ANALYZE:
+			return "analyze";
+		case Kind::VARIABLE_SET:
+			return "variable_set";
+		case Kind::CREATE_FUNC:
+			return "create_func";
+		case Kind::EXPLAIN:
+			return "explain";
+		case Kind::DROP:
+			return "drop";
+		case Kind::EXPORT:
+			return "export";
+		case Kind::PRAGMA:
+			return "pragma";
+		case Kind::VACUUM:
+			return "vacuum";
+		case Kind::CALL:
+			return "call";
+		case Kind::SET:
+			return "set";
+		case Kind::LOAD:
+			return "load";
+		case Kind::RELATION:
+			return "relation";
+		case Kind::EXTENSION:
+			return "extension";
+		case Kind::LOGICAL_PLAN:
+			return "logical_plan";
+		case Kind::ATTACH:
+			return "attach";
+		case Kind::DETACH:
+			return "detach";
+		case Kind::MULTI:
+			return "multi";
+		case Kind::COPY_DATABASE:
+			return "copy_database";
+		case Kind::UPDATE_EXTENSIONS:
+			return "update_extensions";
+		case Kind::MERGE_INTO:
+			return "merge_into";
+		default:
+			return "unknown";
+		}
+	}
+
 	/// Run the statement to completion and report how many rows it changed.
 	///
 	/// Side effects land when a result is drained, so a statement whose result
-	/// is dropped without draining never takes effect at all. Stepped here
+	/// is dropped without draining never takes effect at all -- except one
+	/// carrying RETURNING, which the engine applies at execute. Stepped here
 	/// rather than by the engine's blocking drain, so a Ctrl-C can land midway.
 	/// The GIL stays released for whole batches of stepping and is retaken a
 	/// few times a second for the signal check: this loop does no Python work,
@@ -743,7 +813,8 @@ NB_MODULE(_duckdb, m) {
 	         [state](Result &self, size_t count) { return self.FetchRows(state->conversion, count); },
 	         nb::arg("count"))
 	    .def("fetch_chunk_view", &Result::FetchChunkView)
-	    .def_prop_ro("schema_types", &Result::SchemaTypes);
+	    .def_prop_ro("schema_types", &Result::SchemaTypes)
+	    .def_prop_ro("statement_type", &Result::StatementTypeName);
 
 	nb::class_<ChunkView>(m, "ChunkView")
 	    .def_prop_ro("row_count", &ChunkView::RowCount)

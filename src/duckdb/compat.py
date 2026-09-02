@@ -181,33 +181,35 @@ _JOIN_KINDS = {
 #: Distinct default aliases per relation, so unaliased relations can join.
 _relation_numbers = itertools.count()
 
-#: First keywords of statements that produce rows: those become relations,
-#: anything else `sql()` and `query()` ran on the spot, as the old client did.
-_ROWSY = frozenset(
-    {
-        "SELECT",
-        "WITH",
-        "FROM",
-        "VALUES",
-        "TABLE",
-        "PIVOT",
-        "UNPIVOT",
-        "SHOW",
-        "DESCRIBE",
-        "SUMMARIZE",
-        "EXPLAIN",
-        "CALL",
-    }
-)
+#: Statement types the parser certifies as pure queries: those stay lazy
+#: relations, re-running per bare fetchall as the old client's did. Anything
+#: else executes exactly once at sql() time.
+_LAZY_STATEMENTS = frozenset({"select", "explain", "relation", "logical_plan"})
 
 _CLOSED_MESSAGE = "Connection Error: Connection has already been closed"
 
 
-def _produces_rows(sql: str) -> bool:
-    words = sql.lstrip("( \t\n").upper().split()
-    if not words:
-        return False
-    return words[0] in _ROWSY or "RETURNING" in words
+def _materialized_relation(
+    connection: CompatConnection, schema: builtins.list[tuple[str, str]], rows: builtins.list[tuple[Any, ...]]
+) -> CompatRelation:
+    """Rows already produced, carried as a typed VALUES scan.
+
+    The old client wrapped a RETURNING result as a materialized relation:
+    fetches re-read the same rows and verbs compose on top. A VALUES scan
+    of the rendered values gives both for free, since re-running it has no
+    side effects.
+    """
+    from .expr import render_literal
+
+    if rows:
+        casts = ", ".join(f"CAST(c{i} AS {kind}) AS {quote(name)}" for i, (name, kind) in enumerate(schema))
+        rendered = ", ".join("(" + ", ".join(render_literal(value) for value in row) + ")" for row in rows)
+        columns = ", ".join(f"c{i}" for i in range(len(schema)))
+        sql = f"SELECT {casts} FROM (VALUES {rendered}) AS materialized({columns})"
+    else:
+        empty = ", ".join(f"CAST(NULL AS {kind}) AS {quote(name)}" for name, kind in schema)
+        sql = f"SELECT {empty} WHERE FALSE"
+    return CompatRelation(connection, sql, kind="MATERIALIZED_RELATION")
 
 
 def _quantile_parameter(q: object) -> str:
@@ -229,7 +231,12 @@ class CompatRelation:
     """
 
     def __init__(
-        self, connection: CompatConnection, sql: str, alias: str | None = None, table: str | None = None
+        self,
+        connection: CompatConnection,
+        sql: str,
+        alias: str | None = None,
+        table: str | None = None,
+        kind: str | None = None,
     ) -> None:
         #: Held strongly, so a relation keeps its cursor alive (old GH-315).
         self._connection = connection
@@ -238,6 +245,7 @@ class CompatRelation:
         #: The table this relation reads whole, when it does: insert() is a
         #: table-relation verb, as it was on the old client.
         self._table = table
+        self._kind = kind
         self._number = next(_relation_numbers)
         self._result: LiveResult | None = None
         self._closed = False
@@ -281,7 +289,7 @@ class CompatRelation:
 
     def set_alias(self, alias: str) -> CompatRelation:
         """The same relation under a name later fragments can reference."""
-        return CompatRelation(self._connection, self._sql, alias, table=self._table)
+        return CompatRelation(self._connection, self._sql, alias, table=self._table, kind=self._kind)
 
     def filter(self, condition: str) -> CompatRelation:
         """The rows where the SQL fragment holds."""
@@ -305,12 +313,7 @@ class CompatRelation:
         """
         with self._run(f"CREATE OR REPLACE TEMPORARY VIEW {quote(virtual_table_name)} AS {self._sql}") as result:
             result.drain()
-        cleaned = sql.strip().rstrip(";")
-        if _produces_rows(cleaned):
-            return CompatRelation(self._connection, cleaned)
-        with self._run(cleaned) as result:
-            result.drain()
-        return None
+        return self._connection.sql(sql)
 
     def _run(self, sql: str | None = None) -> LiveResult:
         try:
@@ -377,7 +380,17 @@ class CompatRelation:
                 "relations using 'rel = rel.set_alias(<new alias>)'"
             )
             raise InvalidInputException(message)
-        clause = f"USING ({condition})" if _IDENTIFIER_LIST.fullmatch(condition) else f"ON ({condition})"
+        clause = f"ON ({condition})"
+        if _IDENTIFIER_LIST.fullmatch(condition):
+            # Name-shaped conditions join USING, but only when they really
+            # are column references: a literal like "true" binds on its own
+            # and belongs in ON, the way the old parser decided.
+            try:
+                self._connection._engine().bind(f"SELECT {condition}")
+            except ProgrammingError:
+                clause = f"USING ({condition})"
+            except Error:
+                pass
         return CompatRelation(
             self._connection, f"SELECT * FROM {self._named_source()} {kind} {other_rel._named_source()} {clause}"
         )
@@ -435,9 +448,6 @@ class CompatRelation:
         marker = groups.lower().find(" order by ")
         if marker != -1:
             groups = groups[:marker]
-        # Comments vanish in parsing on the old client; stripped here so the
-        # oracle and the rendered call see the expression alone.
-        expression = re.sub(r"--[^\n]*|/\*.*?\*/", "", expression, flags=re.S).strip()
         inputs = [piece.strip() for piece in expression.split(",") if piece.strip()] if expression else []
         if not inputs and function.casefold() == "count":
             inputs = ["*"]
@@ -524,7 +534,7 @@ class CompatRelation:
         if min is not None and (not isinstance(min, int) or not isinstance(max, int)):
             message = "min and max must be of type int"
             raise InvalidTypeException(message)
-        parameter = "" if min is None else f"{min},{max}"
+        parameter = "" if min is None or max is None else f"{int(min)},{int(max)}"
         return self._aggregate_call("bitstring_agg", expression, groups, window_spec, projected_columns, parameter)
 
     def bool_and(
@@ -839,8 +849,9 @@ class CompatRelation:
         return CompatRelation(self._connection, f"SELECT {', '.join(outer)} FROM {source}")
 
     def explain(self, type: str = "standard") -> str:
-        """The engine's plan for this relation, as text."""
-        with self._run(f"EXPLAIN {self._sql}") as result:
+        """The engine's plan for this relation, as text; "analyze" runs it."""
+        keyword = "EXPLAIN ANALYZE" if "analyze" in str(type).lower() else "EXPLAIN"
+        with self._run(f"{keyword} {self._sql}") as result:
             rows = result.fetch_all()
         return "\n".join(str(value) for _, value in rows)
 
@@ -856,8 +867,10 @@ class CompatRelation:
 
     @property
     def type(self) -> str:
-        """TABLE_RELATION for a whole-table relation, QUERY_RELATION otherwise."""
-        return "TABLE_RELATION" if self._table else "QUERY_RELATION"
+        """The old relation kind: TABLE, VIEW, MATERIALIZED or QUERY."""
+        if self._table:
+            return "TABLE_RELATION"
+        return self._kind or "QUERY_RELATION"
 
     @property
     def columns(self) -> builtins.list[str]:
@@ -993,6 +1006,7 @@ class CompatRelation:
             with self._run() as result:
                 result.fetch_rows(1)
                 schema = result.result.schema
+            self._schema = schema
         return [(column, type_text, None, None, None, None, None) for column, type_text in schema]
 
     def _close_result(self) -> None:
@@ -1054,7 +1068,12 @@ class CompatConnection(Connection):
 
     def executemany(self, sql: str, seq_of_parameters: Iterable[Sequence[Any] | Mapping[Any, Any]]) -> CompatConnection:
         """Run one statement once per parameter set. Returns self."""
-        for parameters in seq_of_parameters:
+        sets = builtins.list(seq_of_parameters)
+        if not sets:
+            message = "executemany requires a non-empty list of parameter sets to be provided"
+            raise InvalidInputException(message)
+        self._release_held()
+        for parameters in sets:
             self.execute(sql, parameters)
         return self
 
@@ -1113,15 +1132,38 @@ class CompatConnection(Connection):
         return -1
 
     def sql(self, query: str) -> CompatRelation | None:
-        """A lazy relation over row-producing SQL; anything else runs on the spot.
+        """A lazy relation for a query; anything else runs on the spot, the old way.
 
-        The old client's `sql()` executed a statement without rows right
-        away and returned None; only queries came back as relations.
+        The statement classifies itself: it is executed (which prepares but
+        runs nothing), asked what it is, and the classification result is
+        closed before this returns, so no result is ever left open on the
+        connection. A parser-certified query comes back lazy; a statement
+        producing rows any other way (RETURNING above all) runs exactly
+        once, its rows carried in a materialized relation; the rest is
+        drained on the spot and returns None.
         """
         cleaned = query.strip().rstrip(";")
-        if _produces_rows(cleaned):
+        try:
+            probe = self._execute(cleaned)
+        except InterfaceError:
+            raise ConnectionException(_CLOSED_MESSAGE) from None
+        materialized: tuple[Any, Any] | None = None
+        with probe:
+            try:
+                statement = probe.result.statement_type
+            except InvalidInputError:
+                # Only the multi-expanding statements (the PIVOT family)
+                # cannot answer before stepping, and those are queries.
+                statement = "select"
+            if statement not in _LAZY_STATEMENTS:
+                if probe.result.result_type == "rows":
+                    materialized = (probe.result.schema, probe.fetch_all())
+                else:
+                    probe.drain()
+        if materialized is not None:
+            return _materialized_relation(self, materialized[0], materialized[1])
+        if statement in _LAZY_STATEMENTS:
             return CompatRelation(self, cleaned)
-        self.run(cleaned)
         return None
 
     def query(self, query: str) -> CompatRelation | None:
@@ -1134,7 +1176,7 @@ class CompatConnection(Connection):
 
     def view(self, name: str) -> CompatRelation:
         """A relation reading a view by name."""
-        return CompatRelation(self, f"SELECT * FROM {qualified(name)}")
+        return CompatRelation(self, f"SELECT * FROM {qualified(name)}", kind="VIEW_RELATION")
 
     def table_function(self, name: str, params: object = None) -> CompatRelation:
         """A relation over a table function, its parameters rendered as literals."""
@@ -1263,6 +1305,8 @@ def connect(
     key = database if database.startswith(":memory:") else str(Path(database).resolve())
     fingerprint = frozenset(rendered)
     with _instances_lock:
+        for stale in [path for path, (reference, _) in _instances.items() if reference() is None]:
+            del _instances[stale]
         entry = _instances.get(key)
         shared = entry[0]() if entry is not None else None
         if shared is not None and entry is not None:
