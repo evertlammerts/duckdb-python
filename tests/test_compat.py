@@ -18,6 +18,12 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+def rel(source: compat.CompatConnection, query: str) -> compat.CompatRelation:
+    relation = source.sql(query)
+    assert relation is not None
+    return relation
+
+
 class TestExecuteAndFetch:
     def test_execute_fetch_family(self) -> None:
         con = compat.connect()
@@ -187,7 +193,7 @@ class TestCompatRelation:
         # A bare fetchall re-runs each call; fetchone and fetchmany hold and
         # drain one result; execute() resets it.
         con = compat.connect()
-        relation = con.sql("SELECT * FROM range(3)")
+        relation = rel(con, "SELECT * FROM range(3)")
         assert relation.fetchall() == [(0,), (1,), (2,)]
         assert relation.fetchall() == [(0,), (1,), (2,)]
         assert relation.fetchone() == (0,)
@@ -204,12 +210,13 @@ class TestCompatRelation:
         assert odd.aggregate("sum(i)").fetchone() == (25,)
         aliased = con.table("t").set_alias("s").filter("s.i < 3")
         assert len(aliased.fetchall()) == 3
-        renamed = con.sql("SELECT 1 AS a").query("v", "SELECT a + 1 FROM v")
+        renamed = rel(con, "SELECT 1 AS a").query("v", "SELECT a + 1 FROM v")
+        assert renamed is not None
         assert renamed.fetchone() == (2,)
 
     def test_close_speaks_the_old_words(self) -> None:
         con = compat.connect()
-        relation = con.sql("SELECT 1").execute()
+        relation = rel(con, "SELECT 1").execute()
         relation.close()
         with pytest.raises(exceptions.InvalidInputError, match="result closed"):
             relation.fetchone()
@@ -218,16 +225,16 @@ class TestCompatRelation:
 
     def test_description_without_running(self) -> None:
         con = compat.connect()
-        relation = con.sql("SELECT 1 AS a, 'x' AS b")
+        relation = rel(con, "SELECT 1 AS a, 'x' AS b")
         assert [d[:2] for d in relation.description] == [("a", "INTEGER"), ("b", "VARCHAR")]
 
     def test_a_relation_keeps_its_cursor_alive(self) -> None:
         con = compat.connect()
-        assert con.cursor().sql("SELECT 1 AS foo").fetchall() == [(1,)]
+        assert rel(con.cursor(), "SELECT 1 AS foo").fetchall() == [(1,)]
 
     def test_fetchdf_after_fetchone_returns_the_remaining_rows(self) -> None:
         con = compat.connect()
-        relation = con.sql("SELECT i FROM range(5) t(i)").execute()
+        relation = rel(con, "SELECT i FROM range(5) t(i)").execute()
         assert relation.fetchone() == (0,)
         assert list(relation.fetchdf()["i"]) == [1, 2, 3, 4]
 
@@ -240,7 +247,7 @@ class TestCompatRelation:
 
         monkeypatch.setattr(_numpy, "fetch_numpy", boom)
         con = compat.connect()
-        relation = con.sql("SELECT 1 AS x").execute()
+        relation = rel(con, "SELECT 1 AS x").execute()
         with pytest.raises(RuntimeError, match="conversion failed"):
             relation.fetchnumpy()
         # The engine allows one live result per connection: an orphaned open
@@ -249,7 +256,7 @@ class TestCompatRelation:
 
     def test_a_connection_close_marks_relations_closed_the_compat_way(self) -> None:
         con = compat.connect()
-        relation = con.sql("SELECT 42 AS x").execute()
+        relation = rel(con, "SELECT 42 AS x").execute()
         con.close()
         with pytest.raises(exceptions.InvalidInputError, match="result closed"):
             relation.fetchall()
@@ -258,7 +265,7 @@ class TestCompatRelation:
 
     def test_description_after_close_raises_like_the_fetches(self) -> None:
         con = compat.connect()
-        relation = con.sql("SELECT 1 AS a")
+        relation = rel(con, "SELECT 1 AS a")
         relation.close()
         with pytest.raises(exceptions.InvalidInputError, match="result closed"):
             _ = relation.description
@@ -327,9 +334,13 @@ class TestModuleSurface:
     def test_execute_rides_one_default_connection(self) -> None:
         compat.execute("CREATE OR REPLACE TABLE compat_default AS SELECT 7 AS v")
         assert compat.execute("SELECT v FROM compat_default").fetchone() == (7,)
-        assert compat.sql("SELECT v FROM compat_default").fetchone() == (7,)
-        assert compat.query("SELECT 1").fetchone() == (1,)
-        assert compat.from_query("SELECT 2").fetchone() == (2,)
+        assert rel(compat.default_connection(), "SELECT v FROM compat_default").fetchone() == (7,)
+        module_query = compat.query("SELECT 1")
+        assert module_query is not None
+        assert module_query.fetchone() == (1,)
+        module_from = compat.from_query("SELECT 2")
+        assert module_from is not None
+        assert module_from.fetchone() == (2,)
         assert compat.description() is not None
 
     def test_the_old_exception_names_point_at_the_new_classes(self) -> None:

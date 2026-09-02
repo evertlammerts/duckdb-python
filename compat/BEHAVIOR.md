@@ -65,11 +65,22 @@
   module-level `sql`/`execute`/`query` ran on an implicit default
   connection, reproduced only in `duckdb.compat`.
   (`tests/test_frame.py`, `tests/test_compat.py`)
+- `CompatRelation.types`/`dtypes` return type text; the old client
+  returned `DuckDBPyType` objects, which compared equal to their text.
+- A shorthand aggregate operand that fails to parse is quoted as an
+  identifier, as the old client's fallback did; an operand like `a b`
+  that the old parser accidentally read as `a AS b` (and then failed on)
+  is quoted here instead and works.
 
 ## Pending
 
 - Multi-statement `execute`: the old client ran `"a; b; c"` and
   returned the last result; the seam refuses it until `ParseSQL` is
   bound. (`suite/test_multi_statement.py` fails as behavior)
-- The implicit `FROM df` replacement scan of local dataframes: M2
-  data-in. (`suite/test_metatransaction.py` fails as behavior)
+- The implicit `FROM df` replacement scan of local dataframes and
+  relations: M2 data-in. (`suite/test_metatransaction.py` and
+  `suite/relational_api/test_rapi_query.py::test_replacement_scan_recursion`
+  fail as behavior; `from_df` is missing surface)
+- The old Expression-object API (`ColumnExpression`,
+  `ConstantExpression`, ...): a future compat step.
+  (`suite/relational_api/test_joins.py` fails at import)

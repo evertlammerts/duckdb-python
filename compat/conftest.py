@@ -44,26 +44,7 @@ if os.environ.get("DUCKDB_COMPAT_FACADE"):
     import duckdb
     from duckdb import compat
 
-    for _name in (
-        "connect",
-        "execute",
-        "sql",
-        "query",
-        "from_query",
-        "default_connection",
-        "description",
-        "apilevel",
-        "paramstyle",
-        "threadsafety",
-        "BINARY",
-        "DATETIME",
-        "NUMBER",
-        "ROWID",
-        "STRING",
-        "CatalogException",
-        "ConnectionException",
-        "InterruptException",
-        "InvalidInputException",
-        "__formatted_python_version__",
-    ):
+    # Everything the face exports IS the old module surface; patching from
+    # __all__ keeps this list from trailing the face as it grows.
+    for _name in (*compat.__all__, "__formatted_python_version__"):
         setattr(duckdb, _name, getattr(compat, _name))

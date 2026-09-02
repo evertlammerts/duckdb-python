@@ -21,17 +21,40 @@ difference is a behavior-change-log entry, not an accident.
 
 from __future__ import annotations
 
+import builtins
+import itertools
+import re
 import sys
 import threading
 import weakref
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 from . import _duckdb
 from .connection import Connection, LiveResult, _Catalog
 from .dbapi import BINARY, DATETIME, NUMBER, ROWID, STRING, apilevel, paramstyle, threadsafety
-from .exceptions import CatalogError, InterfaceError, InterruptError, InvalidInputError
+from .exceptions import (
+    CatalogError,
+    ConversionError,
+    DatabaseError,
+    DataError,
+    Error,
+    FatalError,
+    IntegrityError,
+    InterfaceError,
+    InternalError,
+    InterruptError,
+    InvalidInputError,
+    IOError,
+    NotSupportedError,
+    OperationalError,
+    OutOfMemoryError,
+    ParserError,
+    ProgrammingError,
+    TransactionError,
+    Warning,
+)
 from .expr import qualified, quote
 
 if TYPE_CHECKING:
@@ -45,13 +68,40 @@ __all__ = [
     "NUMBER",
     "ROWID",
     "STRING",
+    "BinderException",
     "CatalogException",
     "CompatConnection",
     "CompatRelation",
     "ConnectionException",
+    "ConversionException",
+    "DataError",
+    "DatabaseError",
+    "Error",
+    "FatalException",
+    "HTTPException",
+    "IOException",
+    "IntegrityError",
+    "InternalException",
     "InterruptException",
     "InvalidInputException",
+    "InvalidTypeException",
+    "NotImplementedException",
+    "NotSupportedError",
+    "OperationalError",
+    "OutOfMemoryException",
+    "OutOfRangeException",
+    "ParserException",
+    "PermissionException",
+    "ProgrammingError",
+    "SequenceException",
+    "SerializationException",
+    "StandardException",
+    "SyntaxException",
+    "TransactionException",
+    "TypeMismatchException",
+    "Warning",
     "apilevel",
+    "close",
     "connect",
     "default_connection",
     "description",
@@ -59,16 +109,39 @@ __all__ = [
     "from_query",
     "paramstyle",
     "query",
+    "set_default_connection",
     "sql",
+    "table",
+    "table_function",
     "threadsafety",
 ]
 
-#: The old exception names. ConnectionException covered "closed or unusable",
-#: which this package reports as InterfaceError.
+#: The old exception names, each aliased to the class this package raises for
+#: the same engine error, or to the nearest ancestor when the old class drew a
+#: finer line than the engine's error codes do. ConnectionException covered
+#: "closed or unusable", which this package reports as InterfaceError.
+BinderException = ProgrammingError
 CatalogException = CatalogError
 ConnectionException = InterfaceError
+ConversionException = ConversionError
+FatalException = FatalError
+HTTPException = IOError
+InternalException = InternalError
 InterruptException = InterruptError
 InvalidInputException = InvalidInputError
+InvalidTypeException = ProgrammingError
+IOException = IOError
+NotImplementedException = NotSupportedError
+OutOfMemoryException = OutOfMemoryError
+OutOfRangeException = DataError
+ParserException = ParserError
+PermissionException = DatabaseError
+SequenceException = DatabaseError
+SerializationException = DatabaseError
+StandardException = Error
+SyntaxException = ParserError
+TransactionException = TransactionError
+TypeMismatchException = ProgrammingError
 
 #: The old client advertised itself to the engine as python/<major.minor>.
 __formatted_python_version__ = f"{sys.version_info.major}.{sys.version_info.minor}"
@@ -83,6 +156,68 @@ def _name(key: object) -> str:
     return str(key)
 
 
+#: Type texts describe() treats as numeric, mirroring the old client: those
+#: get every summary statistic cast to DOUBLE, the rest get NULL for the
+#: numeric-only ones and VARCHAR casts for the rest.
+_NUMERIC_TYPES = frozenset({
+    "TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT",
+    "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT", "UHUGEINT",
+    "FLOAT", "DOUBLE", "DECIMAL",
+})  # fmt: skip
+
+#: A join condition that is only column names becomes USING, anything else
+#: ON, the same reading the old client's parser applied.
+_IDENTIFIER_LIST = re.compile(r'\s*[\w"]+(\s*,\s*[\w"]+)*\s*$')
+
+_JOIN_KINDS = {
+    "inner": "INNER JOIN",
+    "left": "LEFT JOIN",
+    "right": "RIGHT JOIN",
+    "outer": "FULL JOIN",
+    "semi": "SEMI JOIN",
+    "anti": "ANTI JOIN",
+}
+
+#: Distinct default aliases per relation, so unaliased relations can join.
+_relation_numbers = itertools.count()
+
+#: First keywords of statements that produce rows: those become relations,
+#: anything else `sql()` and `query()` ran on the spot, as the old client did.
+_ROWSY = frozenset(
+    {
+        "SELECT",
+        "WITH",
+        "FROM",
+        "VALUES",
+        "TABLE",
+        "PIVOT",
+        "UNPIVOT",
+        "SHOW",
+        "DESCRIBE",
+        "SUMMARIZE",
+        "EXPLAIN",
+        "CALL",
+    }
+)
+
+_CLOSED_MESSAGE = "Connection Error: Connection has already been closed"
+
+
+def _produces_rows(sql: str) -> bool:
+    words = sql.lstrip("( \t\n").upper().split()
+    if not words:
+        return False
+    return words[0] in _ROWSY or "RETURNING" in words
+
+
+def _quantile_parameter(q: object) -> str:
+    if isinstance(q, str):
+        return q
+    if isinstance(q, (list, tuple)):
+        return "[" + ", ".join(str(float(value)) for value in q) + "]"
+    return str(float(cast("float", q)))
+
+
 class CompatRelation:
     """A lazy relation the old client's way: SQL text composed over one connection.
 
@@ -93,21 +228,60 @@ class CompatRelation:
     `execute()` resets the held result.
     """
 
-    def __init__(self, connection: CompatConnection, sql: str, alias: str | None = None) -> None:
+    def __init__(
+        self, connection: CompatConnection, sql: str, alias: str | None = None, table: str | None = None
+    ) -> None:
         #: Held strongly, so a relation keeps its cursor alive (old GH-315).
         self._connection = connection
         self._sql = sql
         self._relation_alias = alias
+        #: The table this relation reads whole, when it does: insert() is a
+        #: table-relation verb, as it was on the old client.
+        self._table = table
+        self._number = next(_relation_numbers)
         self._result: LiveResult | None = None
         self._closed = False
+        #: Bound eagerly, as the old relations were: a bad fragment or a
+        #: closed connection errors at the verb, not at the first fetch.
+        self._schema = self._bind()
+
+    def _bind(self) -> builtins.list[tuple[str, str]] | None:
+        try:
+            schema, _ = self._connection._engine().bind(self._sql)
+        except InvalidInputError as error:
+            # PIVOT and friends expand into multiple engine statements and
+            # refuse to bind; they still execute, so the schema stays unknown
+            # until a result exists.
+            if "expands into multiple engine statements" in str(error):
+                return None
+            raise
+        except InterfaceError:
+            raise ConnectionException(_CLOSED_MESSAGE) from None
+        return schema
+
+    def __getattr__(self, name: str) -> NoReturn:
+        # The old client reported a closed connection before an unknown verb;
+        # reached only for names this face does not carry.
+        if not name.startswith("_") and self._connection._raw is None:
+            raise ConnectionException(_CLOSED_MESSAGE)
+        message = f"'CompatRelation' object has no attribute {name!r}"
+        raise AttributeError(message)
 
     def _source(self) -> str:
         aliased = f" AS {quote(self._relation_alias)}" if self._relation_alias else ""
         return f"({self._sql}){aliased}"
 
+    def _named_source(self) -> str:
+        return f"({self._sql}) AS {quote(self.alias)}"
+
+    @property
+    def alias(self) -> str:
+        """The name this relation joins under, generated when none was set."""
+        return self._relation_alias or f"unnamed_relation_{self._number}"
+
     def set_alias(self, alias: str) -> CompatRelation:
         """The same relation under a name later fragments can reference."""
-        return CompatRelation(self._connection, self._sql, alias)
+        return CompatRelation(self._connection, self._sql, alias, table=self._table)
 
     def filter(self, condition: str) -> CompatRelation:
         """The rows where the SQL fragment holds."""
@@ -122,15 +296,601 @@ class CompatRelation:
         grouped = f" GROUP BY {groups}" if groups else ""
         return CompatRelation(self._connection, f"SELECT {aggregates} FROM {self._source()}{grouped}")
 
-    def query(self, virtual_table_name: str, sql: str) -> CompatRelation:
-        """Run SQL that refers to this relation by the given name."""
-        return CompatRelation(self._connection, f"WITH {quote(virtual_table_name)} AS ({self._sql}) {sql}")
+    def query(self, virtual_table_name: str, sql: str) -> CompatRelation | None:
+        """Run SQL that refers to this relation by the given name.
+
+        The relation is registered as a temporary view under the name, as
+        the old client registered it; a statement without rows runs on the
+        spot and returns None, the old way.
+        """
+        with self._run(f"CREATE OR REPLACE TEMPORARY VIEW {quote(virtual_table_name)} AS {self._sql}") as result:
+            result.drain()
+        cleaned = sql.strip().rstrip(";")
+        if _produces_rows(cleaned):
+            return CompatRelation(self._connection, cleaned)
+        with self._run(cleaned) as result:
+            result.drain()
+        return None
+
+    def _run(self, sql: str | None = None) -> LiveResult:
+        try:
+            return self._connection._execute(sql if sql is not None else self._sql)
+        except InterfaceError:
+            raise ConnectionException(_CLOSED_MESSAGE) from None
+
+    def _statement(self, sql: str, parameters: Sequence[Any] | None = None) -> None:
+        try:
+            self._connection.run(sql, parameters)
+        except InterfaceError:
+            raise ConnectionException(_CLOSED_MESSAGE) from None
+
+    def __repr__(self) -> str:
+        """The first rows as a table, the way the old relations printed."""
+        from .frame import sql as frame_sql
+
+        try:
+            return frame_sql(self._sql).preview(self._connection)
+        except InterfaceError:
+            raise ConnectionException(_CLOSED_MESSAGE) from None
+
+    def select(self, *args: object, groups: str = "") -> CompatRelation:
+        """The old alias of `project`; `groups` was accepted and ignored there too."""
+        return self.project(", ".join(str(argument) for argument in args))
+
+    def order(self, order_expr: str) -> CompatRelation:
+        """The rows sorted by the SQL fragment."""
+        return CompatRelation(self._connection, f"SELECT * FROM {self._source()} ORDER BY {order_expr}")
+
+    def sort(self, *args: object) -> CompatRelation:
+        """The old alias family of `order`, taking the keys as arguments."""
+        return self.order(", ".join(str(argument) for argument in args))
+
+    def limit(self, n: int, offset: int = 0) -> CompatRelation:
+        """The first `n` rows, optionally past an offset."""
+        tail = f" OFFSET {int(offset)}" if offset else ""
+        return CompatRelation(self._connection, f"SELECT * FROM {self._source()} LIMIT {int(n)}{tail}")
+
+    def distinct(self) -> CompatRelation:
+        """The distinct rows."""
+        return CompatRelation(self._connection, f"SELECT DISTINCT * FROM {self._source()}")
+
+    def unique(self, unique_aggr: str) -> CompatRelation:
+        """The distinct values of the listed columns."""
+        return CompatRelation(self._connection, f"SELECT DISTINCT {unique_aggr} FROM {self._source()}")
+
+    def _combine_guard(self, other: CompatRelation) -> None:
+        # The old client refused to combine with a relation whose connection
+        # is gone, in the closed-connection words.
+        if other._connection._raw is None:
+            raise ConnectionException(_CLOSED_MESSAGE)
+
+    def join(self, other_rel: CompatRelation, condition: str, how: str = "inner") -> CompatRelation:
+        """Join on a condition, or by the named columns when the condition is only names."""
+        self._combine_guard(other_rel)
+        kind = _JOIN_KINDS.get(how.strip().lower())
+        if kind is None:
+            message = f"Unsupported join type {how}"
+            raise InvalidInputException(message)
+        if self.alias.casefold() == other_rel.alias.casefold():
+            message = (
+                "Both relations have the same alias, please change the alias of one or both "
+                "relations using 'rel = rel.set_alias(<new alias>)'"
+            )
+            raise InvalidInputException(message)
+        clause = f"USING ({condition})" if _IDENTIFIER_LIST.fullmatch(condition) else f"ON ({condition})"
+        return CompatRelation(
+            self._connection, f"SELECT * FROM {self._named_source()} {kind} {other_rel._named_source()} {clause}"
+        )
+
+    def cross(self, other_rel: CompatRelation) -> CompatRelation:
+        """The cross product with another relation."""
+        self._combine_guard(other_rel)
+        return CompatRelation(
+            self._connection, f"SELECT * FROM {self._named_source()} CROSS JOIN {other_rel._named_source()}"
+        )
+
+    def union(self, union_rel: CompatRelation) -> CompatRelation:
+        """UNION ALL, as the old client's union was."""
+        self._combine_guard(union_rel)
+        return CompatRelation(self._connection, f"({self._sql}) UNION ALL ({union_rel._sql})")
+
+    def except_(self, other_rel: CompatRelation) -> CompatRelation:
+        """EXCEPT ALL, as the old client's except_ was."""
+        self._combine_guard(other_rel)
+        return CompatRelation(self._connection, f"({self._sql}) EXCEPT ALL ({other_rel._sql})")
+
+    def intersect(self, other_rel: CompatRelation) -> CompatRelation:
+        """INTERSECT ALL, as the old client's intersect was."""
+        self._combine_guard(other_rel)
+        return CompatRelation(self._connection, f"({self._sql}) INTERSECT ALL ({other_rel._sql})")
+
+    # -- the old aggregate shorthands, all one template
+
+    def _aggregate_operand(self, piece: str, function: str, parameter: str) -> str:
+        # The old client parsed each operand and quoted it as an identifier
+        # when the parse failed, which is how reserved words and spaced
+        # names worked. The binder stands in for the parser here: a
+        # parse-level failure routes to the quoted form, a binding failure
+        # is left for the built relation to report.
+        if piece == "*":
+            return piece
+        arguments = f"{piece},{parameter}" if parameter else piece
+        try:
+            self._connection._engine().bind(f"SELECT {function}({arguments}) FROM ({self._sql})")
+        except (ParserError, InvalidInputError):
+            return quote(piece)
+        except Error:
+            pass
+        return piece
+
+    def _aggregate_call(
+        self, function: str, expression: str, groups: str, window_spec: str, projected_columns: str, parameter: str = ""
+    ) -> CompatRelation:
+        if groups and window_spec:
+            message = "Either groups or window must be set (can't be both at the same time)"
+            raise InvalidInputException(message)
+        # The old client silently discarded a trailing "order by ..." in the
+        # groups; rows keep their scan order, and the adopted tests rely on
+        # exactly that.
+        marker = groups.lower().find(" order by ")
+        if marker != -1:
+            groups = groups[:marker]
+        # Comments vanish in parsing on the old client; stripped here so the
+        # oracle and the rendered call see the expression alone.
+        expression = re.sub(r"--[^\n]*|/\*.*?\*/", "", expression, flags=re.S).strip()
+        inputs = [piece.strip() for piece in expression.split(",") if piece.strip()] if expression else []
+        if not inputs and function.casefold() == "count":
+            inputs = ["*"]
+        tail = f" {window_spec}" if window_spec else ""
+        calls = []
+        for piece in inputs:
+            operand = self._aggregate_operand(piece, function, parameter)
+            arguments = f"{operand},{parameter}" if parameter else operand
+            calls.append(f"{function}({arguments}){tail}")
+        if not inputs and parameter:
+            calls.append(f"{function}({parameter}){tail}")
+        prefix = f"{projected_columns}, " if projected_columns else ""
+        rendered = prefix + ", ".join(calls)
+        if window_spec:
+            return CompatRelation(self._connection, f"SELECT {rendered} FROM {self._source()}")
+        return CompatRelation(self._connection, f"SELECT {rendered} FROM {self._source()} GROUP BY {groups or 'ALL'}")
+
+    def apply(
+        self,
+        function_name: str,
+        function_aggr: str,
+        group_expr: str = "",
+        function_parameter: str = "",
+        projected_columns: str = "",
+    ) -> CompatRelation:
+        """Any function by name over the listed columns, the old passthrough."""
+        return self._aggregate_call(function_name, function_aggr, group_expr, "", projected_columns, function_parameter)
+
+    def any_value(
+        self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
+    ) -> CompatRelation:
+        """The engine's any_value aggregate over each listed column."""
+        return self._aggregate_call("any_value", expression, groups, window_spec, projected_columns)
+
+    def arg_max(
+        self, arg_column: str, value_column: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
+    ) -> CompatRelation:
+        """The value of the first column at the second's maximum."""
+        return self._aggregate_call("arg_max", arg_column, groups, window_spec, projected_columns, value_column)
+
+    def arg_min(
+        self, arg_column: str, value_column: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
+    ) -> CompatRelation:
+        """The value of the first column at the second's minimum."""
+        return self._aggregate_call("arg_min", arg_column, groups, window_spec, projected_columns, value_column)
+
+    def avg(
+        self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
+    ) -> CompatRelation:
+        """The average over each listed column."""
+        return self._aggregate_call("avg", expression, groups, window_spec, projected_columns)
+
+    def bit_and(
+        self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
+    ) -> CompatRelation:
+        """The bitwise AND over each listed column."""
+        return self._aggregate_call("bit_and", expression, groups, window_spec, projected_columns)
+
+    def bit_or(
+        self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
+    ) -> CompatRelation:
+        """The bitwise OR over each listed column."""
+        return self._aggregate_call("bit_or", expression, groups, window_spec, projected_columns)
+
+    def bit_xor(
+        self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
+    ) -> CompatRelation:
+        """The bitwise XOR over each listed column."""
+        return self._aggregate_call("bit_xor", expression, groups, window_spec, projected_columns)
+
+    def bitstring_agg(
+        self,
+        expression: str,
+        min: int | None = None,
+        max: int | None = None,
+        groups: str = "",
+        window_spec: str = "",
+        projected_columns: str = "",
+    ) -> CompatRelation:
+        """The bitstring aggregate over each listed column, with the old min/max checks."""
+        if (min is None) != (max is None):
+            message = "Both min and max values must be set"
+            raise InvalidInputException(message)
+        if min is not None and (not isinstance(min, int) or not isinstance(max, int)):
+            message = "min and max must be of type int"
+            raise InvalidTypeException(message)
+        parameter = "" if min is None else f"{min},{max}"
+        return self._aggregate_call("bitstring_agg", expression, groups, window_spec, projected_columns, parameter)
+
+    def bool_and(
+        self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
+    ) -> CompatRelation:
+        """The boolean AND over each listed column."""
+        return self._aggregate_call("bool_and", expression, groups, window_spec, projected_columns)
+
+    def bool_or(
+        self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
+    ) -> CompatRelation:
+        """The boolean OR over each listed column."""
+        return self._aggregate_call("bool_or", expression, groups, window_spec, projected_columns)
+
+    def count(
+        self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
+    ) -> CompatRelation:
+        """The count over each listed column; a star count with none."""
+        return self._aggregate_call("count", expression, groups, window_spec, projected_columns)
+
+    def favg(
+        self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
+    ) -> CompatRelation:
+        """The Kahan-summed average over each listed column."""
+        return self._aggregate_call("favg", expression, groups, window_spec, projected_columns)
+
+    def first(self, expression: str, groups: str = "", projected_columns: str = "") -> CompatRelation:
+        """The first value over each listed column."""
+        return self._aggregate_call('"first"', expression, groups, "", projected_columns)
+
+    def fsum(
+        self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
+    ) -> CompatRelation:
+        """The Kahan sum over each listed column."""
+        return self._aggregate_call("fsum", expression, groups, window_spec, projected_columns)
+
+    def geomean(self, expression: str, groups: str = "", projected_columns: str = "") -> CompatRelation:
+        """The geometric mean over each listed column."""
+        return self._aggregate_call("geomean", expression, groups, "", projected_columns)
+
+    def histogram(
+        self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
+    ) -> CompatRelation:
+        """The histogram over each listed column."""
+        return self._aggregate_call("histogram", expression, groups, window_spec, projected_columns)
+
+    def last(self, expression: str, groups: str = "", projected_columns: str = "") -> CompatRelation:
+        """The last value over each listed column."""
+        return self._aggregate_call('"last"', expression, groups, "", projected_columns)
+
+    def list(
+        self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
+    ) -> CompatRelation:
+        """The values gathered into a list, over each listed column."""
+        return self._aggregate_call("list", expression, groups, window_spec, projected_columns)
+
+    def max(
+        self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
+    ) -> CompatRelation:
+        """The maximum over each listed column."""
+        return self._aggregate_call("max", expression, groups, window_spec, projected_columns)
+
+    def mean(
+        self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
+    ) -> CompatRelation:
+        """The average, under its old alias."""
+        return self._aggregate_call("avg", expression, groups, window_spec, projected_columns)
+
+    def median(
+        self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
+    ) -> CompatRelation:
+        """The median over each listed column."""
+        return self._aggregate_call("median", expression, groups, window_spec, projected_columns)
+
+    def min(
+        self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
+    ) -> CompatRelation:
+        """The minimum over each listed column."""
+        return self._aggregate_call("min", expression, groups, window_spec, projected_columns)
+
+    def mode(
+        self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
+    ) -> CompatRelation:
+        """The mode over each listed column."""
+        return self._aggregate_call("mode", expression, groups, window_spec, projected_columns)
+
+    def product(
+        self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
+    ) -> CompatRelation:
+        """The product over each listed column."""
+        return self._aggregate_call("product", expression, groups, window_spec, projected_columns)
+
+    def quantile(
+        self,
+        expression: str,
+        q: object = 0.5,
+        groups: str = "",
+        window_spec: str = "",
+        projected_columns: str = "",
+    ) -> CompatRelation:
+        """The discrete quantile, under its old shorthand name."""
+        return self._aggregate_call(
+            "quantile", expression, groups, window_spec, projected_columns, _quantile_parameter(q)
+        )
+
+    def quantile_cont(
+        self,
+        expression: str,
+        q: object = 0.5,
+        groups: str = "",
+        window_spec: str = "",
+        projected_columns: str = "",
+    ) -> CompatRelation:
+        """The interpolated quantile."""
+        return self._aggregate_call(
+            "quantile_cont", expression, groups, window_spec, projected_columns, _quantile_parameter(q)
+        )
+
+    def quantile_disc(
+        self,
+        expression: str,
+        q: object = 0.5,
+        groups: str = "",
+        window_spec: str = "",
+        projected_columns: str = "",
+    ) -> CompatRelation:
+        """The discrete quantile."""
+        return self._aggregate_call(
+            "quantile_disc", expression, groups, window_spec, projected_columns, _quantile_parameter(q)
+        )
+
+    def std(
+        self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
+    ) -> CompatRelation:
+        """The sample standard deviation, under its old shorthand name."""
+        return self._aggregate_call("stddev_samp", expression, groups, window_spec, projected_columns)
+
+    stddev = std
+    stddev_samp = std
+
+    def stddev_pop(
+        self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
+    ) -> CompatRelation:
+        """The population standard deviation over each listed column."""
+        return self._aggregate_call("stddev_pop", expression, groups, window_spec, projected_columns)
+
+    def string_agg(
+        self, expression: str, sep: str = ",", groups: str = "", window_spec: str = "", projected_columns: str = ""
+    ) -> CompatRelation:
+        """The strings joined, the separator carried as a quoted literal."""
+        quoted = "'" + sep.replace("'", "''") + "'"
+        return self._aggregate_call("string_agg", expression, groups, window_spec, projected_columns, quoted)
+
+    def sum(
+        self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
+    ) -> CompatRelation:
+        """The sum over each listed column."""
+        return self._aggregate_call("sum", expression, groups, window_spec, projected_columns)
+
+    def value_counts(self, expression: str, groups: str = "") -> CompatRelation:
+        """The values with their counts, projecting the column beside its count."""
+        return self._aggregate_call("count", expression, groups, "", expression)
+
+    def var(
+        self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
+    ) -> CompatRelation:
+        """The sample variance, under its old shorthand name."""
+        return self._aggregate_call("var_samp", expression, groups, window_spec, projected_columns)
+
+    var_samp = var
+    variance = var
+
+    def var_pop(
+        self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
+    ) -> CompatRelation:
+        """The population variance over each listed column."""
+        return self._aggregate_call("var_pop", expression, groups, window_spec, projected_columns)
+
+    # -- the old window shorthands
+
+    def _window_call(self, call: str, window_spec: str, projected_columns: str) -> CompatRelation:
+        prefix = f"{projected_columns}, " if projected_columns else ""
+        return CompatRelation(self._connection, f"SELECT {prefix}{call} {window_spec} FROM {self._source()}")
+
+    def row_number(self, window_spec: str, projected_columns: str = "") -> CompatRelation:
+        """The row number over the window."""
+        return self._window_call("row_number()", window_spec, projected_columns)
+
+    def rank(self, window_spec: str, projected_columns: str = "") -> CompatRelation:
+        """The rank over the window."""
+        return self._window_call("rank()", window_spec, projected_columns)
+
+    def dense_rank(self, window_spec: str, projected_columns: str = "") -> CompatRelation:
+        """The dense rank over the window."""
+        return self._window_call("dense_rank()", window_spec, projected_columns)
+
+    rank_dense = dense_rank
+
+    def percent_rank(self, window_spec: str, projected_columns: str = "") -> CompatRelation:
+        """The percent rank over the window."""
+        return self._window_call("percent_rank()", window_spec, projected_columns)
+
+    def cume_dist(self, window_spec: str, projected_columns: str = "") -> CompatRelation:
+        """The cumulative distribution over the window."""
+        return self._window_call("cume_dist()", window_spec, projected_columns)
+
+    def n_tile(self, window_spec: str, num_buckets: int, projected_columns: str = "") -> CompatRelation:
+        """The bucket number over the window."""
+        return self._window_call(f"ntile({int(num_buckets)})", window_spec, projected_columns)
+
+    def lag(
+        self,
+        expression: str,
+        window_spec: str,
+        offset: int = 1,
+        default_value: str = "NULL",
+        ignore_nulls: bool = False,
+        projected_columns: str = "",
+    ) -> CompatRelation:
+        """The lagging value over the window, with the old offset and default arguments."""
+        suffix = " ignore nulls" if ignore_nulls else ""
+        return self._window_call(
+            f"lag({expression}, {int(offset)}, {default_value}{suffix})", window_spec, projected_columns
+        )
+
+    def lead(
+        self,
+        expression: str,
+        window_spec: str,
+        offset: int = 1,
+        default_value: str = "NULL",
+        ignore_nulls: bool = False,
+        projected_columns: str = "",
+    ) -> CompatRelation:
+        """The leading value over the window, with the old offset and default arguments."""
+        suffix = " ignore nulls" if ignore_nulls else ""
+        return self._window_call(
+            f"lead({expression}, {int(offset)}, {default_value}{suffix})", window_spec, projected_columns
+        )
+
+    def first_value(self, expression: str, window_spec: str = "", projected_columns: str = "") -> CompatRelation:
+        """The first value over the window."""
+        return self._window_call(f"first_value({expression})", window_spec, projected_columns)
+
+    def last_value(self, expression: str, window_spec: str = "", projected_columns: str = "") -> CompatRelation:
+        """The last value over the window."""
+        return self._window_call(f"last_value({expression})", window_spec, projected_columns)
+
+    def nth_value(
+        self,
+        expression: str,
+        window_spec: str,
+        offset: int,
+        ignore_nulls: bool = False,
+        projected_columns: str = "",
+    ) -> CompatRelation:
+        """The nth value over the window."""
+        suffix = " ignore nulls" if ignore_nulls else ""
+        return self._window_call(f"nth_value({expression}, {int(offset)}{suffix})", window_spec, projected_columns)
+
+    # -- materialization and introspection
+
+    def create(self, table_name: str) -> None:
+        """A new table holding this relation's rows, effective immediately."""
+        self._statement(f"CREATE TABLE {qualified(table_name)} AS {self._sql}")
+
+    to_table = create
+
+    def create_view(self, view_name: str, replace: bool = True) -> CompatRelation:
+        """A view over this relation's SQL, effective immediately."""
+        prefix = "CREATE OR REPLACE VIEW" if replace else "CREATE VIEW"
+        self._statement(f"{prefix} {qualified(view_name)} AS {self._sql}")
+        return self
+
+    to_view = create_view
+
+    def insert_into(self, table_name: str) -> None:
+        """Append this relation's rows to a table by position."""
+        self._statement(f"INSERT INTO {qualified(table_name)} {self._sql}")
+
+    def insert(self, values: object) -> None:
+        """Append one row of values; a table-relation verb, as it was."""
+        if self._table is None:
+            message = "'DuckDBPyRelation.insert' can only be used on a table relation"
+            raise InvalidInputException(message)
+        row = builtins.list(cast("Iterable[Any]", values))
+        placeholders = ", ".join(f"${index + 1}" for index in range(len(row)))
+        self._statement(f"INSERT INTO {qualified(self._table)} VALUES ({placeholders})", row)
+
+    def describe(self) -> CompatRelation:
+        """The old summary: count/mean/stddev/min/max/median per column, one row each."""
+        aggregates = ("count", "mean", "stddev", "min", "max", "median")
+        numeric_only = {"mean", "stddev", "median"}
+        inner = []
+        outer = ["unnest(['count', 'mean', 'stddev', 'min', 'max', 'median']) AS aggr"]
+        for index, entry in enumerate(self.description):
+            name, type_text = entry[0], entry[1]
+            base = str(type_text).split("(")[0].strip().upper()
+            numeric = base in _NUMERIC_TYPES
+            cast_to = "DOUBLE" if numeric else "VARCHAR"
+            cells = []
+            for position, aggregate in enumerate(aggregates):
+                if not numeric and aggregate in numeric_only:
+                    cells.append("NULL")
+                    continue
+                cell = f"c{index}_{position}"
+                inner.append(f"CAST({aggregate}({quote(name)}) AS {cast_to}) AS {cell}")
+                cells.append(cell)
+            outer.append(f"unnest([{', '.join(cells)}]) AS {quote(name)}")
+        # A relation with no columns still describes: one aggr column of names.
+        source = f"(SELECT {', '.join(inner)} FROM {self._source()})" if inner else "(SELECT 1)"
+        return CompatRelation(self._connection, f"SELECT {', '.join(outer)} FROM {source}")
+
+    def explain(self, type: str = "standard") -> str:
+        """The engine's plan for this relation, as text."""
+        with self._run(f"EXPLAIN {self._sql}") as result:
+            rows = result.fetch_all()
+        return "\n".join(str(value) for _, value in rows)
+
+    def show(self, **_: object) -> None:
+        """Print the first rows as a table."""
+        from .frame import sql as frame_sql
+
+        frame_sql(self._sql).show(self._connection)
+
+    def sql_query(self) -> str:
+        """The SQL text this relation stands for."""
+        return self._sql
+
+    @property
+    def type(self) -> str:
+        """TABLE_RELATION for a whole-table relation, QUERY_RELATION otherwise."""
+        return "TABLE_RELATION" if self._table else "QUERY_RELATION"
+
+    @property
+    def columns(self) -> builtins.list[str]:
+        """The column names, from binding the text."""
+        return [entry[0] for entry in self.description]
+
+    @property
+    def types(self) -> builtins.list[str]:
+        """The column types, as text; the old client returned type objects."""
+        return [entry[1] for entry in self.description]
+
+    dtypes = types
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        """(row count, column count); counting runs the relation."""
+        return (len(self), len(self.columns))
+
+    def __len__(self) -> int:
+        """The row count, by running a count over the text."""
+        with self._run(f"SELECT count(*) FROM {self._source()}") as result:
+            rows = result.fetch_all()
+        return int(rows[0][0])
+
+    def __getitem__(self, name: str) -> CompatRelation:
+        """A single-column projection, as the old subscript was."""
+        return self.project(name)
 
     def execute(self) -> CompatRelation:
         """Run the relation and hold its rows, resetting whatever was held."""
         self._close_result()
         self._closed = False
-        self._result = self._connection._execute(self._sql)
+        self._result = self._run()
         return self
 
     def close(self) -> None:
@@ -147,7 +907,7 @@ class CompatRelation:
             raise self._stale() from None
         return rows[0] if rows else None
 
-    def fetchmany(self, size: int = 1) -> list[tuple[Any, ...]]:
+    def fetchmany(self, size: int = 1) -> builtins.list[tuple[Any, ...]]:
         """Up to `size` rows, running the relation first if nothing is held."""
         if size <= 0:
             return []
@@ -157,7 +917,7 @@ class CompatRelation:
         except InterfaceError:
             raise self._stale() from None
 
-    def fetchall(self) -> list[tuple[Any, ...]]:
+    def fetchall(self) -> builtins.list[tuple[Any, ...]]:
         """Every row: the rest of a held result, or a fresh run each call."""
         if self._closed:
             message = "result closed"
@@ -169,7 +929,7 @@ class CompatRelation:
                 raise self._stale() from None
             self._close_result()
             return rows
-        with self._connection._execute(self._sql) as result:
+        with self._run() as result:
             return result.fetch_all()
 
     def fetchnumpy(self) -> dict[str, Any]:
@@ -190,7 +950,7 @@ class CompatRelation:
                 # A conversion that failed midway must not orphan the open
                 # result: one live result would block the next statement.
                 result.close()
-        with self._connection._execute(self._sql) as result:
+        with self._run() as result:
             return fetch_numpy(result.result)
 
     def fetchdf(self, date_as_object: bool = False) -> pandas.DataFrame:
@@ -209,7 +969,7 @@ class CompatRelation:
                 raise self._stale() from None
             finally:
                 result.close()
-        with self._connection._execute(self._sql) as result:
+        with self._run() as result:
             return to_dataframe(result.result, date_as_object=date_as_object)
 
     #: The old client's aliases for `fetchdf`.
@@ -217,7 +977,7 @@ class CompatRelation:
     to_df = fetchdf
 
     @property
-    def description(self) -> list[tuple[Any, ...]]:
+    def description(self) -> builtins.list[tuple[Any, ...]]:
         """Column metadata, from the held result or from binding the text."""
         if self._closed:
             message = "result closed"
@@ -227,8 +987,12 @@ class CompatRelation:
                 schema = self._result.result.schema
             except InterfaceError:
                 raise self._stale() from None
+        elif self._schema is not None:
+            schema = self._schema
         else:
-            schema, _ = self._connection._engine().bind(self._sql)
+            with self._run() as result:
+                result.fetch_rows(1)
+                schema = result.result.schema
         return [(column, type_text, None, None, None, None, None) for column, type_text in schema]
 
     def _close_result(self) -> None:
@@ -348,17 +1112,41 @@ class CompatConnection(Connection):
         """Always -1, as the old client reported it. Real counts live in `run()` and dbapi."""
         return -1
 
-    def sql(self, query: str) -> CompatRelation:
-        """A lazy relation over this SQL, the old client's way."""
-        return CompatRelation(self, query)
+    def sql(self, query: str) -> CompatRelation | None:
+        """A lazy relation over row-producing SQL; anything else runs on the spot.
 
-    def query(self, query: str) -> CompatRelation:
+        The old client's `sql()` executed a statement without rows right
+        away and returned None; only queries came back as relations.
+        """
+        cleaned = query.strip().rstrip(";")
+        if _produces_rows(cleaned):
+            return CompatRelation(self, cleaned)
+        self.run(cleaned)
+        return None
+
+    def query(self, query: str) -> CompatRelation | None:
         """The old alias of `sql`."""
         return self.sql(query)
 
     def table(self, name: str) -> CompatRelation:
         """A relation reading a table by name."""
+        return CompatRelation(self, f"SELECT * FROM {qualified(name)}", table=name)
+
+    def view(self, name: str) -> CompatRelation:
+        """A relation reading a view by name."""
         return CompatRelation(self, f"SELECT * FROM {qualified(name)}")
+
+    def table_function(self, name: str, params: object = None) -> CompatRelation:
+        """A relation over a table function, its parameters rendered as literals."""
+        from .expr import render_literal
+
+        if params is None:
+            params = []
+        if not isinstance(params, builtins.list):
+            message = "'params' has to be a list of parameters"
+            raise InvalidInputException(message)
+        rendered = ", ".join(render_literal(value) for value in params)
+        return CompatRelation(self, f"SELECT * FROM {quote(name)}({rendered})")
 
     def begin(self) -> CompatConnection:
         """BEGIN TRANSACTION, as a method because the old connection had one."""
@@ -463,6 +1251,8 @@ def connect(
     same path with a different configuration is refused in the old
     client's words. Plain in-memory databases are never shared.
     """
+    if database == ":default:":
+        return default_connection()
     options: dict[str, object] = dict(config or {})
     if read_only:
         options["access_mode"] = "read_only"
@@ -505,24 +1295,55 @@ def default_connection() -> CompatConnection:
         return _default
 
 
+def set_default_connection(connection: CompatConnection) -> None:
+    """Route the module-level surface at this connection, as the old client allowed."""
+    if not isinstance(cast("object", connection), CompatConnection):
+        # The old client's nanobind boundary rejected anything else with
+        # this wording, and the adopted tests match on it.
+        message = f"set_default_connection(): incompatible function arguments. Invoked with: {connection!r}"
+        raise TypeError(message)
+    global _default
+    with _default_lock:
+        _default = connection
+
+
 def execute(sql: str, parameters: Sequence[Any] | Mapping[Any, Any] | None = None) -> CompatConnection:
     """`execute` on the default connection, as the old module surface had."""
     return default_connection().execute(sql, parameters)
 
 
-def sql(query: str) -> CompatRelation:
-    """A relation over the default connection."""
+def sql(query: str) -> CompatRelation | None:
+    """A relation over the default connection; a statement without rows runs on the spot."""
     return default_connection().sql(query)
 
 
-def query(query: str) -> CompatRelation:
+def query(query: str) -> CompatRelation | None:
     """The old alias of module-level `sql`."""
     return default_connection().sql(query)
 
 
-def from_query(query: str) -> CompatRelation:
+def from_query(query: str) -> CompatRelation | None:
     """The old alias of module-level `sql`."""
     return default_connection().sql(query)
+
+
+def table(name: str) -> CompatRelation:
+    """A relation reading a table on the default connection."""
+    return default_connection().table(name)
+
+
+def table_function(name: str, params: object = None) -> CompatRelation:
+    """A relation over a table function on the default connection."""
+    return default_connection().table_function(name, params)
+
+
+def close() -> None:
+    """Close the default connection; the next module-level call makes a fresh one."""
+    global _default
+    with _default_lock:
+        if _default is not None:
+            _default.close()
+            _default = None
 
 
 def description() -> list[tuple[Any, ...]] | None:

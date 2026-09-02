@@ -30,10 +30,13 @@ prints the top failure signatures, and always exits 0. `--facade` patches
 verbatim files are never touched. Extra arguments are passed to pytest, so
 `scripts/compat_report.py suite/test_result.py -v` narrows a run.
 
-Current slice: 26 files from `tests/fast/` and `tests/fast/api/`: the
-connection, statement, transaction, result and interrupt files, and the
-DB-API set (`test_dbapi*.py`, `test_cursor.py`, `test_dbapi_fetch.py`). The
-old suite's `conftest.py` rides along verbatim. The `compat` dependency
+Current slice: 36 files from `tests/fast/`, `tests/fast/api/` and
+`tests/fast/relational_api/`: the connection, statement, transaction,
+result and interrupt files, the DB-API set (`test_dbapi*.py`,
+`test_cursor.py`, `test_dbapi_fetch.py`), and the relational-API set
+(groupings, joins, pivot, aggregations, windows, close, description,
+functions, query, table_function) with the data file it reads under
+`suite/data/`. The old suite's `conftest.py` rides along verbatim. The `compat` dependency
 group carries what these files import at module level (numpy, pandas); a
 third-party module missing from the venv is reported as `environment`, so
 it never counts against this client's surface. Deliberately excluded so
