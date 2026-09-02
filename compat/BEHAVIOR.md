@@ -30,6 +30,17 @@
 
 ## Connections and transactions
 
+- `sql()` over a held result follows the old client halfway: a held
+  result nothing has fetched from is silently discarded, as the old
+  client did; one that has been fetched from raises the engine's
+  live-result refusal, where the old client kept the remainder because
+  it had materialized the whole result at execute. Same for a
+  relation's held result. Both raise loudly, never lose data silently;
+  both resolve when statement classification moves from a probe
+  execution to the parser (`sql_statement_type` on the seam).
+- A row-producing CALL materializes once at `sql()`; the old client's
+  relation re-ran it per fetch.
+
 - `duckdb.connect()` carries no execute/fetch/cursor vocabulary; that
   contract lives in `duckdb.dbapi` (strict PEP 249) and `duckdb.compat`
   (the old shape). What `connect()` returns in 2.0 is an open roadmap

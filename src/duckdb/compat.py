@@ -197,7 +197,8 @@ def _materialized_relation(
     The old client wrapped a RETURNING result as a materialized relation:
     fetches re-read the same rows and verbs compose on top. A VALUES scan
     of the rendered values gives both for free, since re-running it has no
-    side effects.
+    side effects. The text is O(rows) and re-parsed per run, so this suits
+    the small row sets RETURNING produces, not bulk results.
     """
     from .expr import render_literal
 
@@ -1038,6 +1039,10 @@ class CompatConnection(Connection):
     def __init__(self, database: _duckdb.Database, catalog: _Catalog | None = None) -> None:
         super().__init__(database, catalog)
         self._held: LiveResult | None = None
+        #: Whether anything was fetched from the held result yet: the old
+        #: client silently discarded an untouched result when the next
+        #: statement arrived, and kept a touched one, fully materialized.
+        self._held_touched = False
         self._compat_description: list[tuple[Any, ...]] | None = None
         #: Cursors made from this connection; the old client closed them with it.
         self._cursors: weakref.WeakSet[CompatConnection] = weakref.WeakSet()
@@ -1058,6 +1063,7 @@ class CompatConnection(Connection):
         result = self._execute(sql, parameters)
         if result.result.result_type == "rows":
             self._held = result
+            self._held_touched = False
             self._compat_description = [
                 (name, type_text, None, None, None, None, None) for name, type_text in result.result.schema
             ]
@@ -1143,6 +1149,12 @@ class CompatConnection(Connection):
         drained on the spot and returns None.
         """
         cleaned = query.strip().rstrip(";")
+        if self._held is not None and not self._held_touched:
+            # The old client silently discarded a held result nothing had
+            # fetched from when the next statement arrived; a touched one it
+            # kept, materialized. This client streams, so the touched case
+            # raises the engine's own live-result refusal instead.
+            self._release_held()
         try:
             probe = self._execute(cleaned)
         except InterfaceError:
@@ -1257,6 +1269,7 @@ class CompatConnection(Connection):
         if self._held is None:
             message = "No open result set"
             raise InvalidInputException(message)
+        self._held_touched = True
         return self._held
 
 

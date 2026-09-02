@@ -221,7 +221,15 @@ def render_literal(value: object) -> str:
         if not value.is_finite():
             message = f"cannot render a non-finite Decimal: {value!r}"
             raise TypeError(message)
-        return f"CAST('{value}' AS DECIMAL)"
+        # Width and scale come from the value itself: a bare DECIMAL is
+        # DECIMAL(18,3), which silently rounds anything finer.
+        _, digits, exponent = value.as_tuple()
+        scale = max(0, -int(exponent))
+        width = max(len(digits) + max(int(exponent), 0), scale + 1)
+        if width > 38:
+            message = f"cannot render a Decimal wider than 38 digits: {value!r}"
+            raise TypeError(message)
+        return f"CAST('{value}' AS DECIMAL({width}, {scale}))"
     if isinstance(value, uuid.UUID):
         return f"UUID '{value}'"
     if isinstance(value, (list, tuple)):

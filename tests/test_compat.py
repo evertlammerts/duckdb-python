@@ -394,7 +394,7 @@ class TestStatementDispatch:
         con = compat.connect()
         con.run("CREATE TABLE t (v INTEGER)")
         assert con.sql("WITH x AS (SELECT 42 AS v) INSERT INTO t SELECT * FROM x") is None
-        assert con.run("SELECT count(*) FROM t") == 0 or duckdb.table("t").count(con) == 1
+        assert duckdb.table("t").count(con) == 1
 
     def test_returning_inside_a_string_literal_is_data(self) -> None:
         con = compat.connect()
@@ -431,6 +431,37 @@ class TestStatementDispatch:
         con.run("INSERT INTO u VALUES (1)")
         assert con.sql("ROLLBACK") is None
         assert duckdb.table("u").count(con) == 0
+
+    def test_sql_discards_an_untouched_held_result_like_the_old_client(self) -> None:
+        con = compat.connect()
+        con.execute("SELECT * FROM range(10000)")
+        relation = con.sql("SELECT 1")
+        assert relation is not None
+        assert relation.fetchall() == [(1,)]
+        # The old client's silent discard: nothing had been fetched, so the
+        # held result is gone rather than the statement refused.
+        with pytest.raises(exceptions.InvalidInputError, match="No open result set"):
+            con.fetchall()
+
+    def test_sql_refuses_loudly_over_a_touched_held_result(self) -> None:
+        # A recorded divergence: the old client kept a touched result because
+        # it had materialized it; this client streams and says so.
+        con = compat.connect()
+        con.execute("SELECT * FROM range(10000)")
+        assert con.fetchone() == (0,)
+        with pytest.raises(exceptions.ProgrammingError, match="live result"):
+            con.sql("SELECT 1")
+        # The held result is untouched by the refusal.
+        assert con.fetchone() == (1,)
+
+    def test_returning_decimals_keep_width_and_scale(self) -> None:
+        import decimal
+
+        con = compat.connect()
+        con.run("CREATE TABLE d (v DECIMAL(38,6))")
+        relation = con.sql("INSERT INTO d VALUES (-0.000001) RETURNING v")
+        assert relation is not None
+        assert relation.fetchall() == [(decimal.Decimal("-0.000001"),)]
 
     def test_executemany_refuses_an_empty_set_in_the_old_words(self) -> None:
         con = compat.connect()
