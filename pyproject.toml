@@ -63,7 +63,6 @@ backend-path = ["./"]
 requires = [
     "scikit-build-core>=0.11.4",
 	"nanobind>=3.0",
-    "setuptools_scm>=8.0",
     # numpy C API headers (PyArray_Empty in the result path). Building against numpy 2.x yields a
     # binary compatible with numpy >=1.19 AND 2.x at runtime (numpy 2.0 backward-compat), so the
     # unpinned runtime numpy range is preserved. Build-time only; the runtime numpy dep is unchanged.
@@ -75,7 +74,11 @@ minimum-version = "0.10"
 cmake.version = ">=3.29.0"
 ninja.version = ">=1.10"
 ninja.make-fallback = false
-metadata.version.provider = "scikit_build_core.metadata.setuptools_scm"
+metadata.version.provider = "duckdb_packaging.build_info"
+# Required for a metadata provider that is not shipped by scikit-build-core itself.
+# It is project wide: it also unlocks PEP 817 variant settings and absolute wheel
+# destinations, neither of which is used or meant to be.
+experimental = true
 # Stable build dir instead of the default randomized temp dir. A randomized dir
 # changes every include path and the compile cwd on every run, which makes
 # ccache direct mode miss 100% of the time in CI (only the slower preprocessed
@@ -92,16 +95,11 @@ packages._duckdb-stubs = "_duckdb-stubs"
 [tool.scikit-build.cmake.define]
 BUILD_EXTENSIONS = "core_functions;json;parquet;icu"
 
-[tool.setuptools_scm]
-version_scheme = "duckdb_packaging.setuptools_scm_version:version_scheme"
-local_scheme = "no-local-version"
-fallback_version = "0.0.1.dev1"
-
-# main only: count dev distance from the last *minor* tag (v*.*.0), so a patch
-# tag (e.g. v1.5.4) merged in from a release branch can't reset .devN.
-# Release branches must NOT have this, they correctly count from v*.*.* (the default).
-[tool.setuptools_scm.scm.git]
-describe_command = "git describe --dirty --tags --long --abbrev=40 --match v*.*.0"
+[tool.duckdb_packaging]
+# The version this branch releases next. A release forces exactly this version, a
+# dev build appends .dev<yymmddhhmm> of the latest commit across this repository
+# and the DuckDB submodule. Bump it right after every release from this branch.
+release_version = "2.0.0"
 
 [[tool.scikit-build.overrides]]
 if.env.CIBUILDWHEEL_BUILD_IDENTIFIER = true
@@ -163,8 +161,8 @@ include = [
     "adbc_driver_duckdb/**",
     "_duckdb-stubs/*.pyi",
 
-    # Generated during sdist build, contains git describe string for duckdb
-    "duckdb_packaging/duckdb_version.txt",
+    # Generated during the sdist build, the identity the wheel build inherits
+    "duckdb_packaging/build_info.json",
 
     # -------------- DuckDB submodule includes
     # Core DuckDB source and build system
@@ -330,7 +328,6 @@ build = [
     "ninja>=1.10",
     "nanobind>=3.0",
     "scikit_build_core>=0.11.4",
-    "setuptools_scm>=8.0",
 ]
 dev = [ # tooling like uv will install this automatically when syncing the environment
     "pre-commit",
