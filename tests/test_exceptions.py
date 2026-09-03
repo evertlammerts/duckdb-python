@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 
+import duckdb
 from duckdb import exceptions
 from duckdb._error_codes import ERROR_CODES
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # PEP 249 section "Exceptions": these names, and these parent relationships.
 PEP249_HIERARCHY = [
@@ -49,6 +55,20 @@ def test_unknown_code_degrades_instead_of_raising() -> None:
     # A newer engine may report a code this build has never seen. Losing the
     # error to a lookup failure would be worse than reporting it imprecisely.
     assert exceptions.class_for_code(999_999) is exceptions.DatabaseError
+
+
+def test_a_file_held_open_elsewhere_is_an_operational_error(tmp_path: Path) -> None:
+    # A file another connection or process holds is a condition of the
+    # environment, not a mistake in the statement: OperationalError, where
+    # the code used to map to ProgrammingError.
+    path = str(tmp_path / "held.db")
+    holder = duckdb.connect(path)
+    try:
+        with pytest.raises(exceptions.OperationalError, match=r"^Resource In Use Error") as caught:
+            duckdb.connect(path)
+    finally:
+        holder.close()
+    assert not isinstance(caught.value, exceptions.ProgrammingError)
 
 
 def test_warning_is_not_an_error() -> None:

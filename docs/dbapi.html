@@ -65,11 +65,11 @@ con.close()</code></pre>
 con = dbapi.connect(<span class="s">"shop.db"</span>)                                       <span class="c"># a file, created if it does not exist</span>
 con = dbapi.connect(<span class="s">"shop.db"</span>, access_mode=<span class="s">"READ_ONLY"</span>, threads=<span class="s">4</span>)
 con = dbapi.connect(<span class="s">"shop.db"</span>, autocommit=<span class="k">True</span>)</code></pre>
-  <p><code>database</code> is a path, as a string, or <code>":memory:"</code>, the default. Every other keyword is a DuckDB setting under its own name, applied as the database opens. The value is sent as text, so <code>threads=4</code> and <code>threads="4"</code> are the same. Some settings, <code>access_mode</code> among them, can only be chosen here, before the database exists. A name the engine does not know is refused with <code>InvalidInputError</code>, and so is a value it cannot read.</p>
+  <p><code>database</code> is a path, as a string or a <code>pathlib.Path</code>, or <code>":memory:"</code>, the default. Every other keyword is a DuckDB setting under its own name, applied as the database opens. The value is sent as text, so <code>threads=4</code> and <code>threads="4"</code> are the same. Some settings, <code>access_mode</code> among them, can only be chosen here, before the database exists. A name the engine does not know is refused with <code>InvalidInputError</code>, and so is a value it cannot read.</p>
   <p><code>autocommit</code> is the one keyword that is not a setting. Left <code>False</code>, the first statement opens a transaction that <code>commit()</code> ends and <code>close()</code> rolls back. Set <code>True</code>, no transaction is opened and every statement stands on its own. The details are under <a href="#transactions">Transactions</a>.</p>
 
   <p class="lead-in">one file, one open</p>
-  <p>A database file is open once at a time within a process. A second <code>connect()</code> to a file that is already open raises <code>ProgrammingError</code>, naming the file handle conflict. Open it once and take cursors from that connection; close it and it can be opened again.</p>
+  <p>A database file is open once at a time within a process. A second <code>connect()</code> to a file that is already open raises <code>OperationalError</code>, naming the file handle conflict. Open it once and take cursors from that connection; close it and it can be opened again.</p>
 
   <p class="lead-in">the connection as a context manager</p>
   <pre><code><span class="k">with</span> con:
@@ -78,7 +78,7 @@ con = dbapi.connect(<span class="s">"shop.db"</span>, autocommit=<span class="k"
   <p>The block is a transaction: COMMIT when it ends, ROLLBACK if it raises. The connection stays open afterwards. PEP 249 leaves this to the driver, and this is what <code>sqlite3</code> does and what a caller means by <code>with connection:</code>. Closing is <code>close()</code>.</p>
 
   <p class="lead-in">closing</p>
-  <p><code>close()</code> rolls back whatever was not committed, then releases the engine connection. Calling it again does nothing. After it, <code>cursor()</code> raises <code>InterfaceError</code>, and so does <code>execute</code> on any cursor the connection made.</p>
+  <p><code>close()</code> rolls back whatever was not committed, then releases the engine connection. Calling it again does nothing. After it, every other call raises <code>InterfaceError</code>: <code>cursor()</code>, <code>commit()</code>, <code>rollback()</code>, and <code>execute</code> on any cursor the connection made.</p>
 </section>
 
 <section id="cursors">
@@ -142,7 +142,7 @@ cur.fetchone()                              <span class="c"># ConversionError</s
     (<span class="s">7</span>, <span class="s">"fay"</span>, <span class="s">20</span>, <span class="s">"2026-04-02"</span>),
 ])
 cur.rowcount        <span class="c"># 2</span></code></pre>
-  <p>DuckDB has no batched bind, so the sets run one after another, in order. <code>rowcount</code> is the total across them, as <code>sqlite3</code> reports it. It is <code>-1</code> when the statement produced rows, or when the sequence was empty.</p>
+  <p>DuckDB has no batched bind, so the sets run one after another, in order. <code>rowcount</code> is the total across them, as <code>sqlite3</code> reports it. It is <code>-1</code> when the statement produced rows, or when the sequence was empty. A statement that produces rows leaves nothing behind: <code>description</code> is <code>None</code> and there is nothing to fetch.</p>
 </section>
 
 <section id="fetch">
@@ -183,7 +183,7 @@ cur.fetchone()          <span class="c"># None</span></code></pre>
   <p>Aware values carry the standard library's <code>datetime.timezone</code>, never pytz. A temporal value outside the range Python's <code>datetime</code> can hold raises <code>ConversionError</code> naming the value.</p>
 
   <p class="lead-in">stopping</p>
-  <p>Ctrl&#8209;C while <code>execute</code> or a fetch is inside the engine raises <code>KeyboardInterrupt</code>, as any Python program expects. The interrupt lands between batches of rows, so it is prompt on a long fetch.</p>
+  <p>Ctrl&#8209;C while <code>execute</code> or a fetch is inside the engine raises <code>KeyboardInterrupt</code>, as any Python program expects. From another thread, <code>con.interrupt()</code> cancels whatever the connection is running, and the statement fails with <code>InterruptError</code>. Either interrupt lands between batches of rows, so it is prompt on a long fetch.</p>
 </section>
 
 <section id="meta">
@@ -216,12 +216,25 @@ cur.description
 
 <section id="transactions">
   <h2>Transactions</h2>
-  <p>On a connection opened with the default <code>autocommit=False</code>, the first statement opens a transaction, and every cursor works inside it. <code>commit()</code> ends it; <code>rollback()</code> discards it; either does nothing when no transaction is open. The next statement opens a fresh one.</p>
+  <p>PEP 249 says: "Note that if the database supports an auto-commit feature, this must be initially off." DuckDB has no session setting for autocommit, so the connection does it itself: before the first statement after <code>connect()</code>, <code>commit()</code> or <code>rollback()</code> it opens a transaction, and every statement from then on, reads included, runs inside it. Every cursor works inside it. <code>commit()</code> ends it; <code>rollback()</code> discards it; either does nothing when no transaction is open. The next statement opens a fresh one.</p>
   <pre><code>cur = con.cursor()
 cur.execute(<span class="s">"INSERT INTO orders VALUES (9, 'hal', 1, '2026-04-04')"</span>)
 con.rollback()
 cur.execute(<span class="s">"SELECT count(*) FROM orders"</span>)     <span class="c"># the insert is gone</span></code></pre>
   <p><code>close()</code> rolls back, as PEP 249 requires: work not committed before the connection closes is not in the file. The <a href="#connect">context manager</a> commits at the end of the block and rolls back if the block raises.</p>
+
+  <p class="lead-in">what a read sees</p>
+  <p>A transaction reads the database as it was when the transaction began. So a connection that only ever reads keeps seeing that snapshot, and what other connections commit in the meantime becomes visible only after its own <code>commit()</code> or <code>rollback()</code>:</p>
+  <pre><code>cur = con.cursor()
+cur.execute(<span class="s">"SELECT count(*) FROM orders"</span>)
+cur.fetchone()                                  <span class="c"># (3,)</span>
+<span class="c"># another connection inserts a row and commits</span>
+cur.execute(<span class="s">"SELECT count(*) FROM orders"</span>)
+cur.fetchone()                                  <span class="c"># (3,): the snapshot the transaction began with</span>
+con.rollback()                                  <span class="c"># or commit(); either ends the transaction</span>
+cur.execute(<span class="s">"SELECT count(*) FROM orders"</span>)
+cur.fetchone()                                  <span class="c"># (4,)</span></code></pre>
+  <p>The ways out are <code>connect(..., autocommit=True)</code>, below, where no transaction is opened and a read sees whatever has been committed when it runs, and the main API, where <code>con.transaction()</code> is the only way a transaction starts.</p>
 
   <p class="lead-in">after an error</p>
   <p>Most errors abort the open transaction. After one, every statement on the connection raises <code>TransactionError</code> until <code>rollback()</code> is called, and the message says so: <code>Current transaction is aborted (please ROLLBACK)</code>. A syntax error is the exception, since the parser refuses it before the transaction is touched.</p>
@@ -239,7 +252,7 @@ cur.execute(<span class="s">"SELECT count(*) FROM orders"</span>)     <span clas
 cur = auto.cursor()
 cur.execute(<span class="s">"INSERT INTO orders VALUES (10, 'ivy', 2, '2026-04-05')"</span>)
 auto.rollback()                                 <span class="c"># nothing to undo: the insert stands</span></code></pre>
-  <p>With <code>autocommit=True</code> no transaction is opened. Each statement commits itself, <code>commit()</code> and <code>rollback()</code> do nothing, and an error affects only the statement that raised it.</p>
+  <p>With <code>autocommit=True</code> no transaction is opened. Each statement commits itself and each read sees the latest commit, <code>commit()</code> and <code>rollback()</code> do nothing, and an error affects only the statement that raised it.</p>
 </section>
 
 <section id="module">
@@ -296,7 +309,7 @@ Error
 <span class="k">except</span> dbapi.IntegrityError <span class="k">as</span> error:        <span class="c"># a ConstraintError</span>
     con.rollback()</code></pre>
   <p>The message is the one DuckDB gives any client. <code>Warning</code> is exported because PEP 249 lists it; nothing in this package raises it. It is not an <code>Error</code>, so <code>except Error</code> does not swallow it.</p>
-  <p>Ctrl&#8209;C is not an <code>Error</code> either: it raises <code>KeyboardInterrupt</code>.</p>
+  <p>Ctrl&#8209;C is not an <code>Error</code> either: it raises <code>KeyboardInterrupt</code>. A statement cancelled by <code>con.interrupt()</code> from another thread fails with <code>InterruptError</code>, an <code>OperationalError</code>.</p>
 </section>
 
 <section id="reference">
@@ -304,7 +317,7 @@ Error
 
   <h3>Module</h3>
   <dl class="ref">
-    <dt>connect(database=":memory:", *, autocommit=False, **options)</dt><dd>Open a connection. A path or <code>":memory:"</code>; settings by name, applied as the database opens.</dd>
+    <dt>connect(database=":memory:", *, autocommit=False, **options)</dt><dd>Open a connection. A path, as a string or a <code>pathlib.Path</code>, or <code>":memory:"</code>; settings by name, applied as the database opens.</dd>
     <dt>apilevel</dt><dd><code>"2.0"</code>.</dd>
     <dt>threadsafety</dt><dd><code>1</code>: threads may share the module, not a connection.</dd>
     <dt>paramstyle</dt><dd><code>"qmark"</code>. The engine also reads <code>$1</code> and <code>$name</code>.</dd>
@@ -315,14 +328,15 @@ Error
     <dt>con.cursor()</dt><dd>A new cursor sharing this connection's transaction.</dd>
     <dt>con.commit()</dt><dd>Commit the open transaction, if any. Releases any open result.</dd>
     <dt>con.rollback()</dt><dd>Discard the open transaction, if any. Releases any open result.</dd>
-    <dt>con.close()</dt><dd>Roll back, then close. Idempotent.</dd>
+    <dt>con.interrupt()</dt><dd>Cancel the statement the connection is running, from another thread; it fails with <code>InterruptError</code>.</dd>
+    <dt>con.close()</dt><dd>Roll back, then close. Idempotent; every other call afterwards raises <code>InterfaceError</code>.</dd>
     <dt>with con:</dt><dd>The block as a transaction: commit on success, roll back on any exception. Does not close.</dd>
   </dl>
 
   <h3>Cursor</h3>
   <dl class="ref">
     <dt>cur.execute(operation, parameters=None)</dt><dd>Run one statement. Returns the cursor.</dd>
-    <dt>cur.executemany(operation, seq_of_parameters)</dt><dd>Run it once per parameter set, in order.</dd>
+    <dt>cur.executemany(operation, seq_of_parameters)</dt><dd>Run it once per parameter set, in order. A statement that produces rows leaves no result.</dd>
     <dt>cur.fetchone()</dt><dd>The next row, or <code>None</code>.</dd>
     <dt>cur.fetchmany(size=arraysize)</dt><dd>Up to <code>size</code> rows.</dd>
     <dt>cur.fetchall()</dt><dd>Every remaining row.</dd>
@@ -362,11 +376,12 @@ Error
       <tbody>
         <tr><td><code>duckdb.connect()</code> returned an object carrying <code>execute</code>, the fetch family, <code>description</code> and <code>rowcount</code>.</td><td><code>duckdb.connect()</code> carries none of that. The DB-API vocabulary lives in <code>duckdb.dbapi</code>, strictly PEP 249, and in <code>duckdb.compat</code>, as the old client had it.</td></tr>
         <tr><td><code>cursor()</code> handed back an independent duplicate connection with its own transaction, closed along with its parent.</td><td>Cursors share their connection's transaction, as PEP 249 requires. <code>duckdb.compat</code> keeps the old semantics.</td></tr>
+        <tr><td><code>execute()</code> ran in autocommit: each statement committed itself, and <code>commit()</code> outside a transaction did nothing.</td><td>A transaction is open from the first statement after <code>connect()</code>, <code>commit()</code> or <code>rollback()</code>, reads included, as PEP 249 requires. <code>connect(autocommit=True)</code> gives the old behaviour.</td></tr>
         <tr><td><code>rowcount</code> was always <code>-1</code>.</td><td>Real counts for INSERT, UPDATE, DELETE and CREATE TABLE AS; <code>-1</code> only for a row-producing statement. <code>duckdb.compat</code> still reports <code>-1</code>.</td></tr>
         <tr><td>Exception classes had their own names: <code>CatalogException</code>, <code>ConnectionException</code>, <code>BinderException</code> and so on.</td><td>Classes follow the engine's error codes, rooted in PEP 249, in <code>duckdb.exceptions</code>. The old names exist as aliases in <code>duckdb.compat</code> only; <code>ConnectionException</code> there is <code>InterfaceError</code>.</td></tr>
         <tr><td>Ctrl&#8209;C during a query was converted to <code>RuntimeError</code>.</td><td>It raises <code>KeyboardInterrupt</code>.</td></tr>
         <tr><td>A parameter mapping accepted any key and stringified it.</td><td>Keys must be strings; anything else is <code>InvalidInputError</code>. The leniency lives in <code>duckdb.compat</code> alone.</td></tr>
-        <tr><td>Opening one file twice shared a single database instance per path.</td><td>A second open of a file already open is refused with <code>ProgrammingError</code>. <code>duckdb.compat</code> reproduces the shared instance.</td></tr>
+        <tr><td>Opening one file twice shared a single database instance per path.</td><td>A second open of a file already open is refused with <code>OperationalError</code>. <code>duckdb.compat</code> reproduces the shared instance.</td></tr>
         <tr><td><code>execute("a; b; c")</code> ran all three and returned the last result.</td><td>One statement per call; more is <code>InvalidInputError</code>. Multi-statement execute is pending.</td></tr>
         <tr><td>A temporal value beyond Python's <code>datetime</code> range came back silently as text.</td><td>It raises <code>ConversionError</code> naming the value.</td></tr>
         <tr><td>A MAP whose keys Python cannot hash came back as a <code>{'key': [...], 'value': [...]}</code> dict of lists.</td><td>It comes back as a list of <code>(key, value)</code> pairs.</td></tr>

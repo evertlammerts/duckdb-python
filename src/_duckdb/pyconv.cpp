@@ -732,12 +732,23 @@ Value FromText(SCOPE &scope, const std::string &text, const LogicalType &target)
 }
 
 [[noreturn]] void ThrowUnsupported(nb::handle object) {
-	const auto name = nb::cast<std::string>(nb::handle(Py_TYPE(object.ptr())).attr("__name__"));
-	throw duckdb::cxx::InvalidInputException("Invalid Input Error: cannot bind a parameter of type " +
-	                                         name);
+	throw UnsupportedTypeException(
+	    nb::cast<std::string>(nb::handle(Py_TYPE(object.ptr())).attr("__name__")));
+}
+
+// The body doubles as the raw message, so a callback boundary, where the
+// engine adds the prefix itself, can report the body alone.
+[[noreturn]] void ThrowInvalidInput(const std::string &body) {
+	throw duckdb::cxx::InvalidInputException("Invalid Input Error: " + body, body);
 }
 
 } // namespace
+
+UnsupportedTypeException::UnsupportedTypeException(std::string type_name)
+    : duckdb::cxx::InvalidInputException("Invalid Input Error: cannot bind a parameter of type " + type_name,
+                                         "cannot bind a parameter of type " + type_name),
+      type_name(std::move(type_name)) {
+}
 
 template <class SCOPE>
 Value PythonToValue(SCOPE &scope, nb::handle object, ConversionContext &ctx) {
@@ -780,8 +791,7 @@ Value PythonToValue(SCOPE &scope, nb::handle object, ConversionContext &ctx) {
 		// blob_t carries a uint32 length, so anything larger would wrap and
 		// bind silently truncated. Every other overflow here throws.
 		if (bytes.size() > std::numeric_limits<uint32_t>::max()) {
-			throw duckdb::cxx::InvalidInputException(
-			    "Invalid Input Error: bytes value is larger than a BLOB can hold");
+			ThrowInvalidInput("bytes value is larger than a BLOB can hold");
 		}
 		return Value::Create(scope, duckdb::cxx::blob_t(bytes.c_str(),
 		                                                    static_cast<uint32_t>(bytes.size())));
@@ -813,8 +823,7 @@ Value PythonToValue(SCOPE &scope, nb::handle object, ConversionContext &ctx) {
 			    nb::cast<int64_t>(offset.attr("total_seconds")().attr("__int__")());
 			if (seconds > duckdb::cxx::dtime_tz_t::MAX_OFFSET ||
 			    seconds < -duckdb::cxx::dtime_tz_t::MAX_OFFSET) {
-				throw duckdb::cxx::InvalidInputException(
-				    "Invalid Input Error: time zone offset is outside the range TIME_TZ can hold");
+				ThrowInvalidInput("time zone offset is outside the range TIME_TZ can hold");
 			}
 			return Value::Create(scope,
 			                     duckdb::cxx::dtime_tz_t(micros, static_cast<int32_t>(seconds)));
@@ -843,8 +852,7 @@ Value PythonToValue(SCOPE &scope, nb::handle object, ConversionContext &ctx) {
 		if (!nb::isinstance<nb::int_>(exponent)) {
 			// NaN and the infinities carry a string exponent and have no
 			// DECIMAL counterpart at all.
-			throw duckdb::cxx::InvalidInputException(
-			    "Invalid Input Error: cannot bind a non-finite Decimal");
+			ThrowInvalidInput("cannot bind a non-finite Decimal");
 		}
 		// A Decimal is digits x 10^exponent. A negative exponent is the scale;
 		// a positive one adds trailing zeroes the digit tuple does not carry,
@@ -855,8 +863,7 @@ Value PythonToValue(SCOPE &scope, nb::handle object, ConversionContext &ctx) {
 		const auto integer_places = digits + std::max(0, power);
 		const auto width = std::min(38, std::max(std::max(integer_places, scale), 1));
 		if (scale > width) {
-			throw duckdb::cxx::InvalidInputException(
-			    "Invalid Input Error: Decimal has more fractional digits than DECIMAL can hold");
+			ThrowInvalidInput("Decimal has more fractional digits than DECIMAL can hold");
 		}
 		return FromText(scope, nb::cast<std::string>(nb::str(object)),
 		                scope.ParseType("DECIMAL(" + std::to_string(width) + "," +

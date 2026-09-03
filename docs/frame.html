@@ -188,9 +188,11 @@ coalesce(col(<span class="s">"v"</span>), <span class="s">0</span>)   <span clas
   <p class="lead-in">tests and casts</p>
   <pre><code>col(<span class="s">"total"</span>).between(<span class="s">100</span>, <span class="s">500</span>)
 col(<span class="s">"region"</span>).isin([<span class="s">"emea"</span>, <span class="s">"amer"</span>])
+col(<span class="s">"x"</span>).isin(col(<span class="s">"xs"</span>))                <span class="c"># ("x" IN "xs"): a list held in another column</span>
 col(<span class="s">"sku"</span>).like(<span class="s">"AB-%"</span>)               <span class="c"># % any run, _ any one character; .ilike ignores case</span>
 col(<span class="s">"amount"</span>).cast(<span class="s">"DECIMAL(10,2)"</span>)
 col(<span class="s">"amount"</span>).try_cast(<span class="s">"INTEGER"</span>)       <span class="c"># NULL where the cast would fail</span></code></pre>
+  <p><code>isin</code> takes a list of values, a plan with one column (<a href="#nested">Plans inside plans</a>), or an expression of list type. The last is the engine's <code>IN</code> over a list: <code>2 IN [1, 2, 3]</code> is true, <code>5 IN [1, NULL]</code> is false and <code>NULL IN [1, 2]</code> is NULL.</p>
 
   <p class="lead-in">function namespaces</p>
   <p>The engine's functions come in families, entered by saying how the expression is meant: <code>.str()</code> for text, <code>.dt()</code> for dates and times, <code>.list()</code> for lists, <code>.json()</code> for JSON documents. The entry is the same expression with that family's methods in scope; nothing is checked or cast, and the engine still judges every call.</p>
@@ -417,7 +419,7 @@ orders.filter(sql_expr(<span class="s">"region = 'emea' AND total &gt; 1000"</sp
     <dt>values(rows, columns)</dt><dd>Rows given in memory; <code>columns</code> are names or (name, type) pairs, and a type given is a cast.</dd>
     <dt>read_csv / read_parquet / read_json(path, **options)</dt><dd>A file, files or a glob through the engine's reader; options under their SQL names.</dd>
     <dt>table_function(name, *args, **named)</dt><dd>Any table function in a FROM clause.</dd>
-    <dt>duckdb.connect(path, **options)</dt><dd>Open a connection. Defaults to an in-memory database.</dd>
+    <dt>duckdb.connect(path, **options)</dt><dd>Open a connection. <code>path</code> is a string or a <code>pathlib.Path</code>; the default is an in-memory database.</dd>
     <dt>con.run(sql, params)</dt><dd>Run a statement; returns rows changed.</dd>
     <dt>con.transaction()</dt><dd>The block as one transaction: COMMIT on success, ROLLBACK on any error.</dd>
     <dt>con.interrupt()</dt><dd>Cancel the running query from another thread; it fails with <code>InterruptError</code>. Ctrl&#8209;C in the querying thread does the same and raises <code>KeyboardInterrupt</code>.</dd>
@@ -480,7 +482,7 @@ orders.filter(sql_expr(<span class="s">"region = 'emea' AND total &gt; 1000"</sp
     <dt>.alias(name)</dt><dd>Name the output column.</dd>
     <dt>.asc() / .desc() / .nulls_first() / .nulls_last()</dt><dd>Sort order.</dd>
     <dt>.cast(type) / .try_cast(type)</dt><dd>Cast; the second gives NULL where the first would fail.</dd>
-    <dt>.is_null() / .is_not_null() / .isin(values or plan) / .between(lo, hi)</dt><dd>Tests.</dd>
+    <dt>.is_null() / .is_not_null() / .isin(values, plan or list expression) / .between(lo, hi)</dt><dd>Tests. <code>isin</code> takes a list of values, a plan with one column, or an expression of list type, which is <code>IN</code> over a list.</dd>
     <dt>.like(pattern, escape) / .ilike(…)</dt><dd>Pattern match.</dd>
     <dt>.concat(*others)</dt><dd>Join text.</dd>
     <dt>.str() / .dt() / .list() / .json()</dt><dd>Function namespaces: the same expression with one family's methods in scope.</dd>

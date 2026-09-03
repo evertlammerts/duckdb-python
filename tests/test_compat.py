@@ -318,6 +318,17 @@ class TestSharedInstances:
         again.close()
         cursor.close()
 
+    def test_a_path_and_the_equal_string_share_the_database(self, tmp_path: Path) -> None:
+        # One instance per file, however the file was spelled: a second
+        # instance would be refused by the engine as already open.
+        path = tmp_path / "typed.db"
+        by_string = compat.connect(str(path))
+        by_path = compat.connect(path)
+        by_string.execute("CREATE TABLE a AS SELECT 1 AS v")
+        assert by_path.execute("SELECT count(*) FROM a").fetchone() == (1,)
+        by_string.close()
+        by_path.close()
+
     def test_named_memory_is_shared_and_plain_memory_is_not(self) -> None:
         named = compat.connect(":memory:compat_gate")
         sibling = compat.connect(":memory:compat_gate")
@@ -449,7 +460,9 @@ class TestStatementDispatch:
         con = compat.connect()
         con.execute("SELECT * FROM range(10000)")
         assert con.fetchone() == (0,)
-        with pytest.raises(exceptions.ProgrammingError, match="live result"):
+        # The engine reports it under RESOURCE_IN_USE, the code a file held
+        # by another connection gets, which maps to OperationalError.
+        with pytest.raises(exceptions.OperationalError, match="live result"):
             con.sql("SELECT 1")
         # The held result is untouched by the refusal.
         assert con.fetchone() == (1,)
@@ -643,6 +656,45 @@ class TestExpressionCompat:
             compat.FunctionExpression("greatest", compat.ColumnExpression("b"), 7).alias("g"),
         )
         assert picked.fetchall() == [(4, 7)]
+        assert picked.columns == ["c", "g"]
+
+    def test_project_keeps_an_alias(self) -> None:
+        # The rows came out right while the name was lost: the alias rode
+        # the expression but never reached the SELECT list.
+        con = compat.connect()
+        con.run("CREATE TABLE orders AS SELECT 1 AS total")
+        relation = con.table("orders").project(compat.ColumnExpression("total").alias("t"))
+        assert relation.columns == ["t"]
+        assert [column[0] for column in relation.description] == ["t"]
+        assert ' AS "t"' in relation.sql_query()
+        assert relation.fetchall() == [(1,)]
+
+    def test_aggregate_keeps_an_alias(self) -> None:
+        con = compat.connect()
+        relation = rel(con, "SELECT unnest([1, 2, 3]) AS v")
+        summed = relation.aggregate([compat.FunctionExpression("sum", compat.ColumnExpression("v")).alias("s")])
+        assert summed.columns == ["s"]
+        assert [column[0] for column in summed.description] == ["s"]
+        assert summed.fetchall() == [(6,)]
+
+    def test_aliased_and_unaliased_columns_mix(self) -> None:
+        con = compat.connect()
+        relation = rel(con, "SELECT 1 AS a, 2 AS b")
+        mixed = relation.project(
+            compat.ColumnExpression("a"),
+            (compat.ColumnExpression("b") + 1).alias("c"),
+            "b",
+        )
+        assert mixed.columns == ["a", "c", "b"]
+        assert mixed.fetchall() == [(1, 3, 2)]
+
+    def test_filter_still_takes_an_aliased_expression(self) -> None:
+        # A WHERE cannot carry AS, so the alias is left off there rather
+        # than rendered into a syntax error.
+        con = compat.connect()
+        relation = rel(con, "SELECT unnest([1, 2, 3]) AS v")
+        kept = relation.filter((compat.ColumnExpression("v") > 1).alias("big"))
+        assert kept.fetchall() == [(2,), (3,)]
 
 
 class TestCreateFunction:
@@ -677,6 +729,47 @@ class TestCreateFunction:
 
         con.create_function("maybe", maybe, null_handling="special")
         assert con.execute("SELECT maybe(2), maybe(3)").fetchall() == [(None, 3)]
+
+    def test_a_string_annotation_is_a_sql_type(self) -> None:
+        # Deferred by this module's __future__ import, the annotation arrives
+        # as text that evaluates to the string "VARCHAR"; the text is the
+        # type, not a Python name to look up.
+        con = compat.connect()
+
+        def shout(text: "VARCHAR") -> "VARCHAR":  # type: ignore[name-defined]  # noqa: F821, UP037
+            return text.upper()
+
+        con.create_function("shout_sql", shout)
+        assert con.execute("SELECT shout_sql('ha')").fetchall() == [("HA",)]
+
+    def test_string_sql_types_mix_with_python_types(self) -> None:
+        con = compat.connect()
+
+        def widen(x: int, scale: "DECIMAL(4,1)") -> float:  # type: ignore[valid-type]  # noqa: F821, UP037
+            return x * float(scale)
+
+        con.create_function("widen", widen)
+        assert con.execute("SELECT widen(2, 1.5)").fetchall() == [(3.0,)]
+
+    def test_undeferred_string_annotations_are_sql_types_too(self) -> None:
+        # Without the __future__ import an annotation is the bare string, which
+        # inspect's own evaluation turned into a NameError before the text
+        # could be read as a type; "INTEGER[]" is not even Python syntax.
+        con = compat.connect()
+
+        def total(values: object) -> object:
+            return sum(values)  # type: ignore[call-overload]
+
+        total.__annotations__ = {"values": "INTEGER[]", "return": "BIGINT"}
+        con.create_function("total_sql", total)
+        assert con.execute("SELECT total_sql([1, 2, 3])").fetchall() == [(6,)]
+
+        def label(x: object) -> object:
+            return str(x)
+
+        label.__annotations__ = {"x": "int", "return": "VARCHAR"}
+        con.create_function("label_sql", label)
+        assert con.execute("SELECT label_sql(7)").fetchall() == [("7",)]
 
     def test_missing_annotations_are_refused_with_directions(self) -> None:
         con = compat.connect()

@@ -193,7 +193,7 @@ con = duckdb.connect(threads=<span class="s">2</span>)</code></pre>
       <dt>ConfigurationError</dt><dd>A <code>ProgrammingError</code>. A setting was unknown, invalid or not permitted.</dd>
       <dt>ConversionError</dt><dd>A <code>DataError</code>. A value could not be converted to the requested type.</dd>
       <dt>ConstraintError</dt><dd>An <code>IntegrityError</code>. A key, NOT NULL or CHECK constraint was violated.</dd>
-      <dt>IOError / OutOfMemoryError / ConnectionError / TransactionError / InterruptError</dt><dd>Each an <code>OperationalError</code>: reading or writing failed; an allocation failed; the connection is no longer usable; the transaction could not proceed; the query was interrupted.</dd>
+      <dt>IOError / OutOfMemoryError / ConnectionError / TransactionError / InterruptError</dt><dd>Each an <code>OperationalError</code>: reading or writing failed; an allocation failed; the connection is no longer usable; the transaction could not proceed; the query was interrupted. A database file already in use, by another connection or another process, is an <code>OperationalError</code> too.</dd>
       <dt>FatalError</dt><dd>An <code>InternalError</code>. The database is no longer usable and must be reopened.</dd>
     </dl>
     <p>Catch a leaf when the program can do something about that case, and <code>DatabaseError</code> when it cannot. A code the engine adds later, one this package has never seen, arrives as a plain <code>DatabaseError</code> rather than being lost. The message is the engine's own, as it would be given to any client; the one above goes on to suggest <code>orders</code> and point at the SQL.</p>

@@ -1,7 +1,21 @@
 """Type stubs for the nanobind extension module."""
 
+import enum
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
+
+class FunctionNullHandling(enum.Enum):
+    """Whether a scalar function handles NULL arguments itself."""
+
+    DEFAULT = 0
+    SPECIAL = 1
+
+class FunctionStability(enum.Enum):
+    """How far the engine may reuse a scalar function's result."""
+
+    CONSISTENT = 0
+    VOLATILE = 1
+    CONSISTENT_WITHIN_QUERY = 2
 
 class ChunkView:
     """One fetched chunk column-wise, for the numpy converter.
@@ -40,6 +54,13 @@ class ChunkView:
         """Per-cell object fallback for the columns data() cannot serve."""
 
 class Result:
+    """One statement's result, streamed a chunk at a time.
+
+    Single reader: the fetch state is unguarded and stepping releases the
+    GIL, so two threads fetching from one Result race even on a GIL build.
+    Fetch from one thread; `close()` is the one call safe from another.
+    """
+
     @property
     def schema(self) -> list[tuple[str, str]]:
         """Column names paired with the text form of their type."""
@@ -96,16 +117,28 @@ class Connection:
         callable: Callable[..., Any],
         parameters: list[str],
         returns: str,
-        null_handling: str,
-        stability: str,
+        null_handling: FunctionNullHandling,
+        stability: FunctionStability,
     ) -> None:
-        """Register a Python callable as a scalar SQL function."""
+        """Register a Python callable as a scalar SQL function.
+
+        The type texts go to the engine's parser as they are; the caller has
+        already refused ANY, which the parser rejects without saying why.
+        """
 
     def interrupt(self) -> None: ...
     def get_option(self, name: str) -> str: ...
     def set_option(self, name: str, value: str) -> None: ...
+    def close(self) -> None:
+        """Release the engine connection now. Idempotent; every other method raises InterfaceError afterwards."""
 
 class Database:
+    """One open database.
+
+    Every Connection and Result on it holds a reference to it, so the
+    engine instance lives until the last of them is closed or collected.
+    """
+
     def __init__(self, path: str = ":memory:", options: list[tuple[str, str]] | None = None) -> None: ...
     def connect(self) -> Connection: ...
 

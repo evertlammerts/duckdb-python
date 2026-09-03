@@ -10,6 +10,7 @@
 
 #include <nanobind/nanobind.h>
 
+#include <string>
 #include <vector>
 
 #include "duckdb_cpp.hpp"
@@ -63,6 +64,21 @@ void AppendChunkRows(const duckdb::cxx::DataChunk &chunk, const std::vector<duck
 /// Elements [first, last) of one vector as a new list. NULL becomes None.
 nb::list VectorElements(duckdb::cxx::Vector &vector, const duckdb::cxx::LogicalType &type,
                         duckdb::cxx::idx_t first, duckdb::cxx::idx_t last, ConversionContext &ctx);
+
+/// Raised by PythonToValue for an object of a type no branch accepts. Worded
+/// for parameter binding; a caller converting something else rewrites it.
+class UnsupportedTypeException : public duckdb::cxx::InvalidInputException {
+public:
+	explicit UnsupportedTypeException(std::string type_name);
+
+	/// The offending object's Python type name.
+	const std::string &TypeName() const {
+		return type_name;
+	}
+
+private:
+	std::string type_name;
+};
 
 /// One Python object as a DuckDB value, for binding as a parameter or writing
 /// a function result. `scope` is the Connection outside engine callbacks and

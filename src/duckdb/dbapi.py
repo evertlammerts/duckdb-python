@@ -12,6 +12,7 @@ cursor its own connection and so could not honour that.
 from __future__ import annotations
 
 import datetime
+import os
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -247,23 +248,31 @@ class Cursor:
     def executemany(self, operation: str, seq_of_parameters: Sequence[Parameters]) -> Cursor:
         """Run one statement once per parameter set.
 
-        DuckDB has no batched bind, so the sets run in order. `rowcount` is the
-        total across them, which is what sqlite3 and most drivers report; PEP
-        249 leaves it undefined only when the statement produces rows, and it
-        stays -1 in that case.
+        DuckDB has no batched bind, so the sets run in order, and no result is
+        held afterwards: PEP 249 leaves a row-producing statement undefined
+        here, and keeping the last set's rows would be a guess at what was
+        meant. `description` is None and a fetch is refused. `rowcount` is the
+        total across the sets for statements that report one, which is what
+        sqlite3 and most drivers do, and -1 otherwise.
         """
+        connection = self._require_open()
         # A statement run zero times is still the last one asked for, so the
         # metadata of whatever ran before must not survive it.
-        self._require_open()._claim_result_slot(self)
+        connection._claim_result_slot(self)
         self._description = None
         self._rowcount = -1
         total = 0
         counted = False
-        for parameters in seq_of_parameters:
-            self.execute(operation, parameters)
-            if self._rowcount >= 0:
-                total += self._rowcount
-                counted = True
+        try:
+            for parameters in seq_of_parameters:
+                self.execute(operation, parameters)
+                if self._rowcount >= 0:
+                    total += self._rowcount
+                    counted = True
+        finally:
+            self._release_result()
+            self._description = None
+            connection._release_cursor(self)
         self._rowcount = total if counted else -1
         return self
 
@@ -377,7 +386,12 @@ class Connection:
             result.close()
 
     def _begin_if_needed(self) -> None:
-        """Open a transaction lazily, so a read-only session never starts one."""
+        """Open a transaction before the first statement after connect(), commit() or rollback().
+
+        PEP 249 wants auto-commit off from the start and DuckDB has no
+        session-level switch for it, so every statement, a SELECT included,
+        runs inside a transaction opened here.
+        """
         if self._autocommit or self._in_transaction:
             return
         self._run("BEGIN TRANSACTION")
@@ -394,8 +408,17 @@ class Connection:
         self._engine()
         return Cursor(self)
 
+    def interrupt(self) -> None:
+        """Cancel the statement this connection is running.
+
+        Made to be called from another thread; the statement fails with
+        `InterruptError`, an `OperationalError`.
+        """
+        self._engine().interrupt()
+
     def commit(self) -> None:
         """Commit the open transaction, if there is one."""
+        self._engine()
         self._release_open_result()
         if self._in_transaction:
             self._run("COMMIT")
@@ -403,6 +426,7 @@ class Connection:
 
     def rollback(self) -> None:
         """Discard the open transaction, if there is one."""
+        self._engine()
         self._release_open_result()
         if self._in_transaction:
             self._run("ROLLBACK")
@@ -437,7 +461,7 @@ class Connection:
             self.rollback()
 
 
-def connect(database: str = ":memory:", *, autocommit: bool = False, **options: str) -> Connection:
+def connect(database: str | os.PathLike[str] = ":memory:", *, autocommit: bool = False, **options: str) -> Connection:
     """Open a connection.
 
     Args:
@@ -447,5 +471,5 @@ def connect(database: str = ":memory:", *, autocommit: bool = False, **options: 
         **options: Settings applied when the database is opened. Some can only
             be chosen here, before the database exists.
     """
-    engine = _duckdb.Database(database, [(k, str(v)) for k, v in options.items()])
+    engine = _duckdb.Database(os.fspath(database), [(k, str(v)) for k, v in options.items()])
     return Connection(engine.connect(), autocommit=autocommit)

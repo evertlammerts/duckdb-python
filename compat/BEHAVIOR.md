@@ -27,6 +27,9 @@
 - Duplicate output names and join clashes are refused at build with a
   message; the old client let the engine silently bind the first.
   (`tests/test_frame.py::TestJoinRefusesToDuplicateAName`)
+- `intersect()` and `except_()` on a `CompatRelation` render
+  `INTERSECT ALL` and `EXCEPT ALL`, as the old client's did; the main
+  API's `intersect()` and `except_()` drop duplicates.
 
 ## Connections and transactions
 

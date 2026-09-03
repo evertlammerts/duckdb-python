@@ -35,6 +35,15 @@ def test_database_accepts_open_time_options() -> None:
     assert con.get_option("threads") == "2"
 
 
+def test_connect_accepts_a_path(tmp_path: Path) -> None:
+    # A Path used to reach the engine's binding unconverted and be refused
+    # with its argument-type error.
+    with duckdb.connect(tmp_path / "by_path.db") as con:
+        con.run("CREATE TABLE t AS SELECT 1 AS v")
+        assert duckdb.sql("SELECT v FROM t").rows(con) == [(1,)]
+    assert (tmp_path / "by_path.db").exists()
+
+
 def test_interrupt_cancels_a_running_query() -> None:
     con = _duckdb.Database(":memory:").connect()
     failure: list[BaseException] = []

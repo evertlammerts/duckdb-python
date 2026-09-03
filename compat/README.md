@@ -27,8 +27,10 @@ The report clusters outcomes (passed, missing surface, behavior, skipped),
 prints the top failure signatures, and always exits 0. `--facade` patches
 `duckdb.connect` and the old module-level names to `duckdb.compat` through
 `compat/conftest.py`, previewing what a drop-in 2.0 would score; the
-verbatim files are never touched. Extra arguments are passed to pytest, so
-`scripts/compat_report.py suite/test_result.py -v` narrows a run.
+verbatim files are never touched. A path argument restricts the run to the
+suite files under it and is not passed to pytest; every other argument is
+passed through, so `scripts/compat_report.py suite/test_result.py -v` runs
+that one file verbosely.
 
 Current slice: 36 files from `tests/fast/`, `tests/fast/api/` and
 `tests/fast/relational_api/`: the connection, statement, transaction,

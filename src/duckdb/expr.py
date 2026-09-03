@@ -250,6 +250,11 @@ def render_literal(value: object) -> str:
 
 _sink_stack: contextvars.ContextVar[tuple[ParamSink, ...]] = contextvars.ContextVar("duckdb_param_sink", default=())
 
+#: The refusal a `param()` meets when it renders with no sink active, or None
+#: where the NULL stand-in is right. Separate from the sink stack, so that a
+#: nested `suspended_sinks()` cannot lift it.
+_param_refusal: contextvars.ContextVar[str | None] = contextvars.ContextVar("duckdb_param_refusal", default=None)
+
 
 class ParamSink:
     """Collects the values a plan binds, in render order, numbering them `$n`.
@@ -359,6 +364,21 @@ def suspended_sinks() -> Iterator[None]:
         yield
     finally:
         _sink_stack.reset(token)
+
+
+@contextlib.contextmanager
+def refusing_parameters(message: str) -> Iterator[None]:
+    """Make a `param()` that renders with no sink raise `TypeError(message)` instead of standing in NULL.
+
+    For a rendering that has nothing to bind a parameter to, a macro
+    definition: NULL would be written into it and every call would answer
+    NULL.
+    """
+    token = _param_refusal.set(message)
+    try:
+        yield
+    finally:
+        _param_refusal.reset(token)
 
 
 # --- the tree --------------------------------------------------------------
@@ -646,17 +666,22 @@ class Expr(AggregateMethods, FuncNamespaces):
         """Whether this is not NULL."""
         return Postfix("IS NOT NULL", self)
 
-    def isin(self, values: Iterable[object] | PlanBase) -> Expr:
-        """Membership, in a list of values or in a one-column plan.
+    def isin(self, values: Iterable[object] | PlanBase | Expr) -> Expr:
+        """Membership: in a list of values, in a one-column plan, or in a list-typed expression.
 
-        An empty list is never a match.
+        An empty list is never a match. Given an expression, the engine reads
+        it as a list and tests membership of it row by row: `x IN xs`.
         """
         if isinstance(values, PlanBase):
             return Binary("IN", self, SubQuery(values))
+        if isinstance(values, Expr):
+            return Binary("IN", self, values)
         if isinstance(values, (str, bytes)):
             # Iterating text would test each character. Nobody means that, and
             # one value is what `==` is for.
-            message = f"isin takes a list of values or a query; for one value use == {values!r}"
+            message = (
+                f"isin takes a list of values, a query or a list-typed expression; for one value use == {values!r}"
+            )
             raise TypeError(message)
         return In(self, [_lift(v) for v in values])
 
@@ -859,6 +884,9 @@ class Param(Expr):
     def fragment(self) -> str:
         sink = active_sink()
         if sink is None:
+            refusal = _param_refusal.get()
+            if refusal is not None:
+                raise TypeError(refusal)
             # Rendering without a sink happens for the schema oracle, where an
             # untyped placeholder tells the binder nothing. NULL binds and
             # carries no type either, which is the honest stand-in.

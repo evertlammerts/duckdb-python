@@ -4,12 +4,21 @@ from __future__ import annotations
 
 import datetime
 import decimal
+import gc
+import subprocess
+import sys
 import threading
+import time
+import weakref
+from typing import TYPE_CHECKING
 
 import pytest
 
 import duckdb
-from duckdb import col, exceptions, fn
+from duckdb import _duckdb, col, exceptions, fn
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 @pytest.fixture
@@ -20,6 +29,11 @@ def con() -> duckdb.Connection:
 def rows(con: duckdb.Connection, sql: str) -> list[tuple[object, ...]]:
     with con._execute(sql) as result:
         return result.fetch_all()
+
+
+# The raw module takes the facade enums; the string forms belong to duckdb.Connection.
+DEFAULT = _duckdb.FunctionNullHandling.DEFAULT
+CONSISTENT = _duckdb.FunctionStability.CONSISTENT
 
 
 class TestRegistration:
@@ -67,6 +81,22 @@ class TestRegistration:
         with pytest.raises(exceptions.InterfaceError):
             con.create_function("f", lambda x: x, ["BIGINT"], "BIGINT")
 
+    @pytest.mark.parametrize("text", ["ANY", "any", " ANY "])
+    def test_an_any_parameter_is_refused(self, con: duckdb.Connection, text: str) -> None:
+        with pytest.raises(exceptions.InvalidInputError) as info:
+            con.create_function("f", lambda x, y: x, ["BIGINT", text], "BIGINT")
+        assert str(info.value) == "Invalid Input Error: ANY parameters are not supported yet"
+
+    @pytest.mark.parametrize("text", ["ANY", "any", " ANY "])
+    def test_an_any_return_type_is_refused(self, con: duckdb.Connection, text: str) -> None:
+        with pytest.raises(exceptions.InvalidInputError) as info:
+            con.create_function("f", lambda x: x, ["BIGINT"], text)
+        assert str(info.value) == "Invalid Input Error: an ANY return type is not supported yet"
+
+    def test_a_nested_any_gets_the_parsers_refusal(self, con: duckdb.Connection) -> None:
+        with pytest.raises(exceptions.InvalidInputError, match="can not be converted to a DuckDB Type"):
+            con.create_function("f", lambda x: x, ["ANY[]"], "BIGINT")
+
 
 class TestValues:
     def test_scalar_types_round_trip(self, con: duckdb.Connection) -> None:
@@ -111,7 +141,7 @@ class TestValues:
 
     def test_an_unbindable_return_object_fails_loudly(self, con: duckdb.Connection) -> None:
         con.create_function("obj", lambda x: object(), ["BIGINT"], "VARCHAR")
-        with pytest.raises(exceptions.Error, match="cannot bind"):
+        with pytest.raises(exceptions.Error, match="returned a value of type object"):
             rows(con, "SELECT obj(1)")
 
 
@@ -145,7 +175,7 @@ class TestPandasNA:
     def test_other_unbindable_returns_still_fail(self, con: duckdb.Connection) -> None:
         pytest.importorskip("pandas")
         con.create_function("obj2", lambda x: object(), ["BIGINT"], "VARCHAR")
-        with pytest.raises(exceptions.Error, match="cannot bind"):
+        with pytest.raises(exceptions.Error, match="returned a value of type object"):
             rows(con, "SELECT obj2(1)")
 
 
@@ -212,3 +242,229 @@ class TestFailure:
         with pytest.raises(exceptions.Error):
             rows(con, "SELECT bad(1)")
         assert rows(con, "SELECT 42") == [(42,)]
+
+    def test_a_return_the_declared_type_cannot_hold_carries_one_prefix(self, con: duckdb.Connection) -> None:
+        con.create_function("big", lambda x: 2**100, ["BIGINT"], "BIGINT")
+        with pytest.raises(exceptions.InvalidInputError) as info:
+            rows(con, "SELECT big(1)")
+        message = str(info.value)
+        assert message.startswith("Invalid Input Error: Failed to cast value")
+        assert message.count("Invalid Input Error:") == 1
+
+    def test_an_unconvertible_return_names_the_function_and_the_type(self, con: duckdb.Connection) -> None:
+        con.create_function("o", lambda x: object(), ["BIGINT"], "BIGINT")
+        with pytest.raises(exceptions.InvalidInputError) as info:
+            rows(con, "SELECT o(1)")
+        assert str(info.value) == (
+            "Invalid Input Error: the UDF 'o' returned a value of type object, "
+            "which cannot be converted to a DuckDB value"
+        )
+
+    def test_an_unconvertible_element_of_a_return_names_its_type(self, con: duckdb.Connection) -> None:
+        con.create_function("wrap", lambda x: [x, object()], ["BIGINT"], "BIGINT[]")
+        with pytest.raises(exceptions.InvalidInputError, match="the UDF 'wrap' returned a value of type object"):
+            rows(con, "SELECT wrap(1)")
+
+    def test_a_conversion_refusal_inside_the_function_carries_one_prefix(self, con: duckdb.Connection) -> None:
+        con.create_function("nan", lambda x: decimal.Decimal("NaN"), ["BIGINT"], "DOUBLE")
+        with pytest.raises(exceptions.InvalidInputError) as info:
+            rows(con, "SELECT nan(1)")
+        assert str(info.value) == "Invalid Input Error: cannot bind a non-finite Decimal"
+
+    def test_parameter_binding_keeps_its_own_wording(self, con: duckdb.Connection) -> None:
+        with pytest.raises(exceptions.InvalidInputError) as info:
+            con._execute("SELECT $1", [object()])
+        assert str(info.value) == "Invalid Input Error: cannot bind a parameter of type object"
+
+
+class TestCollection:
+    """A callable that reaches its own connection is a cycle the collector must see through the engine."""
+
+    def test_a_connection_held_by_a_bound_method_is_collected(self) -> None:
+        class Service:
+            def __init__(self) -> None:
+                self.con = duckdb.connect()
+                self.con.create_function("f", self.transform, ["BIGINT"], "BIGINT")
+
+            def transform(self, x: int) -> int:
+                return x + 1
+
+        ref = weakref.ref(Service())
+        gc.collect()
+        assert ref() is None
+
+    def test_duplicates_and_live_results_do_not_hide_the_cycle(self) -> None:
+        # More handles share the database here than references the registry
+        # holds per callable, so a traverse that counted once per handle
+        # would get the collector's arithmetic wrong.
+        class Service:
+            def __init__(self) -> None:
+                self.con = duckdb.connect()
+                self.con.create_function("f", self.transform, ["BIGINT"], "BIGINT")
+                self.twins = [self.con.duplicate() for _ in range(3)]
+                self.result = self.con._execute("SELECT f(1)")
+
+            def transform(self, x: int) -> int:
+                return x + 1
+
+        ref = weakref.ref(Service())
+        gc.collect()
+        assert ref() is None
+
+    def test_a_closure_over_a_global_is_collected(self) -> None:
+        namespace: dict[str, object] = {}
+        exec(
+            "import duckdb\n"
+            "con = duckdb.connect()\n"
+            "con.create_function('f', lambda x: x + con.run('SELECT 0'), ['BIGINT'], 'BIGINT')\n",
+            namespace,
+        )
+        ref = weakref.ref(namespace["con"])
+        del namespace
+        gc.collect()
+        assert ref() is None
+
+    def test_the_function_survives_a_collection(self, con: duckdb.Connection) -> None:
+        con.create_function("f", lambda x: x + 1, ["BIGINT"], "BIGINT")
+        con.create_function("f", lambda x: x + 2, ["BIGINT"], "BIGINT")
+        gc.collect()
+        assert rows(con, "SELECT f(1)") == [(3,)]
+
+    def test_a_module_global_connection_does_not_leak_at_exit(self) -> None:
+        script = (
+            "import duckdb\n"
+            "con = duckdb.connect()\n"
+            "con.create_function('f', lambda x: x, ['BIGINT'], 'BIGINT')\n"
+            "assert duckdb.sql('SELECT f(1)').rows(con) == [(1,)]\n"
+        )
+        result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=False)
+        assert result.returncode == 0, result.stderr
+        assert "nanobind: leaked" not in result.stderr, result.stderr
+
+
+class TestClosedHandles:
+    """Closing a raw handle is what the collector's clear does; every method refuses afterwards."""
+
+    def test_a_closed_result_refuses_every_call(self) -> None:
+        connection = _duckdb.Database().connect()
+        result = connection.execute("SELECT 1")
+        result.close()
+        result.close()
+        calls: list[Callable[[], object]] = [
+            lambda: result.schema,
+            lambda: result.result_type,
+            lambda: result.statement_type,
+            lambda: result.schema_types,
+            result.fetch_all,
+            lambda: result.fetch_rows(1),
+            result.drain,
+            result.fetch_chunk_view,
+        ]
+        for call in calls:
+            with pytest.raises(exceptions.InterfaceError, match="result is closed"):
+                call()
+
+    def test_a_closed_connection_refuses_every_call(self) -> None:
+        connection = _duckdb.Database().connect()
+        connection.close()
+        connection.close()
+        calls: list[Callable[[], object]] = [
+            lambda: connection.execute("SELECT 1"),
+            lambda: connection.bind("SELECT 1"),
+            lambda: connection.create_scalar_function("f", abs, ["BIGINT"], "BIGINT", DEFAULT, CONSISTENT),
+            connection.interrupt,
+            lambda: connection.get_option("threads"),
+            lambda: connection.set_option("threads", "1"),
+        ]
+        for call in calls:
+            with pytest.raises(exceptions.InterfaceError, match="connection is closed"):
+                call()
+
+    def test_a_connection_keeps_its_database_alive(self) -> None:
+        # A Database has no close: its children hold it, and the engine
+        # instance goes with the last of them.
+        assert not hasattr(_duckdb.Database, "close")
+        database = _duckdb.Database()
+        connection = database.connect()
+
+        def probe(x: int) -> int:
+            return x
+
+        # The database owns its registered callables, so one outliving its
+        # last Python reference shows the database itself has.
+        connection.create_scalar_function("probe", probe, ["BIGINT"], "BIGINT", DEFAULT, CONSISTENT)
+        ref = weakref.ref(probe)
+        del database, probe
+        gc.collect()
+        assert ref() is not None, "the connection dropped its database"
+        assert connection.execute("SELECT probe(1)").fetch_all() == [(1,)]
+        connection.close()
+        gc.collect()
+        assert ref() is None, "a closed connection still pinned its database"
+
+    def test_closing_from_another_thread_during_execute_is_safe(self) -> None:
+        # A consistent function over constant arguments is folded by the
+        # optimizer, which runs inside execute(): the gate below therefore
+        # holds the worker inside execute, with the GIL released, until the
+        # close has landed. Deterministic, no timing involved.
+        connection = _duckdb.Database().connect()
+        started = threading.Event()
+        release = threading.Event()
+
+        def gate(x: int) -> int:
+            started.set()
+            release.wait(timeout=30)
+            return x
+
+        connection.create_scalar_function("gate", gate, ["BIGINT"], "BIGINT", DEFAULT, CONSISTENT)
+        outcome: list[object] = []
+
+        def run() -> None:
+            try:
+                outcome.append(connection.execute("SELECT gate(1)").fetch_all())
+            except BaseException as error:
+                outcome.append(error)
+
+        worker = threading.Thread(target=run)
+        worker.start()
+        assert started.wait(timeout=30), "the function never ran"
+        assert not outcome, "execute returned before the gate opened"
+        connection.close()
+        with pytest.raises(exceptions.InterfaceError, match="connection is closed"):
+            connection.interrupt()
+        release.set()
+        worker.join(timeout=30)
+
+        assert not worker.is_alive(), "the call outlived the close"
+        (result,) = outcome
+        assert isinstance(result, list | exceptions.InterruptError | exceptions.InterfaceError), repr(result)
+        with pytest.raises(exceptions.InterfaceError, match="connection is closed"):
+            connection.execute("SELECT 1")
+
+    def test_closing_from_another_thread_during_a_fetch_is_safe(self) -> None:
+        connection = _duckdb.Database().connect()
+        outcome: list[object] = []
+
+        def run() -> None:
+            try:
+                # Long enough to still be running when the close lands, yet
+                # short enough to end on its own: once closed, the handle
+                # cannot interrupt the engine any more.
+                outcome.append(connection.execute("SELECT count(*) FROM range(20_000_000_000)").fetch_all())
+            except BaseException as error:
+                outcome.append(error)
+
+        worker = threading.Thread(target=run)
+        worker.start()
+        # Give the query time to actually start.
+        time.sleep(0.2)
+        connection.close()
+        with pytest.raises(exceptions.InterfaceError, match="connection is closed"):
+            connection.interrupt()
+        worker.join(timeout=60)
+
+        assert not worker.is_alive(), "the query outlived the close"
+        (result,) = outcome
+        assert isinstance(result, list | exceptions.InterruptError | exceptions.InterfaceError), repr(result)
+        with pytest.raises(exceptions.InterfaceError, match="connection is closed"):
+            connection.execute("SELECT 1")

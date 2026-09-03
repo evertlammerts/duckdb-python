@@ -12,7 +12,10 @@ delayed interrupt_main() behind that aborts whatever pytest session it lands
 in, and a lost interrupt leaves a query running unbounded. Isolation keeps
 one file's bomb or hang from hiding every file after it.
 
-    compat_report.py [extra pytest args]
+    compat_report.py [suite file or directory ...] [extra pytest args]
+
+A path argument, resolved against the invoking directory, narrows the run to
+the suite files under it; everything else is handed to pytest.
 """
 
 from __future__ import annotations
@@ -118,22 +121,32 @@ def main() -> int:
         return run_child(sys.argv[2:])
     arguments = [a for a in sys.argv[1:] if a != "--facade"]
     facade = len(arguments) != len(sys.argv) - 1
+    # Resolved here, against the invoking directory: the children run in a
+    # scratch directory, where a relative path would name nothing.
+    chosen = [Path(a).resolve() for a in arguments if Path(a).exists()]
+    passthrough = [a for a in arguments if not Path(a).exists()]
     environment = dict(os.environ)
     if facade:
         # compat/conftest.py reads this and patches duckdb.connect to the
         # migration face, previewing what a drop-in connect() would score.
         environment["DUCKDB_COMPAT_FACADE"] = "1"
     suite = Path(__file__).resolve().parent.parent / "compat" / "suite"
+    files = sorted(suite.rglob("test_*.py"))
+    if chosen:
+        files = [f for f in files if any(f == c or f.is_relative_to(c) for c in chosen)]
+        if not files:
+            listed = ", ".join(str(c) for c in chosen)
+            print(f"no suite files under {listed}; the suite is {suite}", file=sys.stderr)
     outcomes: collections.Counter[str] = collections.Counter()
     signatures: collections.Counter[str] = collections.Counter()
     # A scratch working directory: the adopted tests write files like test.db
     # into their cwd, which must never be the repository.
     scratch = tempfile.mkdtemp(prefix="compat-")
-    for path in sorted(suite.rglob("test_*.py")):
+    for path in files:
         name = str(path.relative_to(suite))
         try:
             child = subprocess.run(
-                [sys.executable, __file__, "--child", str(path), *arguments],
+                [sys.executable, __file__, "--child", str(path), *passthrough],
                 capture_output=True,
                 text=True,
                 timeout=FILE_TIMEOUT,

@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import datetime
+import threading
+import time
 from collections.abc import Iterator
+from typing import TYPE_CHECKING
 
 import pytest
 
-from duckdb import dbapi
+from duckdb import dbapi, exceptions
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.fixture
@@ -226,6 +232,29 @@ class TestTransactions:
         con.commit()
         con.commit()
 
+    def test_commit_on_a_closed_connection_is_refused(self) -> None:
+        # PEP 249: any operation on a closed connection is an Error. Falling
+        # through because no transaction is open would hide a use after close.
+        con = dbapi.connect()
+        con.close()
+        with pytest.raises(dbapi.InterfaceError, match="closed"):
+            con.commit()
+
+    def test_rollback_on_a_closed_connection_is_refused(self) -> None:
+        con = dbapi.connect()
+        con.cursor().execute("SELECT 1")
+        con.close()
+        with pytest.raises(dbapi.InterfaceError, match="closed"):
+            con.rollback()
+
+    def test_close_still_rolls_back_and_stays_idempotent(self) -> None:
+        # close() rolls back through rollback() before it drops the engine
+        # handle, so the refusal above must not reach that call.
+        con = dbapi.connect()
+        con.cursor().execute("CREATE TABLE t (v INTEGER)")
+        con.close()
+        con.close()
+
     def test_autocommit_skips_the_transaction(self) -> None:
         with dbapi.connect(autocommit=True) as con:
             cur = con.cursor()
@@ -281,10 +310,70 @@ class TestConnection:
             cur.execute("SELECT current_setting('threads')")
             assert cur.fetchone() == (2,)  # the setting comes back typed
 
+    def test_connect_accepts_a_path(self, tmp_path: Path) -> None:
+        con = dbapi.connect(tmp_path / "by_path.db")
+        try:
+            cur = con.cursor()
+            cur.execute("CREATE TABLE t AS SELECT 1 AS v")
+            cur.execute("SELECT v FROM t")
+            assert cur.fetchone() == (1,)
+        finally:
+            con.close()
+        assert (tmp_path / "by_path.db").exists()
+
     def test_errors_are_typed(self, con: dbapi.Connection) -> None:
         cur = con.cursor()
         with pytest.raises(dbapi.DatabaseError):
             cur.execute("SELECT * FROM no_such_table")
+
+
+class TestInterrupt:
+    """`Connection.interrupt()` from another thread, as the native connection has it."""
+
+    def test_interrupt_cancels_from_another_thread(self, con: dbapi.Connection) -> None:
+        # Interrupt repeatedly until the query dies: one shot at a fixed delay
+        # can fire before execution starts, land on nothing, and leave the
+        # query running unbounded.
+        stop = threading.Event()
+
+        def keep_interrupting() -> None:
+            while not stop.is_set():
+                con.interrupt()
+                time.sleep(0.05)
+
+        cur = con.cursor()
+
+        def count_forever() -> None:
+            cur.execute("SELECT count(*) FROM range(100_000_000_000)")
+            cur.fetchall()
+
+        worker = threading.Thread(target=keep_interrupting)
+        worker.start()
+        try:
+            with pytest.raises(exceptions.InterruptError) as caught:
+                count_forever()
+        finally:
+            stop.set()
+            worker.join()
+        assert isinstance(caught.value, dbapi.OperationalError)
+        # The statement failed inside the transaction this connection had
+        # opened, which the engine aborts; after the rollback PEP 249 asks
+        # for at that point, the connection is usable again.
+        con.rollback()
+        cur.execute("SELECT 1")
+        assert cur.fetchone() == (1,)
+
+    def test_interrupting_an_idle_connection_is_a_no_op(self, con: dbapi.Connection) -> None:
+        con.interrupt()
+        cur = con.cursor()
+        cur.execute("SELECT 1")
+        assert cur.fetchone() == (1,)
+
+    def test_interrupt_on_a_closed_connection_is_refused(self) -> None:
+        con = dbapi.connect()
+        con.close()
+        with pytest.raises(dbapi.InterfaceError, match="closed"):
+            con.interrupt()
 
 
 class TestRowcount:
@@ -401,3 +490,44 @@ class TestExecutemanyRowcount:
         cur = con.cursor()
         cur.executemany("SELECT ?", [[1], [2]])
         assert cur.rowcount == -1
+
+
+class TestExecutemanyHoldsNoResult:
+    """After executemany nothing is held, whatever the statement produced.
+
+    The last set's rows used to stay open: description set, the connection's
+    result slot taken, and fetchall() answering with one set's rows as if
+    they were the outcome of the whole call.
+    """
+
+    def test_a_row_producing_statement_is_not_left_open(self, con: dbapi.Connection) -> None:
+        cur = con.cursor()
+        cur.executemany("SELECT ? AS v", [(1,), (2,)])
+        assert cur.description is None
+        assert cur.rowcount == -1
+        assert con._open_cursor is None
+        with pytest.raises(dbapi.InterfaceError, match="no result set"):
+            cur.fetchall()
+
+    def test_an_insert_reports_the_total_and_holds_nothing(self, con: dbapi.Connection) -> None:
+        cur = con.cursor()
+        cur.execute("CREATE TABLE t (v INTEGER)")
+        cur.executemany("INSERT INTO t VALUES (?)", [(1,), (2,), (3,)])
+        assert cur.rowcount == 3
+        assert cur.description is None
+        assert con._open_cursor is None
+        with pytest.raises(dbapi.InterfaceError, match="no result set"):
+            cur.fetchone()
+        cur.execute("SELECT count(*) FROM t")
+        assert cur.fetchone() == (3,)
+
+    def test_a_failing_set_releases_the_slot_too(self, con: dbapi.Connection) -> None:
+        # The first set's rows were open when the second set was refused.
+        cur = con.cursor()
+        with pytest.raises(dbapi.DatabaseError, match="count mismatch"):
+            cur.executemany("SELECT ? AS v", [(1,), (1, 2)])
+        assert cur.description is None
+        assert cur.rowcount == -1
+        assert con._open_cursor is None
+        with pytest.raises(dbapi.InterfaceError, match="no result set"):
+            cur.fetchone()

@@ -331,6 +331,12 @@ def _as_exprs(values: Iterable[object] | object) -> list[Expr]:
     return out
 
 
+def _type_name(value: object) -> str:
+    """The type of a value by name, qualified by its module unless it is a builtin."""
+    kind = type(value)
+    return kind.__qualname__ if kind.__module__ == "builtins" else f"{kind.__module__}.{kind.__qualname__}"
+
+
 class NeedsConnection(ValueError):
     """Working this out means asking the engine, and no connection was given."""
 
@@ -1331,7 +1337,7 @@ class Frame(PlanBase):
         """
         if not isinstance(connection, Connection):
             message = (
-                f"a plan runs on a duckdb.Connection, not {type(connection).__name__}; "
+                f"a plan runs on a duckdb.Connection, not {_type_name(connection)}; "
                 f"to run it through the DB-API, execute plan.render() on a cursor"
             )
             raise TypeError(message)

@@ -43,6 +43,10 @@ def orders(con: duckdb.Connection) -> duckdb.Frame:
     return duckdb.table("orders")
 
 
+#: The refusal a macro body meets when it holds a param(); the docs quote it.
+PARAM_IN_MACRO = r"^param\(\) has no value inside a macro body; a macro parameter is col\(name\)$"
+
+
 class TestGraph:
     """Steps become CTEs, and a step used twice is still computed once."""
 
@@ -412,6 +416,15 @@ class TestSubqueries:
 
     def test_isin_still_accepts_values(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
         assert [row[0] for row in orders.filter(col("id").isin([1, 2])).rows(con)] == [1, 2]
+
+    def test_isin_accepts_a_list_typed_expression(self, con: duckdb.Connection) -> None:
+        # `x IN xs` over a list column, evaluated by the engine row by row;
+        # iterating the expression as if it were the list used to fail.
+        assert col("x").isin(col("xs")).fragment() == '("x" IN "xs")'
+        rows = duckdb.sql("SELECT * FROM (VALUES (2, [1, 2, 3]), (5, [1, NULL]), (NULL, [1, 2])) t(x, xs)")
+        assert rows.select(col("x").isin(col("xs"))).rows(con) == [(True,), (False,), (None,)]
+        assert (~col("x").isin(col("xs"))).fragment() == '(NOT ("x" IN "xs"))'
+        assert rows.select(~col("x").isin(col("xs"))).rows(con) == [(False,), (True,), (None,)]
 
     def test_a_subquery_is_a_step_of_the_plan(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
         # The plan a subquery refers to joins the graph: one WITH, and the
@@ -847,7 +860,7 @@ class TestReviewRoundTwo:
     def test_isin_refuses_a_bare_string(self) -> None:
         # List("US") is ['U', 'S'], so the membership test silently
         # became one over single characters.
-        with pytest.raises(TypeError, match="for one value use =="):
+        with pytest.raises(TypeError, match="a list-typed expression; for one value use =="):
             col("code").isin("US")
 
     def test_isin_still_takes_a_list(self, con: duckdb.Connection) -> None:
@@ -1131,7 +1144,7 @@ class TestTerminalsTakeARelationalConnection:
 
     def test_a_dbapi_connection_is_refused(self) -> None:
         raw = duckdb.dbapi.connect()
-        with pytest.raises(TypeError, match=r"duckdb\.Connection, not Connection"):
+        with pytest.raises(TypeError, match=r"duckdb\.Connection, not duckdb\.dbapi\.Connection"):
             duckdb.sql("SELECT 1").rows(raw)  # type: ignore[arg-type]
         with pytest.raises(TypeError, match=r"duckdb\.Connection"):
             duckdb.sql("SELECT 1").create(raw, "t")  # type: ignore[arg-type]
@@ -1763,6 +1776,14 @@ class TestErrorModel:
         with pytest.raises(TypeError):
             orders.sample()
 
+    def test_the_wrong_connection_is_named_by_its_module(self) -> None:
+        # Both classes are called Connection, so the bare name read as
+        # "not Connection", the one thing the caller was sure they passed.
+        with pytest.raises(TypeError, match=r"not duckdb\.dbapi\.Connection;"):
+            duckdb.sql("SELECT 1").rows(duckdb.dbapi.connect())  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match=r"not str;"):
+            duckdb.sql("SELECT 1").rows(":memory:")  # type: ignore[arg-type]
+
     def test_the_wrong_content_is_a_value_error(self, con: duckdb.Connection) -> None:
         orders = duckdb.table("orders")
         with pytest.raises(ValueError, match="more than once"):
@@ -1919,6 +1940,55 @@ class TestScopeStepFour:
     def test_a_macro_body_must_be_an_expression_or_a_plan(self, con: duckdb.Connection) -> None:
         with pytest.raises(TypeError, match="expression or a plan"):
             con.create_macro("bad", ["a"], "a + 1")
+
+    def test_a_param_in_an_expression_body_is_refused_and_nothing_is_created(self, con: duckdb.Connection) -> None:
+        # Rendered blind, a param() stood in NULL and the macro answered NULL
+        # on every call; a definition has nothing to bind it to.
+        with pytest.raises(TypeError, match=PARAM_IN_MACRO):
+            con.create_macro("p", ["x"], col("x") + param("y"))
+        defined = duckdb.sql("SELECT count(*) FROM duckdb_functions() WHERE function_name = 'p'").rows(con)
+        assert defined == [(0,)]
+
+    def test_a_param_in_a_plan_body_is_refused(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+        with pytest.raises(TypeError, match=PARAM_IN_MACRO):
+            con.create_macro("m", ["x"], orders.filter(col("amount") == param("p")))
+        defined = duckdb.sql("SELECT count(*) FROM duckdb_functions() WHERE function_name = 'm'").rows(con)
+        assert defined == [(0,)]
+
+    def test_a_param_in_a_body_rendered_with_the_connection_is_refused(self, con: duckdb.Connection) -> None:
+        # A suffixed join cannot render blind, so the body takes the other
+        # branch, resolved on the connection; the refusal must hold there too.
+        left = duckdb.sql("SELECT 1 AS id, 10 AS amount")
+        right = duckdb.sql("SELECT 1 AS id, 20 AS amount")
+        body = left.join(right, on="id", suffix="_r").filter(col("amount") > param("floor"))
+        assert repr(body).startswith("<Frame, renders with a connection:")
+        with pytest.raises(TypeError, match=PARAM_IN_MACRO):
+            con.create_macro("j", [], body)
+
+    def test_a_param_inside_a_subquery_of_the_body_is_refused(
+        self, con: duckdb.Connection, orders: duckdb.Frame
+    ) -> None:
+        wanted = orders.filter(col("country") == param("c")).select(col("id"))
+        with pytest.raises(TypeError, match=PARAM_IN_MACRO):
+            con.create_macro("s", [], orders.filter(col("id").isin(wanted)))
+
+    def test_a_body_of_columns_and_literals_is_still_accepted(
+        self, con: duckdb.Connection, orders: duckdb.Frame
+    ) -> None:
+        con.create_macro("scaled", ["a"], col("a") * 2.5)
+        con.create_macro("nl_over", ["floor"], orders.filter((col("country") == "nl") & (col("amount") > col("floor"))))
+        assert duckdb.sql("SELECT scaled(2), count(*) FROM nl_over(100)").rows(con) == [(5.0, 2)]
+
+    def test_the_schema_oracle_still_renders_a_param_as_null(
+        self, con: duckdb.Connection, orders: duckdb.Frame
+    ) -> None:
+        # Only a macro definition refuses; a plan's columns and types are
+        # still worked out with NULL standing in for the placeholder.
+        plan = orders.filter(col("amount") > param("floor")).select(
+            col("id"), (col("amount") + param("bump")).alias("b")
+        )
+        assert plan.columns(con) == ["id", "b"]
+        assert plan.types(con) == ["INTEGER", "INTEGER"]
 
 
 class TestEgressNames:

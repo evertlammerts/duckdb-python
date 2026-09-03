@@ -156,7 +156,7 @@ _BY_NAME: dict[str, type[Error]] = {
     "INPUT_OUT_OF_RANGE": DataError,
     "INPUT_OBJECT_SIZE": DataError,
     # resources
-    "RESOURCE_IN_USE": ProgrammingError,
+    "RESOURCE_IN_USE": OperationalError,
     "RESOURCE_OUT_OF_MEMORY": OutOfMemoryError,
     "RESOURCE_CONNECTION": ConnectionError,
     "RESOURCE_DEPENDENCY": CatalogError,

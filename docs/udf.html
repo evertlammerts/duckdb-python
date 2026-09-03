@@ -76,7 +76,7 @@ sql(<span class="s">"SELECT weave('x', 7, true)"</span>).rows(con)   <span class
 prefix = <span class="s">"state"</span>
 con.create_function(<span class="s">"tag"</span>, <span class="k">lambda</span> x: <span class="s">f"{prefix}:{x}"</span>, [<span class="s">"BIGINT"</span>], <span class="s">"VARCHAR"</span>)
 sql(<span class="s">"SELECT tag(1)"</span>).rows(con)   <span class="c"># [('state:1',)]</span></code></pre>
-  <p>The type texts are parsed by the engine when you register, so a mistake in one is reported here and not at the first call: a type that does not exist raises <code>CatalogError</code> naming it, and <code>ANY</code> is refused with <code>InvalidInputError</code>. An option that is not one of the choices above raises <code>InvalidInputError</code>. A closed connection raises <code>InterfaceError</code>.</p>
+  <p>The type texts are parsed by the engine when you register, so a mistake in one is reported here and not at the first call: a type that does not exist raises <code>CatalogError</code> naming it, and <code>ANY</code> is refused with <code>InvalidInputError</code>: <code>ANY parameters are not supported yet</code>, or <code>an ANY return type is not supported yet</code> for <code>returns</code>. An option that is not one of the choices above raises <code>InvalidInputError</code>. A closed connection raises <code>InterfaceError</code>.</p>
   <div class="note">
     <p><strong>The function belongs to the database, not to the connection.</strong> Every connection to that database sees it, <code>con.duplicate()</code> included, and the engine keeps it until the database closes. There is no way to remove one; register the same name again to replace it. A fresh <code>duckdb.connect()</code> is a different database, and does not have it.</p>
   </div>
@@ -146,7 +146,7 @@ sql(<span class="s">"SELECT plus_one(3) AS v"</span>).types(con)   <span class="
         <tr><td><code>uuid.UUID</code></td><td><code>UUID</code></td></tr>
         <tr><td><code>list</code>, <code>tuple</code></td><td>a list; the engine needs one element type, so <code>[1, "a"]</code> is refused</td></tr>
         <tr><td><code>dict</code></td><td>a <code>STRUCT</code> when every key is a string, a <code>MAP</code> otherwise</td></tr>
-        <tr><td>anything else</td><td>refused: <code>InvalidInputError</code>, cannot bind a parameter of type <em>X</em></td></tr>
+        <tr><td>anything else</td><td>refused: <code>InvalidInputError</code>, the UDF '<em>name</em>' returned a value of type <em>X</em>, which cannot be converted to a DuckDB value</td></tr>
       </tbody>
     </table>
   </div>
@@ -260,7 +260,10 @@ sql(<span class="s">"SELECT boom(7)"</span>).rows(con)
 
 sql(<span class="s">"SELECT 42"</span>).rows(con)   <span class="c"># [(42,)]: the connection is fine</span></code></pre>
   <p>The connection survives, and so does the function; the next query runs as usual. A <code>KeyboardInterrupt</code> raised inside the function is reported the same way, as the query's <code>InvalidInputError</code>: the engine owns the call and sees only that it failed.</p>
-  <p>The other failures at run time are a returned value that cannot be read (<code>InvalidInputError</code>, cannot bind a parameter of type <em>X</em>) and one that cannot be cast to <code>returns</code> (<code>InvalidInputError</code>, with the engine's cast message). Both fail the query the same way. Failures at registration are listed under <a href="#register">Registering</a>.</p>
+  <p>The other failures at run time are a returned value that cannot be read and one that cannot be cast to <code>returns</code> (<code>InvalidInputError</code>, with the engine's cast message). Both fail the query the same way, and the message carries one <code>Invalid Input Error:</code> prefix. Failures at registration are listed under <a href="#register">Registering</a>.</p>
+  <pre><code>con.create_function(<span class="s">"odd"</span>, <span class="k">lambda</span> x: object(), [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT"</span>)
+sql(<span class="s">"SELECT odd(1)"</span>).rows(con)
+<span class="c"># InvalidInputError: Invalid Input Error: the UDF 'odd' returned a value of type object, which cannot be converted to a DuckDB value</span></code></pre>
 </section>
 
 <section id="performance">

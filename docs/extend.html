@@ -103,11 +103,14 @@ con.create_macro(<span class="s">"n_above"</span>, [<span class="s">"x"</span>],
 sql(<span class="s">"SELECT region, my_avg(total) FROM orders GROUP BY region ORDER BY region"</span>).rows(con)   <span class="c"># [('amer', 320.0), ('emea', 2000.0)]</span>
 sql(<span class="s">"SELECT id, running(total, id) FROM orders ORDER BY id"</span>).rows(con)
 sql(<span class="s">"SELECT n_above(1000)"</span>).rows(con)                                                       <span class="c"># [(2,)]</span></code></pre>
-  <p>Values in the body are written into the definition as literals, escaped, since a definition has no parameters to bind: <code>col("c") == "it's"</code> becomes <code>("c" = 'it''s')</code>. A <code>param()</code> has no place in a body for the same reason; a value that changes per call is a parameter of the macro.</p>
+  <p>Values in the body are written into the definition as literals, escaped, since a definition has no parameters to bind: <code>col("c") == "it's"</code> becomes <code>("c" = 'it''s')</code>. A <code>param()</code> is refused for the same reason: <code>create_macro</code> raises <code>TypeError</code>, <code>param() has no value inside a macro body; a macro parameter is col(name)</code>. A value that changes per call is a parameter of the macro, <code>col(name)</code> in the body.</p>
   <p>A body can call anything the engine has, a Python function registered with <code>create_function</code> included, so the levels compose: the macro does the arithmetic around a call into Python.</p>
   <pre><code>con.create_function(<span class="s">"plus_one"</span>, <span class="k">lambda</span> x: x + <span class="s">1</span>, [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT"</span>)
 con.create_macro(<span class="s">"plus_two"</span>, [<span class="s">"x"</span>], fn(<span class="s">"plus_one"</span>, col(<span class="s">"x"</span>)) + <span class="s">1</span>)
 sql(<span class="s">"SELECT plus_two(1)"</span>).rows(con)   <span class="c"># [(3,)]</span></code></pre>
+  <p>A macro and a function registered with <code>create_function</code> both live in schema <code>main</code>. The engine stores a registered function as internal, like a built-in, and a macro of the same name takes precedence over it, as it does over a built-in. That is the engine's rule, not this package's.</p>
+  <pre><code>con.create_macro(<span class="s">"abs"</span>, [<span class="s">"x"</span>], col(<span class="s">"x"</span>) + <span class="s">100</span>)
+sql(<span class="s">"SELECT abs(-1)"</span>).rows(con)   <span class="c"># [(99,)]</span></code></pre>
 
   <p class="lead-in">writing the statement yourself</p>
   <p><code>create_macro</code> renders the body and runs <code>CREATE MACRO</code>. The same statement can be written by hand, with a plan's <code>render()</code> as the body, when the macro needs something the method does not offer, such as several signatures under one name:</p>
@@ -143,15 +146,19 @@ table_function(<span class="s">"big_orders"</span>, <span class="s">1000</span>)
 con.create_macro(<span class="s">"nope"</span>, [<span class="s">"x"</span>], col(<span class="s">"x"</span>) + col(<span class="s">"y"</span>))
 <span class="c"># ProgrammingError: Referenced column "y" was not found because the FROM clause is missing</span></code></pre>
   <p>Parameters have no types, so anything that depends on the arguments' types is settled at each call. <code>create_macro("up", ["s"], col("s").str().upper())</code> is accepted; <code>up('abc')</code> gives <code>'ABC'</code> and <code>up(1)</code> is refused with the message <code>upper</code> gives an integer: no function matches the given name and argument types.</p>
-  <p>Tables are looked up again at every call. The body is text the engine substitutes, not a result it kept, so a macro over <code>orders</code> sees rows inserted after it was defined. One consequence: a name in the body is looked up from the caller's point of view, not the macro's. A macro created as <code>util.rate_of</code> does not see <code>util.rates</code> as <code>rates</code>; the definition is refused unless the body says <code>table("util.rates")</code>.</p>
+  <p>Tables are looked up again at every call. The body is text the engine substitutes, not a result it kept, so a macro over <code>orders</code> sees rows inserted after it was defined. One consequence: an unqualified table name in the body resolves from the caller's search path, not from the schema the macro lives in. A macro created as <code>util.rate_of</code> that reads <code>rates</code> must say <code>table("util.rates")</code>; with <code>table("rates")</code> the engine refuses the definition when <code>rates</code> is not on the definer's own path.</p>
+  <pre><code>con.create_macro(<span class="s">"util.rate_of"</span>, [<span class="s">"p"</span>], table(<span class="s">"rates"</span>).select((col(<span class="s">"p"</span>) * col(<span class="s">"rate"</span>)).alias(<span class="s">"v"</span>)))
+<span class="c"># CatalogError: Table with name rates does not exist!</span>
+<span class="c"># Did you mean "util.rates"?</span></code></pre>
 
   <p class="lead-in">where it lives</p>
-  <p>In the database, like a table: a macro created on a file database is there when the file is opened again. <code>temporary=True</code> keeps it on this connection. <code>duckdb_functions()</code> lists macros with their definition, and <code>DROP MACRO</code> removes one:</p>
+  <p>In the database, like a table: a macro created on a file database is there when the file is opened again. <code>temporary=True</code> keeps it on this connection. <code>duckdb_functions()</code> lists macros with their parameter names and their definition, and <code>DROP MACRO</code> removes one:</p>
   <pre><code>sql(<span class="s">"SELECT function_name, parameters, macro_definition FROM duckdb_functions() WHERE function_name = 'add_up'"</span>).rows(con)
 <span class="c"># [('add_up', ['a', 'b'], '(a + b)')]     the engine's own spelling; defaults are not shown</span>
 
 con.run(<span class="s">"DROP MACRO add_up"</span>)
 con.run(<span class="s">"DROP MACRO TABLE big_orders"</span>)</code></pre>
+  <p>Defaults are not introspectable: <code>parameters</code> lists the names without them, and <code>macro_definition</code> is the engine's normalised spelling of the body, not what was written.</p>
 
   <p class="lead-in">what a macro cannot do</p>
   <dl class="ref">
@@ -336,12 +343,12 @@ payload.select(fn(<span class="s">"json_extract"</span>, col(<span class="s">"pa
 
   <h3>Macros</h3>
   <dl class="ref">
-    <dt>con.create_macro(name, parameters, body, replace=False, temporary=False)</dt><dd>Define a macro. An expression makes a scalar macro, a plan a table macro. <code>parameters</code> are names or <code>(name, default)</code> pairs; a default is a plain value. <code>col(name)</code> in the body is a parameter.</dd>
+    <dt>con.create_macro(name, parameters, body, replace=False, temporary=False)</dt><dd>Define a macro. An expression makes a scalar macro, a plan a table macro. <code>parameters</code> are names or <code>(name, default)</code> pairs; a default is a plain value. <code>col(name)</code> in the body is a parameter; a <code>param()</code> there is refused with <code>TypeError</code>.</dd>
     <dt>con.run("CREATE MACRO name(p) AS ...")</dt><dd>The statement itself. <code>AS TABLE</code> and a plan's <code>render()</code> for a table macro. Several signatures: <code>AS a, (a, b) AS a + b</code>.</dd>
     <dt>con.run("DROP MACRO name") / "DROP MACRO TABLE name"</dt><dd>Remove a scalar or a table macro. <code>IF EXISTS</code> works.</dd>
     <dt>fn(name, *args)</dt><dd>Call a scalar macro from a plan.</dd>
     <dt>table_function(name, *args, **named)</dt><dd>A table macro as a plan; named arguments render as <code>name := value</code>.</dd>
-    <dt>duckdb_functions()</dt><dd>Every function the engine has, macros included: <code>function_type</code> is <code>macro</code> or <code>table_macro</code>, <code>macro_definition</code> the body in the engine's spelling, <code>extension_name</code> where it came from.</dd>
+    <dt>duckdb_functions()</dt><dd>Every function the engine has, macros included: <code>function_type</code> is <code>macro</code> or <code>table_macro</code>, <code>parameters</code> the names without their defaults, <code>macro_definition</code> the body in the engine's spelling, <code>extension_name</code> where it came from.</dd>
   </dl>
 
   <h3>Extensions</h3>

@@ -12,12 +12,13 @@ cursor here and no fetch family; those belong to PEP 249 and live in
 from __future__ import annotations
 
 import contextlib
+import os
 import threading
 import weakref
 from typing import TYPE_CHECKING, Any
 
 from . import _duckdb
-from .exceptions import Error, InterfaceError
+from .exceptions import Error, InterfaceError, InvalidInputError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -184,15 +185,17 @@ class Connection:
         are names, or (name, default) pairs. The body is rendered as written,
         with `col(name)` referring to a parameter, and the engine checks it
         when the macro is defined. Literals in the body are written into it,
-        since a definition has no parameters to bind.
+        since a definition has no parameters to bind, and for the same reason
+        a `param()` in the body is refused.
         """
-        from .expr import Expr, qualified, quote, render_literal, suspended_sinks
+        from .expr import Expr, qualified, quote, refusing_parameters, render_literal, suspended_sinks
         from .frame import Frame, NeedsConnection
 
         signature = ", ".join(
             quote(p) if isinstance(p, str) else f"{quote(p[0])} := {render_literal(p[1])}" for p in parameters
         )
-        with suspended_sinks():
+        refusal = "param() has no value inside a macro body; a macro parameter is col(name)"
+        with suspended_sinks(), refusing_parameters(refusal):
             if isinstance(body, Expr):
                 definition = body.fragment()
             elif isinstance(body, Frame):
@@ -235,12 +238,33 @@ class Connection:
         `stability` declares how cacheable results are: "consistent" lets the
         engine fold repeated and constant calls, "volatile" makes it call once
         per row every time, which is the honest choice for anything random,
-        stateful or side-effecting. "consistent_within_query" sits in between.
+        stateful or side-effecting. "consistent_within_query" gives the same
+        result for every row within one query, like `now()`, and possibly a
+        different one in the next query.
 
         Anything expressible as an expression runs orders of magnitude faster
         as a macro; see `create_macro`.
         """
-        self._engine().create_scalar_function(name, function, list(parameters), returns, null_handling, stability)
+        nulls = _NULL_HANDLING.get(null_handling)
+        if nulls is None:
+            message = "Invalid Input Error: null_handling must be 'default' or 'special'"
+            raise InvalidInputError(message)
+        level = _STABILITY.get(stability)
+        if level is None:
+            message = "Invalid Input Error: stability must be 'consistent', 'volatile' or 'consistent_within_query'"
+            raise InvalidInputError(message)
+        # ANY would leave arguments un-cast, and the extension reads them by
+        # the declared types; supporting it needs a bind callback that
+        # captures the bound types. Refused on the text, since the engine's
+        # type parser refuses ANY with a message that does not say why.
+        texts = list(parameters)
+        if any(_is_any(text) for text in texts):
+            message = "Invalid Input Error: ANY parameters are not supported yet"
+            raise InvalidInputError(message)
+        if _is_any(returns):
+            message = "Invalid Input Error: an ANY return type is not supported yet"
+            raise InvalidInputError(message)
+        self._engine().create_scalar_function(name, function, texts, returns, nulls, level)
         # A new function changes what names bind to, like CREATE MACRO does.
         self._catalog.changed()
 
@@ -290,6 +314,23 @@ class Connection:
         self.close()
 
 
+_NULL_HANDLING = {
+    "default": _duckdb.FunctionNullHandling.DEFAULT,
+    "special": _duckdb.FunctionNullHandling.SPECIAL,
+}
+
+_STABILITY = {
+    "consistent": _duckdb.FunctionStability.CONSISTENT,
+    "volatile": _duckdb.FunctionStability.VOLATILE,
+    "consistent_within_query": _duckdb.FunctionStability.CONSISTENT_WITHIN_QUERY,
+}
+
+
+def _is_any(text: str) -> bool:
+    """Whether a type text is the word ANY, trimmed of ASCII blanks and in any case."""
+    return text.strip(" \t\n\r\f\v").upper() == "ANY"
+
+
 #: The first word of a statement that only reads. Anything else may change
 #: what the binder would answer, so it forgets the stub answers.
 _READ_ONLY = frozenset({"SELECT", "WITH", "FROM", "VALUES", "DESCRIBE", "SUMMARIZE", "EXPLAIN", "SHOW"})
@@ -310,11 +351,11 @@ def _may_change_binding(sql: str) -> bool:
     return bool(words) and words[0] not in _READ_ONLY
 
 
-def connect(database: str = ":memory:", **options: str) -> Connection:
+def connect(database: str | os.PathLike[str] = ":memory:", **options: str) -> Connection:
     """Open a connection.
 
     Args:
         database: A database file, or ":memory:".
         **options: Settings applied as the database is opened.
     """
-    return Connection(_duckdb.Database(database, [(k, str(v)) for k, v in options.items()]))
+    return Connection(_duckdb.Database(os.fspath(database), [(k, str(v)) for k, v in options.items()]))

@@ -24,6 +24,7 @@ from __future__ import annotations
 import builtins
 import datetime
 import itertools
+import os
 import re
 import sys
 import threading
@@ -232,15 +233,19 @@ def _quantile_parameter(q: object) -> str:
     return str(float(cast("float", q)))
 
 
-def _operand(value: object) -> str:
-    """A verb operand as SQL text: expressions render, strings pass through."""
+def _operand(value: object, *, select: bool = False) -> str:
+    """A verb operand as SQL text: expressions render, strings pass through.
+
+    Only a select-list item carries an expression's alias; anywhere else,
+    a WHERE or a join condition, `AS` would be a syntax error.
+    """
     from .expr import Expr, suspended_sinks
 
     if isinstance(value, CompatExpression):
         value = value._value()
     if isinstance(value, Expr):
         with suspended_sinks():
-            return value.fragment()
+            return value.as_select() if select else value.fragment()
     return str(value)
 
 
@@ -570,13 +575,13 @@ class CompatRelation:
 
     def project(self, *columns: object, groups: str = "") -> CompatRelation:
         """The listed columns or expressions; `groups` was accepted and ignored there too."""
-        rendered = ", ".join(_operand(column) for column in columns)
+        rendered = ", ".join(_operand(column, select=True) for column in columns)
         return CompatRelation(self._connection, f"SELECT {rendered} FROM {self._source()}")
 
     def aggregate(self, aggregates: object, groups: str = "") -> CompatRelation:
         """Aggregate over the whole relation, or per group; expressions welcome."""
         if not isinstance(aggregates, str):
-            aggregates = ", ".join(_operand(a) for a in cast("Iterable[object]", aggregates))
+            aggregates = ", ".join(_operand(a, select=True) for a in cast("Iterable[object]", aggregates))
         grouped = f" GROUP BY {groups}" if groups else ""
         return CompatRelation(self._connection, f"SELECT {aggregates} FROM {self._source()}{grouped}")
 
@@ -1563,9 +1568,22 @@ def _udf_signature(
         return [str(p) for p in parameters], str(return_type)
     import inspect
 
-    signature = inspect.signature(function, eval_str=True)
+    signature = inspect.signature(function)
+    namespace = getattr(inspect.unwrap(function), "__globals__", {})
+
+    def resolved(annotation: object) -> object:
+        # Evaluated as inspect would, one at a time, so that a name Python
+        # does not know is a SQL type written as text rather than an error;
+        # "INTEGER[]" is not even Python syntax.
+        if not isinstance(annotation, str):
+            return annotation
+        try:
+            return eval(annotation, namespace)
+        except (NameError, SyntaxError):
+            return annotation
+
     if return_type is None:
-        annotation = signature.return_annotation
+        annotation = resolved(signature.return_annotation)
         if annotation is inspect.Signature.empty:
             message = "could not infer the return type; pass return_type explicitly"
             raise InvalidInputException(message)
@@ -1581,7 +1599,7 @@ def _udf_signature(
             if parameter.annotation is inspect.Parameter.empty:
                 message = f"parameter '{parameter.name}' has no annotation; pass parameters explicitly"
                 raise InvalidInputException(message)
-            texts.append(_annotation_text(parameter.annotation, f"parameter '{parameter.name}'"))
+            texts.append(_annotation_text(resolved(parameter.annotation), f"parameter '{parameter.name}'"))
     else:
         texts = [str(p) for p in parameters]
     return texts, return_text
@@ -1936,7 +1954,7 @@ _instances_lock = threading.Lock()
 
 
 def connect(
-    database: str = ":memory:", read_only: bool = False, config: Mapping[str, object] | None = None
+    database: str | os.PathLike[str] = ":memory:", read_only: bool = False, config: Mapping[str, object] | None = None
 ) -> CompatConnection:
     """Open a connection the old client's way: positional path, read_only flag, config dict.
 
@@ -1945,6 +1963,7 @@ def connect(
     same path with a different configuration is refused in the old
     client's words. Plain in-memory databases are never shared.
     """
+    database = os.fspath(database)
     if database == ":default:":
         return default_connection()
     options: dict[str, object] = dict(config or {})
