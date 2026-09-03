@@ -650,6 +650,122 @@ private:
 	bool finished = false;
 };
 
+/// Carried by a registered Python scalar function and read by every exec
+/// call. The engine frees it at teardown, which can run without the GIL, so
+/// dropping the callable takes it first; with the interpreter already gone
+/// the reference is deliberately leaked rather than decref'd into a corpse.
+struct PyFunctionData {
+	PyFunctionData(nb::object callable, std::string name, std::vector<cxx::LogicalType> parameter_types,
+	               bool skip_nulls, std::shared_ptr<ModuleState> module)
+	    : callable(std::move(callable)), name(std::move(name)), parameter_types(std::move(parameter_types)),
+	      skip_nulls(skip_nulls), module(std::move(module)) {
+	}
+
+	~PyFunctionData() {
+		if (!Py_IsInitialized()) {
+			static_cast<void>(callable.release());
+			return;
+		}
+		nb::gil_scoped_acquire gil;
+		callable.reset();
+	}
+
+	nb::object callable;
+	std::string name;
+	std::vector<cxx::LogicalType> parameter_types;
+	bool skip_nulls;
+	std::shared_ptr<ModuleState> module;
+};
+
+bool IsPandasNA(nb::handle object) {
+	return nb::cast<std::string>(nb::handle(Py_TYPE(object.ptr())).attr("__name__")) == "NAType";
+}
+
+/// The engine runs this on its own threads, so the GIL is taken here, once
+/// per batch. The arguments are trusted to match the declared parameter
+/// types: the signature refuses ANY, so the binder has cast them.
+void PyScalarExec(cxx::ScalarFunction::ExecInput &input) {
+	auto &data = input.GetUserData<PyFunctionData>();
+	const auto rows = input.GetRowCount();
+	const auto count = input.GetArgCount();
+	auto context = input.GetContext();
+	auto result = input.GetResult();
+
+	nb::gil_scoped_acquire gil;
+	try {
+		std::vector<nb::list> columns;
+		columns.reserve(count);
+		for (cxx::idx_t a = 0; a < count; a++) {
+			auto argument = input.GetArg(a);
+			columns.push_back(
+			    VectorElements(argument, data.parameter_types.at(a), 0, rows, data.module->conversion));
+		}
+		result.SetSize(rows);
+		for (cxx::idx_t r = 0; r < rows; r++) {
+			PyObject *raw = PyTuple_New(static_cast<Py_ssize_t>(count));
+			if (raw == nullptr) {
+				throw nb::python_error();
+			}
+			auto arguments = nb::steal<nb::tuple>(raw);
+			bool any_null = false;
+			for (cxx::idx_t a = 0; a < count; a++) {
+				PyObject *item = PyList_GetItem(columns[a].ptr(), static_cast<Py_ssize_t>(r));
+				any_null = any_null || item == Py_None;
+				// SetItem steals the new reference whatever it returns.
+				if (PyTuple_SetItem(raw, static_cast<Py_ssize_t>(a), Py_NewRef(item)) != 0) {
+					throw nb::python_error();
+				}
+			}
+			// DEFAULT null handling promises NULL in, NULL out without a
+			// call, but the engine still runs the batch over such rows, so
+			// the row skip lives here.
+			if (any_null && data.skip_nulls) {
+				result.SetNull(r);
+				continue;
+			}
+			PyObject *returned = PyObject_CallObject(data.callable.ptr(), raw);
+			if (returned == nullptr) {
+				throw nb::python_error();
+			}
+			const auto object = nb::steal(returned);
+			if (object.is_none()) {
+				result.SetNull(r);
+				continue;
+			}
+			try {
+				// SetValue casts to the vector's type, so the declared
+				// return type is enforced right here.
+				result.SetValue(r, PythonToValue(context, object, data.module->conversion));
+			} catch (const cxx::Exception &) {
+				// pandas' NA is unbindable but means NULL, as the old
+				// client treated it.
+				if (IsPandasNA(object)) {
+					result.SetNull(r);
+					continue;
+				}
+				throw;
+			}
+		}
+	} catch (nb::python_error &error) {
+		// Rendered while the GIL is still held; what() needs it. Summary
+		// before traceback, in the old client's words, which callers and
+		// adopted tests match on. The engine prefixes callback errors
+		// itself, so no "Invalid Input Error:" here.
+		std::string summary;
+		try {
+			summary = nb::cast<std::string>(nb::handle(error.type()).attr("__name__"));
+			const auto text = nb::cast<std::string>(nb::str(nb::handle(error.value())));
+			if (!text.empty()) {
+				summary += ": " + text;
+			}
+		} catch (...) {
+			summary.clear();
+		}
+		throw cxx::InvalidInputException("Python exception occurred while executing the UDF '" + data.name +
+		                                 "': " + summary + "\n" + error.what());
+	}
+}
+
 class Connection {
 public:
 	Connection(std::shared_ptr<DatabaseState> owner, cxx::Connection connection)
@@ -722,6 +838,70 @@ public:
 		nb::gil_scoped_release release;
 		const auto signature = connection.Bind(statement);
 		return {Fields(signature.output), Fields(signature.parameters)};
+	}
+
+	/// Register a Python callable as a scalar SQL function on this database.
+	void CreateScalarFunction(const std::string &name, nb::object callable,
+	                          const std::vector<std::string> &parameters, const std::string &returns,
+	                          const std::string &null_handling, const std::string &stability,
+	                          std::shared_ptr<ModuleState> module) {
+		cxx::FunctionNullHandling nulls;
+		if (null_handling == "default") {
+			nulls = cxx::FunctionNullHandling::DEFAULT;
+		} else if (null_handling == "special") {
+			nulls = cxx::FunctionNullHandling::SPECIAL;
+		} else {
+			throw cxx::InvalidInputException(
+			    "Invalid Input Error: null_handling must be 'default' or 'special'");
+		}
+		cxx::FunctionStability level;
+		if (stability == "consistent") {
+			level = cxx::FunctionStability::CONSISTENT;
+		} else if (stability == "volatile") {
+			level = cxx::FunctionStability::VOLATILE;
+		} else if (stability == "consistent_within_query") {
+			level = cxx::FunctionStability::CONSISTENT_WITHIN_QUERY;
+		} else {
+			throw cxx::InvalidInputException(
+			    "Invalid Input Error: stability must be 'consistent', 'volatile' or "
+			    "'consistent_within_query'");
+		}
+
+		std::vector<cxx::LogicalType> parameter_types;
+		parameter_types.reserve(parameters.size());
+		for (const auto &text : parameters) {
+			parameter_types.push_back(connection.ParseType(text));
+		}
+		auto return_type = connection.ParseType(returns);
+		// ANY leaves arguments un-cast, so the exec callback could no longer
+		// trust the declared types it reads the vectors by. Supporting it
+		// needs a bind callback that captures the bound argument types.
+		for (const auto &type : parameter_types) {
+			if (type.GetTypeId() == cxx::LogicalTypeId::ANY) {
+				throw cxx::InvalidInputException(
+				    "Invalid Input Error: ANY parameters are not supported yet");
+			}
+		}
+		if (return_type.GetTypeId() == cxx::LogicalTypeId::ANY) {
+			throw cxx::InvalidInputException(
+			    "Invalid Input Error: an ANY return type is not supported yet");
+		}
+
+		auto function = cxx::ScalarFunction::Create(connection);
+		function.SetName(name);
+		function.WithSignature([&](cxx::FunctionSignature &signature) {
+			for (size_t i = 0; i < parameter_types.size(); i++) {
+				signature.AddParameter("arg" + std::to_string(i), parameter_types[i]);
+			}
+			signature.SetReturnType(return_type);
+		});
+		function.SetUserData<PyFunctionData>(std::move(callable), name, std::move(parameter_types),
+		                                     nulls == cxx::FunctionNullHandling::DEFAULT, std::move(module));
+		function.SetExecCallback(&PyScalarExec);
+		function.SetNullHandling(nulls);
+		function.SetStability(level);
+		nb::gil_scoped_release release;
+		function.Register();
 	}
 
 	void Interrupt() {
@@ -799,6 +979,15 @@ NB_MODULE(_duckdb, m) {
 	         },
 	         nb::arg("sql"), nb::arg("parameters") = nb::none())
 	    .def("bind", &Connection::Bind, nb::arg("sql"))
+	    .def("create_scalar_function",
+	         [state](Connection &self, const std::string &name, nb::object callable,
+	                 const std::vector<std::string> &parameters, const std::string &returns,
+	                 const std::string &null_handling, const std::string &stability) {
+		         self.CreateScalarFunction(name, std::move(callable), parameters, returns, null_handling,
+		                                   stability, state);
+	         },
+	         nb::arg("name"), nb::arg("callable"), nb::arg("parameters"), nb::arg("returns"),
+	         nb::arg("null_handling"), nb::arg("stability"))
 	    .def("interrupt", &Connection::Interrupt)
 	    .def("get_option", &Connection::GetOption, nb::arg("name"))
 	    .def("set_option", &Connection::SetOption, nb::arg("name"), nb::arg("value"));

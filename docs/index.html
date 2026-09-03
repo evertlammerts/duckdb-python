@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DuckDB for Python</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Newsreader:opsz,wght@6..72,400;6..72,600&family=Public+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="sitenav">
+  <a class="home here" href="index.html">duckdb for python</a>
+  <a href="dbapi.html">DB-API 2.0</a>
+  <a href="frame.html">Frames &amp; Plans</a>
+  <a href="udf.html">UDFs</a>
+  <a href="extend.html">Macros &amp; Extensions</a>
+  <a href="compat.html">Compat</a>
+</nav>
+
+<div class="page">
+  <header class="top">
+    <div class="eyebrow">duckdb for python &middot; user manual</div>
+    <h1>DuckDB for Python</h1>
+    <p class="standfirst"><strong>duckdb</strong> is the DuckDB engine inside your Python process: an analytical SQL database that runs in memory or on a file, with no server and no dependencies. A query is a plain value you build in Python and run on a connection. Two more modules share the engine: <code>duckdb.dbapi</code>, a strict DB-API 2.0 interface, and <code>duckdb.compat</code>, the previous client's interface for code that already exists.</p>
+  </header>
+
+  <nav class="toc">
+    <ol>
+      <li><a href="#start">Start here</a></li>
+      <li><a href="#modules">duckdb, duckdb.dbapi and duckdb.compat</a></li>
+      <li><a href="#pages">The manual</a></li>
+      <li><a href="#which">Which module to use</a></li>
+      <li><a href="#connect">Installing and connecting</a></li>
+      <li><a href="#versions">Versions</a></li>
+      <li><a href="#errors">Errors</a></li>
+    </ol>
+  </nav>
+
+  <section id="start">
+    <h2>Start here</h2>
+    <pre><code><span class="k">import</span> duckdb
+<span class="k">from</span> duckdb <span class="k">import</span> col, table, count_all
+
+con = duckdb.connect()
+con.run(<span class="s">"CREATE TABLE orders (customer VARCHAR, region VARCHAR, total DECIMAL(6,2))"</span>)
+con.run(<span class="s">"INSERT INTO orders VALUES ('acme', 'emea', 1400), ('bolt', 'amer', 320), ('acme', 'emea', 2600)"</span>)
+
+orders = table(<span class="s">"orders"</span>)
+orders.filter(col(<span class="s">"total"</span>) &gt; <span class="s">1000</span>).rows(con)
+<span class="c"># [('acme', 'emea', Decimal('1400.00')), ('acme', 'emea', Decimal('2600.00'))]</span></code></pre>
+    <p><code>con</code> is a connection: a database, open, in memory. <code>orders</code> is a plan: a query that has not run. <code>con.run()</code> runs a statement and returns the number of rows it changed. <code>rows(con)</code> runs a plan on a connection and returns its rows as tuples. A plan holds no connection, so <code>orders</code> runs on any database that has a table called <code>orders</code>.</p>
+    <pre><code>spent = orders.group_by(<span class="s">"region"</span>).agg(col(<span class="s">"total"</span>).sum().alias(<span class="s">"spent"</span>), count_all().alias(<span class="s">"orders"</span>))
+spent.sort(col(<span class="s">"spent"</span>).desc()).show(con)</code></pre>
+    <pre><code>┌─────────┬───────────────┬────────┐
+│ region  │ spent         │ orders │
+│ VARCHAR │ DECIMAL(38,2) │ BIGINT │
+├─────────┼───────────────┼────────┤
+│ emea    │ 4000.00       │ 2      │
+│ amer    │ 320.00        │ 1      │
+└─────────┴───────────────┴────────┘</code></pre>
+    <p>Each verb returns a new plan and leaves the old one alone. Nothing runs until a method takes a connection. The rest is in <a href="frame.html">Frames and Plans</a>.</p>
+  </section>
+
+  <section id="modules">
+    <h2><code>duckdb</code>, <code>duckdb.dbapi</code> and <code>duckdb.compat</code></h2>
+    <p class="lede">Each of the three is a complete way to use DuckDB. They share the engine and the exception classes, and nothing else; a program picks one and stays on it.</p>
+
+    <h3><code>duckdb</code>: the main API</h3>
+    <p><code>duckdb.connect()</code> opens a database. <code>duckdb.table()</code>, <code>duckdb.sql()</code> and the file readers make plans; <code>col()</code> and its relatives make expressions. A connection is somewhere to run things: it has <code>run()</code>, <code>transaction()</code>, <code>interrupt()</code>, <code>create_macro()</code>, <code>create_function()</code>, <code>duplicate()</code> and <code>close()</code>, and nothing else. There is no <code>execute()</code>, no fetch family and no <code>cursor()</code>. Rows come out of plans.</p>
+    <pre><code><span class="k">import</span> duckdb
+<span class="k">from</span> duckdb <span class="k">import</span> col, table
+
+con = duckdb.connect(<span class="s">"shop.db"</span>)
+table(<span class="s">"orders"</span>).filter(col(<span class="s">"total"</span>) &gt; <span class="s">1000</span>).rows(con)</code></pre>
+
+    <h3><code>duckdb.dbapi</code>: PEP 249, strictly</h3>
+    <p>A connection with <code>cursor()</code>, <code>commit()</code> and <code>rollback()</code>; a cursor with <code>execute()</code>, <code>executemany()</code>, <code>fetchone()</code>, <code>fetchmany()</code>, <code>fetchall()</code> and <code>description</code>. <code>paramstyle</code> is <code>qmark</code>. Cursors share their connection's transaction, which the specification requires and the previous client could not do. The execute and fetch vocabulary is here because PEP 249 asks for it, and it lives in its own module so that the main API owes it nothing.</p>
+    <pre><code><span class="k">import</span> duckdb.dbapi <span class="k">as</span> dbapi
+
+con = dbapi.connect(<span class="s">"shop.db"</span>)
+cur = con.cursor()
+cur.execute(<span class="s">"SELECT customer, total FROM orders WHERE total &gt; ?"</span>, (<span class="s">1000</span>,))
+cur.fetchall()</code></pre>
+
+    <h3><code>duckdb.compat</code>: the previous client, for migration</h3>
+    <p><code>connect()</code> returns a connection that executes and fetches directly, with <code>description</code> and <code>rowcount</code> on the connection itself; <code>sql()</code>, <code>table()</code> and <code>query()</code> return relations that compose SQL text; a module level default connection backs <code>duckdb.compat.execute()</code> and its siblings. Old habits are reproduced on purpose, the questionable ones included, so that code written against the old client keeps running while it moves. <code>import duckdb</code> does not load this module; ask for it by name.</p>
+    <pre><code><span class="k">import</span> duckdb.compat
+
+con = duckdb.compat.connect(<span class="s">"shop.db"</span>)
+con.execute(<span class="s">"SELECT customer, total FROM orders WHERE total &gt; ?"</span>, [<span class="s">1000</span>]).fetchall()
+con.table(<span class="s">"orders"</span>).filter(<span class="s">"total &gt; 1000"</span>).fetchall()</code></pre>
+
+    <div class="note">
+      <p><strong>New code uses the main API.</strong> The other two exist for code that already speaks PEP 249 or the previous client. A <code>duckdb.compat</code> connection is a <code>duckdb</code> connection with the old client's interface added, so a plan runs on it as well. A <code>duckdb.dbapi</code> connection is not, and a plan handed one is refused with <code>TypeError</code>; to run a plan through the DB-API, execute <code>plan.render()</code> on a cursor.</p>
+    </div>
+  </section>
+
+  <section id="pages">
+    <h2>The manual</h2>
+    <div class="cards">
+      <a class="card" href="frame.html">
+        <span class="kicker">duckdb</span>
+        <h3>Frames and Plans</h3>
+        <p>Building a query as a value: where a plan starts, the verbs, expressions, running it, writing rows out, and SQL in and out. The page for new code.</p>
+      </a>
+      <a class="card" href="udf.html">
+        <span class="kicker">duckdb</span>
+        <h3>UDFs</h3>
+        <p><code>con.create_function()</code>: a Python function the engine calls once per row, the types it takes and returns, NULL handling and stability, and when a macro will do instead.</p>
+      </a>
+      <a class="card" href="extend.html">
+        <span class="kicker">duckdb</span>
+        <h3>Macros and Extensions</h3>
+        <p>Extending DuckDB itself: from an expression to a macro, to a Python function, to a C++ or Rust extension. For functionality the engine does not have.</p>
+      </a>
+      <a class="card" href="dbapi.html">
+        <span class="kicker">duckdb.dbapi</span>
+        <h3>DB-API 2.0</h3>
+        <p>Connections, cursors, transactions and parameters as PEP 249 defines them, and where DuckDB's own rules show through. For code and libraries written to the specification.</p>
+      </a>
+      <a class="card" href="compat.html">
+        <span class="kicker">duckdb.compat</span>
+        <h3>Compat</h3>
+        <p>The previous client's connection, relations and exception names over the new engine: what is reproduced, what changed, and how to move off it. For code that exists today.</p>
+      </a>
+    </div>
+  </section>
+
+  <section id="which">
+    <h2>Which module to use</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Situation</th><th>Use</th></tr></thead>
+        <tbody>
+          <tr><td>New code</td><td>The main API: <code>duckdb.connect()</code>, <code>table()</code>, <code>sql()</code>, expressions</td></tr>
+          <tr><td>SQL text, rows wanted</td><td><code>sql(text).rows(con)</code></td></tr>
+          <tr><td>A statement that returns no rows: DDL, INSERT, COPY, SET</td><td><code>con.run(text)</code>, which returns the rows changed</td></tr>
+          <tr><td>Several statements as one transaction</td><td><code>with con.transaction():</code> in <code>duckdb</code>; <code>commit()</code> and <code>rollback()</code> in <code>duckdb.dbapi</code></td></tr>
+          <tr><td>A Python function called from SQL</td><td><code>con.create_function()</code> on a <code>duckdb</code> connection</td></tr>
+          <tr><td>Extending DuckDB with new functionality</td><td>A macro, then a Python function, then a C++ or Rust extension: <a href="extend.html">Macros and Extensions</a></td></tr>
+          <tr><td>A library or framework that speaks PEP 249</td><td><code>duckdb.dbapi</code></td></tr>
+          <tr><td>Code written against the previous <code>duckdb</code> client</td><td><code>duckdb.compat</code>, while that code moves</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="connect">
+    <h2>Installing and connecting</h2>
+    <p>The package is called <code>duckdb</code>. It needs Python 3.12 or later and nothing else: importing it loads no other library, and the engine ships inside the wheel.</p>
+    <pre><code>pip install duckdb</code></pre>
+
+    <p class="lead-in">opening a database</p>
+    <pre><code>con = duckdb.connect()                                    <span class="c"># in memory</span>
+con = duckdb.connect(<span class="s">"shop.db"</span>)                           <span class="c"># a file, created if it does not exist</span>
+con = duckdb.connect(<span class="s">"shop.db"</span>, access_mode=<span class="s">"read_only"</span>)  <span class="c"># a setting, applied as the database opens</span>
+con = duckdb.connect(threads=<span class="s">2</span>)</code></pre>
+    <p>The default is an in-memory database, which lives as long as a connection to it is open. A path opens a file, creating it when it is not there. Keyword arguments are DuckDB settings, applied as the database opens; the value is passed as text, and a setting the engine does not know is refused by name. Settings that can only be chosen at open time, <code>access_mode</code> among them, go here. The rest can also be changed later with <code>con.run("SET ...")</code>.</p>
+    <p>One process opens a file once. A second <code>duckdb.connect("shop.db")</code> while the first is open is refused by the engine. For more connections to the same database, <code>con.duplicate()</code> gives a second one with its own transaction.</p>
+
+    <p class="lead-in">closing</p>
+    <pre><code><span class="k">with</span> duckdb.connect(<span class="s">"shop.db"</span>) <span class="k">as</span> con:
+    table(<span class="s">"orders"</span>).count(con)</code></pre>
+    <p><code>close()</code> releases the database and closes every result the connection is still reading. A connection is a context manager, so a <code>with</code> block does that on the way out. A closed connection refuses further work with <code>InterfaceError</code>. Plans built while it was open are unaffected; they hold no connection.</p>
+  </section>
+
+  <section id="versions">
+    <h2>Versions</h2>
+    <pre><code>&gt;&gt;&gt; <span class="k">import</span> duckdb
+&gt;&gt;&gt; duckdb.__version__
+<span class="s">'0.0.1.dev0'</span>
+&gt;&gt;&gt; duckdb.duckdb_version()
+<span class="s">'v2.0.0-dev83383'</span></code></pre>
+    <p><code>__version__</code> is this package. <code>duckdb_version()</code> is the DuckDB engine linked into it. They are versioned and released separately, so neither can be read from the other: a package release may carry a new engine or the same one. A problem in SQL belongs to the engine version, a problem in <code>rows()</code> to the package version; report both. <code>duckdb.library_version()</code> is the same engine string, read from the extension module directly.</p>
+  </section>
+
+  <section id="errors">
+    <h2>Errors</h2>
+    <p>Every error the engine reports arrives as a class from <code>duckdb.exceptions</code>. The hierarchy is rooted in PEP 249. <code>Error</code> is at the top. Under it, <code>InterfaceError</code> is misuse of the package itself and <code>DatabaseError</code> is anything the database reports. Under <code>DatabaseError</code> sit the specification's <code>DataError</code>, <code>OperationalError</code>, <code>IntegrityError</code>, <code>InternalError</code>, <code>ProgrammingError</code> and <code>NotSupportedError</code>. Under those, one concrete leaf for each engine error code that carries a meaning of its own.</p>
+    <pre><code><span class="k">from</span> duckdb <span class="k">import</span> exceptions
+
+<span class="k">try</span>:
+    table(<span class="s">"nope"</span>).rows(con)
+<span class="k">except</span> exceptions.CatalogError <span class="k">as</span> error:
+    print(error)      <span class="c"># Catalog Error: Table with name nope does not exist!</span></code></pre>
+    <dl class="ref">
+      <dt>ParserError</dt><dd>A <code>ProgrammingError</code>. The SQL could not be parsed.</dd>
+      <dt>CatalogError</dt><dd>A <code>ProgrammingError</code>. A referenced object does not exist, or already does.</dd>
+      <dt>InvalidInputError</dt><dd>A <code>ProgrammingError</code>. An argument was malformed or out of range.</dd>
+      <dt>ConfigurationError</dt><dd>A <code>ProgrammingError</code>. A setting was unknown, invalid or not permitted.</dd>
+      <dt>ConversionError</dt><dd>A <code>DataError</code>. A value could not be converted to the requested type.</dd>
+      <dt>ConstraintError</dt><dd>An <code>IntegrityError</code>. A key, NOT NULL or CHECK constraint was violated.</dd>
+      <dt>IOError / OutOfMemoryError / ConnectionError / TransactionError / InterruptError</dt><dd>Each an <code>OperationalError</code>: reading or writing failed; an allocation failed; the connection is no longer usable; the transaction could not proceed; the query was interrupted.</dd>
+      <dt>FatalError</dt><dd>An <code>InternalError</code>. The database is no longer usable and must be reopened.</dd>
+    </dl>
+    <p>Catch a leaf when the program can do something about that case, and <code>DatabaseError</code> when it cannot. A code the engine adds later, one this package has never seen, arrives as a plain <code>DatabaseError</code> rather than being lost. The message is the engine's own, as it would be given to any client; the one above goes on to suggest <code>orders</code> and point at the SQL.</p>
+    <p>A mistake caught before the engine sees the query is Python's own <code>TypeError</code> or <code>ValueError</code>: a string where <code>filter</code> wants an expression, <code>and</code> between two expressions, a plan handed a <code>dbapi</code> connection. <code>NeedsConnection</code>, raised when a plan is asked something only the engine can answer and no connection was given, is a <code>ValueError</code>.</p>
+    <p><code>duckdb.dbapi</code> exports the same classes under the names PEP 249 lists, so <code>except dbapi.Error</code> and <code>except exceptions.Error</code> catch the same thing. <code>duckdb.compat</code> aliases the previous client's names, <code>CatalogException</code> and the rest, to these classes.</p>
+    <p>A Ctrl&#8209;C while a query runs cancels it and raises <code>KeyboardInterrupt</code>. <code>con.interrupt()</code> from another thread cancels the running query, which fails with <code>InterruptError</code>.</p>
+  </section>
+
+  <footer>
+    <p>The SQL dialect, its functions and its settings are DuckDB's own, documented at <a href="https://duckdb.org/docs/">duckdb.org</a>; this manual covers the Python package around them. Where the engine refuses something, the message is the one it gives every client.</p>
+  </footer>
+</div>
+
+</body>
+</html>

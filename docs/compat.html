@@ -1,0 +1,479 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>The Compat Module &middot; DuckDB for Python</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Newsreader:opsz,wght@6..72,400;6..72,600&family=Public+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="sitenav">
+  <a class="home" href="index.html">duckdb for python</a>
+  <a href="dbapi.html">DB-API 2.0</a>
+  <a href="frame.html">Frames &amp; Plans</a>
+  <a href="udf.html">UDFs</a>
+  <a href="extend.html">Macros &amp; Extensions</a>
+  <a class="here" href="compat.html">Compat</a>
+</nav>
+
+<div class="page">
+
+<header class="top">
+  <div class="eyebrow">duckdb for python &middot; user manual</div>
+  <h1>Keeping old code running</h1>
+  <p class="standfirst"><code>duckdb.compat</code> is the old client's API, built on top of the native connection: <code>execute</code> and <code>fetchall</code> on the connection, <code>cursor()</code>, lazy relations, the old expression constructors and the old exception names. It exists so that code written against the old client keeps running while it migrates. New code has no reason to be here.</p>
+</header>
+
+<nav class="toc">
+  <ol>
+    <li><a href="#what">What it is, and is not</a></li>
+    <li><a href="#import">Reaching for it</a></li>
+    <li><a href="#connection">The connection</a></li>
+    <li><a href="#instances">One database per path</a></li>
+    <li><a href="#default">The default connection</a></li>
+    <li><a href="#relations">Relations</a></li>
+    <li><a href="#expressions">Expressions</a></li>
+    <li><a href="#exceptions">Exceptions</a></li>
+    <li><a href="#functions">Functions</a></li>
+    <li><a href="#gaps">What is not here</a></li>
+    <li><a href="#migrate">Migrating off it</a></li>
+    <li><a href="#reference">Reference</a></li>
+  </ol>
+</nav>
+
+<section id="what">
+  <h2>What it is, and is not</h2>
+  <p>The old client's <code>duckdb.connect()</code> returned a connection that executed and fetched directly: <code>con.execute(...).fetchall()</code>, with <code>description</code> and <code>rowcount</code> on the connection, <code>cursor()</code> handing back a duplicate whose lifetime was tied to its parent, and <code>sql()</code>, <code>table()</code> and <code>query()</code> returning lazy relations. This module reproduces that contract.</p>
+  <p>The old habits are reproduced deliberately, the questionable ones included:</p>
+  <ul>
+    <li><code>cursor()</code> is an independent connection with its own transaction, and closing a connection closes its cursors.</li>
+    <li><code>rowcount</code> is always <code>-1</code>.</li>
+    <li>Relations compose SQL text.</li>
+    <li><code>connect()</code> hands out connections into one shared database instance per path, with the old refusal when the configuration differs, and <code>:memory:name</code> is shared.</li>
+    <li>A default connection at module level backs <code>execute()</code>, <code>sql()</code>, <code>query()</code>, <code>table()</code> and the rest of the names there.</li>
+  </ul>
+  <p>The native package does none of this. A connection from <code>duckdb.connect()</code> has no <code>execute</code>, no fetch family and no <code>cursor()</code>: plans run on it (<a href="frame.html">Frames &amp; Plans</a>), statements go through <code>run()</code>, and the PEP 249 cursor lives in <code>duckdb.dbapi</code> (<a href="dbapi.html">DB-API 2.0</a>). Neither inherits anything from this module.</p>
+  <div class="note">
+    <p><strong>What this module still lacks is measured.</strong> A copy of the old client's own test suite runs against it (<a href="#gaps">What is not here</a>), and every remaining difference is an entry in the behaviour log, <code>compat/BEHAVIOR.md</code>.</p>
+  </div>
+</section>
+
+<section id="import">
+  <h2>Reaching for it</h2>
+  <p>The module carries the names the old package had at module level, so the shortest first step is an import alias:</p>
+  <pre><code><span class="k">import</span> duckdb.compat <span class="k">as</span> duckdb
+
+con = duckdb.connect(<span class="s">"shop.db"</span>)
+con.execute(<span class="s">"SELECT count(*) FROM orders"</span>).fetchall()   <span class="c"># [(3,)]</span>
+duckdb.sql(<span class="s">"SELECT 42"</span>).fetchone()                        <span class="c"># (42,), on the default connection</span></code></pre>
+  <p>Under that alias <code>duckdb.execute</code>, <code>duckdb.sql</code>, <code>duckdb.ConnectionException</code> and the rest resolve to this module. The native package is untouched: <code>import duckdb</code> elsewhere in the same process still gives the native API. <code>from duckdb import compat</code> is the same module under its own name, for code that uses both at once.</p>
+  <p class="lead-in">one connection, both APIs</p>
+  <p>A compat connection is a native connection. <code>CompatConnection</code> subclasses <code>duckdb.Connection</code>, so everything on the native pages works on it: plans run on it, <code>run()</code> counts rows, <code>transaction()</code> is a block. Old calls and new calls can share one connection, which is what makes a gradual migration possible.</p>
+  <pre><code><span class="k">import</span> duckdb.compat <span class="k">as</span> compat
+<span class="k">from</span> duckdb <span class="k">import</span> table, col
+
+con = compat.connect(<span class="s">"shop.db"</span>)
+con.execute(<span class="s">"SELECT count(*) FROM orders"</span>).fetchone()        <span class="c"># the old call</span>
+table(<span class="s">"orders"</span>).filter(col(<span class="s">"total"</span>) &gt; <span class="s">1000</span>).rows(con)   <span class="c"># the native call, same connection</span></code></pre>
+</section>
+
+<section id="connection">
+  <h2>The connection</h2>
+  <p><code>connect(database=":memory:", read_only=False, config=None)</code> is the old signature: a positional path, a <code>read_only</code> flag and a <code>config</code> dict of settings. The native <code>connect</code> takes its settings as keyword arguments instead.</p>
+
+  <p class="lead-in">execute and fetch</p>
+  <pre><code>con = duckdb.connect()
+con.execute(<span class="s">"CREATE TABLE orders (id INTEGER, customer VARCHAR, total INTEGER)"</span>)
+con.execute(<span class="s">"INSERT INTO orders VALUES (1, 'acme', 1400), (2, 'bolt', 320), (3, 'acme', 2600)"</span>)
+
+con.execute(<span class="s">"SELECT id, total FROM orders WHERE total &gt; ?"</span>, [<span class="s">1000</span>])
+con.description     <span class="c"># [('id', 'INTEGER', None, None, None, None, None), ('total', 'INTEGER', None, None, None, None, None)]</span>
+con.fetchone()      <span class="c"># (1, 1400)</span>
+con.fetchall()      <span class="c"># [(3, 2600)]</span>
+con.fetchone()      <span class="c"># None</span>
+con.rowcount        <span class="c"># -1, always</span></code></pre>
+  <p><code>execute</code> runs one statement and returns the connection, so <code>con.execute(...).fetchall()</code> chains. A statement that produces rows is held on the connection and the fetch family drains it: <code>fetchone()</code>, <code>fetchmany(size=1)</code>, <code>fetchall()</code>, <code>fetchnumpy()</code>, <code>fetchdf()</code> (also under the names <code>df()</code> and <code>fetch_df()</code>), <code>fetch_df_chunk()</code>. The next <code>execute</code> releases whatever is still held. A statement that produces no rows is applied at execute, as the old client's INSERT was, and <code>description</code> is then <code>None</code>. <code>executemany(sql, sets)</code> runs the statement once per parameter set and refuses an empty list.</p>
+  <p><code>rowcount</code> is <code>-1</code> whatever ran: the old client never reported a count. The real count is what <code>con.run(sql)</code> returns.</p>
+  <p>Parameters are a list for <code>?</code> and <code>$1</code>, or a dict for names. A dict key of any type is taken as its text, so <code>{1: value}</code> fills <code>$1</code>; the native connection accepts only string keys, and the leniency is this module's.</p>
+  <p>Fetching with nothing held raises <code>InvalidInputException</code>, <code>No open result set</code>. The same error is raised after <code>close()</code>, since the held result is checked before the connection is.</p>
+
+  <p class="lead-in">cursors</p>
+  <pre><code>con = duckdb.connect()
+cur = con.cursor()
+con.execute(<span class="s">"CREATE TABLE t (v INTEGER)"</span>)
+con.execute(<span class="s">"BEGIN"</span>)
+con.execute(<span class="s">"INSERT INTO t VALUES (1)"</span>)
+cur.execute(<span class="s">"SELECT count(*) FROM t"</span>).fetchone()   <span class="c"># (0,): its own transaction</span>
+con.execute(<span class="s">"COMMIT"</span>)
+cur.execute(<span class="s">"SELECT count(*) FROM t"</span>).fetchone()   <span class="c"># (1,)</span>
+con.close()
+cur.execute(<span class="s">"SELECT 1"</span>)                             <span class="c"># ConnectionException: closed with its parent</span></code></pre>
+  <p><code>cursor()</code> returns another <code>CompatConnection</code>: an independent duplicate with its own transaction and its own temporary schema. That is what the old client did, and it is the opposite of PEP 249, where a cursor shares its connection's transaction; the cursor that does that is in <code>duckdb.dbapi</code>. Closing a connection closes every cursor made from it.</p>
+  <p><code>begin()</code>, <code>commit()</code> and <code>rollback()</code> exist as methods and run the statement of the same name. <code>close()</code> closes the cursors, releases the held result and closes the connection; the connection is also a context manager.</p>
+  <div class="note caution">
+    <p><strong>A held result and <code>sql()</code>.</strong> <code>sql()</code> on a connection holding a result nothing has fetched from discards that result silently, as the old client did. Once something has been fetched from it, <code>sql()</code> refuses with the engine's error for a live result instead; the old client had materialized the whole result at execute and kept the remainder. Fetch the result to the end, or call <code>execute</code> again, before building a relation on the same connection.</p>
+  </div>
+</section>
+
+<section id="instances">
+  <h2>One database per path</h2>
+  <pre><code>a = duckdb.connect(<span class="s">"shop.db"</span>)
+b = duckdb.connect(<span class="s">"shop.db"</span>)                    <span class="c"># the same database instance</span>
+a.execute(<span class="s">"CREATE TABLE t AS SELECT 1 AS v"</span>)
+b.execute(<span class="s">"SELECT count(*) FROM t"</span>).fetchone()   <span class="c"># (1,)</span>
+
+duckdb.connect(<span class="s">"shop.db"</span>, read_only=<span class="k">True</span>)
+<span class="c"># ConnectionException: Can't open a connection to same database file with a different configuration than existing connections</span></code></pre>
+  <p>Two <code>connect()</code> calls to one path hand out connections into one database instance, so each sees the other's writes. The instance lives as long as any connection or cursor into it; when the last one closes, the file is released, and a later <code>connect()</code> opens it afresh. Asking for the same path with a different configuration, whether <code>read_only</code> or an entry in <code>config</code>, is refused in the old words, and the refusal is a <code>ConnectionException</code>.</p>
+  <p><code>:memory:name</code> is shared the same way. A plain <code>:memory:</code> is never shared: every call is a fresh database.</p>
+  <p>The native <code>connect()</code> does none of this. Opening one file twice natively is refused by the engine (<code>Unique file handle conflict</code>); a second connection into a database that is already open is <code>con.duplicate()</code>.</p>
+  <p>The connection announces itself to the engine as <code>python/&lt;major.minor&gt;</code> in the <code>duckdb_api</code> setting, as the old client did.</p>
+</section>
+
+<section id="default">
+  <h2>The default connection</h2>
+  <pre><code><span class="k">import</span> duckdb.compat <span class="k">as</span> duckdb
+
+duckdb.execute(<span class="s">"CREATE TABLE numbers AS SELECT * FROM range(5) t(i)"</span>)
+duckdb.execute(<span class="s">"SELECT count(*) FROM numbers"</span>).fetchone()   <span class="c"># (5,)</span>
+duckdb.description()                                          <span class="c"># [('count_star()', 'BIGINT', None, None, None, None, None)]</span>
+duckdb.sql(<span class="s">"SELECT i FROM numbers WHERE i &gt; 2"</span>).fetchall()   <span class="c"># [(3,), (4,)]</span>
+duckdb.table(<span class="s">"numbers"</span>).fetchall()                            <span class="c"># [(0,), (1,), (2,), (3,), (4,)]</span>
+duckdb.table_function(<span class="s">"range"</span>, [<span class="s">3</span>]).fetchall()                <span class="c"># [(0,), (1,), (2,)]</span>
+
+duckdb.default_connection()   <span class="c"># the CompatConnection behind all of the above</span>
+duckdb.close()                <span class="c"># closes it; the next call at module level makes a fresh, empty one</span></code></pre>
+  <p><code>execute</code>, <code>sql</code>, <code>query</code>, <code>from_query</code>, <code>table</code>, <code>table_function</code>, <code>create_function</code>, <code>remove_function</code> and <code>description</code> at module level all run on one connection that the module makes on first use, in memory. <code>description</code> is a function here, <code>duckdb.description()</code>, where on a connection it is a property.</p>
+  <p><code>default_connection()</code> returns that connection. <code>set_default_connection(con)</code> points the names at module level at a connection of your own, and refuses anything that is not a <code>CompatConnection</code> with a <code>TypeError</code>. <code>connect(":default:")</code> returns the default connection as well. <code>close()</code> closes it, and with it every table it held; the next call at module level opens a new one.</p>
+</section>
+
+<section id="relations">
+  <h2>Relations</h2>
+  <pre><code>con = duckdb.connect()
+con.execute(<span class="s">"CREATE TABLE orders AS SELECT * FROM (VALUES (1, 'acme', 1400), (2, 'bolt', 320), (3, 'acme', 2600)) t(id, customer, total)"</span>)
+
+orders = con.table(<span class="s">"orders"</span>)
+big = orders.filter(<span class="s">"total &gt; 1000"</span>).project(<span class="s">"customer, total"</span>)
+big.sql_query()   <span class="c"># SELECT customer, total FROM (SELECT * FROM (SELECT * FROM "orders") WHERE total &gt; 1000)</span>
+big.fetchall()    <span class="c"># [('acme', 1400), ('acme', 2600)]</span>
+big.aggregate(<span class="s">"sum(total)"</span>).fetchone()   <span class="c"># (4000,)</span></code></pre>
+  <p><code>con.sql(query)</code> returns a <code>CompatRelation</code>: lazy, bound to that connection, and composed as SQL text. Every verb takes its argument as a SQL fragment and wraps the previous text in a subquery; <code>sql_query()</code> shows the result. The text is bound when the relation is made, so a bad fragment errors at the verb, not at the first fetch. <code>con.query</code> is the old alias. <code>con.table(name)</code> and <code>con.view(name)</code> read a table or view by name, and <code>con.table_function(name, params)</code> takes the function's arguments as a list.</p>
+  <p><code>sql()</code> given anything other than a query runs it on the spot and returns <code>None</code>: DDL, INSERT, BEGIN. A statement that is not a query but still produces rows, such as <code>INSERT ... RETURNING</code>, runs exactly once, and its rows are carried in a materialized relation that gives the same rows on every fetch and takes verbs like any other.</p>
+
+  <p class="lead-in">fetching</p>
+  <pre><code>r = con.sql(<span class="s">"SELECT * FROM range(3)"</span>)
+r.fetchall()      <span class="c"># [(0,), (1,), (2,)]: runs the query</span>
+r.fetchall()      <span class="c"># runs it again</span>
+r.fetchone()      <span class="c"># (0,): runs once more and holds the result</span>
+r.fetchmany(<span class="s">2</span>)    <span class="c"># [(1,), (2,)], from the held result</span>
+r.fetchone()      <span class="c"># None</span>
+r.execute()       <span class="c"># runs again and holds the new result</span>
+r.close()         <span class="c"># releases it; every fetch afterwards raises "result closed"</span></code></pre>
+  <p>That is the old model: a bare <code>fetchall()</code> runs fresh every call, <code>fetchone()</code> and <code>fetchmany()</code> run once and drain what they hold, <code>execute()</code> resets it. <code>fetchdf()</code> (also <code>df()</code> and <code>to_df()</code>), <code>fetchnumpy()</code> and <code>fetch_df_chunk()</code> follow the same rule.</p>
+  <p><code>description</code>, <code>columns</code> and <code>types</code> (also <code>dtypes</code>) come from binding the text and run nothing; <code>types</code> are type text, where the old client returned type objects. <code>shape</code> and <code>len()</code> run a count. <code>type</code> is <code>TABLE_RELATION</code>, <code>VIEW_RELATION</code>, <code>QUERY_RELATION</code> or <code>MATERIALIZED_RELATION</code>. Printing a relation shows its first rows as a table, and <code>show()</code> prints them. <code>"customer" in orders</code> asks for a column; <code>orders["customer"]</code> projects one.</p>
+
+  <p class="lead-in">joining and combining</p>
+  <pre><code>customers = con.table(<span class="s">"customers"</span>)
+orders.join(customers, <span class="s">"customer"</span>)                      <span class="c"># USING (customer): the condition is only names</span>
+orders.set_alias(<span class="s">"o"</span>).join(customers.set_alias(<span class="s">"c"</span>), <span class="s">"o.customer = c.customer"</span>, how=<span class="s">"left"</span>)   <span class="c"># ON (...)</span>
+orders.union(orders.set_alias(<span class="s">"again"</span>))                  <span class="c"># UNION ALL: duplicates stay</span></code></pre>
+  <p>A condition that is only column names becomes <code>USING</code>; anything else is <code>ON</code>. Each side joins under its alias, which is a table's own name or one given by <code>set_alias()</code>; two sides with the same alias are refused. <code>how</code> is <code>inner</code>, <code>left</code>, <code>right</code>, <code>outer</code>, <code>semi</code> or <code>anti</code>. <code>cross()</code> is the cross product. <code>union</code>, <code>except_</code> and <code>intersect</code> are the <code>ALL</code> forms, as they were.</p>
+
+  <p class="lead-in">the shorthands</p>
+  <pre><code>orders.sum(<span class="s">"total"</span>, groups=<span class="s">"customer"</span>, projected_columns=<span class="s">"customer"</span>).order(<span class="s">"customer"</span>).fetchall()   <span class="c"># [('acme', 4000), ('bolt', 320)]</span>
+orders.count(<span class="s">"*"</span>).fetchone()                                       <span class="c"># (3,)</span>
+orders.row_number(<span class="s">"over (order by total desc)"</span>, <span class="s">"customer"</span>)    <span class="c"># a window shorthand</span>
+orders.describe()                                                  <span class="c"># count, mean, stddev, min, max, median, one row each</span></code></pre>
+  <p>Every old aggregate shorthand is here, <code>sum</code>, <code>min</code>, <code>max</code>, <code>mean</code>, <code>count</code>, <code>median</code>, <code>quantile</code>, <code>std</code>, <code>var</code>, <code>list</code>, <code>string_agg</code>, <code>histogram</code> and the rest, each taking its columns as text with optional <code>groups</code>, <code>window_spec</code> and <code>projected_columns</code>; <code>apply(function_name, columns)</code> calls any aggregate by name. The window shorthands, <code>row_number</code>, <code>rank</code>, <code>dense_rank</code>, <code>lag</code>, <code>lead</code>, <code>first_value</code> and the rest, take the window as text. The full list is in the <a href="#reference">reference</a>.</p>
+
+  <p class="lead-in">writing out</p>
+  <pre><code>big.create(<span class="s">"big_orders"</span>)              <span class="c"># a new table; to_table is the alias</span>
+big.insert_into(<span class="s">"big_orders"</span>)         <span class="c"># append, by position</span>
+big.create_view(<span class="s">"big_view"</span>)           <span class="c"># CREATE OR REPLACE VIEW; replace=False for a plain CREATE</span>
+con.table(<span class="s">"orders"</span>).insert([<span class="s">4</span>, <span class="s">"cog"</span>, <span class="s">10</span>])                     <span class="c"># one row; a table relation only</span>
+con.table(<span class="s">"orders"</span>).update({<span class="s">"total"</span>: <span class="s">0</span>}, condition=<span class="s">"id = 2"</span>)   <span class="c"># a table relation only</span>
+big.write_csv(<span class="s">"big.csv"</span>, sep=<span class="s">"|"</span>, header=<span class="k">True</span>)
+big.write_parquet(<span class="s">"big.parquet"</span>, compression=<span class="s">"zstd"</span>)
+big.query(<span class="s">"b"</span>, <span class="s">"SELECT count(*) FROM b"</span>).fetchone()   <span class="c"># (2,): the relation as a temporary view named b</span>
+big.explain()                                          <span class="c"># the plan as text; explain(type="analyze") runs it</span></code></pre>
+  <p><code>write_csv</code> takes the old option names, spelled the way pandas spells them, <code>sep</code>, <code>na_rep</code>, <code>header</code>, <code>quotechar</code>, <code>escapechar</code>, <code>date_format</code>, <code>timestamp_format</code>, <code>quoting</code>, <code>encoding</code>, <code>compression</code>, <code>overwrite</code>, <code>per_thread_output</code>, <code>use_tmp_file</code>, <code>partition_by</code> and <code>write_partition_columns</code>, and writes with <code>COPY</code>; <code>to_csv</code> is the alias. <code>write_parquet</code> and <code>to_parquet</code> do the same with the Parquet options. <code>insert()</code> and <code>update()</code> work on a relation from <code>con.table()</code> only, as they did.</p>
+
+  <p class="lead-in">against a frame</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th></th><th>CompatRelation</th><th>Frame</th></tr></thead>
+      <tbody>
+        <tr><td>Connection</td><td>bound to the one it was made on</td><td>holds none; every run takes one</td></tr>
+        <tr><td>Verb arguments</td><td>SQL text fragments, or expressions</td><td>expressions; a bare string names a column</td></tr>
+        <tr><td>Composition</td><td>text; each verb wraps the last in a subquery</td><td>a plan, rendered when it runs</td></tr>
+        <tr><td>Rows out</td><td><code>fetchall()</code>, <code>fetchone()</code>, <code>execute()</code>: the old model</td><td><code>rows(con)</code>, <code>first(con)</code>, <code>iter_rows(con)</code></td></tr>
+        <tr><td>Aliases</td><td>needed to join two relations</td><td>sides are <code>l</code> and <code>r</code></td></tr>
+        <tr><td>Union</td><td><code>UNION ALL</code>, always</td><td><code>union(all=False)</code> drops duplicates</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The native side of every row is on <a href="frame.html">Frames &amp; Plans</a>.</p>
+</section>
+
+<section id="expressions">
+  <h2>Expressions</h2>
+  <pre><code><span class="k">from</span> duckdb.compat <span class="k">import</span> ColumnExpression, FunctionExpression, CaseExpression, StarExpression, SQLExpression, CoalesceOperator
+
+orders.filter(ColumnExpression(<span class="s">"total"</span>) &gt; <span class="s">1000</span>)
+orders.filter(ColumnExpression(<span class="s">"customer"</span>) == <span class="s">"acme"</span>)                 <span class="c"># a bare string is a value</span>
+orders.project(FunctionExpression(<span class="s">"upper"</span>, ColumnExpression(<span class="s">"customer"</span>)))
+orders.project(StarExpression(exclude=[<span class="s">"id"</span>]))
+orders.project(SQLExpression(<span class="s">"total * 2"</span>))
+orders.project(CoalesceOperator(ColumnExpression(<span class="s">"total"</span>), <span class="s">0</span>))
+orders.sort(ColumnExpression(<span class="s">"total"</span>).desc())
+
+tier = (CaseExpression(ColumnExpression(<span class="s">"total"</span>) &gt; <span class="s">2000</span>, <span class="s">"big"</span>)
+        .when(ColumnExpression(<span class="s">"total"</span>) &gt; <span class="s">500</span>, <span class="s">"mid"</span>)
+        .otherwise(<span class="s">"small"</span>))
+orders.project(<span class="s">"id"</span>, tier).order(<span class="s">"id"</span>).fetchall()   <span class="c"># [(1, 'mid'), (2, 'small'), (3, 'big')]</span></code></pre>
+  <p>Each constructor returns a <code>CompatExpression</code>, a thin wrapper over the native expression layer, so what an expression means is what the native layer says it means: a bare operand is a value, never a column name, and <code>ColumnExpression("customer") == "acme"</code> compares with the text <code>acme</code>. <code>repr()</code> of an expression is its SQL fragment.</p>
+  <p><code>ColumnExpression</code> takes a dotted name or its parts; <code>ColumnExpression("o", "id")</code> and <code>ColumnExpression("o.id")</code> are the same. <code>ConstantExpression(value)</code> is a literal. <code>FunctionExpression(name, *args)</code> calls any function by name. <code>CaseExpression(condition, value)</code> opens a CASE with its first branch; chain <code>.when(condition, value)</code> and <code>.otherwise(value)</code>, and without an <code>otherwise</code> the unmatched rows are NULL. <code>StarExpression(exclude=[...])</code> takes names or column expressions. <code>SQLExpression(text)</code> is spliced as written. <code>DefaultExpression()</code> is the <code>DEFAULT</code> marker. <code>CoalesceOperator(*args)</code> is the first argument that is not NULL.</p>
+  <p>Comparison and arithmetic operators build bigger expressions, as do <code>&amp;</code>, <code>|</code>, <code>~</code> and unary minus. The methods are <code>cast(type)</code>, <code>asc()</code>, <code>desc()</code>, <code>nulls_first()</code>, <code>nulls_last()</code>, <code>between(lo, hi)</code>, <code>isin(*values)</code> and <code>isnotin(*values)</code> with the values as separate arguments, <code>isnull()</code>, <code>isnotnull()</code>, <code>collate(name)</code>, <code>get_name()</code> and <code>show()</code>.</p>
+  <p>An expression goes wherever a relation verb takes a fragment: <code>filter</code>, <code>project</code>, <code>aggregate</code> (as a list), <code>sort</code>, a <code>join</code> condition, the values and condition of <code>update</code>. A native expression from <code>col()</code>, <code>lit()</code>, <code>fn()</code> or <code>when()</code> is accepted in the same places.</p>
+  <div class="note">
+    <p><strong><code>Expression</code> is the old class name</strong>, an alias of <code>CompatExpression</code>, kept for <code>isinstance</code> checks in migrating code. A native <code>Expr</code> is not an instance of it.</p>
+  </div>
+  <div class="note caution">
+    <p><strong>Combine with <code>&amp;</code>, <code>|</code> and <code>~</code></strong>, in parentheses. Python's <code>and</code>, <code>or</code> and <code>not</code> do not build an expression.</p>
+  </div>
+</section>
+
+<section id="exceptions">
+  <h2>Exceptions</h2>
+  <pre><code><span class="k">import</span> duckdb.compat <span class="k">as</span> duckdb
+
+<span class="k">try</span>:
+    con.execute(<span class="s">"SELECT * FROM nope"</span>)
+<span class="k">except</span> duckdb.CatalogException:
+    ...                                   <span class="c"># the object raised is duckdb.exceptions.CatalogError</span></code></pre>
+  <p>Every old exception name is an alias of the class this package raises for the same engine error, or of the nearest ancestor where the old class drew a finer line than the engine's error codes do. An <code>except</code> clause written against the old name keeps catching.</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Old name</th><th>Raised now</th></tr></thead>
+      <tbody>
+        <tr><td><code>BinderException</code>, <code>InvalidTypeException</code>, <code>TypeMismatchException</code></td><td><code>ProgrammingError</code></td></tr>
+        <tr><td><code>CatalogException</code></td><td><code>CatalogError</code></td></tr>
+        <tr><td><code>ConnectionException</code></td><td><code>InterfaceError</code></td></tr>
+        <tr><td><code>ConversionException</code></td><td><code>ConversionError</code></td></tr>
+        <tr><td><code>FatalException</code></td><td><code>FatalError</code></td></tr>
+        <tr><td><code>HTTPException</code>, <code>IOException</code></td><td><code>IOError</code></td></tr>
+        <tr><td><code>InternalException</code></td><td><code>InternalError</code></td></tr>
+        <tr><td><code>InterruptException</code></td><td><code>InterruptError</code></td></tr>
+        <tr><td><code>InvalidInputException</code></td><td><code>InvalidInputError</code></td></tr>
+        <tr><td><code>NotImplementedException</code></td><td><code>NotSupportedError</code></td></tr>
+        <tr><td><code>OutOfMemoryException</code></td><td><code>OutOfMemoryError</code></td></tr>
+        <tr><td><code>OutOfRangeException</code></td><td><code>DataError</code></td></tr>
+        <tr><td><code>ParserException</code>, <code>SyntaxException</code></td><td><code>ParserError</code></td></tr>
+        <tr><td><code>PermissionException</code>, <code>SequenceException</code>, <code>SerializationException</code></td><td><code>DatabaseError</code></td></tr>
+        <tr><td><code>StandardException</code></td><td><code>Error</code></td></tr>
+        <tr><td><code>TransactionException</code></td><td><code>TransactionError</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Two consequences. Where several old names alias one class, the clause is wider than it was: <code>except TypeMismatchException</code> catches every <code>ProgrammingError</code>, including the one DuckDB raises when it cannot resolve a query. And <code>ConnectionException</code>, which covered "closed or unusable", is <code>InterfaceError</code>: that is the class raised for a closed connection, and for the refusal in <code>connect()</code> when the configuration differs.</p>
+  <p>The PEP 249 names, <code>Error</code>, <code>Warning</code>, <code>DatabaseError</code>, <code>DataError</code>, <code>IntegrityError</code>, <code>NotSupportedError</code>, <code>OperationalError</code> and <code>ProgrammingError</code>, are here too, with <code>apilevel</code>, <code>paramstyle</code>, <code>threadsafety</code> and the type objects <code>STRING</code>, <code>BINARY</code>, <code>NUMBER</code>, <code>DATETIME</code> and <code>ROWID</code>, all taken from <code>duckdb.dbapi</code>.</p>
+</section>
+
+<section id="functions">
+  <h2>Functions</h2>
+  <pre><code>con = duckdb.connect()
+con.create_function(<span class="s">"plus_one"</span>, <span class="k">lambda</span> x: x + <span class="s">1</span>, [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT"</span>)
+con.execute(<span class="s">"SELECT plus_one(41)"</span>).fetchall()   <span class="c"># [(42,)]</span>
+
+<span class="k">def</span> shout(text: str, times: int) -&gt; str:
+    <span class="k">return</span> text.upper() * times
+
+con.create_function(<span class="s">"shout"</span>, shout)                 <span class="c"># types from the annotations</span>
+con.execute(<span class="s">"SELECT shout('ha', 2)"</span>).fetchall()   <span class="c"># [('HAHA',)]</span>
+
+<span class="k">def</span> brittle(x: int) -&gt; int:
+    <span class="k">return</span> <span class="s">100</span> // x
+
+con.create_function(<span class="s">"brittle"</span>, brittle, exception_handling=<span class="s">"return_null"</span>)
+con.execute(<span class="s">"SELECT brittle(x) FROM (VALUES (4), (0), (10)) t(x)"</span>).fetchall()   <span class="c"># [(25,), (None,), (10,)]</span></code></pre>
+  <p><code>create_function(name, function, parameters=None, return_type=None, *, type="native", null_handling="default", exception_handling="default", side_effects=False)</code> registers a Python callable and returns the connection. Types left out are read from the function's annotations: <code>bool</code>, <code>int</code>, <code>float</code>, <code>str</code>, <code>bytes</code>, <code>datetime</code>, <code>date</code>, <code>time</code>, <code>timedelta</code> and <code>UUID</code> map to <code>BOOLEAN</code>, <code>BIGINT</code>, <code>DOUBLE</code>, <code>VARCHAR</code>, <code>BLOB</code>, <code>TIMESTAMP</code>, <code>DATE</code>, <code>TIME</code>, <code>INTERVAL</code> and <code>UUID</code>; <code>list[T]</code> is <code>T[]</code>, <code>dict[K, V]</code> is <code>MAP(K, V)</code>, and <code>T | None</code> is <code>T</code>. A parameter or return without an annotation and without an explicit type is refused, with directions.</p>
+  <p>With <code>null_handling="default"</code> a NULL argument gives NULL without calling the function, and a function that returns <code>None</code> anyway is refused with the old client's message. With <code>"special"</code>, <code>None</code> passes in and a returned <code>None</code> is NULL. <code>exception_handling="return_null"</code> turns a Python error into NULL instead of failing the query. <code>side_effects=True</code> marks the function volatile, so the engine calls it once per row every time. Any of these may be given as the old enum value, which is taken by its name. <code>type</code> must be <code>"native"</code>; <code>"arrow"</code> raises <code>NotSupportedError</code>.</p>
+  <p><code>remove_function(name)</code> raises <code>NotSupportedError</code>: the engine keeps a registered function until the database closes. Registering the same name again replaces it, where the old client refused. <code>create_function</code> and <code>remove_function</code> at module level act on the default connection.</p>
+  <p>The native registration is <code>con.create_function(name, function, parameters, returns, null_handling=, stability=)</code>, types always given, on <a href="udf.html">UDFs</a>.</p>
+</section>
+
+<section id="gaps">
+  <h2>What is not here</h2>
+  <p><code>compat/suite/</code> holds verbatim copies of 36 of the old client's own test files, taken from <code>duckdb/duckdb-python</code> <code>main</code> at <code>2ba111556c0a</code> on 1 September 2026: the connection, statement, transaction, result and interrupt files, the DB-API set, and the relational API set with the data file it reads. They run against this package to report how much of the old API is here, and they gate nothing: the repository's own suite under <code>tests/</code> gates changes; this slice only reports.</p>
+  <p>The files under <code>suite/</code> are never edited to pass. A failure there is one of three things: a name this client does not have, a deliberate divergence recorded in <code>compat/BEHAVIOR.md</code>, or a bug. A test that asserts a recorded divergence is marked xfail from <code>compat/conftest.py</code>, with a reason naming its log entry. The slice grows file by file, each copied verbatim from the same source, with the source commit recorded in <code>compat/README.md</code>.</p>
+  <p class="lead-in">running it</p>
+  <pre><code>uv run --no-sync python scripts/compat_report.py
+uv run --no-sync python scripts/compat_report.py --facade</code></pre>
+  <p>The report clusters the outcomes under its four labels, <code>passed</code>, <code>missing surface</code>, <code>behavior</code> and <code>skipped</code>, prints the top failure signatures, and always exits 0. Without <code>--facade</code> the old tests run against the native <code>duckdb</code> package, and nearly all of them fail on a missing name, which is expected: the native API is not the old one. With <code>--facade</code>, <code>compat/conftest.py</code> patches <code>duckdb.connect</code> and the old names at module level to <code>duckdb.compat</code> first, previewing what a package that shipped this module as its top level would score; the verbatim files are never touched. Extra arguments are passed to pytest, so <code>-k name</code> narrows a run. Each file runs in its own subprocess with a timeout, so one file that hangs cannot hide the files after it.</p>
+  <p>Left out of the slice so far: files importing pyarrow, polars, torch or tensorflow, files needing the old build tree or its data files, and <code>test_query_progress.py</code>.</p>
+  <p class="lead-in">pending</p>
+  <p>These parts of the old API are recorded as pending in <code>compat/BEHAVIOR.md</code> and are not here:</p>
+  <ul>
+    <li>Several statements in one <code>execute</code>. The old client ran <code>"a; b; c"</code> and returned the last result; here it is refused: <code>Execute expects exactly one statement</code>.</li>
+    <li>The implicit <code>FROM df</code> scan of a local DataFrame or relation, and <code>from_df</code>. A query naming a local variable finds no such table.</li>
+    <li>Arrow UDFs, <code>create_function(type="arrow")</code>.</li>
+    <li>UDF parameters typed <code>ANY</code>.</li>
+  </ul>
+  <p>Every other difference from the old client, whether in values, expressions, connections, errors or functions, is an entry in <code>compat/BEHAVIOR.md</code> with the test that pins it.</p>
+</section>
+
+<section id="migrate">
+  <h2>Migrating off it</h2>
+  <p>A compat connection is a native connection, so a migration can move one call at a time on the same connection object.</p>
+  <div class="chain">
+    <div class="step"><div class="n">1</div><div class="what">Change the import to <code>import duckdb.compat as duckdb</code>. What still fails is in the behaviour log or the report.</div></div>
+    <div class="step"><div class="n">2</div><div class="what">Replace fetches with plans on the same connection: <code>con.execute(text).fetchall()</code> becomes <code>duckdb.sql(text).rows(con)</code>, then the SQL becomes verbs.</div></div>
+    <div class="step"><div class="n">3</div><div class="what">Replace statements: <code>con.execute("INSERT ...")</code> becomes <code>con.run("INSERT ...")</code>, which returns the count <code>rowcount</code> never had. <code>begin()</code>, <code>commit()</code> and <code>rollback()</code> become a <code>with con.transaction():</code> block.</div></div>
+    <div class="step"><div class="n">4</div><div class="what">Replace the old exception names with the classes in <code>duckdb.exceptions</code>. They are the same objects, so the two spellings can coexist while it happens.</div></div>
+    <div class="step"><div class="n">5</div><div class="what">When no old call is left, <code>compat.connect</code> becomes <code>duckdb.connect</code>, and each <code>cursor()</code> becomes <code>con.duplicate()</code>, or a <code>duckdb.dbapi</code> cursor where PEP 249 was the point.</div></div>
+  </div>
+
+  <p class="lead-in">fetching rows</p>
+  <div class="pair">
+    <div class="bad">
+      <div class="tag">old</div>
+      <pre><code><span class="k">import</span> duckdb.compat <span class="k">as</span> duckdb
+
+con = duckdb.connect(<span class="s">"shop.db"</span>)
+con.execute(
+    <span class="s">"SELECT customer, total FROM orders WHERE total &gt; ?"</span>, [<span class="s">1000</span>]
+).fetchall()</code></pre>
+    </div>
+    <div class="good">
+      <div class="tag">native</div>
+      <pre><code><span class="k">import</span> duckdb
+<span class="k">from</span> duckdb <span class="k">import</span> table, col
+
+con = duckdb.connect(<span class="s">"shop.db"</span>)
+(table(<span class="s">"orders"</span>)
+    .filter(col(<span class="s">"total"</span>) &gt; <span class="s">1000</span>)
+    .select(<span class="s">"customer"</span>, <span class="s">"total"</span>)
+    .rows(con))</code></pre>
+    </div>
+  </div>
+
+  <p class="lead-in">running a statement</p>
+  <div class="pair">
+    <div class="bad">
+      <div class="tag">old</div>
+      <pre><code>con.execute(<span class="s">"INSERT INTO orders VALUES (4, 'cog', 10)"</span>)
+con.rowcount   <span class="c"># -1</span></code></pre>
+    </div>
+    <div class="good">
+      <div class="tag">native</div>
+      <pre><code>con.run(<span class="s">"INSERT INTO orders VALUES (4, 'cog', 10)"</span>)   <span class="c"># 1</span></code></pre>
+    </div>
+  </div>
+
+  <p class="lead-in">where each habit lives now</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Old</th><th>Native</th><th>Page</th></tr></thead>
+      <tbody>
+        <tr><td><code>con.execute(text).fetchall()</code></td><td><code>sql(text).rows(con)</code></td><td><a href="frame.html">Frames &amp; Plans</a></td></tr>
+        <tr><td><code>con.execute(statement)</code>, <code>con.rowcount</code></td><td><code>con.run(statement)</code>, which returns the count</td><td><a href="frame.html">Frames &amp; Plans</a></td></tr>
+        <tr><td><code>con.begin()</code>, <code>commit()</code>, <code>rollback()</code></td><td><code>with con.transaction():</code></td><td><a href="frame.html">Frames &amp; Plans</a></td></tr>
+        <tr><td><code>con.cursor()</code></td><td><code>con.duplicate()</code>; or a PEP 249 cursor from <code>duckdb.dbapi</code></td><td><a href="dbapi.html">DB-API 2.0</a></td></tr>
+        <tr><td><code>con.sql(text)</code>, <code>con.table(name)</code></td><td><code>duckdb.sql(text)</code>, <code>duckdb.table(name)</code>: no connection until it runs</td><td><a href="frame.html">Frames &amp; Plans</a></td></tr>
+        <tr><td><code>rel.filter("total &gt; 1000").project("a, b")</code></td><td><code>.filter(col("total") &gt; 1000).select("a", "b")</code></td><td><a href="frame.html">Frames &amp; Plans</a></td></tr>
+        <tr><td><code>ColumnExpression</code>, <code>ConstantExpression</code>, <code>FunctionExpression</code>, <code>CaseExpression</code>, <code>StarExpression</code>, <code>SQLExpression</code>, <code>CoalesceOperator</code></td><td><code>col</code>, <code>lit</code>, <code>fn</code>, <code>when(...).then(...).otherwise(...)</code>, <code>star</code>, <code>sql_expr</code>, <code>coalesce</code></td><td><a href="frame.html">Frames &amp; Plans</a></td></tr>
+        <tr><td><code>duckdb.execute(text)</code> on the default connection</td><td>a connection you made, passed to the plan</td><td><a href="frame.html">Frames &amp; Plans</a></td></tr>
+        <tr><td><code>con.create_function(name, f, params, return_type)</code></td><td><code>con.create_function(name, f, parameters, returns)</code>; or a macro, when the body can be written in SQL</td><td><a href="udf.html">UDFs</a>, <a href="extend.html">Macros &amp; Extensions</a></td></tr>
+        <tr><td><code>CatalogException</code> and the other old names</td><td><code>duckdb.exceptions.CatalogError</code> and the classes in the <a href="#exceptions">table</a></td><td>this page</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="reference">
+  <h2>Reference</h2>
+
+  <h3>Module level</h3>
+  <dl class="ref">
+    <dt>connect(database=":memory:", read_only=False, config=None)</dt><dd>A <code>CompatConnection</code>. One shared instance per path; <code>":default:"</code> gives the default connection.</dd>
+    <dt>default_connection()</dt><dd>The connection behind the calls at module level, made in memory on first use.</dd>
+    <dt>set_default_connection(con)</dt><dd>Point the calls at module level at this connection. Must be a <code>CompatConnection</code>.</dd>
+    <dt>execute(sql, parameters=None)</dt><dd><code>execute</code> on the default connection.</dd>
+    <dt>sql(query) / query(query) / from_query(query)</dt><dd>A relation on the default connection, or <code>None</code> for a statement without rows.</dd>
+    <dt>table(name) / table_function(name, params=None)</dt><dd>Relations on the default connection.</dd>
+    <dt>create_function(...) / remove_function(name)</dt><dd>On the default connection.</dd>
+    <dt>description()</dt><dd>The default connection's <code>description</code>.</dd>
+    <dt>close()</dt><dd>Close the default connection; the next call at module level makes a fresh one.</dd>
+    <dt>apilevel, paramstyle, threadsafety, STRING, BINARY, NUMBER, DATETIME, ROWID</dt><dd>The PEP 249 module names, from <code>duckdb.dbapi</code>.</dd>
+  </dl>
+
+  <h3>Connection</h3>
+  <dl class="ref">
+    <dt>execute(sql, parameters=None)</dt><dd>Run one statement and hold its rows. Returns the connection.</dd>
+    <dt>executemany(sql, seq_of_parameters)</dt><dd>Once per parameter set. Refuses an empty list.</dd>
+    <dt>fetchone() / fetchmany(size=1) / fetchall()</dt><dd>Rows from the held result.</dd>
+    <dt>fetchnumpy() / fetchdf(date_as_object=False) / df() / fetch_df() / fetch_df_chunk(vectors_per_chunk=1, date_as_object=False)</dt><dd>Columns from the held result. <code>fetchdf</code> returns <code>None</code> when nothing is held.</dd>
+    <dt>description</dt><dd>Column metadata of the held result, or <code>None</code>.</dd>
+    <dt>rowcount</dt><dd>Always <code>-1</code>.</dd>
+    <dt>sql(query) / query(query)</dt><dd>A lazy relation for a query; anything else runs now and returns <code>None</code>.</dd>
+    <dt>table(name) / view(name) / table_function(name, params=None)</dt><dd>Relations on this connection. <code>params</code> is a list.</dd>
+    <dt>cursor()</dt><dd>An independent duplicate, closed with this connection.</dd>
+    <dt>begin() / commit() / rollback()</dt><dd>The statement of the same name. Each returns the connection.</dd>
+    <dt>create_function(name, function, parameters=None, return_type=None, *, type, null_handling, exception_handling, side_effects)</dt><dd>Register a Python function; types read from annotations when left out. Returns the connection.</dd>
+    <dt>remove_function(name)</dt><dd>Raises <code>NotSupportedError</code>. Register the name again to replace it.</dd>
+    <dt>close()</dt><dd>Close every cursor, release the held result, close the connection. Also a context manager.</dd>
+    <dt>run(sql, parameters) / transaction() / duplicate() / interrupt() / create_macro(...)</dt><dd>The native connection's own, unchanged.</dd>
+  </dl>
+
+  <h3>Relation</h3>
+  <dl class="ref">
+    <dt>filter(condition) / project(*columns) / select(*columns)</dt><dd>Rows where the fragment holds; the listed columns or expressions.</dd>
+    <dt>aggregate(aggregates, groups="")</dt><dd>Aggregates as text or a list of expressions, per group when <code>groups</code> is given.</dd>
+    <dt>order(text) / sort(*keys) / limit(n, offset=0) / distinct() / unique(columns)</dt><dd>Order, fewer rows, distinct rows, distinct values of the listed columns.</dd>
+    <dt>join(other, condition, how="inner") / cross(other)</dt><dd>Names only become <code>USING</code>, anything else <code>ON</code>. <code>how</code>: inner, left, right, outer, semi, anti.</dd>
+    <dt>union(other) / except_(other) / intersect(other)</dt><dd>The <code>ALL</code> forms.</dd>
+    <dt>set_alias(name) / alias</dt><dd>The name the relation joins under.</dd>
+    <dt>sum, min, max, mean, avg, count, median, mode, quantile, quantile_cont, quantile_disc, std, stddev, stddev_samp, stddev_pop, var, var_samp, variance, var_pop, product, list, string_agg, histogram, bool_and, bool_or, bit_and, bit_or, bit_xor, bitstring_agg, any_value, arg_min, arg_max, first, last, favg, fsum, geomean, value_counts</dt><dd>The aggregate shorthands: <code>(expression, groups="", window_spec="", projected_columns="")</code>, with a function's own extra argument where it has one (<code>q</code>, <code>sep</code>, <code>min</code> and <code>max</code>, the value column of <code>arg_min</code> and <code>arg_max</code>).</dd>
+    <dt>apply(function_name, function_aggr, group_expr="", function_parameter="", projected_columns="")</dt><dd>Any aggregate by name.</dd>
+    <dt>row_number, rank, dense_rank, rank_dense, percent_rank, cume_dist, n_tile, lag, lead, first_value, last_value, nth_value</dt><dd>The window shorthands: the window as text, then <code>projected_columns</code>, with the expression, offset, default and <code>ignore_nulls</code> where the function takes them.</dd>
+    <dt>fetchone() / fetchmany(size=1) / fetchall() / execute() / close()</dt><dd>The old fetch model.</dd>
+    <dt>fetchnumpy() / fetchdf(date_as_object=False) / df() / to_df() / fetch_df_chunk(vectors_per_chunk=1, date_as_object=False)</dt><dd>Columns out, under the same model.</dd>
+    <dt>description / columns / types / dtypes</dt><dd>From binding the text. Types are text.</dd>
+    <dt>shape / len(rel) / type / name in rel / rel[name]</dt><dd>Counts, which run; the relation kind; column membership; a projection of one column.</dd>
+    <dt>create(name) / to_table(name) / create_view(name, replace=True) / to_view / insert_into(name)</dt><dd>Into a table or a view.</dd>
+    <dt>insert(values) / update(set, condition=None)</dt><dd>On a relation from <code>table()</code> only.</dd>
+    <dt>write_csv(path, **options) / to_csv / write_parquet(path, **options) / to_parquet</dt><dd>Into a file with <code>COPY</code>, under the old option names.</dd>
+    <dt>query(view_name, sql) / explain(type="standard") / describe() / show() / sql_query()</dt><dd>SQL over this relation as a view; the plan; the old summary; print; the text.</dd>
+    <dt>select_types(types) / select_dtypes(types)</dt><dd>The columns whose type is one of the given texts.</dd>
+  </dl>
+
+  <h3>Expressions</h3>
+  <dl class="ref">
+    <dt>ColumnExpression(*parts)</dt><dd>A column, dotted or in parts.</dd>
+    <dt>ConstantExpression(value)</dt><dd>A literal.</dd>
+    <dt>FunctionExpression(name, *args)</dt><dd>Any function by name.</dd>
+    <dt>CaseExpression(condition, value).when(condition, value).otherwise(value)</dt><dd>CASE. Unmatched rows are NULL without <code>otherwise</code>.</dd>
+    <dt>StarExpression(exclude=None)</dt><dd><code>*</code>, optionally excluding names or column expressions.</dd>
+    <dt>SQLExpression(text)</dt><dd>A fragment, as written.</dd>
+    <dt>DefaultExpression()</dt><dd>The <code>DEFAULT</code> marker.</dd>
+    <dt>CoalesceOperator(*args)</dt><dd>The first argument that is not NULL.</dd>
+    <dt>== != &lt; &lt;= &gt; &gt;= + - * / // % ** &amp; | ~</dt><dd>Comparison, arithmetic, AND, OR, NOT.</dd>
+    <dt>.cast(type) / .asc() / .desc() / .nulls_first() / .nulls_last()</dt><dd>Cast; sort order.</dd>
+    <dt>.between(lo, hi) / .isin(*values) / .isnotin(*values) / .isnull() / .isnotnull() / .collate(name)</dt><dd>Tests, and a collation.</dd>
+    <dt>.get_name() / .show()</dt><dd>The rendered name, unquoted when it is one plain identifier; print the fragment.</dd>
+    <dt>Expression</dt><dd><code>CompatExpression</code> under its old name, for <code>isinstance</code>.</dd>
+  </dl>
+</section>
+
+<footer>
+  <p>Everything on this page is pinned by <code>tests/test_compat.py</code>. The distance to the old client is measured by <code>scripts/compat_report.py</code>, and every known difference is recorded in <code>compat/BEHAVIOR.md</code>.</p>
+</footer>
+
+</div>
+
+</body>
+</html>

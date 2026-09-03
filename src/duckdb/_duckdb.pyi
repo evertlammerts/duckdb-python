@@ -1,6 +1,6 @@
 """Type stubs for the nanobind extension module."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 class ChunkView:
@@ -89,6 +89,17 @@ class Connection:
 
         Returns (output columns, parameters), each a list of (name, type).
         """
+
+    def create_scalar_function(
+        self,
+        name: str,
+        callable: Callable[..., Any],
+        parameters: list[str],
+        returns: str,
+        null_handling: str,
+        stability: str,
+    ) -> None:
+        """Register a Python callable as a scalar SQL function."""
 
     def interrupt(self) -> None: ...
     def get_option(self, name: str) -> str: ...

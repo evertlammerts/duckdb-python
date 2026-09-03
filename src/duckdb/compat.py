@@ -22,14 +22,17 @@ difference is a behavior-change-log entry, not an accident.
 from __future__ import annotations
 
 import builtins
+import datetime
 import itertools
 import re
 import sys
 import threading
+import types
+import uuid
 import weakref
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NoReturn, cast
+from typing import TYPE_CHECKING, Any, NoReturn, Union, cast, get_args, get_origin
 
 from . import _duckdb
 from .connection import Connection, LiveResult, _Catalog
@@ -114,12 +117,14 @@ __all__ = [
     "apilevel",
     "close",
     "connect",
+    "create_function",
     "default_connection",
     "description",
     "execute",
     "from_query",
     "paramstyle",
     "query",
+    "remove_function",
     "set_default_connection",
     "sql",
     "table",
@@ -1489,6 +1494,99 @@ class CompatRelation:
         return cast("LiveResult", self._result)
 
 
+#: Python annotations the old client mapped onto SQL types when inferring a
+#: UDF signature.
+_ANNOTATION_TYPES: dict[object, str] = {
+    bool: "BOOLEAN",
+    int: "BIGINT",
+    float: "DOUBLE",
+    str: "VARCHAR",
+    bytes: "BLOB",
+    bytearray: "BLOB",
+    datetime.datetime: "TIMESTAMP",
+    datetime.date: "DATE",
+    datetime.time: "TIME",
+    datetime.timedelta: "INTERVAL",
+    uuid.UUID: "UUID",
+}
+
+
+#: The old client's refusal of a None return under DEFAULT null handling,
+#: verbatim; adopted tests match on its last line.
+_NULL_RETURN_ERROR = """
+The returned result contained NULL values, but the 'null_handling' was set to DEFAULT.
+If you want more control over NULL values then 'null_handling' should be set to SPECIAL.
+
+With DEFAULT all rows containing NULL have been filtered from the UDFs input.
+Those rows are automatically set to NULL in the final result.
+The UDF is not expected to return NULL values.
+"""
+
+
+def _udf_choice(value: object) -> str:
+    """A UDF option as lowercase text, taking the old enums by their name."""
+    name = getattr(value, "name", None)
+    text = name if isinstance(name, str) else str(value)
+    return text.lower()
+
+
+def _annotation_text(annotation: object, where: str) -> str:
+    """The SQL type an annotation stood for in the old client's inference."""
+    if isinstance(annotation, str):
+        return annotation
+    origin = get_origin(annotation)
+    if origin is types.UnionType or origin is Union:
+        inner = [a for a in get_args(annotation) if a is not type(None)]
+        if len(inner) == 1:
+            return _annotation_text(inner[0], where)
+    elif origin is list:
+        (element,) = get_args(annotation)
+        return _annotation_text(element, where) + "[]"
+    elif origin is dict:
+        key, value = get_args(annotation)
+        return f"MAP({_annotation_text(key, where)}, {_annotation_text(value, where)})"
+    try:
+        mapped = _ANNOTATION_TYPES.get(annotation)
+    except TypeError:
+        mapped = None
+    if mapped is not None:
+        return mapped
+    message = f"could not infer a DuckDB type for {where}; pass parameters and return_type explicitly"
+    raise InvalidInputException(message)
+
+
+def _udf_signature(
+    function: Callable[..., Any], parameters: Sequence[object] | None, return_type: object
+) -> tuple[builtins.list[str], str]:
+    """Parameter and return type texts, inferred from annotations where omitted."""
+    if parameters is not None and return_type is not None:
+        return [str(p) for p in parameters], str(return_type)
+    import inspect
+
+    signature = inspect.signature(function, eval_str=True)
+    if return_type is None:
+        annotation = signature.return_annotation
+        if annotation is inspect.Signature.empty:
+            message = "could not infer the return type; pass return_type explicitly"
+            raise InvalidInputException(message)
+        return_text = _annotation_text(annotation, "the return type")
+    else:
+        return_text = str(return_type)
+    if parameters is None:
+        texts = []
+        for parameter in signature.parameters.values():
+            if parameter.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+                message = f"cannot infer a type for '*{parameter.name}'; pass parameters explicitly"
+                raise InvalidInputException(message)
+            if parameter.annotation is inspect.Parameter.empty:
+                message = f"parameter '{parameter.name}' has no annotation; pass parameters explicitly"
+                raise InvalidInputException(message)
+            texts.append(_annotation_text(parameter.annotation, f"parameter '{parameter.name}'"))
+    else:
+        texts = [str(p) for p in parameters]
+    return texts, return_text
+
+
 class CompatConnection(Connection):
     """A connection speaking the old client's execute-and-fetch vocabulary."""
 
@@ -1538,6 +1636,71 @@ class CompatConnection(Connection):
         for parameters in sets:
             self.execute(sql, parameters)
         return self
+
+    # The old face reshapes the native registration signature on purpose.
+    def create_function(  # type: ignore[override]
+        self,
+        name: str,
+        function: Callable[..., Any],
+        parameters: Sequence[object] | None = None,
+        return_type: object = None,
+        *,
+        type: object = "native",
+        null_handling: object = "default",
+        exception_handling: object = "default",
+        side_effects: bool = False,
+    ) -> CompatConnection:
+        """Register a Python callable, with the old face's inference and options.
+
+        Types omitted here are inferred from the function's annotations, as
+        the old client did. `exception_handling` "return_null" turns any
+        Python error into a NULL result instead of failing the query.
+        """
+        if _udf_choice(type) != "native":
+            message = "Arrow UDFs are not supported yet; only type='native'"
+            raise NotImplementedException(message)
+        handling = _udf_choice(exception_handling)
+        if handling not in ("default", "return_null"):
+            message = "exception_handling must be 'default' or 'return_null'"
+            raise InvalidInputException(message)
+        texts, return_text = _udf_signature(function, parameters, return_type)
+        nulls = _udf_choice(null_handling)
+        shield = handling == "return_null"
+        refuse_none = nulls != "special"
+        target = function
+        if shield or refuse_none:
+            # The old client's semantics: an error becomes NULL only under
+            # return_null, and a None (or pandas NA) return under DEFAULT
+            # null handling is refused, never written as NULL.
+            def old_semantics(*args: object) -> object:
+                try:
+                    result = function(*args)
+                except Exception:
+                    if shield:
+                        return None
+                    raise
+                if refuse_none and (result is None or builtins.type(result).__name__ == "NAType"):
+                    raise InvalidInputException(_NULL_RETURN_ERROR)
+                return result
+
+            target = old_semantics
+        super().create_function(
+            name,
+            target,
+            texts,
+            return_text,
+            null_handling=nulls,
+            stability="volatile" if side_effects else "consistent",
+        )
+        return self
+
+    def remove_function(self, name: str) -> CompatConnection:
+        """The old unregister. The engine keeps a function until the database closes."""
+        message = (
+            f"remove_function({name!r}) is not supported: the engine keeps a registered "
+            "function until the database closes; registering the same name again replaces it"
+        )
+        raise NotImplementedException(message)
 
     def fetchone(self) -> tuple[Any, ...] | None:
         """The next row, or None when the held result is exhausted."""
@@ -1868,6 +2031,35 @@ def table(name: str) -> CompatRelation:
 def table_function(name: str, params: object = None) -> CompatRelation:
     """A relation over a table function on the default connection."""
     return default_connection().table_function(name, params)
+
+
+def create_function(
+    name: str,
+    function: Callable[..., Any],
+    parameters: Sequence[object] | None = None,
+    return_type: object = None,
+    *,
+    type: object = "native",
+    null_handling: object = "default",
+    exception_handling: object = "default",
+    side_effects: bool = False,
+) -> CompatConnection:
+    """`create_function` on the default connection."""
+    return default_connection().create_function(
+        name,
+        function,
+        parameters,
+        return_type,
+        type=type,
+        null_handling=null_handling,
+        exception_handling=exception_handling,
+        side_effects=side_effects,
+    )
+
+
+def remove_function(name: str) -> CompatConnection:
+    """`remove_function` on the default connection."""
+    return default_connection().remove_function(name)
 
 
 def close() -> None:

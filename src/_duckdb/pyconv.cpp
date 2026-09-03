@@ -725,9 +725,10 @@ int64_t MicrosSince(const nb::object &epoch, nb::handle moment, ConversionContex
 // Round-trip a value through its text form and let the engine parse it. Exact
 // for integers of any width and for decimals, neither of which has a runtime
 // C++ type here to build directly.
-Value FromText(Connection &connection, const std::string &text, const LogicalType &target) {
+template <class SCOPE>
+Value FromText(SCOPE &scope, const std::string &text, const LogicalType &target) {
 	const duckdb::cxx::varchar_t borrowed(text);
-	return Value::Create(connection, borrowed).Cast(connection, target);
+	return Value::Create(scope, borrowed).Cast(scope, target);
 }
 
 [[noreturn]] void ThrowUnsupported(nb::handle object) {
@@ -738,7 +739,8 @@ Value FromText(Connection &connection, const std::string &text, const LogicalTyp
 
 } // namespace
 
-Value PythonToValue(Connection &connection, nb::handle object, ConversionContext &ctx) {
+template <class SCOPE>
+Value PythonToValue(SCOPE &scope, nb::handle object, ConversionContext &ctx) {
 	using duckdb::cxx::LogicalTypeId;
 
 	// A NULL still needs a type to carry it. SQLNULL would be the honest
@@ -746,32 +748,32 @@ Value PythonToValue(Connection &connection, nb::handle object, ConversionContext
 	// casts from any type to any other, so the binder still lands on whatever
 	// the statement wants.
 	if (object.is_none()) {
-		return Value::CreateNull(connection, connection.CreateType(LogicalTypeId::INTEGER));
+		return Value::CreateNull(scope, scope.CreateType(LogicalTypeId::INTEGER));
 	}
 	// Before the int branch: a Python bool IS an int, so testing int first
 	// would silently bind True as 1.
 	if (nb::isinstance<nb::bool_>(object)) {
-		return Value::Create(connection, nb::cast<bool>(object));
+		return Value::Create(scope, nb::cast<bool>(object));
 	}
 	if (nb::isinstance<nb::int_>(object)) {
 		// Widest type that holds the value; the binder narrows from there.
 		// Choosing narrowly here would reject values the column can hold.
 		int64_t narrow = 0;
 		if (nb::try_cast<int64_t>(object, narrow)) {
-			return Value::Create(connection, narrow);
+			return Value::Create(scope, narrow);
 		}
 		const auto text = nb::cast<std::string>(nb::str(object));
 		// The C++ API pins C++17, so no starts_with here.
 		const bool negative = !text.empty() && text[0] == '-';
 		const auto id = negative ? LogicalTypeId::HUGEINT : LogicalTypeId::UHUGEINT;
-		return FromText(connection, text, connection.CreateType(id));
+		return FromText(scope, text, scope.CreateType(id));
 	}
 	if (nb::isinstance<nb::float_>(object)) {
-		return Value::Create(connection, nb::cast<double>(object));
+		return Value::Create(scope, nb::cast<double>(object));
 	}
 	if (nb::isinstance<nb::str>(object)) {
 		const auto text = nb::cast<std::string>(object);
-		return Value::Create(connection, duckdb::cxx::varchar_t(text));
+		return Value::Create(scope, duckdb::cxx::varchar_t(text));
 	}
 	if (nb::isinstance<nb::bytes>(object)) {
 		const auto bytes = nb::cast<nb::bytes>(object);
@@ -781,7 +783,7 @@ Value PythonToValue(Connection &connection, nb::handle object, ConversionContext
 			throw duckdb::cxx::InvalidInputException(
 			    "Invalid Input Error: bytes value is larger than a BLOB can hold");
 		}
-		return Value::Create(connection, duckdb::cxx::blob_t(bytes.c_str(),
+		return Value::Create(scope, duckdb::cxx::blob_t(bytes.c_str(),
 		                                                    static_cast<uint32_t>(bytes.size())));
 	}
 	// datetime before date: datetime subclasses date, so order decides.
@@ -789,13 +791,13 @@ Value PythonToValue(Connection &connection, nb::handle object, ConversionContext
 		const bool aware = !object.attr("tzinfo").is_none();
 		const int64_t micros = MicrosSince(aware ? ctx.epoch_aware : ctx.epoch_naive, object, ctx);
 		if (aware) {
-			return Value::Create(connection, duckdb::cxx::timestamp_tz_t {micros});
+			return Value::Create(scope, duckdb::cxx::timestamp_tz_t {micros});
 		}
-		return Value::Create(connection, duckdb::cxx::timestamp_t {micros});
+		return Value::Create(scope, duckdb::cxx::timestamp_t {micros});
 	}
 	if (nb::isinstance(object, ctx.date_cls)) {
 		const auto days = nb::cast<int64_t>(object.attr("toordinal")()) - EPOCH_ORDINAL;
-		return Value::Create(connection, duckdb::cxx::date_t {static_cast<int32_t>(days)});
+		return Value::Create(scope, duckdb::cxx::date_t {static_cast<int32_t>(days)});
 	}
 	if (nb::isinstance(object, ctx.time_cls)) {
 		nb::object naive = object.attr("replace")(nb::arg("tzinfo") = nb::none());
@@ -814,10 +816,10 @@ Value PythonToValue(Connection &connection, nb::handle object, ConversionContext
 				throw duckdb::cxx::InvalidInputException(
 				    "Invalid Input Error: time zone offset is outside the range TIME_TZ can hold");
 			}
-			return Value::Create(connection,
+			return Value::Create(scope,
 			                     duckdb::cxx::dtime_tz_t(micros, static_cast<int32_t>(seconds)));
 		}
-		return Value::Create(connection, duckdb::cxx::dtime_t {micros});
+		return Value::Create(scope, duckdb::cxx::dtime_t {micros});
 	}
 	if (nb::isinstance(object, ctx.timedelta_cls)) {
 		// timedelta carries no months, so this direction is lossless; the
@@ -827,7 +829,7 @@ Value PythonToValue(Connection &connection, nb::handle object, ConversionContext
 		interval.days = nb::cast<int32_t>(object.attr("days"));
 		interval.micros = nb::cast<int64_t>(object.attr("seconds")) * 1'000'000 +
 		                  nb::cast<int64_t>(object.attr("microseconds"));
-		return Value::Create(connection, interval);
+		return Value::Create(scope, interval);
 	}
 	if (nb::isinstance(object, ctx.decimal_cls)) {
 		// Via text: there is no runtime decimal type to build, and going
@@ -856,25 +858,25 @@ Value PythonToValue(Connection &connection, nb::handle object, ConversionContext
 			throw duckdb::cxx::InvalidInputException(
 			    "Invalid Input Error: Decimal has more fractional digits than DECIMAL can hold");
 		}
-		return FromText(connection, nb::cast<std::string>(nb::str(object)),
-		                connection.ParseType("DECIMAL(" + std::to_string(width) + "," +
+		return FromText(scope, nb::cast<std::string>(nb::str(object)),
+		                scope.ParseType("DECIMAL(" + std::to_string(width) + "," +
 		                                     std::to_string(scale) + ")"));
 	}
 	if (nb::isinstance(object, ctx.uuid_cls)) {
-		return FromText(connection, nb::cast<std::string>(nb::str(object)),
-		                connection.CreateType(LogicalTypeId::UUID));
+		return FromText(scope, nb::cast<std::string>(nb::str(object)),
+		                scope.CreateType(LogicalTypeId::UUID));
 	}
 	if (nb::isinstance<nb::list>(object) || nb::isinstance<nb::tuple>(object)) {
 		std::vector<Value> children;
 		for (nb::handle item : object) {
-			children.push_back(PythonToValue(connection, item, ctx));
+			children.push_back(PythonToValue(scope, item, ctx));
 		}
 		if (children.empty()) {
 			// An empty list still needs a child type, and nothing in the value
 			// says which. INTEGER for the same reason a bare NULL takes it.
-			return Value::CreateList(connection, connection.CreateType(LogicalTypeId::INTEGER));
+			return Value::CreateList(scope, scope.CreateType(LogicalTypeId::INTEGER));
 		}
-		return Value::CreateList(connection, children);
+		return Value::CreateList(scope, children);
 	}
 	if (nb::isinstance<nb::dict>(object)) {
 		// A dict is the only Python type that maps onto two DuckDB types, so
@@ -892,18 +894,39 @@ Value PythonToValue(Connection &connection, nb::handle object, ConversionContext
 			std::vector<std::pair<std::string, Value>> fields;
 			for (auto entry : mapping) {
 				fields.emplace_back(nb::cast<std::string>(entry.first),
-				                    PythonToValue(connection, entry.second, ctx));
+				                    PythonToValue(scope, entry.second, ctx));
 			}
-			return Value::CreateStruct(connection, fields);
+			return Value::CreateStruct(scope, fields);
 		}
 		std::vector<std::pair<Value, Value>> entries;
 		for (auto entry : mapping) {
-			entries.emplace_back(PythonToValue(connection, entry.first, ctx),
-			                     PythonToValue(connection, entry.second, ctx));
+			entries.emplace_back(PythonToValue(scope, entry.first, ctx),
+			                     PythonToValue(scope, entry.second, ctx));
 		}
-		return Value::CreateMap(connection, entries);
+		return Value::CreateMap(scope, entries);
 	}
 	ThrowUnsupported(object);
+}
+
+template Value PythonToValue<Connection>(Connection &, nb::handle, ConversionContext &);
+template Value PythonToValue<duckdb::cxx::Context>(duckdb::cxx::Context &, nb::handle, ConversionContext &);
+
+nb::list VectorElements(duckdb::cxx::Vector &vector, const LogicalType &type, duckdb::cxx::idx_t first,
+                        duckdb::cxx::idx_t last, ConversionContext &ctx) {
+	PyObject *list = PyList_New(static_cast<Py_ssize_t>(last - first));
+	if (list == nullptr) {
+		throw nb::python_error();
+	}
+	// Slots start out empty, which list dealloc accepts, so an exception
+	// mid-fill releases what was already converted.
+	auto out = nb::steal<nb::list>(list);
+	EmitElements(vector, type, first, last, ctx, [&](size_t position, PyObject *object) {
+		// SetItem steals `object` whatever it returns.
+		if (PyList_SetItem(list, static_cast<Py_ssize_t>(position), object) != 0) {
+			throw nb::python_error();
+		}
+	});
+	return out;
 }
 
 } // namespace duckdb_python

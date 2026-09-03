@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Frames and Expressions &middot; DuckDB for Python</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Newsreader:opsz,wght@6..72,400;6..72,600&family=Public+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="sitenav">
+  <a class="home" href="index.html">duckdb for python</a>
+  <a href="dbapi.html">DB-API 2.0</a>
+  <a class="here" href="frame.html">Frames &amp; Plans</a>
+  <a href="udf.html">UDFs</a>
+  <a href="extend.html">Macros &amp; Extensions</a>
+  <a href="compat.html">Compat</a>
+</nav>
+
+<div class="page">
+
+<header class="top">
+  <div class="eyebrow">duckdb for python &middot; user manual</div>
+  <h1>Building queries</h1>
+  <p class="standfirst">A <strong>plan</strong> is a query you build a step at a time. An <strong>expression</strong> is a piece of one. A <strong>connection</strong> is where a plan runs. Plans and expressions are plain values: build them anywhere, run them on any connection.</p>
+</header>
+
+<nav class="toc">
+  <ol>
+    <li><a href="#start">Start here</a></li>
+    <li><a href="#sources">Where a plan starts</a></li>
+    <li><a href="#verbs">Building it up</a></li>
+    <li><a href="#exprs">Expressions</a></li>
+    <li><a href="#run">Running a plan</a></li>
+    <li><a href="#write">Writing rows out</a></li>
+    <li><a href="#look">Looking before you run</a></li>
+    <li><a href="#nested">Plans inside plans</a></li>
+    <li><a href="#reuse">One plan, many places</a></li>
+    <li><a href="#safety">What is bound, what is quoted</a></li>
+    <li><a href="#sql">SQL in and out</a></li>
+    <li><a href="#reference">Reference</a></li>
+    <li><a href="#changes">Changes from the old client</a></li>
+  </ol>
+</nav>
+
+<section id="start">
+  <h2>Start here</h2>
+  <pre><code><span class="k">import</span> duckdb
+<span class="k">from</span> duckdb <span class="k">import</span> col, table
+
+con = duckdb.connect(<span class="s">"shop.db"</span>)
+orders = table(<span class="s">"orders"</span>)
+
+orders.filter(col(<span class="s">"total"</span>) &gt; <span class="s">1000</span>).select(<span class="s">"customer"</span>, <span class="s">"total"</span>).rows(con)</code></pre>
+  <p><code>orders</code> is a plan. Each verb on it returns a new plan and leaves the old one alone. Nothing runs until a method takes a connection; <code>rows(con)</code> is that method here. Put the plan on the connection once and the methods take no argument:</p>
+  <pre><code>orders.on(con).rows()
+orders.on(con).first()</code></pre>
+  <p>To see rows while you work:</p>
+  <pre><code>&gt;&gt;&gt; orders.head(<span class="s">3</span>).show(con)
+┌─────────┬──────────┬─────────┬────────────┬──────────────┬─────────┐
+│ id      │ customer │ region  │ placed     │ total        │ state   │
+│ INTEGER │ VARCHAR  │ VARCHAR │ DATE       │ DECIMAL(6,2) │ VARCHAR │
+├─────────┼──────────┼─────────┼────────────┼──────────────┼─────────┤
+│ 1       │ acme     │ emea    │ 2026-02-01 │ 1400.00      │ active  │
+│ 2       │ bolt     │ amer    │ 2026-01-11 │ 320.00       │ active  │
+│ 3       │ acme     │ emea    │ 2026-03-02 │ 2600.00      │ closed  │
+└─────────┴──────────┴─────────┴────────────┴──────────────┴─────────┘</code></pre>
+  <p>A plan prints as its SQL: <code>&gt;&gt;&gt; orders</code> gives <code>&lt;Frame SELECT * FROM "orders"&gt;</code>.</p>
+</section>
+
+<section id="sources">
+  <h2>Where a plan starts</h2>
+  <dl class="ref">
+    <dt>table(name)</dt><dd>A table or view. The name may be qualified: <code>table("main.orders")</code>. A file name reads the file: <code>table("orders.csv")</code>, <code>table("data/*.parquet")</code>.</dd>
+    <dt>read_csv(path, **options) / read_parquet / read_json</dt><dd>A file, a list of files or a glob through the engine's reader, with its options under their SQL names: <code>read_csv("orders.csv", header=True, delim="|")</code>.</dd>
+    <dt>table_function(name, *args, **named)</dt><dd>Any table function: <code>table_function("range", 10)</code>, <code>table_function("read_xlsx", "book.xlsx", sheet="Q1")</code> once its extension is loaded.</dd>
+    <dt>sql(text)</dt><dd>Any query, as SQL. Carry on from it with verbs.</dd>
+    <dt>values(rows, columns)</dt><dd>Rows given here, in memory. Every value is bound when the plan runs. A column given as <code>(name, type)</code> is cast to that type.</dd>
+  </dl>
+  <pre><code><span class="k">from</span> duckdb <span class="k">import</span> table, sql, values
+
+orders  = table(<span class="s">"orders"</span>)
+emea    = sql(<span class="s">"SELECT * FROM orders WHERE region = 'emea'"</span>)
+labels  = values([(<span class="s">"nl"</span>, <span class="s">"Netherlands"</span>), (<span class="s">"be"</span>, <span class="s">"Belgium"</span>)], columns=[<span class="s">"code"</span>, <span class="s">"label"</span>])
+recent  = emea.filter(col(<span class="s">"placed"</span>) &gt;= <span class="s">"2026-01-01"</span>)</code></pre>
+  <p><code>values</code> needs no table, so a plan can be built and tried before any database exists. Give <code>columns</code> as (name, type) pairs when there are no rows to take the types from.</p>
+
+  <p class="lead-in">files</p>
+  <p>A reader is a table function, and its arguments are spelled the way SQL spells them: a string, number or date is bound when the plan runs; a list is a list; a dict is a struct. The engine works the columns out from the arguments, so a <code>param()</code> cannot be one.</p>
+  <pre><code>orders = read_csv(<span class="s">"orders.csv"</span>, header=<span class="k">True</span>, dateformat=<span class="s">"%d/%m/%Y"</span>)
+year   = read_parquet([<span class="s">"jan.parquet"</span>, <span class="s">"feb.parquet"</span>], union_by_name=<span class="k">True</span>)
+events = read_json(<span class="s">"events/*.json"</span>, filename=<span class="k">True</span>)
+typed  = read_csv(<span class="s">"raw.csv"</span>, columns={<span class="s">"id"</span>: <span class="s">"INTEGER"</span>, <span class="s">"note"</span>: <span class="s">"VARCHAR"</span>})
+
+orders.columns(con)                 <span class="c"># the engine reads the file's head to answer</span>
+orders.filter(col(<span class="s">"total"</span>) &gt; <span class="s">1000</span>).create(con, <span class="s">"big_orders"</span>)   <span class="c"># loading a file is a plan with a sink</span></code></pre>
+  <p>Loading into a table that exists is <code>read_csv(...).insert_into(con, "orders")</code>, or the statement itself: <code>con.run("COPY orders FROM 'orders.csv' (HEADER)")</code>.</p>
+</section>
+
+<section id="verbs">
+  <h2>Building it up</h2>
+  <p>Every verb returns a new plan. Branch from any point:</p>
+  <pre><code>recent = orders.filter(col(<span class="s">"placed"</span>) &gt;= <span class="s">"2026-01-01"</span>)
+
+by_customer = recent.group_by(<span class="s">"customer"</span>).agg(col(<span class="s">"total"</span>).sum().alias(<span class="s">"spent"</span>))
+biggest     = recent.sort(col(<span class="s">"total"</span>).desc()).head(<span class="s">10</span>)</code></pre>
+
+  <p class="lead-in">rows and columns</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Verb</th><th>Does</th></tr></thead>
+      <tbody>
+        <tr><td><code>.filter(pred)</code></td><td>keep the rows where <code>pred</code> holds</td></tr>
+        <tr><td><code>.select(*cols)</code></td><td>keep these columns or expressions, in this order</td></tr>
+        <tr><td><code>.with_columns(**cols)</code></td><td>add columns; a name already present is replaced in place</td></tr>
+        <tr><td><code>.drop(*names)</code> / <code>.rename(old=new)</code></td><td>remove or rename</td></tr>
+        <tr><td><code>.sort(*cols)</code></td><td>order by. Use <code>.desc()</code>, <code>.nulls_last()</code> on a column</td></tr>
+        <tr><td><code>.limit(n, offset)</code> / <code>.head(n)</code> / <code>.offset(n)</code></td><td>fewer rows</td></tr>
+        <tr><td><code>.distinct(on=…)</code></td><td>drop duplicate rows, or duplicates of <code>on</code></td></tr>
+        <tr><td><code>.sample(n)</code> / <code>.sample(percent=)</code></td><td>a random subset; <code>seed=</code> makes it repeatable</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>In <code>select</code>, <code>with_columns</code>, <code>sort</code> and <code>distinct</code> a bare string names a column: <code>orders.select("customer", "total")</code>. <code>filter</code> takes only an expression; a condition written as SQL is <code>filter(sql_expr(...))</code>.</p>
+
+  <p class="lead-in">grouping</p>
+  <pre><code>orders.group_by(<span class="s">"region"</span>).agg(
+    col(<span class="s">"total"</span>).sum().alias(<span class="s">"spent"</span>),
+    count_all().alias(<span class="s">"orders"</span>),
+)
+
+<span class="c"># a HAVING clause is a filter after the aggregate</span>
+orders.group_by(<span class="s">"region"</span>).agg(col(<span class="s">"total"</span>).sum().alias(<span class="s">"spent"</span>)).filter(col(<span class="s">"spent"</span>) &gt; <span class="s">1000</span>)</code></pre>
+  <p>Group keys come first in the output. <code>.aggregate(*aggs, group_by=…)</code> does the same in one call, and with no keys aggregates the whole plan to one row.</p>
+
+  <p class="lead-in">joining</p>
+  <pre><code>orders.join(customers, on=<span class="s">"customer_id"</span>)                          <span class="c"># same name on both sides</span>
+orders.join(customers, on=[<span class="s">"region"</span>, <span class="s">"year"</span>])                     <span class="c"># several</span>
+orders.join(customers, on=col(<span class="s">"l.customer"</span>) == col(<span class="s">"r.name"</span>))     <span class="c"># any condition</span>
+
+orders.join(refunds, on=col(<span class="s">"l.id"</span>) == col(<span class="s">"r.order_id"</span>), how=<span class="s">"left"</span>)</code></pre>
+  <p>Inside <code>on</code>, the left side is <code>l</code> and the right side is <code>r</code>. <code>how</code> is <code>inner</code> (the default), <code>left</code>, <code>right</code>, <code>outer</code> (or <code>full</code>), <code>semi</code>, <code>anti</code>, <code>cross</code>, <code>positional</code>, <code>natural</code> or <code>asof</code>. Semi and anti keep the left rows that do or do not have a match, and add no columns. <code>.cross(other)</code> is every combination.</p>
+  <div class="note">
+    <p><strong>When both sides have a column of the same name</strong>, pass <code>suffix</code> and the right side's copy is renamed: <code>orders.join(orders, on=…, suffix="_r")</code> gives <code>total</code> and <code>total_r</code>. Without a suffix the join is refused, since the result would have two columns called <code>total</code>. Columns joined with <code>on="name"</code> are merged and do not need one.</p>
+  </div>
+
+  <p class="lead-in">combining</p>
+  <pre><code>a.union(b)                  <span class="c"># rows of both, by position; all=False drops duplicates</span>
+a.union_by_name(b)          <span class="c"># by column name</span>
+a.intersect(b)              <span class="c"># rows in both</span>
+a.except_(b)                <span class="c"># rows in a and not in b</span></code></pre>
+
+  <p class="lead-in">reshaping</p>
+  <pre><code>orders.unnest(<span class="s">"tags"</span>)                                       <span class="c"># one row per element</span>
+quarters.unpivot(<span class="s">"q1"</span>, <span class="s">"q2"</span>, <span class="s">"q3"</span>, name=<span class="s">"quarter"</span>, value=<span class="s">"sales"</span>)   <span class="c"># columns to rows</span>
+orders.describe()                                            <span class="c"># statistics per column, as a plan</span></code></pre>
+</section>
+
+<section id="exprs">
+  <h2>Expressions</h2>
+  <p>An expression is a piece of a query: a column, a value, or a computation over them. Build them with <code>col</code> and ordinary Python operators.</p>
+  <pre><code><span class="k">from</span> duckdb <span class="k">import</span> col, lit
+
+col(<span class="s">"age"</span>) &gt;= <span class="s">18</span>
+<span class="s">100</span> - col(<span class="s">"discount"</span>)
+(col(<span class="s">"a"</span>) &gt; <span class="s">1</span>) &amp; (col(<span class="s">"b"</span>) &lt; <span class="s">9</span>)
+~col(<span class="s">"cancelled"</span>)
+col(<span class="s">"first"</span>).concat(<span class="s">" "</span>, col(<span class="s">"last"</span>))</code></pre>
+
+  <div class="note">
+    <p><strong>Combine with <code>&amp;</code>, <code>|</code> and <code>~</code></strong>, in parentheses. Python's <code>and</code>, <code>or</code> and <code>not</code> do not work on expressions, and using one raises <code>TypeError</code>.</p>
+  </div>
+  <div class="note">
+    <p><strong>Inside an expression, a bare string is a value.</strong> <code>col("state") == "active"</code> compares with the text <code>active</code>. For a column, write <code>col("active")</code>.</p>
+  </div>
+  <div class="note">
+    <p><strong>Text joins with <code>.concat()</code>.</strong> <code>+</code> on two text columns is an error.</p>
+  </div>
+
+  <p class="lead-in">null</p>
+  <pre><code>col(<span class="s">"v"</span>).is_null()       <span class="c"># True where v is NULL</span>
+col(<span class="s">"v"</span>) == <span class="k">None</span>         <span class="c"># NULL, never True: SQL's rule</span>
+coalesce(col(<span class="s">"v"</span>), <span class="s">0</span>)   <span class="c"># the first non-NULL</span></code></pre>
+
+  <p class="lead-in">tests and casts</p>
+  <pre><code>col(<span class="s">"total"</span>).between(<span class="s">100</span>, <span class="s">500</span>)
+col(<span class="s">"region"</span>).isin([<span class="s">"emea"</span>, <span class="s">"amer"</span>])
+col(<span class="s">"sku"</span>).like(<span class="s">"AB-%"</span>)               <span class="c"># % any run, _ any one character; .ilike ignores case</span>
+col(<span class="s">"amount"</span>).cast(<span class="s">"DECIMAL(10,2)"</span>)
+col(<span class="s">"amount"</span>).try_cast(<span class="s">"INTEGER"</span>)       <span class="c"># NULL where the cast would fail</span></code></pre>
+
+  <p class="lead-in">function namespaces</p>
+  <p>The engine's functions come in families, entered by saying how the expression is meant: <code>.str()</code> for text, <code>.dt()</code> for dates and times, <code>.list()</code> for lists, <code>.json()</code> for JSON documents. The entry is the same expression with that family's methods in scope; nothing is checked or cast, and the engine still judges every call.</p>
+  <pre><code>col(<span class="s">"customer"</span>).str().upper()
+col(<span class="s">"placed"</span>).dt().trunc(<span class="s">"month"</span>)
+col(<span class="s">"tags"</span>).list().contains(<span class="s">"vip"</span>)
+col(<span class="s">"payload"</span>).json().extract(<span class="s">"$.id"</span>)
+
+col(<span class="s">"name"</span>).str().lower().trim()                <span class="c"># a text result keeps the text methods in scope</span>
+col(<span class="s">"payload"</span>).json().keys().contains(<span class="s">"id"</span>)   <span class="c"># keys() gives a list, so list methods follow</span></code></pre>
+  <p>What a method returns is scoped by the engine's own return type for it, so chains keep going without a second entry. The families exist for two reasons: without them every engine function would be a method on every expression, several hundred names after each dot; and the short names could not exist, since <code>.list().min()</code> can mean <code>list_min</code> only while <code>.min()</code> still means the aggregate. Which functions sit where is declared in one table, <code>scripts/func_namespaces.toml</code>, checked against the engine's catalog on every build.</p>
+  <p>Anything else: <code>fn("regexp_extract", col("path"), r"/(\d+)/", 1)</code> calls any function by name.</p>
+
+  <p class="lead-in">choosing a value</p>
+  <pre><code>tier = (when(col(<span class="s">"total"</span>) &gt; <span class="s">2000</span>).then(<span class="s">"big"</span>)
+        .when(col(<span class="s">"total"</span>) &gt; <span class="s">500</span>).then(<span class="s">"mid"</span>)
+        .otherwise(<span class="s">"small"</span>))
+
+orders.with_columns(tier=tier)</code></pre>
+  <p>A list value needs <code>lit</code>: <code>with_columns(tags=lit(["a", "b"]))</code>. A dict is a struct: <code>lit({"city": "NYC", "zip": 10001})</code>. Both are bound as one value.</p>
+
+  <p class="lead-in">aggregates and windows</p>
+  <pre><code>col(<span class="s">"total"</span>).sum()          col(<span class="s">"total"</span>).mean()       col(<span class="s">"customer"</span>).n_unique()
+col(<span class="s">"total"</span>).quantile(<span class="s">0.9</span>)  col(<span class="s">"tag"</span>).string_agg(<span class="s">", "</span>)  count_all()
+
+<span class="c"># aggregate only some rows</span>
+col(<span class="s">"total"</span>).sum().where(col(<span class="s">"state"</span>) == <span class="s">"active"</span>)
+
+<span class="c"># any aggregate becomes a window function with .over()</span>
+row_number().over(partition_by=col(<span class="s">"region"</span>), order_by=col(<span class="s">"total"</span>).desc())
+col(<span class="s">"total"</span>).sum().over(order_by=col(<span class="s">"placed"</span>), rows=(<span class="k">None</span>, <span class="s">0</span>))      <span class="c"># running total</span>
+col(<span class="s">"total"</span>).mean().over(order_by=col(<span class="s">"placed"</span>), rows=(-<span class="s">6</span>, <span class="s">0</span>))       <span class="c"># seven-row moving average</span>
+last_value(col(<span class="s">"total"</span>)).ignore_nulls().over(order_by=col(<span class="s">"placed"</span>))</code></pre>
+  <p><code>rows=(start, end)</code> or <code>range=(start, end)</code> bounds the window around the current row: a negative number is that many rows before, positive that many after, <code>0</code> the current row, <code>None</code> unbounded.</p>
+
+  <p class="lead-in">lambdas</p>
+  <p>The list functions take little functions: keep some elements, change each one, fold the list to one value. Write them as Python lambdas:</p>
+  <pre><code>col(<span class="s">"tags"</span>).list().filter(<span class="k">lambda</span> x: x.str().length() &gt; <span class="s">3</span>)      <span class="c"># list_filter("tags", lambda x: len(x) &gt; 3)</span>
+col(<span class="s">"prices"</span>).list().transform(<span class="k">lambda</span> p: p * <span class="s">1.21</span>)
+col(<span class="s">"xs"</span>).list().reduce(<span class="k">lambda</span> acc, x: acc + x)</code></pre>
+  <p><strong>Your lambda runs once, while the expression is being built, and it receives an expression, not a value.</strong> Everything you do to it must build a bigger expression, which is what every operator and method here already does. The SQL variable takes your parameter's name, so <code>lambda p: ...</code> becomes <code>lambda p: ...</code> in SQL, and shadows a column called <code>p</code> exactly as SQL would.</p>
+  <p>The one trap: Python's own <code>if</code> is not SQL's. <code>lambda x: a if use_a else b</code> is fine, but it is Python choosing <em>which expression to build</em>, once, now; it does not look at the element. A condition on the element is an expression too:</p>
+  <pre><code><span class="c"># wrong: raises at build time, an expression has no truth value</span>
+col(<span class="s">"xs"</span>).list().transform(<span class="k">lambda</span> x: <span class="s">0</span> <span class="k">if</span> x &lt; <span class="s">0</span> <span class="k">else</span> x)
+
+<span class="c"># right: the SQL conditional</span>
+col(<span class="s">"xs"</span>).list().transform(<span class="k">lambda</span> x: when(x &lt; <span class="s">0</span>).then(<span class="s">0</span>).otherwise(x))</code></pre>
+  <p>A lambda that returns a plain value is a constant body (<code>lambda x: 1</code> is legal SQL); one that returns anything else is refused when you build it. The body cannot hold a subquery or an <code>unnest</code>: SQL itself refuses those, with its own message.</p>
+  <p>The signature must be plain positional parameters, because each one becomes a SQL variable. A default (<code>lambda x, y=1:</code>) would not default at all, it would be a second variable and pick a different engine overload, so it is refused, and so are <code>*args</code> and keyword-only parameters. A function taking no parameters is refused too: a SQL lambda has no zero-variable form, and a bare function where a value was meant is usually a call you forgot to make, <code>col("amount") &gt; threshold</code> for <code>threshold()</code>. Any callable in expression position becomes a lambda, so one handed to something that cannot take a lambda is the engine's to refuse, which it does at bind time.</p>
+</section>
+
+<section id="run">
+  <h2>Running a plan</h2>
+  <pre><code>plan.rows(con)          <span class="c"># every row, as tuples</span>
+plan.first(con)         <span class="c"># the first row, or None</span>
+plan.to_dicts(con)      <span class="c"># every row, as a dict keyed by column</span>
+<span class="k">for</span> row <span class="k">in</span> plan.iter_rows(con): ...   <span class="c"># streamed in batches</span>
+plan.count(con)             <span class="c"># how many rows, without fetching them</span>
+plan.show(con)              <span class="c"># print the first ten as a table; preview(con) returns the text</span></code></pre>
+
+  <p class="lead-in">arrays and dataframes</p>
+  <pre><code>plan.to_numpy(con)      <span class="c"># {column: ndarray}; columns holding NULLs come back masked</span>
+plan.to_pandas(con)     <span class="c"># a DataFrame</span></code></pre>
+  <p>Columns convert from the engine's own vectors, never through rows. In a frame, a column holding NULLs gets pandas' nullable dtype and <code>pd.NA</code>; one without stays a plain numpy dtype, so a clean result costs nothing extra. ENUM becomes an ordered Categorical, TIMESTAMPTZ comes back UTC&#8209;aware, and <code>to_pandas(con, date_as_object=True)</code> gives dates as <code>datetime.date</code>. DECIMAL and HUGEINT become float64 on this path; when the exact values matter, fetch rows, which keeps <code>Decimal</code> and Python's int. An empty result keeps every column's dtype.</p>
+
+  <p class="lead-in">stopping a query</p>
+  <p>A Ctrl&#8209;C while a query runs cancels it and raises <code>KeyboardInterrupt</code>. From another thread, <code>con.interrupt()</code> cancels whatever the connection is running; the query fails with <code>InterruptError</code>.</p>
+
+  <p class="lead-in">transactions</p>
+  <pre><code><span class="k">with</span> con.transaction():
+    plan.insert_into(con, <span class="s">"daily_totals"</span>)
+    con.run(<span class="s">"DELETE FROM staging"</span>)</code></pre>
+  <p>The block is one transaction: COMMIT when it ends, ROLLBACK on any error. Statements and plans inside run on the connection as usual, so they share it.</p>
+
+  <p class="lead-in">values supplied at run time</p>
+  <p>Use <code>param(name)</code> where a value goes, and pass it when running:</p>
+  <pre><code><span class="k">from</span> duckdb <span class="k">import</span> param
+
+by_region = orders.filter(col(<span class="s">"region"</span>) == param(<span class="s">"where"</span>))
+
+by_region.rows(con, parameters={<span class="s">"where"</span>: <span class="s">"emea"</span>})
+by_region.rows(con, parameters={<span class="s">"where"</span>: <span class="s">"amer"</span>})</code></pre>
+  <p>Every method that runs the plan also takes <code>parameters=</code>. A name with no value, or a value for no name, is an error.</p>
+
+  <p class="lead-in">a plan on a connection</p>
+  <p><code>plan.on(con)</code> fills the connection in, so every method below takes none. In a notebook it shows its rows.</p>
+  <pre><code>bound = orders.filter(col(<span class="s">"total"</span>) &gt; <span class="s">1000</span>).on(con)
+
+bound.rows()
+bound.count()
+bound.to_csv(<span class="s">"big.csv"</span>)
+bound                   <span class="c"># prints the first rows as a table</span></code></pre>
+  <p>The plan is not changed by this: <code>plan.on(other)</code> runs the same plan elsewhere.</p>
+</section>
+
+<section id="write">
+  <h2>Writing rows out</h2>
+  <p>Straight from the engine, without passing through Python.</p>
+  <pre><code>plan.create(con, <span class="s">"daily_totals"</span>)                  <span class="c"># a new table; returns the row count</span>
+plan.create(con, <span class="s">"daily_totals"</span>, replace=<span class="k">True</span>)     <span class="c"># replacing one that exists</span>
+plan.create(con, <span class="s">"scratch"</span>, temporary=<span class="k">True</span>)        <span class="c"># gone when the connection closes</span>
+plan.insert_into(con, <span class="s">"daily_totals"</span>)             <span class="c"># append; returns the row count</span></code></pre>
+
+  <p class="lead-in">files</p>
+  <p>A file is written by DuckDB's <code>COPY</code>, and the sinks are that statement with the plan inside: <code>copy_to</code> takes any format the engine has, and <code>to_parquet</code>, <code>to_csv</code>, <code>to_json</code> fill the format in. Keyword arguments are <code>COPY</code>'s own options under their SQL names, written as SQL writes them: a list is a column list, <code>star()</code> is <code>*</code>, a dict is a struct.</p>
+  <pre><code>plan.to_parquet(con, <span class="s">"totals.parquet"</span>)                                  <span class="c"># [(1234,)]  what COPY returns</span>
+plan.to_csv(con, <span class="s">"totals.csv"</span>, header=<span class="k">True</span>, delimiter=<span class="s">"|"</span>, force_quote=star())
+plan.to_json(con, <span class="s">"totals.json"</span>, array=<span class="k">True</span>)
+plan.to_parquet(con, <span class="s">"by_day"</span>, partition_by=[<span class="s">"year"</span>, <span class="s">"month"</span>], compression=<span class="s">"zstd"</span>)
+plan.copy_to(con, <span class="s">"totals.arrow"</span>, format=<span class="s">"arrow"</span>)                        <span class="c"># any loaded writer</span>
+plan.copy_to(con, Path(<span class="s">"out"</span>) / <span class="s">"totals.parquet"</span>)                              <span class="c"># no options: the engine reads the extension</span>
+
+(count, files), = plan.to_parquet(con, <span class="s">"parts"</span>, partition_by=<span class="s">"year"</span>, return_files=<span class="k">True</span>)
+stats = plan.to_parquet(con, <span class="s">"parts"</span>, partition_by=<span class="s">"year"</span>, return_stats=<span class="k">True</span>)   <span class="c"># one row per file</span></code></pre>
+  <p>Each returns the rows the statement returns: one row with the count, the count and the file names with <code>return_files</code>, or one row per file with <code>return_stats</code>. The engine refuses an option it does not know, by name. Options are written into the statement, so a <code>param()</code> cannot be one; a value from Python goes in as a literal.</p>
+  <p>The rest of the family is SQL: <code>sql("EXPORT DATABASE 'dir' (FORMAT parquet)").rows(con)</code>, <code>con.run("COPY FROM DATABASE a TO b")</code>. For any other statement, run it on the connection: <code>con.run("CREATE INDEX …")</code> returns the number of rows changed.</p>
+</section>
+
+<section id="look">
+  <h2>Looking before you run</h2>
+  <pre><code>plan.columns(con)   <span class="c"># ['id', 'customer', 'total']</span>
+plan.types(con)     <span class="c"># ['INTEGER', 'VARCHAR', 'DECIMAL(6,2)']</span>
+plan.schema(con)    <span class="c"># the two together, as pairs</span>
+
+print(plan.render())         <span class="c"># the SQL, from the plan alone</span>
+print(plan.render(con))      <span class="c"># the SQL as it will run on this connection</span>
+print(plan.explain(con))     <span class="c"># how DuckDB will run it; analyze=True runs it and times each step</span></code></pre>
+  <p>None of these fetch rows. <code>columns()</code> needs the connection only to read what the tables hold; the names a plan makes itself, through <code>select</code>, <code>rename</code> and the rest, it knows without one.</p>
+  <p><code>render()</code> with no connection cannot know what the tables hold, so it neither checks names nor keeps the position of a column that <code>with_columns</code> replaced; that column comes last. <code>render(con)</code> gives the exact text <code>rows(con)</code> would run.</p>
+</section>
+
+<section id="nested">
+  <h2>Plans inside plans</h2>
+  <p>A plan can stand in for a value inside an expression:</p>
+  <pre><code>average = orders.aggregate(col(<span class="s">"total"</span>).mean().alias(<span class="s">"m"</span>))
+orders.filter(col(<span class="s">"total"</span>) &gt; average.scalar())          <span class="c"># one row, one column</span>
+
+big = orders.filter(col(<span class="s">"total"</span>) &gt; <span class="s">1000</span>).select(<span class="s">"customer"</span>)
+orders.filter(col(<span class="s">"customer"</span>).isin(big))                <span class="c"># one column, any rows</span>
+orders.filter(~col(<span class="s">"customer"</span>).isin(big))</code></pre>
+  <p>The inner plan is computed once, however many times it is used. It cannot refer to the outer row. A correlated subquery is written one of three ways: as SQL (<a href="#sql">SQL in and out</a>); as a semi or anti join, which is what an <code>EXISTS</code> usually is; or, for a value per group, as an aggregate joined back, which is what a correlated scalar usually is:</p>
+  <pre><code>orders.join(big, on=<span class="s">"customer"</span>, how=<span class="s">"semi"</span>)    <span class="c"># orders whose customer is in big</span>
+<span class="c"># each order against its customer's average: the aggregate once, then joined back</span>
+averages = orders.group_by(<span class="s">"customer"</span>).agg(col(<span class="s">"total"</span>).mean().alias(<span class="s">"avg_total"</span>))
+orders.join(averages, on=<span class="s">"customer"</span>).filter(col(<span class="s">"total"</span>) &gt; col(<span class="s">"avg_total"</span>))
+orders.join(big, on=<span class="s">"customer"</span>, how=<span class="s">"anti"</span>)    <span class="c"># orders whose customer is not</span></code></pre>
+</section>
+
+<section id="reuse">
+  <h2>One plan, many places</h2>
+  <p>A plan holds no connection. Build it once and run it wherever its tables exist:</p>
+  <pre><code>report = table(<span class="s">"orders"</span>).filter(col(<span class="s">"total"</span>) &gt; <span class="s">1000</span>).select(<span class="s">"id"</span>)
+
+report.rows(production)
+report.rows(staging)</code></pre>
+  <p>Each connection reads its own tables, so the same plan is right on both even when their columns differ. Closing a connection does not affect the plans built from it.</p>
+
+  <p class="lead-in">as a macro</p>
+  <p>A plan's SQL can be the body of a DuckDB macro:</p>
+  <pre><code>body = sql(<span class="s">'SELECT unnest("i") AS uid'</span>).filter(col(<span class="s">"uid"</span>) &gt; <span class="s">2</span>)
+
+con.run(<span class="s">"CREATE MACRO big_ids(i) AS TABLE "</span> + body.render())
+sql(<span class="s">"SELECT * FROM big_ids([1, 3, 9])"</span>).rows(con)   <span class="c"># [(3,), (9,)]</span></code></pre>
+  <p>Or let the connection write the statement. An expression makes a scalar macro, a plan a table macro; parameters are names, or (name, default) pairs, and <code>col(name)</code> inside the body refers to one:</p>
+  <pre><code>con.create_macro(<span class="s">"add_up"</span>, [<span class="s">"a"</span>, (<span class="s">"b"</span>, <span class="s">1</span>)], col(<span class="s">"a"</span>) + col(<span class="s">"b"</span>))
+con.create_macro(<span class="s">"big_orders"</span>, [<span class="s">"floor"</span>], table(<span class="s">"orders"</span>).filter(col(<span class="s">"total"</span>) &gt; col(<span class="s">"floor"</span>)))
+
+sql(<span class="s">"SELECT add_up(2), * FROM big_orders(1000)"</span>).rows(con)</code></pre>
+  <p>The body is bound when the macro is defined, not when it is rendered: a name it cannot resolve is refused by <code>CREATE MACRO</code> or <code>create_macro</code>, and what depends on the arguments' types surfaces at the first call. Macros go further than this; see <a href="extend.html">Macros and Extensions</a>.</p>
+
+  <p class="lead-in">the same plan over different relations</p>
+  <p>A plan starts from a relation; to build the same plan over another, write a function that takes the relation:</p>
+  <pre><code><span class="k">def</span> recent(lineitem):
+    <span class="k">return</span> lineitem.filter(col(<span class="s">"l_shipdate"</span>) &gt; date(<span class="s">2026</span>, <span class="s">1</span>, <span class="s">1</span>)).select(<span class="s">"l_orderkey"</span>, <span class="s">"l_quantity"</span>)
+
+recent(table(<span class="s">"lineitem"</span>)).rows(con)
+recent(sql(<span class="s">"SELECT * FROM read_parquet('l.parquet')"</span>)).rows(con)
+recent(values(sample_rows, columns=[<span class="s">"l_orderkey"</span>, <span class="s">"l_shipdate"</span>, <span class="s">"l_quantity"</span>])).rows(con)</code></pre>
+  <p>A plan over <code>table(name)</code> already runs wherever a table of that name exists, so a function is only needed when the relation is not a table, or not always the same one. Give <code>values</code> its types as (name, type) pairs and the plan can answer <code>columns()</code> and <code>types()</code> with no connection at all.</p>
+</section>
+
+<section id="safety">
+  <h2>What is bound, what is quoted</h2>
+  <p>Values you pass never become part of the SQL text. Text, bytes and anything composite, a list, tuple or dict, are sent to the engine separately as parameters, because that is where an injection would come from; dates, times, intervals, decimals and UUIDs are bound too, so they arrive exact. Numbers, booleans and <code>None</code> are written as literals.</p>
+  <pre><code>name = <span class="s">"'; DROP TABLE orders; --"</span>
+orders.filter(col(<span class="s">"customer"</span>) == name).rows(con)    <span class="c"># WHERE ("customer" = $1); the table is fine</span></code></pre>
+  <p>Table and column names are always quoted, so a name from outside your program cannot turn into SQL:</p>
+  <div class="pair">
+    <div class="bad">
+      <div class="tag">runs whatever name contains</div>
+      <pre><code>sql(<span class="s">f"SELECT * FROM {name}"</span>)</code></pre>
+    </div>
+    <div class="good">
+      <div class="tag">one quoted name</div>
+      <pre><code>table(name)</code></pre>
+    </div>
+  </div>
+  <div class="note caution">
+    <p><strong><code>sql()</code> and <code>sql_expr()</code> take SQL as written.</strong> Never build either from input you do not trust.</p>
+  </div>
+</section>
+
+<section id="sql">
+  <h2>SQL in and out</h2>
+  <p>Any query can be a plan, and any plan can show its SQL:</p>
+  <pre><code>plan = sql(<span class="s">"SELECT * FROM orders WHERE region = 'emea'"</span>)
+plan.filter(col(<span class="s">"total"</span>) &gt; <span class="s">1000</span>).rows(con)
+
+print(plan.render())</code></pre>
+  <p>For a fragment inside an expression, <code>sql_expr</code> takes SQL text as written. That includes a whole condition: <code>filter</code> takes an expression, so a condition written as SQL is wrapped.</p>
+  <pre><code>orders.filter(col(<span class="s">"placed"</span>) &gt; sql_expr(<span class="s">"DATE '2026-01-01' + INTERVAL 30 DAY"</span>))
+orders.filter(sql_expr(<span class="s">"region = 'emea' AND total &gt; 1000"</span>))</code></pre>
+  <p>Correlated subqueries, recursive queries and <code>PIVOT</code> are written in SQL through <code>sql()</code>; the result is a plan like any other.</p>
+  <p>For cursors and <code>execute</code>, use <a href="dbapi.html"><code>duckdb.dbapi</code></a>, the PEP 249 interface. Plans do not run on its connections; run <code>plan.render()</code> on a cursor instead.</p>
+</section>
+
+<section id="reference">
+  <h2>Reference</h2>
+
+  <h3>Sources and connections</h3>
+  <dl class="ref">
+    <dt>table(name)</dt><dd>A table or view, by name.</dd>
+    <dt>sql(text)</dt><dd>A query, as SQL.</dd>
+    <dt>values(rows, columns)</dt><dd>Rows given in memory; <code>columns</code> are names or (name, type) pairs, and a type given is a cast.</dd>
+    <dt>read_csv / read_parquet / read_json(path, **options)</dt><dd>A file, files or a glob through the engine's reader; options under their SQL names.</dd>
+    <dt>table_function(name, *args, **named)</dt><dd>Any table function in a FROM clause.</dd>
+    <dt>duckdb.connect(path, **options)</dt><dd>Open a connection. Defaults to an in-memory database.</dd>
+    <dt>con.run(sql, params)</dt><dd>Run a statement; returns rows changed.</dd>
+    <dt>con.transaction()</dt><dd>The block as one transaction: COMMIT on success, ROLLBACK on any error.</dd>
+    <dt>con.interrupt()</dt><dd>Cancel the running query from another thread; it fails with <code>InterruptError</code>. Ctrl&#8209;C in the querying thread does the same and raises <code>KeyboardInterrupt</code>.</dd>
+    <dt>con.create_macro(name, parameters, body, replace, temporary)</dt><dd>Define a macro from an expression or a plan; see <a href="extend.html">Macros and Extensions</a>.</dd>
+    <dt>con.create_function(name, function, parameters, returns)</dt><dd>Register a Python function as a scalar SQL function; see <a href="udf.html">UDFs</a>.</dd>
+    <dt>con.duplicate()</dt><dd>A second connection to the same database, with its own transaction.</dd>
+    <dt>con.close()</dt><dd>Close it. Also a context manager.</dd>
+  </dl>
+
+  <h3>Verbs</h3>
+  <dl class="ref">
+    <dt>.filter(pred)</dt><dd>Keep matching rows.</dd>
+    <dt>.select(*cols)</dt><dd>Keep these columns or expressions.</dd>
+    <dt>.with_columns(**cols)</dt><dd>Add or replace columns.</dd>
+    <dt>.drop(*names) / .rename(old=new)</dt><dd>Remove or rename.</dd>
+    <dt>.sort(*cols)</dt><dd>Order the rows.</dd>
+    <dt>.limit(n, offset) / .head(n) / .offset(n)</dt><dd>Fewer rows.</dd>
+    <dt>.distinct(on=None)</dt><dd>Drop duplicates.</dd>
+    <dt>.sample(n, percent, seed, method)</dt><dd>A random subset.</dd>
+    <dt>.group_by(*keys).agg(…) / .aggregate(…, group_by=)</dt><dd>Group and aggregate.</dd>
+    <dt>.join(other, on, how, suffix)</dt><dd>Join; sides are <code>l</code> and <code>r</code>.</dd>
+    <dt>.cross(other)</dt><dd>Every combination.</dd>
+    <dt>.union / .union_by_name / .intersect / .except_</dt><dd>Set operations.</dd>
+    <dt>.unnest(*cols) / .unpivot(*cols, name, value)</dt><dd>Lists to rows; columns to rows.</dd>
+    <dt>.describe()</dt><dd>Statistics per column, as a plan.</dd>
+    <dt>.scalar()</dt><dd>This plan as a single value.</dd>
+    <dt>plan[name]</dt><dd>One column.</dd>
+  </dl>
+
+  <h3>With a connection</h3>
+  <dl class="ref">
+    <dt>.rows(con) / .first(con) / .iter_rows(con) / .to_dicts(con) / .count(con)</dt><dd>Rows out. All take <code>parameters=</code>.</dd>
+    <dt>.to_numpy(con) / .to_pandas(con, date_as_object=False)</dt><dd>Columns out, straight from the engine's vectors. NULLs are masked entries, or <code>pd.NA</code> under pandas' nullable dtypes.</dd>
+    <dt>.on(con)</dt><dd>The plan on a connection: every method here, with no connection argument.</dd>
+    <dt>.show(con, limit) / .preview(con, limit)</dt><dd>Print, or return, a table of the first rows.</dd>
+    <dt>.columns(con) / .types(con) / .schema(con)</dt><dd>What it produces.</dd>
+    <dt>.explain(con, analyze=False)</dt><dd>The engine's plan.</dd>
+    <dt>.create(con, name, replace, temporary) / .insert_into(con, name)</dt><dd>Into a table.</dd>
+    <dt>.copy_to(con, path, **opts) / .to_parquet / .to_csv / .to_json</dt><dd>Into a file through <code>COPY</code>; the options are its own. Returns what COPY returns.</dd>
+    <dt>.render()</dt><dd>The SQL. No connection.</dd>
+  </dl>
+
+  <h3>Expressions</h3>
+  <dl class="ref">
+    <dt>col(name)</dt><dd>A column. <code>col("l.id")</code> names a join side.</dd>
+    <dt>lit(value)</dt><dd>A value. Needed for lists and dicts (a struct).</dd>
+    <dt>param(name)</dt><dd>A value supplied through <code>parameters=</code>.</dd>
+    <dt>star(exclude, rename)</dt><dd><code>*</code>, optionally dropping or renaming.</dd>
+    <dt>fn(name, *args)</dt><dd>Any function by name.</dd>
+    <dt>sql_expr(text)</dt><dd>A fragment, as SQL.</dd>
+    <dt>when(cond).then(v)….otherwise(v)</dt><dd>CASE.</dd>
+    <dt>coalesce(*values)</dt><dd>The first non-NULL.</dd>
+    <dt>count_all()</dt><dd><code>count(*)</code>. Takes <code>.where()</code> and <code>.over()</code> like any aggregate.</dd>
+    <dt>row_number, rank, dense_rank, ntile, lag, lead, first_value, last_value</dt><dd>Window functions; add <code>.over()</code>.</dd>
+  </dl>
+  <dl class="ref">
+    <dt>== != &lt; &lt;= &gt; &gt;=</dt><dd>Comparison. NULL gives NULL.</dd>
+    <dt>+ - * / // % **</dt><dd>Arithmetic.</dd>
+    <dt>&amp; | ~</dt><dd>AND, OR, NOT.</dd>
+    <dt>.alias(name)</dt><dd>Name the output column.</dd>
+    <dt>.asc() / .desc() / .nulls_first() / .nulls_last()</dt><dd>Sort order.</dd>
+    <dt>.cast(type) / .try_cast(type)</dt><dd>Cast; the second gives NULL where the first would fail.</dd>
+    <dt>.is_null() / .is_not_null() / .isin(values or plan) / .between(lo, hi)</dt><dd>Tests.</dd>
+    <dt>.like(pattern, escape) / .ilike(…)</dt><dd>Pattern match.</dd>
+    <dt>.concat(*others)</dt><dd>Join text.</dd>
+    <dt>.str() / .dt() / .list() / .json()</dt><dd>Function namespaces: the same expression with one family's methods in scope.</dd>
+    <dt>.list().transform / .filter / .reduce(function)</dt><dd>A Python lambda standing for the SQL one. Runs once, at build time, on expressions.</dd>
+    <dt>.sum() .mean() .min() .max() .count() .median() .std() .var() .n_unique() …</dt><dd>Aggregates. Also <code>first</code>, <code>last</code>, <code>any_value</code>, <code>mode</code>, <code>quantile</code>, <code>arg_min</code>, <code>arg_max</code>, <code>array_agg</code>, <code>string_agg</code>, <code>product</code>, <code>bool_and</code>, <code>bool_or</code>, <code>bit_and</code>, <code>bit_or</code>, <code>skewness</code>, <code>kurtosis</code>, <code>entropy</code>.</dd>
+    <dt>.where(pred)</dt><dd>On an aggregate call, <code>count_all()</code> included: only the rows where <code>pred</code> holds. On a scalar call the engine refuses it.</dd>
+    <dt>.over(partition_by, order_by, rows, range)</dt><dd>Window.</dd>
+    <dt>.ignore_nulls()</dt><dd>On <code>first_value</code>, <code>last_value</code>, <code>lag</code>, <code>lead</code>.</dd>
+  </dl>
+</section>
+
+<section id="changes">
+  <h2>Changes from the old client</h2>
+  <p>What is different for code written against the old <code>duckdb</code> package's relational API. Code that needs the old client as it was runs on <a href="compat.html"><code>duckdb.compat</code></a>.</p>
+  <dl class="ref">
+    <dt>A plan holds no connection</dt><dd><code>duckdb.sql()</code> returns a plan and runs nothing. The old module-level <code>sql</code>, <code>execute</code> and <code>query</code> ran on an implicit default connection. Pass one to <code>rows()</code>, or put the plan on one with <code>on()</code>.</dd>
+    <dt>sql() runs nothing</dt><dd>Whatever the text is, it is a plan until a connection runs it. The old <code>sql()</code> ran a statement without rows on the spot and returned <code>None</code>; here that is <code>con.run()</code>. In <code>duckdb.compat</code>, a row-producing <code>CALL</code> runs once at <code>sql()</code> and its rows are carried; the old relation re-ran it on every fetch.</dd>
+    <dt>A string inside an expression is a value</dt><dd><code>col("state") == "active"</code> compares with the text <code>active</code>. The old client read it as a reference to a column named <code>active</code>. A column is always <code>col(...)</code>.</dd>
+    <dt>A string in a verb is a column name</dt><dd><code>select("total * 2")</code> names a column called <code>total * 2</code>, quoted, and the engine refuses it. The old <code>project("total * 2")</code> was a SQL fragment. Write <code>col("total") * 2</code>, or <code>sql_expr("total * 2")</code>.</dd>
+    <dt>filter() takes an expression</dt><dd>SQL text goes through <code>sql_expr</code>: <code>filter(sql_expr("total &gt; 1000"))</code>. The old <code>filter("total &gt; 1000")</code> took the text as it was.</dd>
+    <dt>aggregate() returns its group keys</dt><dd>They come first in the output. The old <code>aggregate("sum(total)", "customer")</code> returned the aggregate alone. <code>select()</code> is a projection and never groups.</dd>
+    <dt>Duplicate names are refused</dt><dd>A step that would produce one name twice, and a join whose sides share a name, are refused when the plan is resolved or run, with a message. The old client let the engine bind the first. Pass <code>suffix=</code> or rename before joining. Inside <code>on</code> the sides are <code>l</code> and <code>r</code>; there is no <code>set_alias</code>.</dd>
+    <dt>intersect() and except_() drop duplicates</dt><dd>They render <code>INTERSECT</code> and <code>EXCEPT</code>. The old client's were <code>INTERSECT ALL</code> and <code>EXCEPT ALL</code>. <code>union()</code> keeps duplicates as it did; <code>all=False</code> drops them.</dd>
+    <dt>types() is text</dt><dd><code>columns()</code>, <code>types()</code> and <code>schema()</code> are methods and take the connection whose catalog answers. Types come back as text, <code>DECIMAL(6,2)</code>, where the old client returned <code>DuckDBPyType</code> objects.</dd>
+    <dt>describe() is SUMMARIZE</dt><dd>One row per column, with the engine's statistics. The old <code>describe()</code> gave one row per statistic (count, mean, stddev, min, max, median) and a column per input column.</dd>
+    <dt>No len(), shape or iteration</dt><dd>A plan cannot count or iterate itself. <code>count(con)</code> counts; <code>rows(con)</code> and <code>iter_rows(con)</code> iterate; <code>for row in plan</code> raises.</dd>
+    <dt>Fetching and writing</dt><dd><code>fetchall()</code>, <code>fetchone()</code>, <code>fetchnumpy()</code> and <code>fetchdf()</code> are <code>rows(con)</code>, <code>first(con)</code>, <code>to_numpy(con)</code> and <code>to_pandas(con)</code>. <code>sql_query()</code> is <code>render()</code>. <code>write_csv(sep=...)</code> and <code>write_parquet()</code> are <code>to_csv</code> and <code>to_parquet</code>, with <code>COPY</code>'s own option names.</dd>
+    <dt>Expression names</dt><dd><code>ColumnExpression</code>, <code>ConstantExpression</code>, <code>FunctionExpression</code>, <code>StarExpression</code>, <code>SQLExpression</code> and <code>CoalesceOperator</code> are <code>col</code>, <code>lit</code>, <code>fn</code>, <code>star</code>, <code>sql_expr</code> and <code>coalesce</code>. <code>CaseExpression(cond, value)</code> is <code>when(cond).then(value)</code>. <code>isnull</code> and <code>isnotnull</code> are <code>is_null</code> and <code>is_not_null</code>; <code>isnotin</code> is <code>~col(...).isin(...)</code>.</dd>
+    <dt>No replacement scan</dt><dd>A DataFrame or a plan in scope is not a table: <code>sql("SELECT * FROM df")</code> does not find it. The implicit <code>FROM df</code> scan of local DataFrames and relations is not there yet.</dd>
+  </dl>
+</section>
+
+<footer>
+  <p>If a column does not exist or a type will not convert, the error comes from DuckDB, with the message it would give any client.</p>
+</footer>
+
+</div>
+
+</body>
+</html>

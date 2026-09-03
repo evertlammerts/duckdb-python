@@ -88,6 +88,21 @@
   column. Block comments and `--` inside string literals are unaffected.
   (xfail: `test_comment_is_harmless`)
 
+## Functions
+
+- `create_function` on a name already registered replaces the function;
+  the old client refused with "already created" and required
+  `remove_function` first. (`tests/test_udf.py`, `tests/test_compat.py`)
+- `remove_function` raises `NotSupportedError`: the engine keeps a
+  registered function until the database closes. The message points at
+  re-registration, which replaces. (`tests/test_compat.py`)
+- A function with neither type annotations nor explicit types is
+  refused with directions; the old client fell back to ANY parameters,
+  which the seam does not support yet. (`tests/test_compat.py`)
+- A `KeyboardInterrupt` raised inside a running function surfaces as
+  the query's `InvalidInputError`, not as `KeyboardInterrupt`: the
+  engine owns the call and sees only its failure.
+
 ## Pending
 
 - Multi-statement `execute`: the old client ran `"a; b; c"` and
@@ -97,6 +112,6 @@
   relations: M2 data-in. (`suite/test_metatransaction.py` and
   `suite/relational_api/test_rapi_query.py::test_replacement_scan_recursion`
   fail as behavior; `from_df` is missing surface)
-- The old Expression-object API (`ColumnExpression`,
-  `ConstantExpression`, ...): a future compat step.
-  (`suite/relational_api/test_joins.py` fails at import)
+- Arrow UDFs (`create_function(type='arrow')`): the Arrow wave.
+- ANY-typed UDF parameters: needs the facade's bind callback to
+  capture the bound argument types.

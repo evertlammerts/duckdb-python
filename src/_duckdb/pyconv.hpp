@@ -60,8 +60,19 @@ nb::object ValueToPython(const duckdb::cxx::Value &value, ConversionContext &ctx
 void AppendChunkRows(const duckdb::cxx::DataChunk &chunk, const std::vector<duckdb::cxx::LogicalType> &types,
                      duckdb::cxx::idx_t start, duckdb::cxx::idx_t end, ConversionContext &ctx, nb::list &out);
 
-/// One Python object as a DuckDB value, for binding as a parameter.
-duckdb::cxx::Value PythonToValue(duckdb::cxx::Connection &connection, nb::handle object,
-                                 ConversionContext &ctx);
+/// Elements [first, last) of one vector as a new list. NULL becomes None.
+nb::list VectorElements(duckdb::cxx::Vector &vector, const duckdb::cxx::LogicalType &type,
+                        duckdb::cxx::idx_t first, duckdb::cxx::idx_t last, ConversionContext &ctx);
+
+/// One Python object as a DuckDB value, for binding as a parameter or writing
+/// a function result. `scope` is the Connection outside engine callbacks and
+/// the callback's Context inside one; the facade's value factories take both.
+template <class SCOPE>
+duckdb::cxx::Value PythonToValue(SCOPE &scope, nb::handle object, ConversionContext &ctx);
+
+extern template duckdb::cxx::Value PythonToValue<duckdb::cxx::Connection>(duckdb::cxx::Connection &,
+                                                                          nb::handle, ConversionContext &);
+extern template duckdb::cxx::Value PythonToValue<duckdb::cxx::Context>(duckdb::cxx::Context &, nb::handle,
+                                                                       ConversionContext &);
 
 } // namespace duckdb_python

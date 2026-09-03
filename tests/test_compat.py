@@ -643,3 +643,124 @@ class TestExpressionCompat:
             compat.FunctionExpression("greatest", compat.ColumnExpression("b"), 7).alias("g"),
         )
         assert picked.fetchall() == [(4, 7)]
+
+
+class TestCreateFunction:
+    def test_explicit_types(self) -> None:
+        con = compat.connect()
+        assert con.create_function("plus_one", lambda x: x + 1, ["BIGINT"], "BIGINT") is con
+        assert con.execute("SELECT plus_one(41)").fetchall() == [(42,)]
+
+    def test_types_come_from_annotations(self) -> None:
+        con = compat.connect()
+
+        def shout(text: str, times: int) -> str:
+            return text.upper() * times
+
+        con.create_function("shout", shout)
+        assert con.execute("SELECT shout('ha', 2)").fetchall() == [("HAHA",)]
+
+    def test_nested_annotations(self) -> None:
+        con = compat.connect()
+
+        def total(values: list[int]) -> int:
+            return sum(values)
+
+        con.create_function("total", total)
+        assert con.execute("SELECT total([1, 2, 3])").fetchall() == [(6,)]
+
+    def test_optional_annotation_unwraps(self) -> None:
+        con = compat.connect()
+
+        def maybe(x: int) -> int | None:
+            return x if x % 2 else None
+
+        con.create_function("maybe", maybe, null_handling="special")
+        assert con.execute("SELECT maybe(2), maybe(3)").fetchall() == [(None, 3)]
+
+    def test_missing_annotations_are_refused_with_directions(self) -> None:
+        con = compat.connect()
+        with pytest.raises(exceptions.InvalidInputError, match="return_type explicitly"):
+            con.create_function("f", lambda x: x)
+
+        def half(x) -> float:  # type: ignore[no-untyped-def]  # noqa: ANN001
+            return float(x) / 2
+
+        with pytest.raises(exceptions.InvalidInputError, match="parameters explicitly"):
+            con.create_function("half", half)
+
+    def test_exception_handling_return_null(self) -> None:
+        con = compat.connect()
+
+        def brittle(x: int) -> int:
+            return 100 // x
+
+        con.create_function("brittle", brittle, exception_handling="return_null")
+        got = con.execute("SELECT brittle(x) FROM (VALUES (4), (0), (10)) t(x)").fetchall()
+        assert got == [(25,), (None,), (10,)]
+
+    def test_null_handling_special(self) -> None:
+        con = compat.connect()
+        con.create_function("backfill", lambda x: -1 if x is None else x, ["BIGINT"], "BIGINT", null_handling="special")
+        assert con.execute("SELECT backfill(NULL::BIGINT)").fetchall() == [(-1,)]
+
+    def test_a_none_return_under_default_nulls_is_refused(self) -> None:
+        con = compat.connect()
+        con.create_function("swallow", lambda x: None, ["BIGINT"], "BIGINT")
+        with pytest.raises(exceptions.InvalidInputError, match="The UDF is not expected to return NULL values"):
+            con.execute("SELECT swallow(1)").fetchall()
+
+    def test_a_none_return_under_special_nulls_is_null(self) -> None:
+        con = compat.connect()
+        con.create_function("swallow", lambda x: None, ["BIGINT"], "BIGINT", null_handling="special")
+        assert con.execute("SELECT swallow(1)").fetchall() == [(None,)]
+
+    def test_a_pandas_na_return_follows_the_same_rule(self) -> None:
+        pd = pytest.importorskip("pandas")
+        con = compat.connect()
+        con.create_function("na_out", lambda x: pd.NA, ["BIGINT"], "BIGINT")
+        with pytest.raises(exceptions.InvalidInputError, match="The UDF is not expected to return NULL values"):
+            con.execute("SELECT na_out(1)").fetchall()
+        con.create_function("na_ok", lambda x: pd.NA, ["BIGINT"], "BIGINT", null_handling="special")
+        assert con.execute("SELECT na_ok(1)").fetchall() == [(None,)]
+
+    def test_error_words_match_the_old_client(self) -> None:
+        con = compat.connect()
+
+        def kapow(x: int) -> int:
+            message = "kapow"
+            raise ValueError(message)
+
+        con.create_function("kapow", kapow)
+        with pytest.raises(
+            exceptions.InvalidInputError, match="Python exception occurred while executing the UDF"
+        ) as info:
+            con.execute("SELECT kapow(1)").fetchall()
+        assert "ValueError: kapow" in str(info.value)
+
+    def test_arrow_udfs_are_refused(self) -> None:
+        con = compat.connect()
+        with pytest.raises(exceptions.NotSupportedError, match="Arrow"):
+            con.create_function("f", lambda x: x, ["BIGINT"], "BIGINT", type="arrow")
+
+    def test_remove_function_points_at_re_registration(self) -> None:
+        con = compat.connect()
+        con.create_function("f", lambda x: x, ["BIGINT"], "BIGINT")
+        with pytest.raises(exceptions.NotSupportedError, match="registering the same name again"):
+            con.remove_function("f")
+        con.create_function("f", lambda x: x * 10, ["BIGINT"], "BIGINT")
+        assert con.execute("SELECT f(2)").fetchall() == [(20,)]
+
+    def test_module_level_uses_the_default_connection(self) -> None:
+        compat.create_function("mod_double", lambda x: x * 2, ["BIGINT"], "BIGINT")
+        try:
+            assert compat.execute("SELECT mod_double(21)").fetchall() == [(42,)]
+        finally:
+            compat.close()
+
+    def test_udf_in_a_relation(self) -> None:
+        con = compat.connect()
+        con.create_function("bump", lambda x: x + 1, ["BIGINT"], "BIGINT")
+        relation = con.sql("SELECT i FROM range(3) t(i)")
+        assert relation is not None
+        assert relation.project("bump(i)").fetchall() == [(1,), (2,), (3,)]

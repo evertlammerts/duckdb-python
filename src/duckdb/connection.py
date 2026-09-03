@@ -20,7 +20,7 @@ from . import _duckdb
 from .exceptions import Error, InterfaceError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
     from types import TracebackType
 
 __all__ = ["Connection", "connect"]
@@ -209,6 +209,40 @@ class Connection:
         prefix = "CREATE OR REPLACE" if replace else "CREATE"
         kind = "TEMP MACRO" if temporary else "MACRO"
         self.run(f"{prefix} {kind} {qualified(name)}({signature}) AS {definition}")
+
+    def create_function(
+        self,
+        name: str,
+        function: Callable[..., Any],
+        parameters: Iterable[str],
+        returns: str,
+        *,
+        null_handling: str = "default",
+        stability: str = "consistent",
+    ) -> None:
+        """Register a Python callable as a scalar SQL function on this database.
+
+        `parameters` and `returns` are SQL type texts, like "BIGINT" or
+        "STRUCT(a INTEGER, b VARCHAR)"; arguments arrive as the Python values
+        those types fetch as, and the returned value is converted back and
+        cast to `returns`. The function is called once per row, from the
+        engine's own threads.
+
+        With `null_handling` "default" a NULL argument makes the result NULL
+        without calling the function; "special" passes None through and lets
+        the function decide. Returning None makes the result NULL either way.
+
+        `stability` declares how cacheable results are: "consistent" lets the
+        engine fold repeated and constant calls, "volatile" makes it call once
+        per row every time, which is the honest choice for anything random,
+        stateful or side-effecting. "consistent_within_query" sits in between.
+
+        Anything expressible as an expression runs orders of magnitude faster
+        as a macro; see `create_macro`.
+        """
+        self._engine().create_scalar_function(name, function, list(parameters), returns, null_handling, stability)
+        # A new function changes what names bind to, like CREATE MACRO does.
+        self._catalog.changed()
 
     def duplicate(self) -> Connection:
         """A second connection to the same database, with its own transaction.
