@@ -10,6 +10,11 @@ tools/cpp/example/README.md, which did not land in main. Delete this once it
 does.
 
     build_engine_bundle.py <duckdb-checkout> <output-dir> [--build-type Release]
+                           [--duckdb-version v2.0.0-alpha40145]
+
+The version is the name core's nightly built the checkout under. The engine
+names itself by it and looks up extensions under it; without it a checkout
+without tags names itself v<release>-dev<count> and can INSTALL nothing.
 """
 
 from __future__ import annotations
@@ -47,11 +52,13 @@ def find_first(root: Path, names: tuple[str, ...]) -> Path | None:
     return None
 
 
-def build_engine(src: Path, build_dir: Path, build_type: str) -> None:
+def build_engine(src: Path, build_dir: Path, build_type: str, duckdb_version: str | None) -> None:
     """Configure and build libduckdb through CMake directly.
 
     DuckDB's Makefile is a wrapper around exactly this, but it is not portable
-    to the Windows runners, so we call CMake ourselves.
+    to the Windows runners, so we call CMake ourselves. Always configured, even
+    over an existing build directory: the version is baked in at configure
+    time, and a stale one is invisible until INSTALL fails.
     """
     configure = [
         "cmake",
@@ -67,6 +74,8 @@ def build_engine(src: Path, build_dir: Path, build_type: str) -> None:
     ]
     if core_extensions := os.environ.get("CORE_EXTENSIONS"):
         configure.append(f"-DCORE_EXTENSIONS={core_extensions}")
+    if duckdb_version:
+        configure.append(f"-DDUCKDB_EXPLICIT_VERSION={duckdb_version}")
     if sys.platform == "win32":
         # Let CMake pick the Visual Studio generator. With Ninja on PATH the
         # Windows runners resolve the compiler to a MinGW gcc that rejects
@@ -108,6 +117,9 @@ def main() -> int:
     ap.add_argument("source", type=Path, help="a DuckDB checkout")
     ap.add_argument("output", type=Path, help="bundle directory to create")
     ap.add_argument("--build-type", default="Release")
+    ap.add_argument(
+        "--duckdb-version", default=None, help="the version name the engine reports, as core's nightly named it"
+    )
     args = ap.parse_args()
 
     src, out = args.source.resolve(), args.output.resolve()
@@ -115,10 +127,8 @@ def main() -> int:
         sys.exit(f"{src} has no tools/cpp: not a DuckDB checkout with the C++ API")
 
     build_dir = src / "build" / args.build_type.lower()
-    runtime = find_first(build_dir, RUNTIME_NAMES) if build_dir.is_dir() else None
-    if runtime is None:
-        build_engine(src, build_dir, args.build_type)
-        runtime = find_first(build_dir, RUNTIME_NAMES)
+    build_engine(src, build_dir, args.build_type, args.duckdb_version)
+    runtime = find_first(build_dir, RUNTIME_NAMES)
     if runtime is None:
         sys.exit(f"no engine library produced under {build_dir}")
 
@@ -148,6 +158,7 @@ def main() -> int:
 
     sha = subprocess.run(["git", "-C", str(src), "rev-parse", "HEAD"], capture_output=True, text=True)
     (out / "ENGINE_SHA").write_text((sha.stdout.strip() or "unknown") + "\n")
+    (out / "ENGINE_VERSION").write_text((args.duckdb_version or "unknown") + "\n")
 
     size = sum(f.stat().st_size for f in out.rglob("*") if f.is_file())
     print(f"bundle: {out} ({size / 1e6:.0f}MB), engine {(out / 'ENGINE_SHA').read_text()[:12]}")

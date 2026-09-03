@@ -15,16 +15,22 @@ on:
       sha:
         description: The engine SHA the bundles were built from.
         value: ${{ jobs.pin.outputs.sha }}
+      version:
+        description: The version name the engine was built under.
+        value: ${{ jobs.pin.outputs.version }}
 
 jobs:
   pin:
     runs-on: ubuntu-latest
     outputs:
       sha: ${{ steps.read.outputs.sha }}
+      version: ${{ steps.read.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - id: read
-        run: echo "sha=$(grep -v '^#' engine.pin | head -1 | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "sha=$(grep -v '^#' engine.pin | sed -n 1p | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+          echo "version=$(grep -v '^#' engine.pin | sed -n 2p | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
 
   build:
     needs: pin
@@ -64,7 +70,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: engine-bundle
-          key: engine-${{ matrix.target }}-${{ needs.pin.outputs.sha }}-${{ hashFiles('.github/workflows/engine.yml') }}
+          key: engine-${{ matrix.target }}-${{ needs.pin.outputs.sha }}-${{ needs.pin.outputs.version }}-${{ hashFiles('.github/workflows/engine.yml') }}
 
       - name: Check out DuckDB at the pinned SHA
         if: steps.cache.outputs.cache-hit != 'true'
@@ -73,11 +79,8 @@ jobs:
           repository: duckdb/duckdb
           ref: ${{ needs.pin.outputs.sha }}
           path: .duckdb
+          # No tags: the version comes from engine.pin, not from `git describe`.
           fetch-depth: 1
-          # DuckDB derives its version from `git describe`. Without tags that
-          # fails ("No names found, cannot describe anything") and the engine
-          # reports no version, which is what duckdb_version() surfaces.
-          fetch-tags: true
 
       # ccache does not help the MSVC build, so it is skipped there.
       #
@@ -109,7 +112,8 @@ jobs:
           CMAKE_CXX_COMPILER_LAUNCHER: ${{ runner.os != 'Windows' && 'ccache' || '' }}
         run: |
           PY=$(command -v python3 || command -v python)
-          "$PY" scripts/build_engine_bundle.py .duckdb engine-bundle --build-type Release
+          "$PY" scripts/build_engine_bundle.py .duckdb engine-bundle --build-type Release \
+            --duckdb-version "${{ needs.pin.outputs.version }}"
 
       - uses: actions/upload-artifact@v4
         with:

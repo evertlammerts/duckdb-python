@@ -173,7 +173,7 @@ con = duckdb.connect(threads=<span class="s">2</span>)</code></pre>
 &gt;&gt;&gt; duckdb.__version__
 <span class="s">'0.0.1.dev0'</span>
 &gt;&gt;&gt; duckdb.duckdb_version()
-<span class="s">'v2.0.0-dev83383'</span></code></pre>
+<span class="s">'v2.0.0-alpha40145'</span></code></pre>
     <p><code>__version__</code> is this package. <code>duckdb_version()</code> is the DuckDB engine linked into it. They are versioned and released separately, so neither can be read from the other: a package release may carry a new engine or the same one. A problem in SQL belongs to the engine version, a problem in <code>rows()</code> to the package version; report both. <code>duckdb.library_version()</code> is the same engine string, read from the extension module directly.</p>
   </section>
 

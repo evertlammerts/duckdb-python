@@ -1,4 +1,9 @@
-# The DuckDB engine this client builds against. One SHA, nothing else.
-# Bump to move to a newer engine; CI rebuilds the engine bundle on change and
-# reuses a cached one otherwise.
-41ddcf2480b7f69ac37764cbeeac7af4391c11fc
+# The DuckDB engine this client builds against: the commit, then the version
+# name core's nightly built that commit under. Both come from the same "Main"
+# run of duckdb/duckdb on the engine branch: the version is v<release>-alpha<run
+# number>, and it is not derivable from the commit. The engine looks up
+# extensions under that name (extensions.duckdb.org/<version>/<platform>/), so
+# a bundle built without it names itself v2.0.0-dev<count> and can INSTALL
+# nothing. CI rebuilds the bundle when either line changes.
+8a81c8498737ccca5f176816fef8d6dc0d89b056
+v2.0.0-alpha40145
