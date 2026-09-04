@@ -452,7 +452,7 @@ orders.filter(sql_expr(<span class="s">"region = 'emea' AND total &gt; 1000"</sp
     <dt>.distinct(on=None)</dt><dd>Drop duplicates.</dd>
     <dt>.sample(n, percent, seed, method)</dt><dd>A random subset.</dd>
     <dt>.group_by(*keys).agg(…) / .aggregate(…, group_by=)</dt><dd>Group and aggregate.</dd>
-    <dt>.join(other, on, how, suffix)</dt><dd>Join. <code>on</code> is a name, a list of names, or a function of the two sides.</dd>
+    <dt>.join(other, on, how, suffix)</dt><dd>Join. <code>on</code> is a name, a list of names, or a function of the two sides. The sides are <code>Side</code> objects; the type is exported for annotations, <code>def cond(left: duckdb.Side, right: duckdb.Side) -&gt; duckdb.Expr</code>.</dd>
     <dt>.cross(other)</dt><dd>Every combination.</dd>
     <dt>.union / .union_by_name / .intersect / .except_</dt><dd>Set operations.</dd>
     <dt>.unnest(*cols) / .unpivot(*cols, name, value)</dt><dd>Lists to rows; columns to rows.</dd>
