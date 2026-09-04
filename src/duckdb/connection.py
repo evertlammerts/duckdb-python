@@ -172,7 +172,7 @@ class Connection:
 
     def create_macro(
         self,
-        name: str,
+        name: str | tuple[str, ...],
         parameters: Iterable[str | tuple[str, object]],
         body: object,
         *,
@@ -181,14 +181,15 @@ class Connection:
     ) -> None:
         """Define a macro from an expression or a plan.
 
-        An expression makes a scalar macro, a plan a table macro. `parameters`
-        are names, or (name, default) pairs. The body is rendered as written,
+        An expression makes a scalar macro, a plan a table macro. `name` is a
+        string, or a tuple for a schema-qualified macro. `parameters` are
+        names, or (name, default) pairs. The body is rendered as written,
         with `col(name)` referring to a parameter, and the engine checks it
         when the macro is defined. Literals in the body are written into it,
         since a definition has no parameters to bind, and for the same reason
         a `param()` in the body is refused.
         """
-        from .expr import Expr, qualified, quote, refusing_parameters, render_literal, suspended_sinks
+        from .expr import Expr, identifier, name_parts, quote, refusing_parameters, render_literal, suspended_sinks
         from .frame import Frame, NeedsConnection
 
         signature = ", ".join(
@@ -211,7 +212,7 @@ class Connection:
                 raise TypeError(message)
         prefix = "CREATE OR REPLACE" if replace else "CREATE"
         kind = "TEMP MACRO" if temporary else "MACRO"
-        self.run(f"{prefix} {kind} {qualified(name)}({signature}) AS {definition}")
+        self.run(f"{prefix} {kind} {identifier(name_parts(name, 'macro name'))}({signature}) AS {definition}")
 
     def create_function(
         self,
@@ -245,6 +246,12 @@ class Connection:
         Anything expressible as an expression runs orders of magnitude faster
         as a macro; see `create_macro`.
         """
+        if not isinstance(name, str):
+            message = (  # type: ignore[unreachable]
+                f"a function's name is a string, not {name!r}: the engine registers a Python function by its "
+                f"bare name, so it cannot be schema-qualified"
+            )
+            raise TypeError(message)
         nulls = _NULL_HANDLING.get(null_handling)
         if nulls is None:
             message = "Invalid Input Error: null_handling must be 'default' or 'special'"

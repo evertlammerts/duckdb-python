@@ -7,6 +7,7 @@ from ._duckdb import library_version
 from .connection import Connection, connect
 from .expr import (
     Expr,
+    Side,
     coalesce,
     col,
     count_all,
@@ -47,6 +48,7 @@ __all__ = [
     "Expr",
     "Frame",
     "NeedsConnection",
+    "Side",
     "Step",
     "__version__",
     "coalesce",

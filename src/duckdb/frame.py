@@ -28,7 +28,6 @@ from __future__ import annotations
 import dataclasses
 import html
 import os
-import re
 from collections.abc import Iterable, Sized
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
@@ -41,12 +40,17 @@ from .expr import (
     Lit,
     ParamSink,
     PlanBase,
+    Side,
     Star,
     SubQuery,
     col,
     count_all,
+    fold_name,
+    function_name,
+    identifier,
+    name_parts,
     parameters_in,
-    qualified,
+    plain_identifier,
     quote,
     render_literal,
     rendering_steps,
@@ -171,11 +175,26 @@ def _as_stub(shape: Shape) -> str:
 
 
 def _duplicates(names: list[str]) -> list[str]:
-    """The names appearing more than once, in order of first appearance."""
-    seen: dict[str, int] = {}
+    """The names appearing more than once as the engine sees them, by first spelling, in order of appearance."""
+    seen: dict[str, list[str]] = {}
     for name in names:
-        seen[name] = seen.get(name, 0) + 1
-    return [name for name, count in seen.items() if count > 1]
+        seen.setdefault(fold_name(name), []).append(name)
+    return [spellings[0] for spellings in seen.values() if len(spellings) > 1]
+
+
+def _has(shape: Shape, name: str) -> bool:
+    """Whether a shape carries a name, compared as the engine compares names."""
+    wanted = fold_name(name)
+    return any(fold_name(column.name) == wanted for column in shape)
+
+
+def _require_present(shape: Shape, names: Iterable[str], verb: str) -> None:
+    """Refuse a step naming a column its input does not have; the engine would not always say so."""
+    missing = [name for name in names if not _has(shape, name)]
+    if missing:
+        listed = ", ".join(repr(name) for name in missing)
+        message = f"{verb}: no column {listed} in the input"
+        raise ValueError(message)
 
 
 def _require_unique(shape: Shape, verb: str) -> Shape:
@@ -196,8 +215,9 @@ def _require_unique(shape: Shape, verb: str) -> Shape:
 
 def _type_of(name: str, shape: Shape) -> str | None:
     """The type of a column in a shape, if it is known."""
+    wanted = fold_name(name)
     for column in shape:
-        if column.name == name:
+        if fold_name(column.name) == wanted:
             return column.type
     return None
 
@@ -216,11 +236,13 @@ def _contributed(expression: Expr, source: Shape) -> list[Column] | None:
     if isinstance(expression, Star):
         if alias:
             return None
-        kept = [c for c in source if c.name not in set(expression.exclude)]
-        return [Column(expression.rename.get(c.name, c.name), c.type) for c in kept]
+        excluded = {fold_name(name) for name in expression.exclude}
+        renamed = {fold_name(old): new for old, new in expression.rename.items()}
+        kept = [c for c in source if fold_name(c.name) not in excluded]
+        return [Column(renamed.get(fold_name(c.name), c.name), c.type) for c in kept]
     if isinstance(expression, Col):
-        # A dotted reference names a side of a join; the column is the last part.
-        bare = expression.name.rsplit(".", 1)[-1]
+        # A join side's column has two parts; the column is the last one.
+        bare = expression.parts[-1]
         return [Column(alias or bare, _type_of(bare, source))]
     if alias:
         # The caller named it, but an expression computed it, so the type is
@@ -253,7 +275,7 @@ _JOIN_KINDS = {
     "asof": JoinKind("ASOF", needs_on=True, keeps_right=True),
 }
 
-_OPTION_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+_OPTION_NAME = plain_identifier
 
 
 def _option(name: str) -> str:
@@ -420,13 +442,13 @@ def _at_least_one(items: Sized, verb: str, what: str = "column") -> None:
 
 @dataclasses.dataclass(frozen=True, eq=False)
 class Table(Step):
-    """A table or view, by name."""
+    """A table or view, by its name's parts."""
 
-    name: str
+    name: tuple[str, ...]
 
     def render(self, names: tuple[str, ...], shapes: tuple[Shape | None, ...]) -> str:
         """Read the table; its name is quoted, so it cannot turn into more SQL."""
-        return f"SELECT * FROM {qualified(self.name)}"
+        return f"SELECT * FROM {identifier(self.name)}"
 
 
 @dataclasses.dataclass(frozen=True, eq=False)
@@ -450,7 +472,7 @@ class TableFunction(Step):
     `read_csv(NULL)` is refused by the parser, so it is refused here.
     """
 
-    name: str
+    name: tuple[str, ...]
     args: tuple[Expr, ...]
     named: tuple[tuple[str, Expr], ...]
 
@@ -459,14 +481,14 @@ class TableFunction(Step):
             held = parameters_in(argument)
             if held:
                 message = (
-                    f"{self.name}() cannot take param({held[0]!r}) as argument {label!r}: the engine works out "
-                    f"a table function's columns from its arguments, which a parameter does not have yet"
+                    f"{function_name(self.name)}() cannot take param({held[0]!r}) as argument {label!r}: the engine "
+                    f"works out a table function's columns from its arguments, which a parameter does not have yet"
                 )
                 raise TypeError(message)
 
     def render(self, names: tuple[str, ...], shapes: tuple[Shape | None, ...]) -> str:
         arguments = [a.fragment() for a in self.args] + [f"{quote(k)} := {v.fragment()}" for k, v in self.named]
-        return f"SELECT * FROM {qualified(self.name)}({', '.join(arguments)})"
+        return f"SELECT * FROM {function_name(self.name)}({', '.join(arguments)})"
 
     def expressions(self) -> tuple[Expr, ...]:
         return (*self.args, *(v for _, v in self.named))
@@ -575,22 +597,22 @@ class WithColumns(Step):
             excluded = ", ".join(render_literal(name) for name, _ in self.columns)
             added = ", ".join(e.alias(n).as_select() for n, e in self.columns)
             return f"SELECT COLUMNS(lambda c: c NOT IN ({excluded})), {added} FROM {source}"
-        existing = {column.name for column in shapes[0]}
+        existing = {fold_name(column.name) for column in shapes[0]}
         # A name already present is replaced in place, keeping column order; a
         # new one is appended. EXCLUDE cannot serve both, because excluding a
         # name that is not there is an error.
-        replaced = [f"{e.fragment()} AS {quote(n)}" for n, e in self.columns if n in existing]
-        appended = [e.alias(n).as_select() for n, e in self.columns if n not in existing]
+        replaced = [f"{e.fragment()} AS {quote(n)}" for n, e in self.columns if fold_name(n) in existing]
+        appended = [e.alias(n).as_select() for n, e in self.columns if fold_name(n) not in existing]
         star = f"* REPLACE ({', '.join(replaced)})" if replaced else "*"
         return f"SELECT {', '.join([star, *appended])} FROM {source}"
 
     def shape(self, shapes: tuple[Shape, ...]) -> Shape | None:
-        setting = {name for name, _ in self.columns}
-        existing = {column.name for column in shapes[0]}
+        setting = {fold_name(name) for name, _ in self.columns}
+        existing = {fold_name(column.name) for column in shapes[0]}
         # A replaced column keeps its position, a new one is appended, and both
         # take their type from the engine because an expression made it.
-        kept = [Column(c.name, None) if c.name in setting else c for c in shapes[0]]
-        new = (Column(name, None) for name, _ in self.columns if name not in existing)
+        kept = [Column(c.name, None) if fold_name(c.name) in setting else c for c in shapes[0]]
+        new = (Column(name, None) for name, _ in self.columns if fold_name(name) not in existing)
         return _require_unique((*kept, *new), "with_columns")
 
     def expressions(self) -> tuple[Expr, ...]:
@@ -605,11 +627,18 @@ class Drop(Step):
         _at_least_one(self.names, "drop")
 
     def render(self, names: tuple[str, ...], shapes: tuple[Shape | None, ...]) -> str:
-        return f"SELECT * EXCLUDE ({', '.join(quote(c) for c in self.names)}) FROM {names[0]}"
+        if all("." not in c and '"' not in c for c in self.names):
+            return f"SELECT * EXCLUDE ({', '.join(quote(c) for c in self.names)}) FROM {names[0]}"
+        # The engine's EXCLUDE re-parses a quoted name as a qualified path, so
+        # a dot or a quote in a name breaks it; the lambda form matches text,
+        # folded on both sides because names compare case-insensitively.
+        dropped = ", ".join(render_literal(fold_name(c)) for c in self.names)
+        return f"SELECT COLUMNS(lambda c: lower(c) NOT IN ({dropped})) FROM {names[0]}"
 
     def shape(self, shapes: tuple[Shape, ...]) -> Shape | None:
-        dropped = set(self.names)
-        return tuple(c for c in shapes[0] if c.name not in dropped)
+        _require_present(shapes[0], self.names, "drop")
+        dropped = {fold_name(name) for name in self.names}
+        return tuple(c for c in shapes[0] if fold_name(c.name) not in dropped)
 
 
 @dataclasses.dataclass(frozen=True, eq=False)
@@ -619,13 +648,36 @@ class Rename(Step):
     def __post_init__(self) -> None:
         _at_least_one(self.pairs, "rename")
 
+    def needs_shapes(self) -> bool:
+        return not all("." not in old and '"' not in old for old, _ in self.pairs)
+
     def render(self, names: tuple[str, ...], shapes: tuple[Shape | None, ...]) -> str:
-        rendered = ", ".join(f"{quote(old)} AS {quote(new)}" for old, new in self.pairs)
-        return f"SELECT * RENAME ({rendered}) FROM {names[0]}"
+        if all("." not in old and '"' not in old for old, _ in self.pairs):
+            rendered = ", ".join(f"{quote(old)} AS {quote(new)}" for old, new in self.pairs)
+            return f"SELECT * RENAME ({rendered}) FROM {names[0]}"
+        # The engine's RENAME re-parses a quoted name as a qualified path and
+        # then silently renames nothing, so such a name is renamed by listing.
+        renamed = {fold_name(old): new for old, new in self.pairs}
+        if shapes[0] is not None:
+            listed = [
+                f"{quote(c.name)} AS {quote(renamed[fold_name(c.name)])}"
+                if fold_name(c.name) in renamed
+                else quote(c.name)
+                for c in shapes[0]
+            ]
+            return f"SELECT {', '.join(listed)} FROM {names[0]}"
+        message = (
+            "renaming a column whose name holds a dot or a quote lists the input's columns, since the "
+            "engine's RENAME mis-parses such a name; this needs a connection to render"
+        )
+        raise NeedsConnection(message)
 
     def shape(self, shapes: tuple[Shape, ...]) -> Shape | None:
-        renamed = dict(self.pairs)
-        return _require_unique(tuple(Column(renamed.get(c.name, c.name), c.type) for c in shapes[0]), "rename")
+        _require_present(shapes[0], [old for old, _ in self.pairs], "rename")
+        renamed = {fold_name(old): new for old, new in self.pairs}
+        return _require_unique(
+            tuple(Column(renamed.get(fold_name(c.name), c.name), c.type) for c in shapes[0]), "rename"
+        )
 
 
 @dataclasses.dataclass(frozen=True, eq=False)
@@ -705,8 +757,8 @@ class Unnest(Step):
     def shape(self, shapes: tuple[Shape, ...]) -> Shape | None:
         # Names and order are untouched; an opened column becomes its element
         # type, which only the engine knows.
-        opened = set(self.columns)
-        return tuple(Column(c.name, None) if c.name in opened else c for c in shapes[0])
+        opened = {fold_name(name) for name in self.columns}
+        return tuple(Column(c.name, None) if fold_name(c.name) in opened else c for c in shapes[0])
 
 
 @dataclasses.dataclass(frozen=True, eq=False)
@@ -723,8 +775,8 @@ class Unpivot(Step):
         return f"UNPIVOT (SELECT * FROM {names[0]}) ON {folded} INTO NAME {quote(self.name)} VALUE {quote(self.value)}"
 
     def shape(self, shapes: tuple[Shape, ...]) -> Shape | None:
-        folded = set(self.columns)
-        kept = (c for c in shapes[0] if c.name not in folded)
+        folded = {fold_name(name) for name in self.columns}
+        kept = (c for c in shapes[0] if fold_name(c.name) not in folded)
         return _require_unique((*kept, Column(self.name, "VARCHAR"), Column(self.value, None)), "unpivot")
 
 
@@ -781,9 +833,9 @@ class Join(Step):
 
     def _clashing(self, left: Shape, right: Shape) -> list[str]:
         """Right-hand names the left already carries; USING keys fold and do not clash."""
-        left_names = {column.name for column in left}
-        folded = set(self.using)
-        return [c.name for c in right if c.name in left_names and c.name not in folded]
+        left_names = {fold_name(column.name) for column in left}
+        folded = {fold_name(key) for key in self.using}
+        return [c.name for c in right if fold_name(c.name) in left_names and fold_name(c.name) not in folded]
 
     def render(self, names: tuple[str, ...], shapes: tuple[Shape | None, ...]) -> str:
         kind = self._kind()
@@ -807,14 +859,23 @@ class Join(Step):
             else []
         )
         projection = "*"
-        if shared:
+        if shared and right_shape is not None:
             # Only when renaming: the plain star keeps the SQL closest to what
-            # the reader wrote, and USING's own folding intact.
-            parts = [f"{quote(n)} AS {quote(n + str(self.suffix))}" for n in shared]
-            excluded = f" EXCLUDE ({', '.join(keys)})" if keys else ""
-            projection = f"l.*, r.*{excluded} RENAME ({', '.join(parts)})"
+            # the reader wrote, and USING's own folding intact. The right side
+            # is listed rather than written as r.* EXCLUDE ... RENAME ...,
+            # since the engine mis-parses a quoted name in those two lists.
+            folded = {fold_name(key) for key in self.using}
+            renamed = {fold_name(name) for name in shared}
+            right = [
+                f"r.{quote(c.name)} AS {quote(c.name + str(self.suffix))}"
+                if fold_name(c.name) in renamed
+                else f"r.{quote(c.name)}"
+                for c in right_shape
+                if fold_name(c.name) not in folded
+            ]
+            projection = ", ".join(["l.*", *right])
         # Both sides are aliased so joining a frame to itself works, and so an
-        # ON expression can tell the sides apart, as col("l.id").
+        # ON condition can tell the sides apart, as l["id"].
         return f"SELECT {projection} FROM {names[0]} AS l {kind.keyword} JOIN {names[1]} AS r{clause}"
 
     def shape(self, shapes: tuple[Shape, ...]) -> Shape | None:
@@ -830,9 +891,13 @@ class Join(Step):
                 f"right side, or rename before joining."
             )
             raise ValueError(message)
-        renamed = {name: name + str(self.suffix) for name in shared}
-        folded = set(self.using)
-        carried = [Column(renamed.get(c.name, c.name), c.type) for c in right_shape if c.name not in folded]
+        renamed = {fold_name(name): name + str(self.suffix) for name in shared}
+        folded = {fold_name(key) for key in self.using}
+        carried = [
+            Column(renamed.get(fold_name(c.name), c.name), c.type)
+            for c in right_shape
+            if fold_name(c.name) not in folded
+        ]
         # The renamed copies have to be free too: suffixing onto a name the
         # left already holds only moves the clash.
         return _require_unique((*left_shape, *carried), "join")
@@ -915,14 +980,18 @@ class Frame(PlanBase):
         return order
 
     def render(self, connection: Connection | None = None) -> str:
-        """The whole query as SQL, with one CTE per step.
+        """The whole query as SQL, with one CTE per step, values written in.
 
-        With a connection, this is the text execution would use on it. Without
-        one, it is a pure function of the plan, and two things follow. A step
-        whose SQL depends on its input's columns renders a form that does not
-        need them, and that form can order columns differently: `with_columns`
-        moves a replaced column to the end, where the executed form keeps it in
-        place. And nothing is checked: two columns of one name in a join, or a
+        With a connection, the shapes are those execution would use on it;
+        the executed text itself binds values as `$n`, which
+        `render_parameterized` gives. Without one, it is a pure function of
+        the plan, and two things follow. A step whose SQL depends on its
+        input's columns renders a form that does not need them, and that form
+        can order columns differently: `with_columns` moves a replaced column
+        to the end, where the executed form keeps it in place. A suffixed
+        join, and a `rename` of a name holding a dot or a quote, have no such
+        form and raise `NeedsConnection`. And nothing is checked:
+        two columns of one name in a join, or a
         table that does not exist, are found when the plan runs, not here.
 
         A frame used twice appears once: the graph is walked by identity, so
@@ -931,6 +1000,17 @@ class Frame(PlanBase):
         order = self._order()
         shapes = self._shapes(connection, order) if connection is not None else None
         return self._render(shapes, order)
+
+    def render_parameterized(
+        self, connection: Connection | None = None, *, parameters: Mapping[str, object] | None = None
+    ) -> tuple[str, list[Any]]:
+        """The query as execution sends it: SQL with `$n` placeholders, and the values in order.
+
+        Lifted literals and `param()` placeholders share the numbering, so
+        every `param()` must be supplied, as it must be to run.
+        """
+        sql, values = self._sql_and_values(connection=connection, parameters=parameters)
+        return sql, values or []
 
     def _render(self, shapes: dict[int, Shape] | None = None, order: list[Frame] | None = None) -> str:
         """The SQL, given whatever shapes are known."""
@@ -1196,16 +1276,17 @@ class Frame(PlanBase):
     def join(
         self,
         other: Frame,
-        on: Expr | str | Iterable[str] | None = None,
+        on: Expr | str | Iterable[str] | Callable[[Side, Side], object] | None = None,
         how: str = "inner",
         suffix: str | None = None,
     ) -> Frame:
         """Join to another frame.
 
-        `on` is a column name, a list of them for a USING join, or an
-        expression for an ON join. Inside that expression the two sides are
-        `l` and `r`, so `col("l.id") == col("r.order_id")` is unambiguous even
-        when both carry the same column name.
+        `on` is a column name, or a list of them, for a USING join, where the
+        column is merged. Any other condition is a function of the two sides,
+        `on=lambda l, r: l["id"] == r["order_id"]`, in which `l["id"]` is that
+        side's column; it runs once, when the join is built, and must return
+        an expression. A condition that names no side may be an expression.
 
         `how` is inner, left, right, outer, semi, anti, cross, positional,
         natural or asof.
@@ -1218,11 +1299,30 @@ class Frame(PlanBase):
         the right side's copies instead.
         """
         using: tuple[str, ...] = ()
+        condition: Expr | None = None
         if isinstance(on, str):
             using = (on,)
-        elif on is not None and not isinstance(on, Expr):
-            using = tuple(str(c) for c in on)
-        return Frame(Join(how.lower(), on if isinstance(on, Expr) else None, using, suffix), (self, other))
+        elif isinstance(on, Expr):
+            condition = on
+        elif callable(on):
+            built = on(Side("l"), Side("r"))
+            if not isinstance(built, Expr):
+                message = (
+                    f"the join condition returned {built!r}, which is not an expression; it runs once, when the "
+                    f"join is built, on the two sides, so its body must be built from their columns"
+                )
+                raise TypeError(message)
+            condition = built
+        elif on is not None:
+            keys = list(on)
+            if not all(isinstance(key, str) for key in keys):
+                message = (
+                    "a USING join takes column names; for a condition pass a function of the two sides, "
+                    "on=lambda left, right: ..."
+                )
+                raise TypeError(message)
+            using = tuple(keys)
+        return Frame(Join(how.lower(), condition, using, suffix), (self, other))
 
     def cross(self, other: Frame) -> Frame:
         """Every combination of rows from both frames."""
@@ -1245,7 +1345,7 @@ class Frame(PlanBase):
         return Frame(SetOp("EXCEPT"), (self, other))
 
     def __getitem__(self, name: object) -> Frame:
-        """A single column, as a plan.
+        """A single column, as a plan: `plan["x"]` narrows the plan, where `expr["x"]` reaches into a value.
 
         Takes `object` rather than `str` because Python will pass integers
         here on its own if it decides a plan is a sequence.
@@ -1446,20 +1546,24 @@ class Frame(PlanBase):
     def create(
         self,
         connection: Connection,
-        name: str,
+        name: str | tuple[str, ...],
         *,
         replace: bool = False,
         temporary: bool = False,
         parameters: Mapping[str, object] | None = None,
     ) -> int:
-        """Store the rows in a new table. Returns how many were written."""
+        """Store the rows in a new table, a tuple naming a qualified one. Returns how many were written."""
         prefix = "CREATE OR REPLACE" if replace else "CREATE"
         kind = "TEMPORARY TABLE" if temporary else "TABLE"
-        return self._run(connection, lambda q: f"{prefix} {kind} {qualified(name)} AS {q}", parameters)
+        target = identifier(name_parts(name, "table name"))
+        return self._run(connection, lambda q: f"{prefix} {kind} {target} AS {q}", parameters)
 
-    def insert_into(self, connection: Connection, name: str, *, parameters: Mapping[str, object] | None = None) -> int:
-        """Append the rows to a table that exists. Returns how many were added."""
-        return self._run(connection, lambda q: f"INSERT INTO {qualified(name)} {q}", parameters)
+    def insert_into(
+        self, connection: Connection, name: str | tuple[str, ...], *, parameters: Mapping[str, object] | None = None
+    ) -> int:
+        """Append the rows to a table that exists, a tuple naming a qualified one. Returns how many were added."""
+        target = identifier(name_parts(name, "table name"))
+        return self._run(connection, lambda q: f"INSERT INTO {target} {q}", parameters)
 
     def copy_to(
         self,
@@ -1578,6 +1682,10 @@ class Bound:
         self.plan = plan
         self.connection = connection
 
+    def render_parameterized(self, *, parameters: Mapping[str, object] | None = None) -> tuple[str, list[Any]]:
+        """The query as execution sends it: SQL with `$n` placeholders, and the values in order."""
+        return self.plan.render_parameterized(self.connection, parameters=parameters)
+
     def rows(self, *, parameters: Mapping[str, object] | None = None) -> list[tuple[Any, ...]]:
         """Every row, as tuples."""
         return self.plan.rows(self.connection, parameters=parameters)
@@ -1642,7 +1750,7 @@ class Bound:
 
     def create(
         self,
-        name: str,
+        name: str | tuple[str, ...],
         *,
         replace: bool = False,
         temporary: bool = False,
@@ -1651,7 +1759,7 @@ class Bound:
         """Store the rows in a new table."""
         return self.plan.create(self.connection, name, replace=replace, temporary=temporary, parameters=parameters)
 
-    def insert_into(self, name: str, *, parameters: Mapping[str, object] | None = None) -> int:
+    def insert_into(self, name: str | tuple[str, ...], *, parameters: Mapping[str, object] | None = None) -> int:
         """Append the rows to a table that exists."""
         return self.plan.insert_into(self.connection, name, parameters=parameters)
 
@@ -1761,25 +1869,27 @@ def sql(query: str) -> Frame:
     return Frame(Sql(query))
 
 
-def table(name: str) -> Frame:
-    """A plan reading a table or view, by name; a file name reads the file.
+def table(name: str | tuple[str, ...]) -> Frame:
+    """A plan reading a table or view by name; a file name reads the file.
 
-    `table("orders.csv")` and `table("data/*.parquet")` read the files, as
-    `FROM "orders.csv"` does: the engine picks the reader from the
-    extension. For the reader's options, use `read_csv` and its siblings.
+    A string is one name, quoted whole and never split: `table("orders.csv")`
+    and `table("data/*.parquet")` read the files as `FROM "orders.csv"` does,
+    and a table called `a.b` is `table("a.b")`. A qualified name is a tuple,
+    `table(("main", "orders"))`, at any depth. For a reader's options, use
+    `read_csv` and its siblings.
 
-    The name is quoted, so a name from outside the program cannot turn into
-    more SQL. What the table holds is the catalog's to say, and is asked of
-    whichever connection the plan runs on.
+    What the table holds is the catalog's to say, and is asked of whichever
+    connection the plan runs on.
     """
-    return Frame(Table(name))
+    return Frame(Table(name_parts(name, "table name")))
 
 
-def table_function(name: str, *args: object, **named: object) -> Frame:
+def table_function(name: str | tuple[str, ...], *args: object, **named: object) -> Frame:
     """A plan over a table function: `table_function("read_csv", "x.csv", header=True)`.
 
-    Any table function the engine has, extensions included, by its name and
-    arguments: positional ones as given, named ones as `name := value`. A
+    Any table function the engine has, extensions included, by its name, a
+    tuple for a schema-qualified one, and its arguments: positional ones as
+    given, named ones as `name := value`. A
     string, number or date is bound at execution; a list is a list; a dict
     is a struct; an expression is written as itself. `read_csv`,
     `read_parquet` and `read_json` are this with the name filled in.
@@ -1788,8 +1898,9 @@ def table_function(name: str, *args: object, **named: object) -> Frame:
         table_function("glob", "data/*.parquet")
         table_function("query_table", "orders")
     """
+    parts = name_parts(name, "function name")
     return Frame(
-        TableFunction(name, tuple(_argument(a) for a in args), tuple((k, _argument(v)) for k, v in named.items()))
+        TableFunction(parts, tuple(_argument(a) for a in args), tuple((k, _argument(v)) for k, v in named.items()))
     )
 
 

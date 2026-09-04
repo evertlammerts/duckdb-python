@@ -223,6 +223,7 @@ jobs:
         run: |
           uv run --no-sync python scripts/gen_aggregates.py --check
           uv run --no-sync python scripts/gen_func_namespaces.py --check
+          uv run --no-sync python scripts/gen_keywords.py --check
 
       # The parity measurement, never a gate: the old client's adopted tests
       # run against this build and the report always exits 0. Two numbers:

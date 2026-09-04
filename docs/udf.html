@@ -60,7 +60,7 @@ sql(<span class="s">"SELECT plus_one(i) FROM range(5) t(i)"</span>).rows(con)   
   <h2>Registering</h2>
   <pre><code>con.create_function(name, function, parameters, returns, *, null_handling=<span class="s">"default"</span>, stability=<span class="s">"consistent"</span>)</code></pre>
   <dl class="ref">
-    <dt>name</dt><dd>The SQL name. Registering a name that is already registered replaces the function.</dd>
+    <dt>name</dt><dd>The SQL name, a bare string: the engine registers a Python function by its bare name, so it cannot be schema-qualified. Registering a name that is already registered replaces the function.</dd>
     <dt>function</dt><dd>Any callable taking one positional argument per parameter: a lambda, a <code>def</code>, a bound method, a <code>functools.partial</code>. A closure keeps its state.</dd>
     <dt>parameters</dt><dd>The argument types, as SQL type text: <code>["VARCHAR", "BIGINT"]</code>, <code>["STRUCT(a INTEGER)"]</code>, <code>[]</code> for a function of no arguments. Not Python types.</dd>
     <dt>returns</dt><dd>The result type, as SQL type text.</dd>

@@ -68,7 +68,7 @@ sql(<span class="s">"SELECT id FROM big_orders(1000)"</span>).rows(con)    <span
   <p>A macro is a piece of SQL with a name and parameters, kept in the database. When a query calls it, the engine puts the body in place of the call, with the arguments in place of the parameters, and then plans the query as if you had written it out. No row ever reaches Python, and there is nothing to call at run time.</p>
   <pre><code>con.create_macro(name, parameters, body, *, replace=<span class="k">False</span>, temporary=<span class="k">False</span>)</code></pre>
   <dl class="ref">
-    <dt>name</dt><dd>The SQL name, quoted. A dotted name puts the macro in a schema: <code>"util.add_up"</code>.</dd>
+    <dt>name</dt><dd>The SQL name, quoted whole. A tuple puts the macro in a schema: <code>("util", "add_up")</code>.</dd>
     <dt>parameters</dt><dd>A list of names, or <code>(name, default)</code> pairs. Every name after the first one with a default must have one too; the engine refuses the definition otherwise.</dd>
     <dt>body</dt><dd>An expression, which makes a scalar macro, or a plan, which makes a table macro. Anything else raises <code>TypeError</code>.</dd>
     <dt>replace</dt><dd>Redefine a macro of that name. Without it a second definition raises <code>CatalogError</code>.</dd>
@@ -134,7 +134,7 @@ sql(<span class="s">"SELECT m(1), m(1, 2)"</span>).rows(con)                  <s
 
 table(<span class="s">"orders"</span>).select(fn(<span class="s">"add_up"</span>, col(<span class="s">"total"</span>), <span class="s">10</span>).alias(<span class="s">"x"</span>)).rows(con)
 table_function(<span class="s">"big_orders"</span>, <span class="s">1000</span>).select(<span class="s">"id"</span>).rows(con)             <span class="c"># [(1,), (3,)]</span>
-table_function(<span class="s">"big_orders"</span>, floor=<span class="s">1000</span>).render()                   <span class="c"># SELECT * FROM "big_orders"("floor" := 1000)</span>
+table_function(<span class="s">"big_orders"</span>, floor=<span class="s">1000</span>).render()                   <span class="c"># SELECT * FROM big_orders("floor" := 1000)</span>
 
 sql(<span class="s">"SELECT add_up(2, 5) AS v"</span>).types(con)      <span class="c"># ['INTEGER']</span>
 table_function(<span class="s">"big_orders"</span>, <span class="s">1000</span>).columns(con)   <span class="c"># ['id', 'customer', 'region', 'total']</span></code></pre>
@@ -146,8 +146,8 @@ table_function(<span class="s">"big_orders"</span>, <span class="s">1000</span>)
 con.create_macro(<span class="s">"nope"</span>, [<span class="s">"x"</span>], col(<span class="s">"x"</span>) + col(<span class="s">"y"</span>))
 <span class="c"># ProgrammingError: Referenced column "y" was not found because the FROM clause is missing</span></code></pre>
   <p>Parameters have no types, so anything that depends on the arguments' types is settled at each call. <code>create_macro("up", ["s"], col("s").str().upper())</code> is accepted; <code>up('abc')</code> gives <code>'ABC'</code> and <code>up(1)</code> is refused with the message <code>upper</code> gives an integer: no function matches the given name and argument types.</p>
-  <p>Tables are looked up again at every call. The body is text the engine substitutes, not a result it kept, so a macro over <code>orders</code> sees rows inserted after it was defined. One consequence: an unqualified table name in the body resolves from the caller's search path, not from the schema the macro lives in. A macro created as <code>util.rate_of</code> that reads <code>rates</code> must say <code>table("util.rates")</code>; with <code>table("rates")</code> the engine refuses the definition when <code>rates</code> is not on the definer's own path.</p>
-  <pre><code>con.create_macro(<span class="s">"util.rate_of"</span>, [<span class="s">"p"</span>], table(<span class="s">"rates"</span>).select((col(<span class="s">"p"</span>) * col(<span class="s">"rate"</span>)).alias(<span class="s">"v"</span>)))
+  <p>Tables are looked up again at every call. The body is text the engine substitutes, not a result it kept, so a macro over <code>orders</code> sees rows inserted after it was defined. One consequence: an unqualified table name in the body resolves from the caller's search path, not from the schema the macro lives in. A macro created as <code>("util", "rate_of")</code> that reads <code>rates</code> must say <code>table(("util", "rates"))</code>; with <code>table("rates")</code> the engine refuses the definition when <code>rates</code> is not on the definer's own path.</p>
+  <pre><code>con.create_macro((<span class="s">"util"</span>, <span class="s">"rate_of"</span>), [<span class="s">"p"</span>], table(<span class="s">"rates"</span>).select((col(<span class="s">"p"</span>) * col(<span class="s">"rate"</span>)).alias(<span class="s">"v"</span>)))
 <span class="c"># CatalogError: Table with name rates does not exist!</span>
 <span class="c"># Did you mean "util.rates"?</span></code></pre>
 
@@ -314,7 +314,7 @@ table_function(<span class="s">"parquet_metadata"</span>, <span class="s">"order
 <span class="c"># [(0, 'id', 3), (0, 'customer', 3), (0, 'region', 3), (0, 'total', 3)]</span>
 
 table_function(<span class="s">"read_json"</span>, <span class="s">"events.json"</span>, format=<span class="s">"array"</span>).render()
-<span class="c"># SELECT * FROM "read_json"('events.json', "format" := 'array')</span>
+<span class="c"># SELECT * FROM read_json('events.json', "format" := 'array')</span>
 
 table_function(<span class="s">"tpch_queries"</span>).select(<span class="s">"query_nr"</span>).head(<span class="s">2</span>).rows(con)   <span class="c"># [(1,), (2,)]</span>
 

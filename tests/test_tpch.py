@@ -135,16 +135,18 @@ class TestExpressedDirectly:
         )
         actual = (
             duckdb.table("customer")
-            .join(orders, on=col("l.c_custkey") == col("r.o_custkey"))
-            .join(duckdb.table("lineitem"), on=col("l.o_orderkey") == col("r.l_orderkey"))
+            .join(orders, on=lambda left, right: left["c_custkey"] == right["o_custkey"])
+            .join(duckdb.table("lineitem"), on=lambda left, right: left["o_orderkey"] == right["l_orderkey"])
             .join(
                 duckdb.table("supplier"),
-                on=(col("l.l_suppkey") == col("r.s_suppkey")) & (col("l.c_nationkey") == col("r.s_nationkey")),
+                on=lambda left, right: (
+                    (left["l_suppkey"] == right["s_suppkey"]) & (left["c_nationkey"] == right["s_nationkey"])
+                ),
             )
-            .join(duckdb.table("nation"), on=col("l.s_nationkey") == col("r.n_nationkey"))
+            .join(duckdb.table("nation"), on=lambda left, right: left["s_nationkey"] == right["n_nationkey"])
             .join(
                 duckdb.table("region").filter(col("r_name") == "ASIA"),
-                on=col("l.n_regionkey") == col("r.r_regionkey"),
+                on=lambda left, right: left["n_regionkey"] == right["r_regionkey"],
             )
             .group_by(col("n_name"))
             .agg(revenue().sum().alias("revenue"))
@@ -174,12 +176,16 @@ class TestExpressedDirectly:
             duckdb.table("supplier")
             .join(
                 duckdb.table("lineitem").filter(col("l_shipdate").between(date("1995-01-01"), date("1996-12-31"))),
-                on=col("l.s_suppkey") == col("r.l_suppkey"),
+                on=lambda left, right: left["s_suppkey"] == right["l_suppkey"],
             )
-            .join(duckdb.table("orders"), on=col("l.l_orderkey") == col("r.o_orderkey"))
-            .join(duckdb.table("customer"), on=col("l.o_custkey") == col("r.c_custkey"))
-            .join(duckdb.table("nation"), on=col("l.s_nationkey") == col("r.n_nationkey"))
-            .join(duckdb.table("nation"), on=col("l.c_nationkey") == col("r.n_nationkey"), suffix="_cust")
+            .join(duckdb.table("orders"), on=lambda left, right: left["l_orderkey"] == right["o_orderkey"])
+            .join(duckdb.table("customer"), on=lambda left, right: left["o_custkey"] == right["c_custkey"])
+            .join(duckdb.table("nation"), on=lambda left, right: left["s_nationkey"] == right["n_nationkey"])
+            .join(
+                duckdb.table("nation"),
+                on=lambda left, right: left["c_nationkey"] == right["n_nationkey"],
+                suffix="_cust",
+            )
             .filter(
                 ((col("n_name") == "FRANCE") & (col("n_name_cust") == "GERMANY"))
                 | ((col("n_name") == "GERMANY") & (col("n_name_cust") == "FRANCE"))
@@ -197,19 +203,23 @@ class TestExpressedDirectly:
         actual = (
             duckdb.table("part")
             .filter(col("p_type") == "ECONOMY ANODIZED STEEL")
-            .join(duckdb.table("lineitem"), on=col("l.p_partkey") == col("r.l_partkey"))
-            .join(duckdb.table("supplier"), on=col("l.l_suppkey") == col("r.s_suppkey"))
+            .join(duckdb.table("lineitem"), on=lambda left, right: left["p_partkey"] == right["l_partkey"])
+            .join(duckdb.table("supplier"), on=lambda left, right: left["l_suppkey"] == right["s_suppkey"])
             .join(
                 duckdb.table("orders").filter(col("o_orderdate").between(date("1995-01-01"), date("1996-12-31"))),
-                on=col("l.l_orderkey") == col("r.o_orderkey"),
+                on=lambda left, right: left["l_orderkey"] == right["o_orderkey"],
             )
-            .join(duckdb.table("customer"), on=col("l.o_custkey") == col("r.c_custkey"))
-            .join(duckdb.table("nation"), on=col("l.c_nationkey") == col("r.n_nationkey"))
+            .join(duckdb.table("customer"), on=lambda left, right: left["o_custkey"] == right["c_custkey"])
+            .join(duckdb.table("nation"), on=lambda left, right: left["c_nationkey"] == right["n_nationkey"])
             .join(
                 duckdb.table("region").filter(col("r_name") == "AMERICA"),
-                on=col("l.n_regionkey") == col("r.r_regionkey"),
+                on=lambda left, right: left["n_regionkey"] == right["r_regionkey"],
             )
-            .join(duckdb.table("nation"), on=col("l.s_nationkey") == col("r.n_nationkey"), suffix="_supp")
+            .join(
+                duckdb.table("nation"),
+                on=lambda left, right: left["s_nationkey"] == right["n_nationkey"],
+                suffix="_supp",
+            )
             .with_columns(o_year=fn("year", col("o_orderdate")), volume=revenue())
             .group_by(col("o_year"))
             .agg(
@@ -225,14 +235,16 @@ class TestExpressedDirectly:
         actual = (
             duckdb.table("part")
             .filter(col("p_name").like("%green%"))
-            .join(duckdb.table("lineitem"), on=col("l.p_partkey") == col("r.l_partkey"))
-            .join(duckdb.table("supplier"), on=col("l.l_suppkey") == col("r.s_suppkey"))
+            .join(duckdb.table("lineitem"), on=lambda left, right: left["p_partkey"] == right["l_partkey"])
+            .join(duckdb.table("supplier"), on=lambda left, right: left["l_suppkey"] == right["s_suppkey"])
             .join(
                 duckdb.table("partsupp"),
-                on=(col("l.l_suppkey") == col("r.ps_suppkey")) & (col("l.l_partkey") == col("r.ps_partkey")),
+                on=lambda left, right: (
+                    (left["l_suppkey"] == right["ps_suppkey"]) & (left["l_partkey"] == right["ps_partkey"])
+                ),
             )
-            .join(duckdb.table("orders"), on=col("l.l_orderkey") == col("r.o_orderkey"))
-            .join(duckdb.table("nation"), on=col("l.s_nationkey") == col("r.n_nationkey"))
+            .join(duckdb.table("orders"), on=lambda left, right: left["l_orderkey"] == right["o_orderkey"])
+            .join(duckdb.table("nation"), on=lambda left, right: left["s_nationkey"] == right["n_nationkey"])
             .with_columns(
                 nation=col("n_name"),
                 o_year=fn("year", col("o_orderdate")),
@@ -250,12 +262,12 @@ class TestExpressedDirectly:
         )
         actual = (
             duckdb.table("customer")
-            .join(orders, on=col("l.c_custkey") == col("r.o_custkey"))
+            .join(orders, on=lambda left, right: left["c_custkey"] == right["o_custkey"])
             .join(
                 duckdb.table("lineitem").filter(col("l_returnflag") == "R"),
-                on=col("l.o_orderkey") == col("r.l_orderkey"),
+                on=lambda left, right: left["o_orderkey"] == right["l_orderkey"],
             )
-            .join(duckdb.table("nation"), on=col("l.c_nationkey") == col("r.n_nationkey"))
+            .join(duckdb.table("nation"), on=lambda left, right: left["c_nationkey"] == right["n_nationkey"])
             .group_by(
                 col("c_custkey"),
                 col("c_name"),
@@ -276,10 +288,10 @@ class TestExpressedDirectly:
     def test_q11(self, tpch: duckdb.Connection) -> None:
         german = (
             duckdb.table("partsupp")
-            .join(duckdb.table("supplier"), on=col("l.ps_suppkey") == col("r.s_suppkey"))
+            .join(duckdb.table("supplier"), on=lambda left, right: left["ps_suppkey"] == right["s_suppkey"])
             .join(
                 duckdb.table("nation").filter(col("n_name") == "GERMANY"),
-                on=col("l.s_nationkey") == col("r.n_nationkey"),
+                on=lambda left, right: left["s_nationkey"] == right["n_nationkey"],
             )
         )
         value = (col("ps_supplycost") * col("ps_availqty")).sum()
@@ -305,7 +317,7 @@ class TestExpressedDirectly:
         )
         actual = (
             duckdb.table("orders")
-            .join(lineitem, on=col("l.o_orderkey") == col("r.l_orderkey"))
+            .join(lineitem, on=lambda left, right: left["o_orderkey"] == right["l_orderkey"])
             .group_by(col("l_shipmode"))
             .agg(
                 when(urgent).then(1).otherwise(0).sum().alias("high_line_count"),
@@ -320,9 +332,9 @@ class TestExpressedDirectly:
             (col("l_shipdate") >= date("1995-09-01")) & (col("l_shipdate") < date("1995-10-01"))
         )
         promo = when(col("p_type").like("PROMO%")).then(revenue()).otherwise(0).sum()
-        actual = lineitem.join(duckdb.table("part"), on=col("l.l_partkey") == col("r.p_partkey")).aggregate(
-            (sql_expr("100.00") * promo / revenue().sum()).alias("promo_revenue")
-        )
+        actual = lineitem.join(
+            duckdb.table("part"), on=lambda left, right: left["l_partkey"] == right["p_partkey"]
+        ).aggregate((sql_expr("100.00") * promo / revenue().sum()).alias("promo_revenue"))
         assert actual.rows(tpch) == answer(tpch, "q14")
 
     def test_q15(self, tpch: duckdb.Connection) -> None:
@@ -337,7 +349,7 @@ class TestExpressedDirectly:
         best = totals.aggregate(col("total_revenue").max().alias("m"))
         actual = (
             duckdb.table("supplier")
-            .join(totals, on=col("l.s_suppkey") == col("r.supplier_no"))
+            .join(totals, on=lambda left, right: left["s_suppkey"] == right["supplier_no"])
             .filter(col("total_revenue") == best.scalar())
             .select("s_suppkey", "s_name", "s_address", "s_phone", "total_revenue")
             .sort(col("s_suppkey"))
@@ -356,7 +368,7 @@ class TestExpressedDirectly:
         actual = (
             duckdb.table("partsupp")
             .filter(~col("ps_suppkey").isin(complained))
-            .join(parts, on=col("l.ps_partkey") == col("r.p_partkey"))
+            .join(parts, on=lambda left, right: left["ps_partkey"] == right["p_partkey"])
             .group_by(col("p_brand"), col("p_type"), col("p_size"))
             .agg(col("ps_suppkey").n_unique().alias("supplier_cnt"))
             .sort(col("supplier_cnt").desc(), col("p_brand"), col("p_type"), col("p_size"))
@@ -375,9 +387,9 @@ class TestExpressedDirectly:
             duckdb.table("customer")
             .join(
                 duckdb.table("orders").filter(col("o_orderkey").isin(heavy)),
-                on=col("l.c_custkey") == col("r.o_custkey"),
+                on=lambda left, right: left["c_custkey"] == right["o_custkey"],
             )
-            .join(duckdb.table("lineitem"), on=col("l.o_orderkey") == col("r.l_orderkey"))
+            .join(duckdb.table("lineitem"), on=lambda left, right: left["o_orderkey"] == right["l_orderkey"])
             .group_by(
                 col("c_name"),
                 col("c_custkey"),
@@ -404,7 +416,7 @@ class TestExpressedDirectly:
 
         actual = (
             duckdb.table("lineitem")
-            .join(duckdb.table("part"), on=col("l.l_partkey") == col("r.p_partkey"))
+            .join(duckdb.table("part"), on=lambda left, right: left["l_partkey"] == right["p_partkey"])
             .filter(
                 branch("Brand#12", ["SM CASE", "SM BOX", "SM PACK", "SM PKG"], 1, 5)
                 | branch("Brand#23", ["MED BAG", "MED BOX", "MED PKG", "MED PACK"], 10, 10)
@@ -436,11 +448,11 @@ class TestExpressedAfterRewriting:
         # used by both the grouping and the join, so it is computed once.
         europe = (
             duckdb.table("partsupp")
-            .join(duckdb.table("supplier"), on=col("l.ps_suppkey") == col("r.s_suppkey"))
-            .join(duckdb.table("nation"), on=col("l.s_nationkey") == col("r.n_nationkey"))
+            .join(duckdb.table("supplier"), on=lambda left, right: left["ps_suppkey"] == right["s_suppkey"])
+            .join(duckdb.table("nation"), on=lambda left, right: left["s_nationkey"] == right["n_nationkey"])
             .join(
                 duckdb.table("region").filter(col("r_name") == "EUROPE"),
-                on=col("l.n_regionkey") == col("r.r_regionkey"),
+                on=lambda left, right: left["n_regionkey"] == right["r_regionkey"],
             )
         )
         cheapest = europe.group_by(col("ps_partkey").alias("cheap_partkey")).agg(
@@ -449,10 +461,12 @@ class TestExpressedAfterRewriting:
         actual = (
             duckdb.table("part")
             .filter((col("p_size") == 15) & col("p_type").like("%BRASS"))
-            .join(europe, on=col("l.p_partkey") == col("r.ps_partkey"))
+            .join(europe, on=lambda left, right: left["p_partkey"] == right["ps_partkey"])
             .join(
                 cheapest,
-                on=(col("l.p_partkey") == col("r.cheap_partkey")) & (col("l.ps_supplycost") == col("r.min_cost")),
+                on=lambda left, right: (
+                    (left["p_partkey"] == right["cheap_partkey"]) & (left["ps_supplycost"] == right["min_cost"])
+                ),
             )
             .select("s_acctbal", "s_name", "n_name", "p_partkey", "p_mfgr", "s_address", "s_phone", "s_comment")
             .sort(col("s_acctbal").desc(), col("n_name"), col("s_name"), col("p_partkey"))
@@ -468,7 +482,7 @@ class TestExpressedAfterRewriting:
             .filter((col("o_orderdate") >= date("1993-07-01")) & (col("o_orderdate") < date("1993-10-01")))
             .join(
                 duckdb.table("lineitem").filter(col("l_commitdate") < col("l_receiptdate")),
-                on=col("l.o_orderkey") == col("r.l_orderkey"),
+                on=lambda left, right: left["o_orderkey"] == right["l_orderkey"],
                 how="semi",
             )
             .group_by(col("o_orderpriority"))
@@ -485,7 +499,7 @@ class TestExpressedAfterRewriting:
         orders = duckdb.table("orders").filter(~col("o_comment").like("%special%requests%"))
         per_customer = (
             duckdb.table("customer")
-            .join(orders, on=col("l.c_custkey") == col("r.o_custkey"), how="left")
+            .join(orders, on=lambda left, right: left["c_custkey"] == right["o_custkey"], how="left")
             .group_by(col("c_custkey"))
             .agg(col("o_orderkey").count().alias("c_count"))
         )
@@ -508,9 +522,9 @@ class TestExpressedAfterRewriting:
             duckdb.table("lineitem")
             .join(
                 duckdb.table("part").filter((col("p_brand") == "Brand#23") & (col("p_container") == "MED BOX")),
-                on=col("l.l_partkey") == col("r.p_partkey"),
+                on=lambda left, right: left["l_partkey"] == right["p_partkey"],
             )
-            .join(thresholds, on=col("l.l_partkey") == col("r.t_partkey"))
+            .join(thresholds, on=lambda left, right: left["l_partkey"] == right["t_partkey"])
             .filter(col("l_quantity") < col("threshold"))
             .aggregate((col("l_extendedprice").sum() / sql_expr("7.0")).alias("avg_yearly"))
         )
@@ -533,7 +547,9 @@ class TestExpressedAfterRewriting:
             .filter(col("ps_partkey").isin(forest))
             .join(
                 shipped,
-                on=(col("l.ps_partkey") == col("r.q_partkey")) & (col("l.ps_suppkey") == col("r.q_suppkey")),
+                on=lambda left, right: (
+                    (left["ps_partkey"] == right["q_partkey"]) & (left["ps_suppkey"] == right["q_suppkey"])
+                ),
             )
             .filter(col("ps_availqty") > col("half"))
             .select(col("ps_suppkey"))
@@ -543,7 +559,7 @@ class TestExpressedAfterRewriting:
             .filter(col("s_suppkey").isin(excess))
             .join(
                 duckdb.table("nation").filter(col("n_name") == "CANADA"),
-                on=col("l.s_nationkey") == col("r.n_nationkey"),
+                on=lambda left, right: left["s_nationkey"] == right["n_nationkey"],
             )
             .select("s_name", "s_address")
             .sort(col("s_name"))
@@ -555,17 +571,20 @@ class TestExpressedAfterRewriting:
         # anti join, chained. Both correlate on more than equality, which an
         # `on` expression carries.
         late = duckdb.table("lineitem").filter(col("l_receiptdate") > col("l_commitdate"))
-        another_supplier = (col("l.l_orderkey") == col("r.l_orderkey")) & (col("l.l_suppkey") != col("r.l_suppkey"))
+
+        def another_supplier(left: duckdb.Side, right: duckdb.Side) -> duckdb.Expr:
+            return (left["l_orderkey"] == right["l_orderkey"]) & (left["l_suppkey"] != right["l_suppkey"])
+
         actual = (
             duckdb.table("supplier")
-            .join(late, on=col("l.s_suppkey") == col("r.l_suppkey"))
+            .join(late, on=lambda left, right: left["s_suppkey"] == right["l_suppkey"])
             .join(
                 duckdb.table("orders").filter(col("o_orderstatus") == "F"),
-                on=col("l.l_orderkey") == col("r.o_orderkey"),
+                on=lambda left, right: left["l_orderkey"] == right["o_orderkey"],
             )
             .join(
                 duckdb.table("nation").filter(col("n_name") == "SAUDI ARABIA"),
-                on=col("l.s_nationkey") == col("r.n_nationkey"),
+                on=lambda left, right: left["s_nationkey"] == right["n_nationkey"],
             )
             .join(duckdb.table("lineitem"), on=another_supplier, how="semi")
             .join(late, on=another_supplier, how="anti")
@@ -590,7 +609,7 @@ class TestExpressedAfterRewriting:
             duckdb.table("customer")
             .filter(code.isin(codes))
             .filter(col("c_acctbal") > average.scalar())
-            .join(duckdb.table("orders"), on=col("l.c_custkey") == col("r.o_custkey"), how="anti")
+            .join(duckdb.table("orders"), on=lambda left, right: left["c_custkey"] == right["o_custkey"], how="anti")
             .with_columns(cntrycode=code)
             .group_by(col("cntrycode"))
             .agg(sql_expr("count(*)").alias("numcust"), col("c_acctbal").sum().alias("totacctbal"))

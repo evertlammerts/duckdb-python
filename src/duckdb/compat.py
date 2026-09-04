@@ -59,7 +59,7 @@ from .exceptions import (
     TransactionError,
     Warning,
 )
-from .expr import qualified, quote
+from .expr import Col, identifier, quote
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
@@ -433,11 +433,87 @@ def _expression_operand(value: object) -> Expr:
     return lit(value)
 
 
-def ColumnExpression(*parts: str) -> CompatExpression:
-    """A column reference, dotted or given in parts."""
-    from .expr import col
+def _parse_name(text: str) -> tuple[str, ...]:
+    """Split a dotted name as the old client did, with the engine's qualified-name grammar.
 
-    return CompatExpression(col(".".join(parts)))
+    A quote opens a part and must close it, `""` inside quotes is a literal
+    quote, dots separate parts. The messages are the engine's own.
+    """
+    parts: list[str] = []
+    entry = ""
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch == '"':
+            if entry:
+                message = f"Parser Error: Unexpected quote in the middle of a qualified name component! (input: {text})"
+                raise ParserError(message)
+            i += 1
+            while True:
+                if i >= n:
+                    message = f"Parser Error: Unterminated quote in qualified name! (input: {text})"
+                    raise ParserError(message)
+                if text[i] == '"':
+                    if i + 1 < n and text[i + 1] == '"':
+                        entry += '"'
+                        i += 2
+                        continue
+                    if not entry:
+                        message = f"Parser Error: Zero-length delimited identifier in qualified name! (input: {text})"
+                        raise ParserError(message)
+                    i += 1
+                    if i < n and text[i] != ".":
+                        message = (
+                            "Parser Error: Unexpected character after a quoted identifier in a qualified name! "
+                            f"(input: {text})"
+                        )
+                        raise ParserError(message)
+                    break
+                entry += text[i]
+                i += 1
+            continue
+        if ch == ".":
+            parts.append(entry)
+            entry = ""
+            i += 1
+            continue
+        entry += ch
+        i += 1
+    if entry:
+        parts.append(entry)
+    return tuple(parts)
+
+
+def _native_name(text: str, what: str = "name") -> tuple[str, ...]:
+    """A dotted name split the old way, checked as the native verbs check names, refused in the old words."""
+    from .expr import name_parts
+
+    parts = _parse_name(text)
+    try:
+        return name_parts(parts, what)
+    except (TypeError, ValueError) as reason:
+        message = f"Invalid Input Error: {reason}"
+        raise InvalidInputException(message) from None
+
+
+def ColumnExpression(*parts: str) -> CompatExpression:
+    """A column reference: a dotted string is split as the old client split it, or the parts are given.
+
+    An empty name is refused here; the old client reached an internal error
+    with it. A part that is not a string is written as its text, as before.
+    """
+    from .expr import star
+
+    if not parts:
+        message = "Invalid Input Error: ColumnExpression needs a column name"
+        raise InvalidInputException(message)
+    if len(parts) == 1:
+        name = str(parts[0])
+        if name == "*":
+            return CompatExpression(star())
+        return CompatExpression(Col(_native_name(name, "column name")))
+    return CompatExpression(Col(tuple(str(part) for part in parts)))
 
 
 def ConstantExpression(value: object) -> CompatExpression:
@@ -762,6 +838,8 @@ class CompatRelation:
 
     def update(self, set: Mapping[str, object], *, condition: object = None) -> None:
         """UPDATE the table this relation reads; a table-relation verb, as it was."""
+        if self._connection._raw is None:
+            raise ConnectionException(_CLOSED_MESSAGE)
         from .expr import render_literal
 
         if self._table is None:
@@ -777,7 +855,7 @@ class CompatRelation:
 
         assignments = ", ".join(f"{quote(name)} = {rendered(value)}" for name, value in set.items())
         where = f" WHERE {_operand(condition)}" if condition is not None else ""
-        self._statement(f"UPDATE {qualified(self._table)} SET {assignments}{where}")
+        self._statement(f"UPDATE {identifier(_parse_name(self._table))} SET {assignments}{where}")
 
     def select_types(self, types: Iterable[object]) -> CompatRelation:
         """The columns whose type matches any of the given type texts."""
@@ -1247,8 +1325,10 @@ class CompatRelation:
         """A new table holding this relation's rows, through the native verb."""
         from .frame import sql as frame_sql
 
+        if self._connection._raw is None:
+            raise ConnectionException(_CLOSED_MESSAGE)
         try:
-            frame_sql(self._sql).create(self._connection, table_name)
+            frame_sql(self._sql).create(self._connection, _native_name(table_name, "table name"))
         except InterfaceError:
             raise ConnectionException(_CLOSED_MESSAGE) from None
 
@@ -1257,7 +1337,9 @@ class CompatRelation:
     def create_view(self, view_name: str, replace: bool = True) -> CompatRelation:
         """A view over this relation's SQL, effective immediately."""
         prefix = "CREATE OR REPLACE VIEW" if replace else "CREATE VIEW"
-        self._statement(f"{prefix} {qualified(view_name)} AS {self._sql}")
+        if self._connection._raw is None:
+            raise ConnectionException(_CLOSED_MESSAGE)
+        self._statement(f"{prefix} {identifier(_parse_name(view_name))} AS {self._sql}")
         return self
 
     to_view = create_view
@@ -1266,8 +1348,10 @@ class CompatRelation:
         """Append this relation's rows to a table by position, through the native verb."""
         from .frame import sql as frame_sql
 
+        if self._connection._raw is None:
+            raise ConnectionException(_CLOSED_MESSAGE)
         try:
-            frame_sql(self._sql).insert_into(self._connection, table_name)
+            frame_sql(self._sql).insert_into(self._connection, _native_name(table_name, "table name"))
         except InterfaceError:
             raise ConnectionException(_CLOSED_MESSAGE) from None
 
@@ -1284,7 +1368,7 @@ class CompatRelation:
             raise ConnectionException(_CLOSED_MESSAGE)
         row = tuple(cast("Iterable[Any]", values))
         try:
-            frame_values([row], self.columns).insert_into(self._connection, self._table)
+            frame_values([row], self.columns).insert_into(self._connection, _native_name(self._table, "table name"))
         except InterfaceError:
             raise ConnectionException(_CLOSED_MESSAGE) from None
 
@@ -1839,11 +1923,11 @@ class CompatConnection(Connection):
 
     def table(self, name: str) -> CompatRelation:
         """A relation reading a table by name."""
-        return CompatRelation(self, f"SELECT * FROM {qualified(name)}", table=name, name=name)
+        return CompatRelation(self, f"SELECT * FROM {identifier(_parse_name(name))}", table=name, name=name)
 
     def view(self, name: str) -> CompatRelation:
         """A relation reading a view by name."""
-        return CompatRelation(self, f"SELECT * FROM {qualified(name)}", kind="VIEW_RELATION", name=name)
+        return CompatRelation(self, f"SELECT * FROM {identifier(_parse_name(name))}", kind="VIEW_RELATION", name=name)
 
     def table_function(self, name: str, params: object = None) -> CompatRelation:
         """A relation over a table function, through the native source."""
@@ -1856,7 +1940,7 @@ class CompatConnection(Connection):
             message = "'params' has to be a list of parameters"
             raise InvalidInputException(message)
         with suspended_sinks():
-            sql = frame_table_function(name, *params).render()
+            sql = frame_table_function(_native_name(name, "function name"), *params).render()
         return CompatRelation(self, sql)
 
     def begin(self) -> CompatConnection:

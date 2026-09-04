@@ -20,10 +20,13 @@ import copy
 import datetime
 import decimal
 import inspect
+import re
+import string
 import uuid
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from ._aggregates import AggregateMethods
+from ._keywords import KEYWORDS
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator
@@ -33,6 +36,7 @@ if TYPE_CHECKING:
 __all__ = [
     "Expr",
     "ParamSink",
+    "Side",
     "coalesce",
     "col",
     "count_all",
@@ -51,6 +55,14 @@ def quote(name: str) -> str:
     return f'"{escaped}"'
 
 
+_ASCII_LOWER = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
+
+
+def fold_name(name: str) -> str:
+    """A name as the engine compares names: ASCII case folded, every other character as written."""
+    return name.translate(_ASCII_LOWER)
+
+
 class PlanBase:
     """What an expression knows about a plan: that it renders to a query.
 
@@ -64,9 +76,39 @@ class PlanBase:
         raise NotImplementedError
 
 
-def qualified(name: str) -> str:
-    """A dotted name, quoted part by part so `main.orders` stays two identifiers."""
-    return ".".join(quote(part) for part in name.split("."))
+def name_parts(name: object, what: str = "name") -> tuple[str, ...]:
+    """A string as a one-part path, a tuple of strings as a qualified path. Nothing is ever split."""
+    parts = (name,) if isinstance(name, str) else name
+    if not isinstance(parts, tuple) or not all(isinstance(part, str) for part in parts):
+        message = f"a {what} is a string, or a tuple of strings for a qualified one, not {name!r}"
+        raise TypeError(message)
+    if not parts or not all(parts):
+        message = f"a {what} cannot be empty: {name!r}"
+        raise ValueError(message)
+    return parts
+
+
+def identifier(parts: tuple[str, ...]) -> str:
+    """The SQL for a name's parts, each quoted, joined by dots. The parts were checked where they were made."""
+    return ".".join(quote(part) for part in parts)
+
+
+plain_identifier = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def function_name(name: str | tuple[str, ...]) -> str:
+    """The SQL for a function's name, written as the engine writes an identifier: bare unless it must be quoted.
+
+    A plain identifier that is not one of the engine's keywords is written
+    bare, anything else quoted, which is the engine's own rule and keeps
+    `sum("x")` readable. Never split. The parser's own forms, COALESCE among
+    them, are syntax rather than functions and refuse a quoted name, so they
+    are not rendered through here.
+    """
+    return ".".join(
+        part if plain_identifier.match(part) and fold_name(part) not in KEYWORDS else quote(part)
+        for part in name_parts(name, "function name")
+    )
 
 
 # What an operand may be without an explicit lit(). The temporal, decimal and
@@ -195,7 +237,9 @@ def render_literal(value: object) -> str:
             return "'Infinity'::DOUBLE"
         if value == float("-inf"):
             return "'-Infinity'::DOUBLE"
-        return repr(value)
+        # A Python float is a double. Written bare, the engine would read 1.5
+        # as a DECIMAL literal, where a bound float arrives as DOUBLE.
+        return f"{value!r}::DOUBLE"
     if isinstance(value, str):
         escaped = value.replace("'", "''")
         return f"'{escaped}'"
@@ -629,6 +673,19 @@ class Expr(AggregateMethods, FuncNamespaces):
     def __neg__(self) -> Expr:
         return Unary("-", self)
 
+    def __getitem__(self, key: object) -> Expr:
+        """A struct field by name, a list element by position, or a map entry by key."""
+        if isinstance(key, bool) or not isinstance(key, (str, int)):
+            message = f"an expression is indexed by a field name or a position, not by {type(key).__name__}"
+            raise TypeError(message)
+        return Index(self, key)
+
+    def __iter__(self) -> Iterator[Any]:
+        # Without this, Python's old sequence protocol would take `for x in e`
+        # to mean e[0], e[1], ... and build indexes forever.
+        message = "an expression is not iterable; index it with a field name or a position"
+        raise TypeError(message)
+
     def __bool__(self) -> bool:
         """Refuse to be treated as a condition.
 
@@ -777,17 +834,52 @@ class Expr(AggregateMethods, FuncNamespaces):
 
 
 class Col(Expr):
-    """A column reference, optionally qualified."""
+    """A column reference: one name, or a join side's column as two parts."""
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, parts: tuple[str, ...]) -> None:
         super().__init__()
-        self.name = name
+        self.parts = parts
 
     def fragment(self) -> str:
-        # A dotted name is a qualified reference: each part is quoted on its
-        # own, so `l.id` becomes "l"."id" rather than one odd identifier.
-        # Needed to disambiguate a join, where both sides can carry the name.
-        return qualified(self.name)
+        return identifier(self.parts)
+
+
+class Side:
+    """One side of a join, inside its condition: `l["id"]` is that side's column."""
+
+    def __init__(self, alias: str) -> None:
+        self.alias = alias
+
+    def __getitem__(self, name: object) -> Expr:
+        if not isinstance(name, str):
+            message = f"a join side is indexed by column name, not by {type(name).__name__}"
+            raise TypeError(message)
+        return Col((self.alias, *name_parts(name, "column name")))
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("__") or name == "alias":
+            raise AttributeError(name)
+        message = f"a join side has no attribute {name!r}; its columns are reached as {self.alias}[{name!r}]"
+        raise AttributeError(message)
+
+    def __repr__(self) -> str:
+        return f"<Side {self.alias}>"
+
+
+class Index(Expr):
+    """A struct field, list element or map entry: `expr[key]`.
+
+    The key is part of the plan's shape, like a column name, so it is written
+    into the SQL rather than bound: the binder needs a struct field's name.
+    """
+
+    def __init__(self, base: Expr, key: str | int) -> None:
+        super().__init__()
+        self.base = base
+        self.key = key
+
+    def fragment(self) -> str:
+        return f"{self.base.fragment()}[{render_literal(self.key)}]"
 
 
 class FamilyExpr(Expr):
@@ -1055,9 +1147,9 @@ class Between(Expr):
 class Func(Expr):
     """A function call."""
 
-    def __init__(self, name: str, args: list[Expr]) -> None:
+    def __init__(self, name: str | tuple[str, ...], args: list[Expr]) -> None:
         super().__init__()
-        self.name = name
+        self.name = name_parts(name, "function name")
         self.args = args
         self._ignore_nulls = False
         self._filter: Expr | None = None
@@ -1067,20 +1159,31 @@ class Func(Expr):
         # IGNORE NULLS goes inside the call, where DuckDB reads it; after the
         # closing parenthesis it is a syntax error.
         tail = " IGNORE NULLS" if self._ignore_nulls else ""
-        return f"{self.name}({rendered}{tail})" + _filter_clause(self._filter)
+        return f"{function_name(self.name)}({rendered}{tail})" + _filter_clause(self._filter)
+
+
+class Coalesce(Expr):
+    """COALESCE, written as the parser's own form: it is syntax, not a catalog function."""
+
+    def __init__(self, args: list[Expr]) -> None:
+        super().__init__()
+        self.args = args
+
+    def fragment(self) -> str:
+        return "COALESCE(" + ", ".join(a.fragment() for a in self.args) + ")"
 
 
 class Distinct(Expr):
     """An aggregate over distinct values, such as `count(DISTINCT x)`."""
 
-    def __init__(self, name: str, operand: Expr) -> None:
+    def __init__(self, name: str | tuple[str, ...], operand: Expr) -> None:
         super().__init__()
-        self.name = name
+        self.name = name_parts(name, "function name")
         self.operand = operand
         self._filter: Expr | None = None
 
     def fragment(self) -> str:
-        return f"{self.name}(DISTINCT {self.operand.fragment()})" + _filter_clause(self._filter)
+        return f"{function_name(self.name)}(DISTINCT {self.operand.fragment()})" + _filter_clause(self._filter)
 
 
 def _filter_clause(predicate: Expr | None) -> str:
@@ -1188,8 +1291,15 @@ class ThenBuilder:
 
 
 def col(name: str) -> Expr:
-    """A column, by name. Always quoted, so reserved words and spaces are fine."""
-    return Col(name)
+    """A column, by its name: quoted whole, so any name works and none is split.
+
+    A join side's column is `l["name"]` inside the join's condition; a struct
+    field is `col("st")["field"]`.
+    """
+    if not isinstance(name, str):
+        message = f"col() takes one column name, not {name!r}; a join side's column is l[name] inside the join's on"  # type: ignore[unreachable]
+        raise TypeError(message)
+    return Col(name_parts(name, "column name"))
 
 
 def lit(value: object) -> Expr:
@@ -1207,8 +1317,8 @@ def star(exclude: Iterable[str] = (), rename: dict[str, str] | None = None) -> E
     return Star(exclude, rename)
 
 
-def fn(name: str, *args: object) -> Expr:
-    """Any SQL function by name. Arguments follow the usual binding rules."""
+def fn(name: str | tuple[str, ...], *args: object) -> Expr:
+    """Any SQL function by name, a tuple for a schema-qualified one. Arguments follow the usual binding rules."""
     return Func(name, [_lift(a) for a in args])
 
 
@@ -1228,7 +1338,7 @@ def when(condition: object) -> CaseBuilder:
 
 def coalesce(*values: object) -> Expr:
     """The first argument that is not NULL."""
-    return Func("coalesce", [_lift(v) for v in values])
+    return Coalesce([_lift(v) for v in values])
 
 
 def count_all() -> Expr:
@@ -1261,11 +1371,15 @@ last_value = _window("last_value")
 __all__ += [
     "dense_rank",
     "first_value",
+    "fold_name",
+    "function_name",
+    "identifier",
     "lag",
     "last_value",
     "lead",
+    "name_parts",
     "ntile",
-    "qualified",
+    "plain_identifier",
     "quote",
     "rank",
     "row_number",

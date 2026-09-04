@@ -16,6 +16,12 @@
 - Parameter names must be strings on the native seam; the old client
   stringified any key. The leniency lives in `duckdb.compat` alone.
   (`tests/test_parameters.py`, `tests/test_compat.py`)
+- A Python float is DOUBLE: `lit(1.5)` renders `1.5::DOUBLE` and comes
+  back as a float, and `[1.5]` or `{"a": 1.5}` types as `DOUBLE[]` or
+  `STRUCT(a DOUBLE)` both in `types(con)` and at execution. The old client
+  bound every float as DOUBLE too; neo's own earlier alphas wrote an inline
+  float bare, which the engine read as `DECIMAL(2,1)` and returned as a
+  `Decimal`. (`tests/test_names.py::TestFloatsAreDoubles`)
 
 ## Expressions and query building
 
@@ -105,6 +111,69 @@
 - A `KeyboardInterrupt` raised inside a running function surfaces as
   the query's `InvalidInputError`, not as `KeyboardInterrupt`: the
   engine owns the call and sees only its failure.
+
+## Names
+
+- A string that names a column, table, macro or function is one name,
+  never split on dots: `col("user.id")` is the column called `user.id`,
+  `table("a.b")` the table called `a.b`. A qualified name is a tuple,
+  `table(("main", "orders"))`, at any depth. The old client and its
+  Expression API split every dotted string. (`tests/test_names.py`,
+  `TestAStringIsOneName`, `TestQualifiedNamesAreTuples`)
+- A join condition is a function of the two sides,
+  `on=lambda left, right: left["id"] == right["order_id"]`; the old
+  `ColumnExpression("l.id")` spelling names a column called `l.id`. A
+  USING join takes names: `on=[col("id")]` is refused, with a message
+  pointing at the callable.
+  (`tests/test_names.py::TestJoinSidesAreTheConditionsArguments`)
+- Names compare as the engine compares them, case-insensitively in
+  ASCII, quoted or not: `select("TOTAL")` finds `total`, and two columns
+  whose names differ only in case are one name twice, refused where
+  duplicates are refused (`values()`, a join without `suffix`, `rename`).
+  (`tests/test_names.py::TestNamesCompareAsTheEngineDoes`)
+- A struct field, map entry or list element is a bracket on the
+  expression, `col("st")["a"]`; the old dotted `st.a` is a column name.
+  (`tests/test_names.py::TestBracketsReachIntoValues`)
+- A function name is written as the engine writes an identifier: bare
+  when it is a plain identifier that is not one of the engine's keywords,
+  quoted otherwise, never split. `sum("x")` and `read_csv(...)` are bare;
+  `"range"(10)` and `"filter"(...)` are quoted, as the old client's
+  `sql_query()` wrote them. The keyword list is generated from the
+  engine's `duckdb_keywords()` by `scripts/gen_keywords.py` and checked
+  by the suite and CI, so an engine bump that changes it fails until it
+  is regenerated. COALESCE is syntax, not a function: `coalesce(...)`
+  renders `COALESCE(...)`, and `fn("coalesce", ...)` fails because the
+  engine has no function of that name. `create_function()` takes a bare
+  string name; the engine registers a Python function by its bare name.
+  (`tests/test_names.py::TestQualifiedNamesAreTuples`)
+- `drop()` and `rename()` of a name holding a dot or a quote: the
+  engine's `EXCLUDE` re-parses such a quoted name as a qualified path and
+  errors, and its `RENAME` does the same and then silently renames
+  nothing. `drop` renders `COLUMNS(lambda c: lower(c) NOT IN (...))`,
+  order kept; `rename` lists the columns when it has the shape, in place,
+  and without a connection raises `NeedsConnection`, as a suffixed join
+  does, since there is no blind form that keeps the order. Both refuse a
+  name the input does not have when the plan is resolved, `drop: no column
+  'nope' in the input`, where the engine's `RENAME` stays silent even for a
+  plain name.
+  `star(exclude=[...])` is the engine's `EXCLUDE` as is.
+  (`tests/test_names.py::TestAStringIsOneName`)
+- `duckdb.compat` keeps the old split: `ColumnExpression("tbl_a.b")` is
+  table `tbl_a` column `b`, `ColumnExpression("a", "b")` gives parts,
+  `con.table("main.orders")` is qualified, with the engine's
+  qualified-name grammar and messages. One difference: the old
+  `ColumnExpression` silently dropped the middle parts of a name with
+  four or more components; the face keeps them all. `ColumnExpression("")`
+  is refused with `InvalidInputException`, where the old client reached an
+  internal error. A malformed dotted name such as `a..b` raises an
+  old-client error class, `InvalidInputException` from the verbs that
+  build a plan and the engine's `ParserException` from the text verbs,
+  never a bare `ValueError`. `update()` says the closed-connection words
+  before looking at a name, like its siblings. The old client's bundled
+  engine parsed names without the `""` escape and with one error message,
+  so `"x""y"` was `xy` there and is `x"y` here; the face follows the
+  engine it ships with.
+  (`tests/test_names.py::TestCompatKeepsTheOldSplit`)
 
 ## Pending
 

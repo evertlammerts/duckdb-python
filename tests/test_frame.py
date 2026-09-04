@@ -62,7 +62,7 @@ class TestGraph:
         # The whole point of walking by identity: the engine sees one scan of
         # the shared step, not two copies of its subtree.
         shared = orders.filter(col("country") == "nl")
-        joined = shared.join(shared, on=col("l.id") == col("r.id"), suffix="_r")
+        joined = shared.join(shared, on=lambda left, right: left["id"] == right["id"], suffix="_r")
         # A suffixed join needs to know which names clash, so it is rendered
         # with the resolution execution would use.
         sql = joined.render(con)
@@ -72,7 +72,7 @@ class TestGraph:
     def test_a_self_join_is_unambiguous(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
         # Both sides name the same CTE, so without the l/r aliases the FROM
         # clause would not parse.
-        pairs = orders.join(orders, on=col("l.id") == (col("r.id") - 1), suffix="_r").rows(con)
+        pairs = orders.join(orders, on=lambda left, right: left["id"] == (right["id"] - 1), suffix="_r").rows(con)
         assert len(pairs) == 4
 
     def test_a_frame_can_be_extended_twice_independently(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
@@ -119,7 +119,7 @@ class TestSchema:
         # does not work that out; it asks, which is the whole reason `.schema(con)`
         # goes to the binder.
         widened = orders.with_columns(doubled=col("amount") * 2.5)
-        assert widened.types(con)[-1] == "DECIMAL(12,1)"
+        assert widened.types(con)[-1] == "DOUBLE"
 
     def test_the_schema_is_asked_afresh(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
         # Deliberately not cached. What a source holds belongs to a catalog at
@@ -245,7 +245,7 @@ class TestJoins:
         assert len(orders.join(renamed, on="country").rows(con)) == 4
 
     def test_join_on_an_expression_names_the_sides(self, orders: duckdb.Frame, con: duckdb.Connection) -> None:
-        joined = orders.join(duckdb.table("countries"), on=col("l.country") == col("r.code"))
+        joined = orders.join(duckdb.table("countries"), on=lambda left, right: left["country"] == right["code"])
         assert len(joined.rows(con)) == 4
 
     def test_join_on_several_names(self, con: duckdb.Connection) -> None:
@@ -258,7 +258,9 @@ class TestJoins:
         [("inner", 4), ("left", 5), ("semi", 4), ("anti", 1), ("outer", 5)],
     )
     def test_join_kinds(self, orders: duckdb.Frame, con: duckdb.Connection, how: str, expected: int) -> None:
-        joined = orders.join(duckdb.table("countries"), on=col("l.country") == col("r.code"), how=how)
+        joined = orders.join(
+            duckdb.table("countries"), on=lambda left, right: left["country"] == right["code"], how=how
+        )
         assert len(joined.rows(con)) == expected
 
     def test_cross_join_needs_no_keys(self, orders: duckdb.Frame, con: duckdb.Connection) -> None:
@@ -512,7 +514,7 @@ class TestTableSource:
         assert duckdb.table("orders").count(con) == 5
 
     def test_a_qualified_name_stays_two_identifiers(self, con: duckdb.Connection) -> None:
-        assert duckdb.table("main.orders").count(con) == 5
+        assert duckdb.table(("main", "orders")).count(con) == 5
 
     def test_an_awkward_name_needs_no_escaping_by_the_caller(self, con: duckdb.Connection) -> None:
         con.run('CREATE TABLE "select ""x""" AS SELECT 1 AS v')
@@ -555,10 +557,10 @@ class TestDerivedNamesMatchTheEngine:
             "aggregate": orders.aggregate(col("amount").sum().alias("total")),
             "grouped": orders.group_by(col("country")).agg(col("amount").sum().alias("total")),
             "grouped alias": orders.group_by(col("country").alias("iso")).agg(col("id").count().alias("n")),
-            "join on expr": orders.join(countries, on=col("l.country") == col("r.code")),
+            "join on expr": orders.join(countries, on=lambda left, right: left["country"] == right["code"]),
             "join using": orders.rename(country="code").join(countries, on="code"),
-            "join suffix": orders.join(orders, on=col("l.id") == col("r.id"), suffix="_r"),
-            "join semi": orders.join(countries, on=col("l.country") == col("r.code"), how="semi"),
+            "join suffix": orders.join(orders, on=lambda left, right: left["id"] == right["id"], suffix="_r"),
+            "join semi": orders.join(countries, on=lambda left, right: left["country"] == right["code"], how="semi"),
             "cross": orders.cross(countries),
             "union": orders.union(orders),
             "intersect": orders.intersect(orders),
@@ -567,7 +569,7 @@ class TestDerivedNamesMatchTheEngine:
             "unpivot": wide.unpivot("q1", "q2", name="quarter", value="sales"),
             "describe": orders.describe(),
             "deep chain": orders.filter(col("id") > 0).select("id", "amount").sort(col("id")).limit(3),
-            "join then verbs": orders.join(countries, on=col("l.country") == col("r.code"))
+            "join then verbs": orders.join(countries, on=lambda left, right: left["country"] == right["code"])
             .drop("code")
             .rename(label="name"),
         }
@@ -651,7 +653,7 @@ class TestTheEngineIsAskedSparingly:
         joined = (
             duckdb.table("orders")
             .filter(col("amount") > 100)
-            .join(duckdb.table("countries"), on=col("l.country") == col("r.code"))
+            .join(duckdb.table("countries"), on=lambda left, right: left["country"] == right["code"])
             .select("id", "label")
         )
         assert joined.columns(con) == ["id", "label"]
@@ -725,23 +727,25 @@ class TestJoinRefusesToDuplicateAName:
     def test_a_shared_name_is_refused(self, con: duckdb.Connection) -> None:
         # A plan is built without asking anything, so the clash is reported
         # when the columns are worked out, which is also before anything runs.
-        joined = duckdb.table("orders").join(duckdb.table("orders"), on=col("l.id") == col("r.id"))
+        joined = duckdb.table("orders").join(duckdb.table("orders"), on=lambda left, right: left["id"] == right["id"])
         with pytest.raises(ValueError, match="both sides of this join have"):
             joined.columns(con)
 
     def test_the_message_names_the_columns(self, con: duckdb.Connection) -> None:
-        joined = duckdb.table("orders").join(duckdb.table("orders"), on=col("l.id") == col("r.id"))
+        joined = duckdb.table("orders").join(duckdb.table("orders"), on=lambda left, right: left["id"] == right["id"])
         with pytest.raises(ValueError, match=r"'id'.*'country'.*'amount'"):
             joined.columns(con)
 
     def test_a_suffix_renames_the_right_side(self, con: duckdb.Connection) -> None:
-        joined = duckdb.table("orders").join(duckdb.table("orders"), on=col("l.id") == col("r.id"), suffix="_r")
+        joined = duckdb.table("orders").join(
+            duckdb.table("orders"), on=lambda left, right: left["id"] == right["id"], suffix="_r"
+        )
         assert joined.columns(con) == ["id", "country", "amount", "id_r", "country_r", "amount_r"]
         assert joined.columns(con) == [name for name, _ in whole_bind(joined, con)]
 
     def test_a_suffixed_column_is_reachable(self, con: duckdb.Connection) -> None:
         joined = duckdb.table("orders").join(
-            duckdb.table("orders"), on=col("l.id") == (col("r.id") - 1), suffix="_next"
+            duckdb.table("orders"), on=lambda left, right: left["id"] == (right["id"] - 1), suffix="_next"
         )
         pairs = joined.select("id", "id_next").sort(col("id")).rows(con)
         assert pairs == [(1, 2), (2, 3), (3, 4), (4, 5)]
@@ -754,11 +758,15 @@ class TestJoinRefusesToDuplicateAName:
 
     def test_a_semi_join_keeps_only_the_left(self, con: duckdb.Connection) -> None:
         # Nothing from the right survives, so nothing can collide.
-        joined = duckdb.table("orders").join(duckdb.table("orders"), on=col("l.id") == col("r.id"), how="semi")
+        joined = duckdb.table("orders").join(
+            duckdb.table("orders"), on=lambda left, right: left["id"] == right["id"], how="semi"
+        )
         assert joined.columns(con) == ["id", "country", "amount"]
 
     def test_disjoint_sides_need_no_suffix(self, con: duckdb.Connection) -> None:
-        joined = duckdb.table("orders").join(duckdb.table("countries"), on=col("l.country") == col("r.code"))
+        joined = duckdb.table("orders").join(
+            duckdb.table("countries"), on=lambda left, right: left["country"] == right["code"]
+        )
         assert joined.columns(con) == ["id", "country", "amount", "code", "label"]
         assert "RENAME" not in joined.render()
 
@@ -932,7 +940,7 @@ class TestReviewRoundTwo:
         # therefore parameter order follow it.
         left = duckdb.table("orders").filter(col("country") == "nl")
         right = duckdb.table("countries").filter(col("code") == "be")
-        _sql, values = left.join(right, on=col("l.country") == col("r.code"))._sql_and_values()
+        _sql, values = left.join(right, on=lambda left, right: left["country"] == right["code"])._sql_and_values()
         assert values == ["nl", "be"], "inputs must still be visited left to right"
 
 
@@ -1100,7 +1108,7 @@ class TestRenderIsTotal:
         with pytest.raises(ValueError, match="needs a connection to render"):
             plan.render()
         assert repr(plan).startswith("<Frame, renders with a connection:")
-        assert "RENAME" in plan.render(con)
+        assert 'AS "country_r"' in plan.render(con)
 
     def test_an_unsuffixed_join_renders_blind(self) -> None:
         assert "JOIN" in duckdb.table("a").join(duckdb.table("b"), on="id").render()
@@ -1118,7 +1126,9 @@ class TestJoinKindIsAClosedSet:
             duckdb.table("a").join(duckdb.table("b"), on="id", how="inner JOIN evil ON true --")
 
     def test_case_does_not_matter(self, con: duckdb.Connection) -> None:
-        plan = duckdb.table("orders").join(duckdb.table("countries"), on=col("l.country") == col("r.code"), how="LEFT")
+        plan = duckdb.table("orders").join(
+            duckdb.table("countries"), on=lambda left, right: left["country"] == right["code"], how="LEFT"
+        )
         assert plan.count(con) == 5
 
 
@@ -1709,7 +1719,7 @@ class TestReviewRoundFour:
         # one helper every verb uses, so the subquery's plan is one step.
         nl = duckdb.table("orders").filter(col("country") == "nl").select("id")
         joined = duckdb.table("orders").join(
-            duckdb.table("countries"), on=(col("l.country") == col("r.code")) & col("l.id").isin(nl)
+            duckdb.table("countries"), on=lambda left, right: (left["country"] == right["code"]) & left["id"].isin(nl)
         )
         assert len(joined._uses) == 1
         assert joined.render().count("'nl'") == 1
@@ -1875,7 +1885,11 @@ class TestScopeStepFour:
     def test_values_joins_a_table(self, con: duckdb.Connection) -> None:
         # The case values() exists for: a fixture without CREATE TABLE.
         labels = duckdb.values([("nl", "Netherlands"), ("be", "Belgium")], columns=["code", "label"])
-        joined = duckdb.table("orders").join(labels, on=col("l.country") == col("r.code")).select("id", "label")
+        joined = (
+            duckdb.table("orders")
+            .join(labels, on=lambda left, right: left["country"] == right["code"])
+            .select("id", "label")
+        )
         assert joined.count(con) == 4
 
     def test_where_filters_an_aggregate(self, con: duckdb.Connection) -> None:
@@ -2059,7 +2073,7 @@ class TestStepsAsData:
         plan = duckdb.table("orders").filter(col("amount") > 100).select("id")
         assert isinstance(plan.step, Select)
         assert isinstance(plan.inputs[0].step, Filter)
-        assert plan.inputs[0].inputs[0].step == Table("orders")
+        assert plan.inputs[0].inputs[0].step == Table(("orders",))
         assert repr(plan.inputs[0].step).startswith("Filter(predicate=")
 
     def test_a_plan_pickles(self, con: duckdb.Connection) -> None:
@@ -2069,7 +2083,7 @@ class TestStepsAsData:
             duckdb.table("orders")
             .filter(col("country").isin(duckdb.table("countries").select("code")))
             .with_columns(big=col("amount") > 100)
-            .join(duckdb.table("countries"), on=col("l.country") == col("r.code"))
+            .join(duckdb.table("countries"), on=lambda left, right: left["country"] == right["code"])
             .group_by("label")
             .agg(col("amount").sum().alias("total"))
             .sort(col("total").desc())
@@ -2147,7 +2161,11 @@ class TestReviewRoundFive:
         assert "does not run here" in repr(missing)
         assert "does_not_exist" in repr(missing)
         assert missing._repr_html_().startswith("<pre>")
-        clash = duckdb.table("orders").join(duckdb.table("orders"), on=col("l.id") == col("r.id")).on(con)
+        clash = (
+            duckdb.table("orders")
+            .join(duckdb.table("orders"), on=lambda left, right: left["id"] == right["id"])
+            .on(con)
+        )
         assert "does not run here" in repr(clash)
         closed = duckdb.connect()
         closed.close()
@@ -2218,7 +2236,7 @@ class TestReviewRoundFive:
         # Equal steps must hash alike, or a set of them lies.
         from duckdb.frame import Filter, Table
 
-        a, b = Table("orders"), Table("orders")
+        a, b = Table(("orders",)), Table(("orders",))
         assert a == b
         assert hash(a) == hash(b)
         assert b in {a}
@@ -2507,7 +2525,7 @@ class TestTableFunctionSources:
     def test_a_file_is_read_with_its_path_bound(self, con: duckdb.Connection, files: Path) -> None:
         plan = duckdb.read_csv(files / "orders.csv", header=True)
         sql, values = plan._sql_and_values()
-        assert sql == 'SELECT * FROM "read_csv"($1, "header" := TRUE)'
+        assert sql == 'SELECT * FROM read_csv($1, "header" := TRUE)'
         assert values == [str(files / "orders.csv")]
         assert plan.columns(con) == ["id", "country", "amount"]
         assert plan.types(con) == ["BIGINT", "VARCHAR", "BIGINT"]

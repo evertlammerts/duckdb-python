@@ -74,9 +74,9 @@ orders.on(con).first()</code></pre>
 <section id="sources">
   <h2>Where a plan starts</h2>
   <dl class="ref">
-    <dt>table(name)</dt><dd>A table or view. The name may be qualified: <code>table("main.orders")</code>. A file name reads the file: <code>table("orders.csv")</code>, <code>table("data/*.parquet")</code>.</dd>
+    <dt>table(name)</dt><dd>A table or view. A string is one name: <code>table("orders")</code>. A qualified name is a tuple: <code>table(("main", "orders"))</code>, at any depth. A file name reads the file: <code>table("orders.csv")</code>, <code>table("data/*.parquet")</code>.</dd>
     <dt>read_csv(path, **options) / read_parquet / read_json</dt><dd>A file, a list of files or a glob through the engine's reader, with its options under their SQL names: <code>read_csv("orders.csv", header=True, delim="|")</code>.</dd>
-    <dt>table_function(name, *args, **named)</dt><dd>Any table function: <code>table_function("range", 10)</code>, <code>table_function("read_xlsx", "book.xlsx", sheet="Q1")</code> once its extension is loaded.</dd>
+    <dt>table_function(name, *args, **named)</dt><dd>Any table function: <code>table_function("range", 10)</code>, <code>table_function("read_xlsx", "book.xlsx", sheet="Q1")</code> once its extension is loaded. A tuple names one in a schema.</dd>
     <dt>sql(text)</dt><dd>Any query, as SQL. Carry on from it with verbs.</dd>
     <dt>values(rows, columns)</dt><dd>Rows given here, in memory. Every value is bound when the plan runs. A column given as <code>(name, type)</code> is cast to that type.</dd>
   </dl>
@@ -139,10 +139,11 @@ orders.group_by(<span class="s">"region"</span>).agg(col(<span class="s">"total"
   <p class="lead-in">joining</p>
   <pre><code>orders.join(customers, on=<span class="s">"customer_id"</span>)                          <span class="c"># same name on both sides</span>
 orders.join(customers, on=[<span class="s">"region"</span>, <span class="s">"year"</span>])                     <span class="c"># several</span>
-orders.join(customers, on=col(<span class="s">"l.customer"</span>) == col(<span class="s">"r.name"</span>))     <span class="c"># any condition</span>
+orders.join(customers, on=<span class="k">lambda</span> left, right: left[<span class="s">"customer"</span>] == right[<span class="s">"name"</span>])     <span class="c"># any condition</span>
 
-orders.join(refunds, on=col(<span class="s">"l.id"</span>) == col(<span class="s">"r.order_id"</span>), how=<span class="s">"left"</span>)</code></pre>
-  <p>Inside <code>on</code>, the left side is <code>l</code> and the right side is <code>r</code>. <code>how</code> is <code>inner</code> (the default), <code>left</code>, <code>right</code>, <code>outer</code> (or <code>full</code>), <code>semi</code>, <code>anti</code>, <code>cross</code>, <code>positional</code>, <code>natural</code> or <code>asof</code>. Semi and anti keep the left rows that do or do not have a match, and add no columns. <code>.cross(other)</code> is every combination.</p>
+orders.join(refunds, on=<span class="k">lambda</span> left, right: left[<span class="s">"id"</span>] == right[<span class="s">"order_id"</span>], how=<span class="s">"left"</span>)
+orders.join(rates, on=<span class="k">lambda</span> left, right: (left[<span class="s">"placed"</span>] &gt;= right[<span class="s">"from"</span>]) &amp; (left[<span class="s">"placed"</span>] &lt; right[<span class="s">"to"</span>]))</code></pre>
+  <p>A condition is a function of the two sides. It is called once, when the join is built, with the left side and the right side, and <code>left["id"]</code> is that side's column; what it returns must be an expression. The names are yours, the positions are not. A struct field on a side is a second bracket, <code>left["shipping"]["zip"]</code>. After the join there is one frame and no sides. <code>how</code> is <code>inner</code> (the default), <code>left</code>, <code>right</code>, <code>outer</code> (or <code>full</code>), <code>semi</code>, <code>anti</code>, <code>cross</code>, <code>positional</code>, <code>natural</code> or <code>asof</code>. Semi and anti keep the left rows that do or do not have a match, and add no columns. <code>.cross(other)</code> is every combination.</p>
   <div class="note">
     <p><strong>When both sides have a column of the same name</strong>, pass <code>suffix</code> and the right side's copy is renamed: <code>orders.join(orders, on=…, suffix="_r")</code> gives <code>total</code> and <code>total_r</code>. Without a suffix the join is refused, since the result would have two columns called <code>total</code>. Columns joined with <code>on="name"</code> are merged and do not need one.</p>
   </div>
@@ -205,6 +206,15 @@ col(<span class="s">"name"</span>).str().lower().trim()                <span cla
 col(<span class="s">"payload"</span>).json().keys().contains(<span class="s">"id"</span>)   <span class="c"># keys() gives a list, so list methods follow</span></code></pre>
   <p>What a method returns is scoped by the engine's own return type for it, so chains keep going without a second entry. The families exist for two reasons: without them every engine function would be a method on every expression, several hundred names after each dot; and the short names could not exist, since <code>.list().min()</code> can mean <code>list_min</code> only while <code>.min()</code> still means the aggregate. Which functions sit where is declared in one table, <code>scripts/func_namespaces.toml</code>, checked against the engine's catalog on every build.</p>
   <p>Anything else: <code>fn("regexp_extract", col("path"), r"/(\d+)/", 1)</code> calls any function by name.</p>
+
+  <p class="lead-in">reaching into a value</p>
+  <p>A bracket on an expression reaches into what it holds: a struct field or a map entry by name, a list element by position, in the engine's own convention, where the first element is 1.</p>
+  <pre><code>col(<span class="s">"address"</span>)[<span class="s">"city"</span>]                  <span class="c"># a struct field</span>
+col(<span class="s">"address"</span>)[<span class="s">"geo"</span>][<span class="s">"lat"</span>]            <span class="c"># nested</span>
+col(<span class="s">"tags"</span>)[<span class="s">1</span>]                          <span class="c"># the first element</span>
+col(<span class="s">"prices"</span>)[<span class="s">"eur"</span>]                     <span class="c"># a map entry</span>
+col(<span class="s">"payload"</span>)[<span class="s">"user.id"</span>]                <span class="c"># a field called user.id; a name is never split</span></code></pre>
+  <p><code>plan["x"]</code> is the other bracket: it narrows a plan to one column, where <code>expr["x"]</code> reaches into a value.</p>
 
   <p class="lead-in">choosing a value</p>
   <pre><code>tier = (when(col(<span class="s">"total"</span>) &gt; <span class="s">2000</span>).then(<span class="s">"big"</span>)
@@ -318,10 +328,11 @@ plan.types(con)     <span class="c"># ['INTEGER', 'VARCHAR', 'DECIMAL(6,2)']</sp
 plan.schema(con)    <span class="c"># the two together, as pairs</span>
 
 print(plan.render())         <span class="c"># the SQL, from the plan alone</span>
-print(plan.render(con))      <span class="c"># the SQL as it will run on this connection</span>
+print(plan.render(con))      <span class="c"># the SQL with this connection's shapes; values written in</span>
+text, values = plan.render_parameterized(con)   <span class="c"># what executes: $n placeholders and the values</span>
 print(plan.explain(con))     <span class="c"># how DuckDB will run it; analyze=True runs it and times each step</span></code></pre>
   <p>None of these fetch rows. <code>columns()</code> needs the connection only to read what the tables hold; the names a plan makes itself, through <code>select</code>, <code>rename</code> and the rest, it knows without one.</p>
-  <p><code>render()</code> with no connection cannot know what the tables hold, so it neither checks names nor keeps the position of a column that <code>with_columns</code> replaced; that column comes last. <code>render(con)</code> gives the exact text <code>rows(con)</code> would run.</p>
+  <p><code>render()</code> with no connection cannot know what the tables hold, so it neither checks names nor keeps the position of a column that <code>with_columns</code> replaced; that column comes last. A suffixed join, and a <code>rename</code> of a name holding a dot or a quote, have no such form and need a connection to render. <code>render(con)</code> uses the shapes <code>rows(con)</code> would use, with values written into the text; <code>render_parameterized(con)</code> gives the form that executes, <code>$n</code> placeholders and the values in order.</p>
 </section>
 
 <section id="nested">
@@ -376,10 +387,11 @@ recent(values(sample_rows, columns=[<span class="s">"l_orderkey"</span>, <span c
 
 <section id="safety">
   <h2>What is bound, what is quoted</h2>
-  <p>Values you pass never become part of the SQL text. Text, bytes and anything composite, a list, tuple or dict, are sent to the engine separately as parameters, because that is where an injection would come from; dates, times, intervals, decimals and UUIDs are bound too, so they arrive exact. Numbers, booleans and <code>None</code> are written as literals.</p>
+  <p>Values you pass never become part of the SQL text. Text, bytes and anything composite, a list, tuple or dict, are sent to the engine separately as parameters, because that is where an injection would come from; dates, times, intervals, decimals and UUIDs are bound too, so they arrive exact. Numbers, booleans and <code>None</code> are written as literals; a float is written as <code>DOUBLE</code>.</p>
   <pre><code>name = <span class="s">"'; DROP TABLE orders; --"</span>
 orders.filter(col(<span class="s">"customer"</span>) == name).rows(con)    <span class="c"># WHERE ("customer" = $1); the table is fine</span></code></pre>
-  <p>Table and column names are always quoted, so a name from outside your program cannot turn into SQL:</p>
+  <p>A name is one name. Names compare as the engine compares them, case-insensitively in ASCII: <code>col("TOTAL")</code> finds <code>total</code>, and two columns whose names differ only in case are one name twice. A string given to <code>col</code>, <code>table</code>, <code>select</code>, <code>drop</code>, <code>create</code> or any other verb is quoted whole and never split on dots, so <code>col("user.id")</code> is the column called <code>user.id</code> and <code>table("a.b")</code> is the table called <code>a.b</code>. A qualified name is a tuple: <code>table(("main", "orders"))</code>, <code>plan.create(con, ("shop", "daily"))</code>, <code>con.create_macro(("util", "rate_of"), ...)</code>, at any depth. A struct field is a bracket, <code>col("st")["a"]</code>, and a join side's column is <code>left["id"]</code> inside the join's condition. A function name is written as the engine writes an identifier, bare unless it is a keyword or needs quoting, so <code>sum("x")</code> reads as SQL reads and <code>"range"(10)</code> is quoted; a name is never split.</p>
+  <p>Because every name is quoted, a name from outside your program cannot turn into SQL:</p>
   <div class="pair">
     <div class="bad">
       <div class="tag">runs whatever name contains</div>
@@ -434,13 +446,13 @@ orders.filter(sql_expr(<span class="s">"region = 'emea' AND total &gt; 1000"</sp
     <dt>.filter(pred)</dt><dd>Keep matching rows.</dd>
     <dt>.select(*cols)</dt><dd>Keep these columns or expressions.</dd>
     <dt>.with_columns(**cols)</dt><dd>Add or replace columns.</dd>
-    <dt>.drop(*names) / .rename(old=new)</dt><dd>Remove or rename.</dd>
+    <dt>.drop(*names) / .rename(old=new)</dt><dd>Remove or rename. A name the input does not have is refused.</dd>
     <dt>.sort(*cols)</dt><dd>Order the rows.</dd>
     <dt>.limit(n, offset) / .head(n) / .offset(n)</dt><dd>Fewer rows.</dd>
     <dt>.distinct(on=None)</dt><dd>Drop duplicates.</dd>
     <dt>.sample(n, percent, seed, method)</dt><dd>A random subset.</dd>
     <dt>.group_by(*keys).agg(…) / .aggregate(…, group_by=)</dt><dd>Group and aggregate.</dd>
-    <dt>.join(other, on, how, suffix)</dt><dd>Join; sides are <code>l</code> and <code>r</code>.</dd>
+    <dt>.join(other, on, how, suffix)</dt><dd>Join. <code>on</code> is a name, a list of names, or a function of the two sides.</dd>
     <dt>.cross(other)</dt><dd>Every combination.</dd>
     <dt>.union / .union_by_name / .intersect / .except_</dt><dd>Set operations.</dd>
     <dt>.unnest(*cols) / .unpivot(*cols, name, value)</dt><dd>Lists to rows; columns to rows.</dd>
@@ -457,21 +469,23 @@ orders.filter(sql_expr(<span class="s">"region = 'emea' AND total &gt; 1000"</sp
     <dt>.show(con, limit) / .preview(con, limit)</dt><dd>Print, or return, a table of the first rows.</dd>
     <dt>.columns(con) / .types(con) / .schema(con)</dt><dd>What it produces.</dd>
     <dt>.explain(con, analyze=False)</dt><dd>The engine's plan.</dd>
-    <dt>.create(con, name, replace, temporary) / .insert_into(con, name)</dt><dd>Into a table.</dd>
+    <dt>.create(con, name, replace, temporary) / .insert_into(con, name)</dt><dd>Into a table; a tuple names a qualified one.</dd>
     <dt>.copy_to(con, path, **opts) / .to_parquet / .to_csv / .to_json</dt><dd>Into a file through <code>COPY</code>; the options are its own. Returns what COPY returns.</dd>
     <dt>.render()</dt><dd>The SQL. No connection.</dd>
+    <dt>.render_parameterized(con, parameters)</dt><dd>What executes: the SQL with <code>$n</code> placeholders, and the values in order. Every <code>param()</code> must be supplied.</dd>
   </dl>
 
   <h3>Expressions</h3>
   <dl class="ref">
-    <dt>col(name)</dt><dd>A column. <code>col("l.id")</code> names a join side.</dd>
+    <dt>col(name)</dt><dd>A column, by its one name. A join side's column is <code>left["id"]</code> inside the join's condition.</dd>
     <dt>lit(value)</dt><dd>A value. Needed for lists and dicts (a struct).</dd>
     <dt>param(name)</dt><dd>A value supplied through <code>parameters=</code>.</dd>
     <dt>star(exclude, rename)</dt><dd><code>*</code>, optionally dropping or renaming.</dd>
-    <dt>fn(name, *args)</dt><dd>Any function by name.</dd>
+    <dt>fn(name, *args)</dt><dd>Any function by name; a tuple names one in a schema.</dd>
+    <dt>expr[key]</dt><dd>A struct field or map entry by name, a list element by position.</dd>
     <dt>sql_expr(text)</dt><dd>A fragment, as SQL.</dd>
     <dt>when(cond).then(v)….otherwise(v)</dt><dd>CASE.</dd>
-    <dt>coalesce(*values)</dt><dd>The first non-NULL.</dd>
+    <dt>coalesce(*values)</dt><dd>The first non-NULL. Renders <code>COALESCE(...)</code>, which is syntax, not a function; <code>fn("coalesce", ...)</code> fails because the engine has no function of that name.</dd>
     <dt>count_all()</dt><dd><code>count(*)</code>. Takes <code>.where()</code> and <code>.over()</code> like any aggregate.</dd>
     <dt>row_number, rank, dense_rank, ntile, lag, lead, first_value, last_value</dt><dd>Window functions; add <code>.over()</code>.</dd>
   </dl>
