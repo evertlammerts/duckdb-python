@@ -627,13 +627,7 @@ class Drop(Step):
         _at_least_one(self.names, "drop")
 
     def render(self, names: tuple[str, ...], shapes: tuple[Shape | None, ...]) -> str:
-        if all("." not in c and '"' not in c for c in self.names):
-            return f"SELECT * EXCLUDE ({', '.join(quote(c) for c in self.names)}) FROM {names[0]}"
-        # The engine's EXCLUDE re-parses a quoted name as a qualified path, so
-        # a dot or a quote in a name breaks it; the lambda form matches text,
-        # folded on both sides because names compare case-insensitively.
-        dropped = ", ".join(render_literal(fold_name(c)) for c in self.names)
-        return f"SELECT COLUMNS(lambda c: lower(c) NOT IN ({dropped})) FROM {names[0]}"
+        return f"SELECT * EXCLUDE ({', '.join(quote(c) for c in self.names)}) FROM {names[0]}"
 
     def shape(self, shapes: tuple[Shape, ...]) -> Shape | None:
         _require_present(shapes[0], self.names, "drop")
@@ -648,29 +642,9 @@ class Rename(Step):
     def __post_init__(self) -> None:
         _at_least_one(self.pairs, "rename")
 
-    def needs_shapes(self) -> bool:
-        return not all("." not in old and '"' not in old for old, _ in self.pairs)
-
     def render(self, names: tuple[str, ...], shapes: tuple[Shape | None, ...]) -> str:
-        if all("." not in old and '"' not in old for old, _ in self.pairs):
-            rendered = ", ".join(f"{quote(old)} AS {quote(new)}" for old, new in self.pairs)
-            return f"SELECT * RENAME ({rendered}) FROM {names[0]}"
-        # The engine's RENAME re-parses a quoted name as a qualified path and
-        # then silently renames nothing, so such a name is renamed by listing.
-        renamed = {fold_name(old): new for old, new in self.pairs}
-        if shapes[0] is not None:
-            listed = [
-                f"{quote(c.name)} AS {quote(renamed[fold_name(c.name)])}"
-                if fold_name(c.name) in renamed
-                else quote(c.name)
-                for c in shapes[0]
-            ]
-            return f"SELECT {', '.join(listed)} FROM {names[0]}"
-        message = (
-            "renaming a column whose name holds a dot or a quote lists the input's columns, since the "
-            "engine's RENAME mis-parses such a name; this needs a connection to render"
-        )
-        raise NeedsConnection(message)
+        rendered = ", ".join(f"{quote(old)} AS {quote(new)}" for old, new in self.pairs)
+        return f"SELECT * RENAME ({rendered}) FROM {names[0]}"
 
     def shape(self, shapes: tuple[Shape, ...]) -> Shape | None:
         _require_present(shapes[0], [old for old, _ in self.pairs], "rename")
@@ -859,21 +833,13 @@ class Join(Step):
             else []
         )
         projection = "*"
-        if shared and right_shape is not None:
+        if shared:
             # Only when renaming: the plain star keeps the SQL closest to what
-            # the reader wrote, and USING's own folding intact. The right side
-            # is listed rather than written as r.* EXCLUDE ... RENAME ...,
-            # since the engine mis-parses a quoted name in those two lists.
-            folded = {fold_name(key) for key in self.using}
-            renamed = {fold_name(name) for name in shared}
-            right = [
-                f"r.{quote(c.name)} AS {quote(c.name + str(self.suffix))}"
-                if fold_name(c.name) in renamed
-                else f"r.{quote(c.name)}"
-                for c in right_shape
-                if fold_name(c.name) not in folded
-            ]
-            projection = ", ".join(["l.*", *right])
+            # the reader wrote, and USING's own folding intact. USING keys are
+            # excluded from the right side because they are already in l.*.
+            excluded = f" EXCLUDE ({', '.join(keys)})" if keys else ""
+            renamed = ", ".join(f"{quote(name)} AS {quote(name + str(self.suffix))}" for name in shared)
+            projection = f"l.*, r.*{excluded} RENAME ({renamed})"
         # Both sides are aliased so joining a frame to itself works, and so an
         # ON condition can tell the sides apart, as l["id"].
         return f"SELECT {projection} FROM {names[0]} AS l {kind.keyword} JOIN {names[1]} AS r{clause}"
@@ -989,8 +955,7 @@ class Frame(PlanBase):
         input's columns renders a form that does not need them, and that form
         can order columns differently: `with_columns` moves a replaced column
         to the end, where the executed form keeps it in place. A suffixed
-        join, and a `rename` of a name holding a dot or a quote, have no such
-        form and raise `NeedsConnection`. And nothing is checked:
+        join has no such form and raises `NeedsConnection`. And nothing is checked:
         two columns of one name in a join, or a
         table that does not exist, are found when the plan runs, not here.
 

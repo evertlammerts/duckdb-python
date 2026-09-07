@@ -81,46 +81,41 @@ class TestAStringIsOneName:
         right = values([(1, 9)], columns=["k.1", "y"])
         assert left.join(right, on="k.1").rows(con) == [(1, 5, 9)]
 
-    def test_drop_works_around_the_engine_on_a_dotted_name(self, con: duckdb.Connection, dotted: duckdb.Frame) -> None:
-        # EXCLUDE re-parses a quoted name as a path in this engine, so the
-        # dotted case takes the lambda form and matches names case-folded.
-        assert "EXCLUDE" in dotted.drop("id").render()
+    def test_drop_takes_any_name_through_exclude(self, con: duckdb.Connection, dotted: duckdb.Frame) -> None:
+        # One form for every name: the engine quotes EXCLUDE's list like any
+        # other identifier (duckdb/duckdb#25370), so nothing is special-cased.
+        assert dotted.drop("id").render().splitlines()[-1] == 'SELECT * EXCLUDE ("id") FROM "_s0"'
         assert dotted.drop("id").rows(con) == [(21,)]
-        assert "COLUMNS(lambda c: lower(c) NOT IN ('hello.world'))" in dotted.drop("hello.world").render()
+        assert dotted.drop("hello.world").render().splitlines()[-1] == 'SELECT * EXCLUDE ("hello.world") FROM "_s0"'
         assert dotted.drop("hello.world").rows(con) == [(1,)]
         assert dotted.drop("HELLO.WORLD").rows(con) == [(1,)]
         assert dotted.drop("hello.world").columns(con) == ["id"]
+        quoted = values([(1, 2)], columns=['say "hi"', "x"])
+        assert quoted.drop('say "hi"').rows(con) == [(2,)]
         with pytest.raises(ValueError, match="drop: no column 'nope'"):
             dotted.drop("nope").rows(con)
         with pytest.raises(ValueError, match="drop: no column 'nope'"):
             dotted.drop("hello.world", "nope").rows(con)
 
-    def test_rename_works_around_the_engine_on_a_dotted_name(
-        self, con: duckdb.Connection, dotted: duckdb.Frame
-    ) -> None:
-        # RENAME re-parses a quoted name as a path and then renames nothing,
-        # silently, so such a name is renamed by listing the columns.
+    def test_rename_takes_any_name_through_rename(self, con: duckdb.Connection, dotted: duckdb.Frame) -> None:
         renamed = dotted.rename(**{"hello.world": "h"})
+        assert renamed.render().splitlines()[-1] == 'SELECT * RENAME ("hello.world" AS "h") FROM "_s0"'
         assert renamed.columns(con) == ["h", "id"]
         assert renamed.rows(con) == [(21, 1)]
         assert renamed.select("h").rows(con) == [(21,)]
-        assert renamed.render(con).splitlines()[-1] == 'SELECT "hello.world" AS "h", "id" FROM "_s0"'
-        with pytest.raises(duckdb.NeedsConnection, match="RENAME"):
-            renamed.render()
-        assert repr(renamed).startswith("<Frame, renders with a connection:")
-        assert "RENAME (" in dotted.rename(id="i").render()
+        assert repr(renamed).startswith("<Frame WITH")
+        quoted = values([(1, 2)], columns=['say "hi"', "x"])
+        assert quoted.rename(**{'say "hi"': "s"}).columns(con) == ["s", "x"]
+        assert quoted.rename(**{'say "hi"': "s"}).rows(con) == [(1, 2)]
         with pytest.raises(ValueError, match="rename: no column 'nope'"):
             dotted.rename(nope="x").rows(con)
-        # A macro body is resolved as far as rendering needs, so it keeps the order too.
         con.create_macro("renamed_rows", [], renamed)
         assert sql("SELECT * FROM renamed_rows()").columns(con) == ["h", "id"]
 
-    def test_star_exclude_is_the_engine_s_own_and_carries_its_limit(
-        self, con: duckdb.Connection, dotted: duckdb.Frame
-    ) -> None:
+    def test_star_exclude_and_rename_take_any_name(self, con: duckdb.Connection, dotted: duckdb.Frame) -> None:
         assert dotted.select(star(exclude=["id"])).rows(con) == [(21,)]
-        with pytest.raises(exceptions.Error, match="EXCLUDE"):
-            dotted.select(star(exclude=["hello.world"])).rows(con)
+        assert dotted.select(star(exclude=["hello.world"])).rows(con) == [(1,)]
+        assert dotted.select(star(rename={"hello.world": "h"})).columns(con) == ["h", "id"]
 
 
 class TestQualifiedNamesAreTuples:

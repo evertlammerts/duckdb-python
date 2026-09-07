@@ -5,5 +5,9 @@
 # extensions under that name (extensions.duckdb.org/<version>/<platform>/), so
 # a bundle built without it names itself v2.0.0-dev<count> and can INSTALL
 # nothing. CI rebuilds the bundle when either line changes.
-8a81c8498737ccca5f176816fef8d6dc0d89b056
-v2.0.0-alpha40145
+09aaddad5e61a51f6bdadbee1a7eb0bd33df13cb
+# Version name pending: no successful Main run on v2.0-cyanoptera has built a
+# commit carrying #25370 and #25340 yet (last success 40369 at c2f5210946, the
+# next two were cancelled). Fill this line from the first successful run and
+# move the commit line to that run's head. Built locally under the dev name
+# meanwhile, so INSTALL is unavailable until then.

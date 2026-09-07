@@ -76,6 +76,11 @@ def build_engine(src: Path, build_dir: Path, build_type: str, duckdb_version: st
         configure.append(f"-DCORE_EXTENSIONS={core_extensions}")
     if duckdb_version:
         configure.append(f"-DDUCKDB_EXPLICIT_VERSION={duckdb_version}")
+    else:
+        # The cache keeps the last configure's value, so without this a new
+        # commit's build would carry an old nightly's name and load its
+        # extensions.
+        configure.append("-UDUCKDB_EXPLICIT_VERSION")
     if sys.platform == "win32":
         # Let CMake pick the Visual Studio generator. With Ninja on PATH the
         # Windows runners resolve the compiler to a MinGW gcc that rejects
