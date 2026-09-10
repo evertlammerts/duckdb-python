@@ -18,25 +18,16 @@
 
 namespace duckdb_python {
 
-/// The ENUM dictionary, index to string.
+/// An ENUM type's labels, in index order.
 std::vector<std::string> EnumValues(const cxx::LogicalType &type);
 
-/// A result's column types, shared between the result and the chunk views it
-/// hands out.
+/// A result's column types, shared between the result and every ChunkView it hands out.
 using ColumnTypes = std::shared_ptr<const std::vector<cxx::LogicalType>>;
 
-/// One fetched chunk, column-wise, for the numpy converter in duckdb/_numpy.py.
-///
-/// Fixed-width columns hand out zero-copy memoryviews over the flattened
-/// vector data; everything else falls back to per-cell objects. The views
-/// borrow the chunk's memory, so they are valid only while this object
-/// lives: the converter copies out of them within one loop iteration and
-/// never keeps one.
+/// One batch of rows, column by column, for the numpy converter; its memoryviews last only as long as it does.
 class ChunkView {
 public:
-	// `row_offset` is how many leading rows a prior row fetch already
-	// consumed; the buffers still cover the whole chunk, so the converter
-	// slices them by it.
+	// `row_offset` counts rows an earlier fetch took; the buffers still cover every row, so the caller slices.
 	ChunkView(cxx::DataChunk chunk, ColumnTypes types, cxx::idx_t row_offset = 0);
 
 	cxx::idx_t RowCount() const {
@@ -59,10 +50,10 @@ public:
 		return Type(column).ToText();
 	}
 
-	/// Zero-copy view over the flattened data, or None without a fixed-width layout.
+	/// A memoryview onto the column's values without copying, or None when the type has no fixed width.
 	nb::object Data(cxx::idx_t column);
 
-	/// Validity bitmask as 64-bit words, LSB first, or None when all rows are valid.
+	/// One bit per row, set when the value is not NULL, in 64-bit words lowest bit first; None when no row is.
 	nb::object Validity(cxx::idx_t column);
 
 	/// A DECIMAL column's scale, so the converter never parses type text.
@@ -70,12 +61,12 @@ public:
 		return static_cast<int>(Type(column).GetDecimalScale());
 	}
 
-	/// The ENUM dictionary, index to string, for categorical assembly.
+	/// An ENUM column's labels in index order, for building a pandas categorical.
 	std::vector<std::string> EnumValues(cxx::idx_t column) const {
 		return duckdb_python::EnumValues(Type(column));
 	}
 
-	/// Per-cell object fallback for the columns Data() cannot serve.
+	/// One Python object per row, for the columns Data() cannot serve.
 	nb::list Values(cxx::idx_t column, ConversionContext &ctx);
 
 private:

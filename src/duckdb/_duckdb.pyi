@@ -1,4 +1,4 @@
-"""Type stubs for the nanobind extension module."""
+"""Type stubs for the compiled extension module."""
 
 import enum
 from collections.abc import Callable, Mapping, Sequence
@@ -11,29 +11,25 @@ class FunctionNullHandling(enum.Enum):
     SPECIAL = 1
 
 class FunctionStability(enum.Enum):
-    """How far the engine may reuse a scalar function's result."""
+    """How far DuckDB may reuse a scalar function's result."""
 
     CONSISTENT = 0
     VOLATILE = 1
     CONSISTENT_WITHIN_QUERY = 2
 
 class ChunkView:
-    """One fetched chunk column-wise, for the numpy converter.
-
-    The buffer views borrow the chunk's memory and are valid only while
-    this object lives; consumers copy out of them immediately.
-    """
+    """One fetched batch of rows, column by column; its buffer views borrow memory that dies with this object."""
 
     @property
     def row_count(self) -> int: ...
     @property
     def row_offset(self) -> int:
-        """Leading rows a prior row fetch already consumed; the buffers still cover the whole chunk."""
+        """Leading rows a prior row fetch already consumed; the buffers still cover the whole batch."""
 
     @property
     def column_count(self) -> int: ...
     def type_id(self, column: int) -> int:
-        """The facade's LogicalTypeId value for the column."""
+        """DuckDB's type-id number for the column."""
 
     def type_text(self, column: int) -> str:
         """The column's type in its text form."""
@@ -54,19 +50,14 @@ class ChunkView:
         """Per-cell object fallback for the columns data() cannot serve."""
 
 class Result:
-    """One statement's result, streamed a chunk at a time.
-
-    Single reader: the fetch state is unguarded and stepping releases the
-    GIL, so two threads fetching from one Result race even on a GIL build.
-    Fetch from one thread; `close()` is the one call safe from another.
-    """
+    """One statement's result, streamed and read from a single thread; only `close()` is safe from another."""
 
     @property
     def schema(self) -> list[tuple[str, str]]:
         """Column names paired with the text form of their type."""
 
     def fetch_all(self) -> list[tuple[Any, ...]]:
-        """Drain the result into a list of row tuples."""
+        """Every remaining row, as a list of tuples."""
 
     @property
     def result_type(self) -> str:
@@ -74,28 +65,19 @@ class Result:
 
     @property
     def statement_type(self) -> str:
-        """The kind of statement this result came from, e.g. "select" or "insert".
-
-        A statement that expands into a group of engine statements (the
-        PIVOT family) cannot answer before its result is stepped and raises
-        InvalidInputError instead.
-        """
+        """The kind of statement behind the result; the PIVOT family cannot answer until the result is stepped."""
 
     def close(self) -> None:
         """Release the result so the connection can run another query."""
 
     def drain(self) -> int:
-        """Run to completion and report how many rows changed."""
+        """Run the statement to completion and report how many rows changed."""
 
     def fetch_rows(self, count: int) -> list[tuple[Any, ...]]:
         """Up to `count` more rows, or every remaining row when `count` is zero."""
 
     def fetch_chunk_view(self) -> ChunkView | None:
-        """The next chunk column-wise, or None at the end.
-
-        After a row fetch, the chunk arrives whole with its row offset set,
-        so a consumer delivers only the remaining rows.
-        """
+        """The next batch column by column, or None at the end, carrying the offset a prior row fetch left."""
 
     @property
     def schema_types(self) -> list[tuple[int, int, list[str] | None]]:
@@ -106,10 +88,7 @@ class Connection:
         """Run one statement, binding parameters positionally or by name."""
 
     def bind(self, sql: str) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
-        """What a statement produces and expects, without running it.
-
-        Returns (output columns, parameters), each a list of (name, type).
-        """
+        """The output columns and the parameters a statement would have, without running it, as (name, type) pairs."""
 
     def create_scalar_function(
         self,
@@ -120,27 +99,19 @@ class Connection:
         null_handling: FunctionNullHandling,
         stability: FunctionStability,
     ) -> None:
-        """Register a Python callable as a scalar SQL function.
-
-        The type texts go to the engine's parser as they are; the caller has
-        already refused ANY, which the parser rejects without saying why.
-        """
+        """Register a Python callable as a scalar SQL function; the type texts reach DuckDB's parser unchanged."""
 
     def interrupt(self) -> None: ...
     def get_option(self, name: str) -> str: ...
     def set_option(self, name: str, value: str) -> None: ...
     def close(self) -> None:
-        """Release the engine connection now. Idempotent; every other method raises InterfaceError afterwards."""
+        """Close the connection now. Idempotent; every other method raises InterfaceError afterwards."""
 
 class Database:
-    """One open database.
-
-    Every Connection and Result on it holds a reference to it, so the
-    engine instance lives until the last of them is closed or collected.
-    """
+    """One open database, kept alive by every connection and result on it."""
 
     def __init__(self, path: str = ":memory:", options: list[tuple[str, str]] | None = None) -> None: ...
     def connect(self) -> Connection: ...
 
 def library_version() -> str:
-    """The version of the DuckDB engine this extension is linked against."""
+    """The DuckDB version this extension module is linked against."""

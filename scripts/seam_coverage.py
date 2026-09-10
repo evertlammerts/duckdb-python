@@ -1,12 +1,6 @@
-"""Measure and gate line coverage of the C++ seam.
+"""Line coverage of the C++ extension module, which coverage.py cannot see, from an instrumented build.
 
-Almost all of this package's logic is C++, so `coverage.py` reports close to
-100% while saying nothing about the code that matters. This measures the seam
-itself, through clang's instrumentation.
-
-Run against a build made with `-fprofile-instr-generate -fcoverage-mapping`.
-
-    seam_coverage.py <profraw-dir> <extension.so> [--min-lines 90]
+Build it with `-fprofile-instr-generate -fcoverage-mapping`.
 """
 
 from __future__ import annotations
@@ -31,7 +25,7 @@ def tool(name: str) -> str:
 
 
 def main() -> int:
-    """Report seam coverage and fail if it is below the floor."""
+    """Report the coverage and fail if it is below the floor."""
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("profraw_dir", type=Path)
     ap.add_argument("extension", type=Path)
@@ -70,9 +64,7 @@ def main() -> int:
     print(f"seam lines {lines:.2f}%  functions {functions:.2f}%  (floor {args.min_lines:.0f}%)")
 
     if functions < 100.0:
-        # A bound method with no test at all is a different problem from a few
-        # uncovered branches, so every seam entry point must have a direct
-        # test.
+        # A function no test ever reaches is a different problem from a few uncovered branches.
         print("FAIL: some seam functions are never executed", file=sys.stderr)
         return 1
     if lines < args.min_lines:

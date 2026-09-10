@@ -28,8 +28,7 @@ ChunkView::ChunkView(cxx::DataChunk chunk, ColumnTypes types, cxx::idx_t row_off
 	vectors.reserve(count);
 	for (cxx::idx_t i = 0; i < count; i++) {
 		cxx::Vector vector = this->chunk.GetVector(i);
-		// Dictionary, constant and other encodings become flat data
-		// plus validity, the one layout the buffer views can serve.
+		// Compact encodings expand to plain values plus a NULL mask, the one layout a memoryview can serve.
 		vector.Flatten();
 		vectors.push_back(std::move(vector));
 	}
@@ -93,8 +92,7 @@ size_t ChunkView::ElementSize(cxx::idx_t column) const {
 	case Id::UHUGEINT:
 		return 16;
 	case Id::DECIMAL: {
-		// The storage tier follows the width; the widest tier is int128,
-		// which the converter reads as two 64-bit limbs.
+		// Storage width follows the declared precision; the widest is a 128-bit integer, read as two halves.
 		const auto width = type.GetDecimalWidth();
 		return width <= 4 ? 2 : width <= 9 ? 4 : width <= 18 ? 8 : 16;
 	}

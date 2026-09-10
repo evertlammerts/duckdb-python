@@ -26,17 +26,10 @@ namespace cxx = duckdb::cxx;
 	throw nb::python_error();
 }
 
-/// Everything this module owns for the lifetime of its interpreter.
+/// Everything the extension owns for as long as its interpreter lives.
 ///
-/// There is exactly one Environment, and every database is opened through it.
-/// That is the whole point of the Environment: it is what notices a second
-/// attempt to open a database already open in this process. Giving each
-/// Database its own Environment would silently remove that guard.
-///
-/// This is per module instance, not a C++ static. nanobind initialises modules
-/// in two phases and the exec function runs once per interpreter that imports
-/// us, so a state created there and captured by the bindings registered
-/// alongside it belongs to that interpreter alone.
+/// The single shared Environment is what notices a second attempt to open a database already open in this
+/// process, and it is created per import rather than in a C++ static so every interpreter gets its own.
 class ModuleState {
 public:
 	cxx::Environment environment;
@@ -50,7 +43,7 @@ public:
 		return Exceptions().interrupt_error;
 	}
 
-	/// The class duckdb.exceptions assigns an engine error code.
+	/// The exception class duckdb.exceptions maps a DuckDB error code to.
 	nb::object ClassForCode(int code) {
 		return Exceptions().class_for_code(code);
 	}
@@ -62,9 +55,7 @@ private:
 		nb::object interrupt_error;
 	};
 
-	/// Resolved on first use rather than at module init, so the extension can
-	/// be loaded on its own before the package is, as the sanitizer staging
-	/// does.
+	/// Looked up on first use, not at import, so the extension can be loaded without the duckdb package.
 	const ExceptionClasses &Exceptions() {
 		nb::ft_lock_guard guard(exceptions_lock);
 		if (!exceptions) {
@@ -79,23 +70,17 @@ private:
 	std::optional<ExceptionClasses> exceptions;
 };
 
-/// What a running call pins: the engine object it uses and the Database it
-/// runs on. Both are owning copies, so a close on another thread releases
-/// only its own references and this call's stay valid until it returns.
+/// References a running call holds itself, so a close on another thread cannot free what it is still using.
 template <class T>
 struct Pinned {
 	nb::object database;
 	std::shared_ptr<T> engine;
 };
 
-/// What a wrapper owns: its engine object and the Database that object runs
-/// on, guarded against a close racing a call.
+/// A DuckDB object and the Database it belongs to, held so a close cannot race a call on another thread.
 ///
-/// A call takes its own owning copies through Acquire and keeps both alive
-/// until it returns; Release moves the owner's copies out and lets the last
-/// ones go. On a GIL build both run with the GIL held, which serialises
-/// them, and the mutex compiles to nothing; on the free-threaded build it is
-/// a PyMutex and is what serialises them.
+/// Acquire hands a call its own references and Release drops the owner's. The global interpreter lock already
+/// serialises those two and the mutex costs nothing there; on a build without that lock, the mutex is what does.
 template <class T>
 class Owned {
 public:
@@ -107,13 +92,12 @@ public:
 		return module;
 	}
 
-	/// The Database reference, for the traverse slot, which runs with every
-	/// other thread stopped.
+	/// The Database reference, for the garbage collector's visit, which runs with every other thread stopped.
 	nb::handle Parent() const {
 		return database;
 	}
 
-	/// Owning copies, or InterfaceError with `closed_message` once released.
+	/// Own references to both, or InterfaceError with `closed_message` once Release has run.
 	Pinned<T> Acquire(const char *closed_message) {
 		Pinned<T> live;
 		{
@@ -127,9 +111,7 @@ public:
 		return live;
 	}
 
-	/// Drop this owner's copies. Idempotent. Destroying the engine object
-	/// talks to the engine, so the last copy, if this is it, goes without the
-	/// GIL; the Database reference goes with it.
+	/// Drop this owner's references, repeatably; the last one calls into DuckDB, so the GIL is dropped first.
 	void Release() {
 		std::shared_ptr<T> released;
 		nb::object parent;
@@ -152,7 +134,7 @@ private:
 	std::shared_ptr<T> held;
 };
 
-/// Run an engine call with the GIL released and hand back what it produced.
+/// Run a DuckDB call with the GIL released and hand back what it returned.
 template <class CALL>
 auto WithoutGil(CALL &&call) {
 	nb::gil_scoped_release release;

@@ -1,4 +1,4 @@
-"""Expressions render to SQL, and the values in them are bound, not inlined."""
+"""Expressions turn into SQL, and the values in them are passed as parameters, not written into the text."""
 
 from __future__ import annotations
 
@@ -52,11 +52,7 @@ class TestQuoting:
 
 
 class TestStringOperandsAreLiterals:
-    """The load-bearing break from the previous client.
-
-    There, `col("state") == "active"` compared against a *column* named active.
-    Here a string is always a literal, and columns are always explicit.
-    """
+    """A break from the previous duckdb package, where `col("state") == "active"` meant a column named active."""
 
     def test_string_compares_as_a_value(self, con: _duckdb.Connection) -> None:
         con.execute("CREATE TABLE s (state VARCHAR, active VARCHAR)").drain()
@@ -69,13 +65,11 @@ class TestStringOperandsAreLiterals:
 
 class TestNoneAndUnknownOperands:
     def test_equality_with_none_is_a_null_comparison(self, con: _duckdb.Connection) -> None:
-        # SQL's answer: comparing with NULL is never true. Surfacing that beats
-        # inventing something friendlier.
+        # Comparing with NULL is never true in SQL, and surfacing that beats inventing something friendlier.
         assert evaluate(con, col("v") == None, " FROM (SELECT 1 AS v)") is None  # noqa: E711
 
     def test_equality_with_an_unconvertible_object_falls_back_to_python(self) -> None:
-        # Python falls back to identity, so this is False rather than an error
-        # and rather than a nonsensical expression.
+        # Python falls back to identity, so this is False rather than an error or a nonsense expression.
         assert (col("x") == object()) is False
 
     def test_arithmetic_with_an_unconvertible_object_raises(self) -> None:
@@ -84,7 +78,7 @@ class TestNoneAndUnknownOperands:
 
 
 class TestParameterSink:
-    """Values that could carry injection are bound; the rest stay inline."""
+    """Values that could carry injection are passed as parameters; the rest are written into the text."""
 
     def test_strings_are_bound(self) -> None:
         with ParamSink() as sink:
@@ -93,8 +87,7 @@ class TestParameterSink:
         assert sink.entries == [("literal", "ann", "VARCHAR")]
 
     def test_numbers_stay_inline(self) -> None:
-        # Injection-safe, and inlining keeps DuckDB's own literal typing rather
-        # than forcing a cast through a bound value.
+        # A number cannot inject anything, and writing it in keeps DuckDB's own typing of the literal.
         with ParamSink() as sink:
             rendered = (col("age") > 30).fragment()
         assert rendered == '("age" > 30)'
@@ -106,8 +99,7 @@ class TestParameterSink:
         assert sink.entries[0][2] == "BLOB"
 
     def test_without_a_sink_everything_renders_inline(self) -> None:
-        # This is how the schema oracle sees it: an untyped $n would tell the
-        # binder nothing, so binding always renders sink-off.
+        # When DuckDB is asked for the column types, an untyped $1 would say nothing, so values go in.
         assert (col("name") == "ann").fragment() == "(\"name\" = 'ann')"
 
     def test_numbering_follows_render_order(self) -> None:
@@ -149,10 +141,7 @@ class TestSqlTypeOf:
         assert sql_type_of(value) == expected
 
     def test_ambiguous_values_have_no_type(self) -> None:
-        # An empty list has no element type, so it stays inline rather than
-        # being bound as something invented. A list or map mixing text and
-        # numbers has none either: the engine refuses to combine BIGINT and
-        # VARCHAR, so a claimed VARCHAR[] only moved that refusal.
+        # Without an element type there is nothing honest to claim, so the value is written in instead.
         assert sql_type_of([]) is None
         assert sql_type_of(["a", 1]) is None
         assert sql_type_of({1: "a", "x": "b"}) is None
@@ -181,8 +170,7 @@ class TestOperatorsEvaluate:
         assert evaluate(con, expression) == expected
 
     def test_precedence_is_preserved(self, con: _duckdb.Connection) -> None:
-        # Every node parenthesises itself, so Python's precedence survives into
-        # the SQL rather than being reinterpreted by it.
+        # Every part parenthesises itself, so Python's precedence survives into the SQL.
         assert evaluate(con, (lit(2) + lit(3)) * lit(4)) == 20
         assert evaluate(con, lit(2) + lit(3) * lit(4)) == 14
 
@@ -197,8 +185,7 @@ class TestPredicatesAndFunctions:
         assert evaluate(con, lit(9).isin([1, 2, 3])) is False
 
     def test_isin_empty_is_false(self, con: _duckdb.Connection) -> None:
-        # Nothing is a member of an empty set, and SQL's `IN ()` is a syntax
-        # error, so this renders as FALSE.
+        # Nothing is a member of an empty set, and SQL has no `IN ()`, so this becomes FALSE.
         assert evaluate(con, lit(1).isin([])) is False
 
     def test_between(self, con: _duckdb.Connection) -> None:
@@ -221,8 +208,7 @@ class TestPredicatesAndFunctions:
         assert evaluate(con, lit("axb").like("a!_b", escape="!")) is False
 
     def test_a_like_pattern_is_bound(self, con: _duckdb.Connection) -> None:
-        # Patterns arrive from users as often as values do, so the same rule
-        # applies: never in the SQL text.
+        # Patterns come from users as often as values do, so they never enter the SQL text either.
         pattern = "%x'; DROP TABLE t; --%"
         with ParamSink() as sink:
             sql = col("s").like(pattern).fragment()
@@ -260,8 +246,7 @@ class TestAggregatesAndWindows:
         assert [r[0] for r in rows] == [1, 2, 3]
 
     def test_unknown_attribute_still_raises(self) -> None:
-        # A typo must stay an AttributeError, never resolve into a callable
-        # that fails later.
+        # A typo must stay an AttributeError, never become a callable that fails later.
         with pytest.raises(AttributeError, match="no_such_aggregate"):
             _ = col("x").no_such_aggregate  # type: ignore[attr-defined]
 
@@ -276,8 +261,7 @@ class TestPresentation:
         assert col("x").desc().nulls_first().as_order() == '"x" DESC NULLS FIRST'
 
     def test_expressions_are_immutable(self) -> None:
-        # Aliasing returns a new node, so one expression can be reused across
-        # frames without carrying another frame's presentation.
+        # Aliasing returns a new expression, so one can be reused without carrying an earlier alias.
         base = col("x")
         aliased = base.alias("y")
         assert base.as_select() == '"x"'
@@ -291,11 +275,7 @@ class TestPresentation:
 
 
 class TestRichLiteralTypes:
-    """The expression layer accepts every type the binding layer can convert.
-
-    It used to accept fewer, so `col("d") > date(2026, 8, 1)` raised TypeError
-    while the same value bound fine as a parameter. Found by writing an example.
-    """
+    """Every type that can be passed as a query parameter also works inside an expression."""
 
     @pytest.mark.parametrize(
         ("value", "expected_type"),
@@ -319,8 +299,7 @@ class TestRichLiteralTypes:
         assert sink.entries == [("literal", value, expected_type)]
 
     def test_renders_for_the_oracle_without_a_sink(self, con: _duckdb.Connection) -> None:
-        # Sink-off rendering has to stay bindable, since that is how the schema
-        # oracle sees the expression.
+        # The form with values written in is the one DuckDB is shown when asked for column types.
         expression = col("d") > datetime.date(2026, 8, 1)
         output, _ = con.bind(f"SELECT {expression.fragment()} FROM (SELECT DATE '2020-01-01' AS d)")
         assert output[0][1] == "BOOLEAN"
@@ -331,8 +310,7 @@ class TestRichLiteralTypes:
         assert rows[0][0] is True
 
     def test_decimal_keeps_its_scale_when_bound(self) -> None:
-        # Rendering a Decimal as text would put its scale at the mercy of a
-        # format string; binding hands the exact value to the converter.
+        # Writing a Decimal into the text would leave its scale to a format string.
         with ParamSink() as sink:
             (col("x") == decimal.Decimal("1.50")).fragment()
         assert str(sink.entries[0][1]) == "1.50"
@@ -343,15 +321,10 @@ class TestRichLiteralTypes:
 
 
 class TestFoundByWritingTheManual:
-    """Two shortcuts that rendered SQL the engine rejects.
-
-    Both were caught by running every example in the user manual rather than
-    trusting that they read correctly.
-    """
+    """Two shortcuts that produced SQL DuckDB rejects, both caught by running the manual's examples."""
 
     def test_n_unique_uses_distinct_syntax(self, con: _duckdb.Connection) -> None:
-        # It mapped to a `count_distinct` function, which DuckDB does not have.
-        # The exact form is syntax, not a function name.
+        # It used to call a `count_distinct` function, which DuckDB does not have; DISTINCT is syntax.
         expression = col("c").n_unique()
         assert expression.fragment() == 'count(DISTINCT "c")'
         con.execute("CREATE TABLE u (c VARCHAR)").drain()
@@ -359,20 +332,17 @@ class TestFoundByWritingTheManual:
         assert con.execute(f"SELECT {expression.fragment()} FROM u").fetch_all()[0][0] == 2
 
     def test_concat_is_explicit_because_plus_is_not_concatenation(self, con: _duckdb.Connection) -> None:
-        # SQL concatenates with ||; `+` on two strings is an error. Expressions
-        # carry no types, so `+` cannot decide which was meant.
+        # An expression carries no type, so `+` cannot decide between addition and concatenation.
         expression = lit("a").concat("-", lit("b"))
         assert con.execute(f"SELECT {expression.fragment()}").fetch_all()[0][0] == "a-b"
 
     def test_plus_on_text_still_fails_loudly(self, con: _duckdb.Connection) -> None:
-        # Not silently reinterpreted as concatenation: the binder says so.
+        # Not silently reinterpreted as concatenation: DuckDB says so.
         with pytest.raises(exceptions.Error):
             con.execute(f"SELECT {(lit('a') + lit('b')).fragment()}").fetch_all()
 
 
-# How to invoke each advertised name, so every one can be executed rather than
-# merely rendered. Adding a shortcut without adding a spec fails the
-# completeness test below, on purpose.
+# How to call each name, so adding a shortcut without adding it here fails the test below.
 AGGREGATE_CALLS: dict[str, tuple[object, ...]] = {
     "sum": (),
     "mean": (),
@@ -422,16 +392,7 @@ def data(con: _duckdb.Connection) -> str:
 
 
 class TestEveryAdvertisedFunctionExecutes:
-    """Execute every shortcut the DSL offers, against the real engine.
-
-    Rendering tests cannot catch a wrong function name: `count_distinct("c")`
-    is a perfectly well-formed string that DuckDB has never heard of. The
-    methods are generated from one table, and the generator checks each name
-    against the catalog; executing every call is what proves the shape each
-    method renders is one the engine accepts.
-
-    That gap shipped a broken `n_unique`. This closes it by construction.
-    """
+    """Checking the SQL text cannot catch a wrong function name, so every shortcut is run against DuckDB."""
 
     def test_the_spec_covers_every_advertised_name(self) -> None:
         advertised = set(Expr._CALLABLES) | set(WINDOW_CALLS)

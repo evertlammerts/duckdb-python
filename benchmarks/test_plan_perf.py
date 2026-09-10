@@ -1,4 +1,4 @@
-"""Plan construction and rendering: pure client work, no engine. See benchmarks/README.md."""
+"""Building a query and turning it into SQL text, with no database involved. See benchmarks/README.md."""
 
 from __future__ import annotations
 
@@ -12,12 +12,10 @@ from duckdb import col, fn, lit, when
 if TYPE_CHECKING:
     from pytest_codspeed import BenchmarkFixture
 
-# gate: frames and expressions never touch the engine here (render on a stub
-# schema), so the measurement is 100% client binding and fully deterministic.
+# gate: nothing here reaches DuckDB, so the measurement is this package alone and repeats exactly.
 pytestmark = pytest.mark.gate
 
-# Chunky units of work (~1ms+ per call): sub-ms callables sit inside the
-# walltime harness's per-round loop overhead and read as noise locally.
+# Each call must take about a millisecond, or the timing harness's own overhead swamps it.
 CHAIN_DEPTH = 256
 EXPR_REPEATS = 100
 

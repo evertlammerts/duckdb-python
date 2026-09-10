@@ -1,9 +1,5 @@
-# Builds and verifies the wheel matrix against the engine bundle.
-#
-# We build the following wheels per platform:
-# - A version-specific wheel for CPython 3.11 because nanobind (in linked mode) doesn't support the stable ABI < py3.12
-# - A stable ABI wheel for all Python >= 3.12
-# - For each free-threaded Python version we build one wheel, since free-threading doesn't fall under the stable ABI
+# Builds and verifies the wheel matrix against the DuckDB bundle.
+# Three per platform: 3.11 alone because nanobind's stable ABI starts at 3.12, one for 3.12 and up, one free-threaded.
 name: Build and test
 
 on:
@@ -20,12 +16,8 @@ on:
         type: string
         default: ""
 
-# A newer push to the same ref supersedes whatever is still running. Set on the
-# caller only: engine.yml is reached through workflow_call, and a called
-# workflow's jobs are cancelled with the run that called them, so a second
-# group here would only risk a deadlock. Called from release.yml, this group
-# takes the caller's workflow name, so it cannot collide with the release
-# run's own group.
+# A newer push to the same ref supersedes whatever is still running.
+# Set on the caller only: a called workflow dies with its caller, and a second group there risks a deadlock.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -39,22 +31,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # target and flavor are real axes so they cross-product: 6 x 3 = 18
-        # jobs. `include` only attaches fields to those combinations. Putting
-        # the targets in `include` instead silently collapses the matrix to one
-        # job per flavor, because include entries do not multiply, they merge
-        # and the last match wins.
+        # target and flavor are real axes so they multiply; targets moved into include collapse to one job per flavor.
         target:
           [windows-amd64, windows-arm64, linux-x86_64, linux-aarch64, macos-arm64, macos-x86_64]
-        # One CMake path serves all three: nanobind applies STABLE_ABI only on
-        # non-free-threaded >= 3.12 and FREE_THREADED only on t interpreters.
+        # One CMake path serves all three: nanobind applies each setting only where it fits.
         flavor: [cp311, abi3, ft314]
         exclude:
-          # No free-threaded CPython is published for Windows on ARM64. uv does
-          # not fail on that: it silently downloads the x86_64 build onto the
-          # ARM64 runner, so the extension targets x64 while the engine bundle
-          # is ARM64. DuckDBCppApi.cmake's link probe catches the mismatch, but
-          # the combination cannot work until such a build exists.
+          # No free-threaded CPython for Windows on ARM64, and uv quietly installs the x86_64 build instead.
           - target: windows-arm64
             flavor: ft314
         include:
@@ -86,8 +69,7 @@ jobs:
       - uses: ./.github/actions/engine-bundle
 
       - name: Stamp the version being released
-        # A push build keeps the checked-in version; only release.yml passes
-        # one in. Through env, so the value reaches the script as data.
+        # Through env, so a dispatched version reaches the script as data and not as code.
         if: inputs.version != ''
         env:
           VERSION: ${{ inputs.version }}
@@ -107,11 +89,8 @@ jobs:
 
       - name: Build the wheel
         env:
-          # Without a pin the wheel takes the runner's OS version as its floor
-          # and installs almost nowhere. The floor is per arch: arm64 macOS did
-          # not exist before 11.0 and packaging generates no arm64 tag below
-          # it, so a 10.x arm64 wheel is uninstallable on Apple Silicon.
-          # Intel keeps 10.14, the floor nanobind's aligned new/delete needs.
+          # Without a pin the wheel takes the runner's OS version as its floor and installs almost nowhere.
+          # arm64 macOS starts at 11.0; Intel keeps 10.14, the floor nanobind's aligned new and delete need.
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.target == 'macos-arm64' && '11.0' || '10.14' }}
         run: |
           uv venv --python ${{ matrix.python }} .venv-build
@@ -121,29 +100,19 @@ jobs:
           VIRTUAL_ENV=.venv-build uv build --wheel --no-build-isolation --python "$PY"
 
       - name: Retag Linux wheels as manylinux
-        # A wheel built straight on the runner is tagged linux_*, which PyPI
-        # and test.pypi both refuse. auditwheel rewrites the tag against the
-        # glibc the extension actually needs. The engine is already inside the
-        # wheel, so this is a retag and an rpath fix, not a vendoring step.
+        # A wheel built on the runner is tagged linux_*, which the indexes refuse; auditwheel retags it against glibc.
         if: startsWith(matrix.target, 'linux-')
         run: |
           for whl in dist/*.whl; do
-            # --exclude: the engine is already inside the wheel and was built
-            # in this image, so auditwheel must not copy it a second time.
+            # The DuckDB library is already inside the wheel, so auditwheel must not copy it again.
             auditwheel repair "$whl" --plat ${{ matrix.plat }} \
               --exclude libduckdb.so -w dist/repaired
           done
           rm -f dist/*.whl && mv dist/repaired/*.whl dist/ && rmdir dist/repaired
 
       - name: Assert the stable-ABI wheel is really stable-ABI
-        # STABLE_ABI silently no-ops if CMake was not asked for
-        # Development.SABIModule: the wheel is still TAGGED cp312-abi3 while the
-        # extension inside is built for one interpreter. Assert on the artifact.
-        #
-        # Checked as "carries no interpreter version" rather than "is named
-        # .abi3.", because the stable-ABI filename differs per platform:
-        # `_duckdb.abi3.so` on Unix but a bare `_duckdb.pyd` on Windows, where
-        # the version-specific form is `_duckdb.cp312-win_amd64.pyd`.
+        # STABLE_ABI silently does nothing if CMake was not asked for Development.SABIModule, so check the artifact.
+        # Read as carrying no interpreter version, because the stable-ABI file name differs per platform.
         if: matrix.flavor == 'abi3'
         run: |
           PY=$(command -v python3 || command -v python)
@@ -252,22 +221,17 @@ jobs:
         with:
           python: ${{ matrix.python }}
 
-      # mypy needs the built extension present: the stub is checked against it,
-      # not accepted in place of it.
+      # mypy needs the built extension: the stub is checked against it, not accepted in its place.
       - run: uv run --no-sync mypy
       - run: uv run --no-sync pytest
-      # The generated surfaces are read from the engine's catalog; a stale
-      # file would advertise functions this engine does not have.
+      # These files are read from DuckDB's catalog, so a stale one would advertise functions it does not have.
       - name: Generated files match the generators
         run: |
           uv run --no-sync python scripts/gen_aggregates.py --check
           uv run --no-sync python scripts/gen_func_namespaces.py --check
           uv run --no-sync python scripts/gen_keywords.py --check
 
-      # The parity measurement, never a gate: the old client's adopted tests
-      # run against this build and the report always exits 0. Two numbers:
-      # drop-in as it stands, and what connect() routed to the migration
-      # face would score.
+      # A measurement, never a gate: the previous package's tests run here and the report always exits 0.
       - name: Compat coverage report
         run: |
           uv run --no-sync python scripts/compat_report.py
@@ -276,9 +240,7 @@ jobs:
   coverage:
     name: Seam coverage
     needs: engine
-    # macOS only, and one platform is enough: coverage is about which lines
-    # execute, not about platform behaviour. clang's instrumentation is also
-    # what the report script speaks; the manylinux images use gcc.
+    # macOS only: one platform is enough, and the report script reads clang's instrumentation, not gcc's.
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4

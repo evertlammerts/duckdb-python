@@ -1,4 +1,4 @@
-"""Columnar egress: to_numpy and to_pandas. See benchmarks/README.md."""
+"""Whole columns going out to numpy and pandas. See benchmarks/README.md."""
 
 from __future__ import annotations
 
@@ -12,8 +12,7 @@ import duckdb
 if TYPE_CHECKING:
     from pytest_codspeed import BenchmarkFixture
 
-# gate: the egress path (ChunkView flatten, buffer copies, mask expansion,
-# dtype assembly) is client code; the range() scan feeding it is cheap.
+# gate: building the arrays is this package's work; the query feeding it is cheap.
 pytestmark = pytest.mark.gate
 
 N_NUM = scaled(500_000)

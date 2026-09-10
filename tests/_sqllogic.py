@@ -1,20 +1,4 @@
-"""A small sqllogictest runner that puts the engine's own tests through the bridge.
-
-DuckDB's `test/sql/**/*.test` files are the engine's statement of what it
-accepts. Running them here checks, at the engine's own standard, that a
-statement the engine accepts passes through `sql()` and `run()` unchanged.
-
-The format, as far as this runner reads it:
-
-    statement ok            the SQL that follows must succeed
-    statement error         it must fail; a message after ---- is a substring
-    query <types> [mode]    the SQL must succeed and match the rows after ----
-    require ...             a precondition; only built-in extensions are met
-    loop / foreach / mode / load / restart / ...   not read: the file is skipped
-
-Rows are compared after the mode's sort, value by value, with every value
-turned into text the way the engine's runner prints it.
-"""
+"""A small runner for the sqllogictest files in DuckDB's own test suite, driven through sql() and run()."""
 
 from __future__ import annotations
 
@@ -34,9 +18,9 @@ from duckdb import exceptions, sql
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-#: Extensions the engine bundle carries, so a `require` of one is met.
+#: Extensions built into the DuckDB this package ships, so a file requiring one can still run.
 BUILT_IN = {"parquet", "json", "icu", "tpch", "core_functions"}
-#: Directives this runner does not read. A file using one is skipped whole.
+#: Directives this runner does not read; a file using one is skipped whole.
 UNSUPPORTED = {
     "loop",
     "foreach",
@@ -52,13 +36,12 @@ UNSUPPORTED = {
     "endloop",
     "concurrentforeach",
 }
-#: Test-harness pragmas: verification modes of the engine's own runner. Not
-#: statements this engine build accepts, and not statements a user would run.
+#: Verification pragmas for DuckDB's own runner, which this build does not accept and no user would write.
 IGNORED = re.compile(
     r"^\s*pragma\s+((enable|disable)_verification|verify_[a-z_]+|disable_verify_[a-z_]+)\s*;?\s*$", re.IGNORECASE
 )
 HASHED = re.compile(r"^\d+ values hashing to [0-9a-f]+$")
-#: The engine's names for the types whose values compare as numbers.
+#: DuckDB's names for the types whose values compare as numbers.
 NUMERIC_TYPES = {
     "TINYINT",
     "SMALLINT",
@@ -75,9 +58,9 @@ NUMERIC_TYPES = {
     "DECIMAL",
     "BIGNUM",
 }
-#: The spellings of a boolean the engine's runner accepts.
+#: The spellings of a boolean DuckDB's own runner accepts.
 BOOLEAN_TEXT = {"true": True, "1": True, "false": False, "0": False}
-#: The type a `query` line's letter stands for, when the binder gave none.
+#: The type a query line's letter stands for, when DuckDB reported none.
 _LETTER_TYPES = {"I": "BIGINT", "R": "DOUBLE"}
 
 
@@ -143,12 +126,7 @@ def records(text: str) -> Iterator[Record]:
 
 
 def as_text(value: object, type_text: str = "") -> str:
-    """One value as the engine's runner prints it, given the column's SQL type.
-
-    The type decides what a dict is: a STRUCT prints as `{'k': v}`, a MAP as
-    `{k=v}`. Strings inside a nested value print unquoted, as the engine's
-    own VARCHAR cast prints them.
-    """
+    """One value as DuckDB's own runner prints it, where the column's SQL type decides how a dict prints."""
     if value is None:
         return "NULL"
     if isinstance(value, bool):
@@ -169,14 +147,12 @@ def as_text(value: object, type_text: str = "") -> str:
         return str(value).rstrip("0").rstrip(".") if value.microsecond else str(value)
     if isinstance(value, datetime.time):
         return str(value).rstrip("0").rstrip(".") if value.microsecond else str(value)
-    # The type is read outside-in: `MAP(INTEGER, VARCHAR)[]` is a list of
-    # maps, and only the element type says what each of its dicts is.
+    # The type is read outside-in: MAP(INTEGER, VARCHAR)[] is a list of maps, and the element type says so.
     upper = type_text.strip().upper()
     if isinstance(value, list) and _list_element(upper) is not None:
         return "[" + ", ".join(_nested_text(v, _list_element(upper) or "") for v in value) + "]"
     if upper.startswith("MAP("):
-        # A MAP arrives as a dict, or as (key, value) pairs when its keys are
-        # lists or structs, which Python cannot hash.
+        # A MAP arrives as a dict, or as (key, value) pairs when its keys are lists or structs Python cannot hash.
         key_type, value_type = _map_types(upper)
         entries = value.items() if isinstance(value, dict) else cast("list[tuple[object, object]]", value)
         return "{" + ", ".join(f"{_nested_text(k, key_type)}={_nested_text(v, value_type)}" for k, v in entries) + "}"
@@ -192,18 +168,12 @@ def as_text(value: object, type_text: str = "") -> str:
     return str(value)
 
 
-#: Characters that make the engine quote a value inside a nested one.
+#: Characters that make DuckDB quote a value inside a nested one.
 _QUOTED_ON = set("\"'(),:=[]{}")
 
 
 def _nested_text(value: object, type_text: str) -> str:
-    """A value inside a list, struct or map, quoted the way the engine's own cast quotes it.
-
-    The engine quotes the text of any leaf that is empty, starts or ends
-    with a space, reads as `null`, or holds one of `" ' ( ) , : = [ ] { }`,
-    whatever its type: a TIME is quoted for its colons, a DATE is not. A
-    quote or a backslash inside is escaped with a backslash.
-    """
+    """A value inside a list, struct or map, quoted as DuckDB's cast quotes it: by its text, not its type."""
     if value is None or isinstance(value, (list, dict)):
         return as_text(value, type_text)
     text = as_text(value, type_text)
@@ -218,7 +188,7 @@ def _nested_text(value: object, type_text: str) -> str:
 
 
 def _quoted(text: str) -> str:
-    """Text in single quotes, escaped as the engine escapes it."""
+    """Text in single quotes, escaped as DuckDB escapes it."""
     return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
@@ -274,15 +244,9 @@ def _struct_fields(upper: str) -> dict[str, str]:
 
 
 def _interval_text(value: datetime.timedelta) -> str:
-    """An interval the way the engine prints one: `1 day 00:00:01.5`, `-1 day -01:00:00`.
-
-    A timedelta is normalised to a non-negative clock (`-1 hour` arrives as
-    `-1 day, 23:00:00`), so it is undone here and the sign put on both parts,
-    which is how the engine writes a negative interval. What a timedelta
-    cannot carry is a mixed sign, `1 day -01:00:00`, or months: the engine
-    prints both and this runner cannot, and such rows compare as mismatches.
-    """
+    """An interval as DuckDB prints one, undoing the way a timedelta normalises a negative to a positive clock."""
     total = (value.days * 86400 + value.seconds) * 1_000_000 + value.microseconds
+    # A timedelta cannot carry a mixed sign or months, so DuckDB prints those and such rows compare as mismatches.
     sign = "-" if total < 0 else ""
     days, rest = divmod(abs(total), 86400 * 1_000_000)
     seconds, micro = divmod(rest, 1_000_000)
@@ -298,23 +262,14 @@ def _interval_text(value: datetime.timedelta) -> str:
 
 
 def close_enough(expected: str, actual: str, column_type: str) -> bool:
-    """Whether one expected value matches, the way the engine's runner decides it.
-
-    Equal text matches. A `<REGEX>:` or `<!REGEX>:` expectation is a full
-    match. Otherwise the column's type decides: a numeric column compares as
-    numbers, so `10` matches `10.0` and a double matches to six places; a
-    boolean column takes `1` and `0` for `true` and `false`; any other
-    column, text included, matches only as text. The letter in the file's
-    `query` line plays no part, and neither does it in the engine's runner.
-    """
+    """Whether an expected value matches, as DuckDB's runner decides: by the column's type, not the query letter."""
     if expected == actual:
         return True
     if expected.startswith(("<REGEX>:", "<!REGEX>:")):
         return matches_regex(actual, expected)
     kind = _type_head(column_type)
     if kind == "BOOLEAN":
-        # A value outside the table, a list of booleans or garbage, matches
-        # nothing; the text rule already said they differ.
+        # Anything that is not a boolean spelling matches nothing; equal text was already handled above.
         known = BOOLEAN_TEXT.get(expected.lower())
         return known is not None and known == BOOLEAN_TEXT.get(actual.lower())
     if kind in NUMERIC_TYPES:
@@ -332,7 +287,7 @@ def close_enough(expected: str, actual: str, column_type: str) -> bool:
 
 
 def _type_head(type_text: str) -> str:
-    """`DECIMAL` for `DECIMAL(18,3)`, `INTEGER` for `INTEGER[]`: the engine's type name without its arguments."""
+    """`DECIMAL` for `DECIMAL(18,3)`, `INTEGER` for `INTEGER[]`: the type name without its arguments."""
     return re.split(r"[(\[]", type_text.strip().upper(), maxsplit=1)[0]
 
 
@@ -350,7 +305,7 @@ def matches_regex(text: str, expectation: str) -> bool:
 def compare(record: Record, rows: list[tuple[object, ...]], column_types: list[str], expected: list[str]) -> bool:
     """Whether the rows match an expected block."""
     if len(expected) == 1 and HASHED.match(expected[0].strip()):
-        return True  # a hashed result block; not checked, not held against the bridge
+        return True  # a hashed result block, which this runner does not check
     types = record.header[0] if record.header else ""
     mode = record.header[1] if len(record.header) > 1 else ""
     width = len(types)
@@ -381,8 +336,7 @@ def compare(record: Record, rows: list[tuple[object, ...]], column_types: list[s
             # One value per line is the classic form for one-column results.
             return False
         for i, (g, w) in enumerate(zip(got, want, strict=True)):
-            # The engine's types where the binder gave them; the file's
-            # letters stand in when it did not (I and R are numeric).
+            # DuckDB's types where it reported them; the file's letters stand in when it did not.
             column_type = column_types[i] if i < len(column_types) else _LETTER_TYPES.get(types[i : i + 1], "")
             if not close_enough(w, g, column_type):
                 return False
@@ -390,13 +344,7 @@ def compare(record: Record, rows: list[tuple[object, ...]], column_types: list[s
 
 
 def placeholders(text: str, tmp: Path, cwd: Path, test_name: str) -> str:
-    """The file's placeholders resolved as the engine's runner resolves them.
-
-    `{TEST_DIR}` and the older `__TEST_DIR__` are a scratch directory,
-    `__WORKING_DIRECTORY__` is the checkout the file's data lives under,
-    `{UUID}` is fresh each time, and `{TEST_NAME}` / `{BASE_TEST_NAME}` name
-    the file.
-    """
+    """The file's placeholders resolved as DuckDB's own runner resolves them."""
     return (
         text.replace("{TEST_DIR}", str(tmp))
         .replace("__TEST_DIR__", str(tmp))
@@ -408,12 +356,7 @@ def placeholders(text: str, tmp: Path, cwd: Path, test_name: str) -> str:
 
 
 def error_matches(message: str, expected: list[str]) -> bool:
-    """Whether a failed statement's message is the one its file expects.
-
-    As the engine's runner reads it: the expected text is a substring of the
-    message, or a `<REGEX>:` / `<!REGEX>:` line is matched against the whole
-    message. An empty expectation is met by any error.
-    """
+    """Whether a failed statement's message is the one its file expects, as DuckDB's own runner reads it."""
     wanted = "\n".join(line for line in expected if line.strip()).strip()
     if not wanted:
         return True
@@ -423,10 +366,7 @@ def error_matches(message: str, expected: list[str]) -> bool:
 
 
 def run_file(path: Path, tmp: Path, cwd: Path | None = None) -> Outcome:
-    """Run one file on a fresh in-memory database.
-
-    `cwd` is the engine checkout: the files name their data relative to it.
-    """
+    """Run one file on a fresh in-memory database, from the DuckDB checkout its data paths are relative to."""
     outcome = Outcome(path)
     try:
         parsed = list(records(path.read_text()))
@@ -459,7 +399,7 @@ def run_file(path: Path, tmp: Path, cwd: Path | None = None) -> Outcome:
                 except exceptions.Error as error:
                     failed = True
                     message = str(error)
-                except Exception as error:  # a crash in the client is a finding, not a skip
+                except Exception as error:  # a crash in this package is a finding, not a skip
                     outcome.not_carried.append(f"statement CRASHED: {text[:80]!r} -> {type(error).__name__}: {error}")
                     if expect_error:
                         continue
@@ -477,9 +417,7 @@ def run_file(path: Path, tmp: Path, cwd: Path | None = None) -> Outcome:
                 outcome.queries += 1
                 plan = sql(text)
                 try:
-                    # Types first, from the binder: they decide how a nested
-                    # value prints. Binding has no side effects; running twice
-                    # would, and some queries here advance sequences.
+                    # Ask for the types first: they decide how a nested value prints, and asking runs nothing.
                     try:
                         column_types = plan.types(con)
                     except exceptions.Error:
@@ -488,18 +426,17 @@ def run_file(path: Path, tmp: Path, cwd: Path | None = None) -> Outcome:
                 except exceptions.Error as error:
                     outcome.not_carried.append(f"query: {text[:80]!r} -> {str(error).splitlines()[0][:80]}")
                     continue
-                except Exception as error:  # a crash in the client is a finding, not a skip
+                except Exception as error:  # a crash in this package is a finding, not a skip
                     outcome.not_carried.append(f"query CRASHED: {text[:80]!r} -> {type(error).__name__}: {error}")
                     continue
                 outcome.carried += 1
                 if text.lstrip().upper().startswith("EXPLAIN"):
-                    continue  # plan text; this client renders plans differently from the engine's runner
+                    continue  # this package prints query plans differently from DuckDB's own runner
                 label = record.header[2] if len(record.header) > 2 else None
                 expected = record.expected
                 try:
                     if label is not None and not expected:
-                        # A labelled result: the first query stores it, later
-                        # ones must reproduce it.
+                        # A labelled result: the first query stores it, later ones must reproduce it.
                         stored = labelled.get(label)
                         if stored is None:
                             labelled[label] = [

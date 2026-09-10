@@ -19,8 +19,7 @@ namespace duckdb_python {
 
 namespace nb = nanobind;
 
-/// Python constructors held for the lifetime of the module, so the hot loop
-/// does not re-import them per value.
+/// Python constructors held for the module's lifetime, so converting a value never re-imports them.
 struct ConversionContext {
 	ConversionContext();
 
@@ -34,18 +33,15 @@ struct ConversionContext {
 	nb::object uuid_cls;
 	nb::object int_cls;
 
-	/// Context for exact scaleb on the int128 decimal tier: its precision
-	/// clears the 39 digits an int128 can carry, so it never rounds.
+	/// Wide enough for the 39 digits a 128-bit integer can carry, so rescaling a decimal never rounds.
 	nb::object decimal_context;
-	/// 2^64 as a Python int, for combining 128-bit limbs exactly.
+	/// 2^64 as a Python int, for combining the two halves of a 128-bit integer exactly.
 	nb::object two_pow_64;
 
-	/// Epochs and the unit, cached because both directions offset from them
-	/// per value.
+	/// 1970-01-01, cached because every date conversion offsets from it.
 	nb::object epoch_date;
 
-	/// Epochs held for the parameter direction, so datetimes convert by
-	/// subtraction rather than by reimplementing the calendar.
+	/// The same day as a datetime, so values convert by subtraction rather than by redoing the calendar.
 	nb::object epoch_naive;
 	nb::object epoch_aware;
 	nb::object one_microsecond;
@@ -54,19 +50,15 @@ struct ConversionContext {
 /// One DuckDB value as a Python object. NULL becomes None.
 nb::object ValueToPython(const duckdb::cxx::Value &value, ConversionContext &ctx);
 
-/// Rows [start, end) of a chunk appended to `out` as tuples, converted
-/// column-at-a-time from the flattened vector data. `types` carries the
-/// columns' logical types, which this facade keeps on the result's schema,
-/// not on the vectors.
+/// Rows [start, end) of a batch appended to `out` as tuples; `types` comes from the schema, not the data.
 void AppendChunkRows(const duckdb::cxx::DataChunk &chunk, const std::vector<duckdb::cxx::LogicalType> &types,
                      duckdb::cxx::idx_t start, duckdb::cxx::idx_t end, ConversionContext &ctx, nb::list &out);
 
-/// Elements [first, last) of one vector as a new list. NULL becomes None.
+/// Elements [first, last) of one column's data as a new list. NULL becomes None.
 nb::list VectorElements(duckdb::cxx::Vector &vector, const duckdb::cxx::LogicalType &type,
                         duckdb::cxx::idx_t first, duckdb::cxx::idx_t last, ConversionContext &ctx);
 
-/// Raised by PythonToValue for an object of a type no branch accepts. Worded
-/// for parameter binding; a caller converting something else rewrites it.
+/// Raised by PythonToValue for an object it cannot convert; worded for query parameters, so others reword it.
 class UnsupportedTypeException : public duckdb::cxx::InvalidInputException {
 public:
 	explicit UnsupportedTypeException(std::string type_name);
@@ -80,9 +72,7 @@ private:
 	std::string type_name;
 };
 
-/// One Python object as a DuckDB value, for binding as a parameter or writing
-/// a function result. `scope` is the Connection outside engine callbacks and
-/// the callback's Context inside one; the facade's value factories take both.
+/// One Python object as a DuckDB value; `scope` is a Connection, or the Context inside a function callback.
 template <class SCOPE>
 duckdb::cxx::Value PythonToValue(SCOPE &scope, nb::handle object, ConversionContext &ctx);
 

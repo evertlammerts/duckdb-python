@@ -1,26 +1,14 @@
-"""A query you build up a step at a time.
+"""Build a query a step at a time, without a connection.
 
-A frame is a plan, and only a plan. It holds no connection and no database, so
-it renders to SQL that will run wherever that SQL is valid, and the same plan
-can be a macro body, a query on one connection, and a query on another.
+A query built this way is called a plan, and each verb added to it is a step. A plan holds no connection and no
+database, so a connection is passed only to the calls that need one, such as running the query.
 
     plan = table("people").filter(col("age") > 30).select(col("name"))
-    plan.render()                 # SQL, no engine involved
     plan.rows(con)                # rows, from a connection you pass
     plan.on(con).rows()           # the same, with the connection filled in
 
-A connection is an argument to the things that need one: resolving a schema,
-running the query, writing the rows somewhere. Nothing else.
-
-The plan is a graph rather than a tree, so a frame used in two places is
-computed once. Column names are worked out here, because this library decided
-them. Types, and any name the engine chose, are asked for.
-
-Nothing a connection said is ever stored on a plan. A schema is one catalog's
-answer at one moment, and a plan that remembered it would render one way here
-and the same way somewhere the answer differs. Shapes are worked out afresh
-against whichever connection is running. The one schema a caller states is
-a `values()` plan's, which is a statement by the caller rather than a memory.
+Nothing a connection reports is stored on a plan, because what a database holds changes; column names and types are
+worked out afresh against whichever connection runs the query, and a plan used twice is built once.
 """
 
 from __future__ import annotations
@@ -80,33 +68,21 @@ __all__ = [
 
 
 class Column(NamedTuple):
-    """One output column.
-
-    `type` is None when the client knows the name but not the type: the name
-    was decided here, the type was decided by an expression only the engine can
-    resolve. Nothing guesses; an unknown type is asked for when it is needed.
-    """
+    """One output column, whose `type` is None when only DuckDB can say what it is."""
 
     name: str
     type: str | None = None
 
 
-#: What a step produces, in order.
+#: The columns a step produces, name and type, in order.
 Shape = tuple[Column, ...]
 
-#: How many stub answers one connection keeps. The keys are query text, so a
-#: long-running process could otherwise accumulate them without bound.
+#: How many remembered column-type answers a connection keeps, so a long run cannot grow without bound.
 _STUB_LIMIT = 512
 
 
 def _stub_shape(connection: Connection, sql: str) -> Shape:
-    """Bind a stub question, remembering the answer on the connection.
-
-    A stub carries its whole input inline and names no table, so its answer
-    does not depend on the catalog. It does depend on the engine's settings:
-    `SELECT 7 / 2` binds as DOUBLE by default and as INTEGER under
-    `integer_division`. Those belong to a connection, so the memory does too.
-    """
+    """Ask DuckDB for a query's columns without running it, remembered per connection because settings change it."""
     with connection._stub_lock:
         _forget_if_moved(connection)
         remembered = connection._stub_answers.get(sql)
@@ -116,8 +92,7 @@ def _stub_shape(connection: Connection, sql: str) -> Shape:
     shape = tuple(Column(name, type_text) for name, type_text in output)
     with connection._stub_lock:
         _forget_if_moved(connection)
-        # The oldest answer goes, one at a time. Clearing everything at the
-        # limit would throw away a working set at the busiest moment.
+        # The oldest goes, one at a time: clearing everything at the limit would throw away a working set.
         while len(connection._stub_answers) >= _STUB_LIMIT:
             connection._stub_answers.pop(next(iter(connection._stub_answers)))
         connection._stub_answers[sql] = shape
@@ -125,7 +100,7 @@ def _stub_shape(connection: Connection, sql: str) -> Shape:
 
 
 def _forget_if_moved(connection: Connection) -> None:
-    """Drop the answers if any connection to this database has run a changing statement since."""
+    """Drop the remembered answers if any connection to this database has changed the catalog since."""
     current = connection._catalog.generation
     if connection._stub_generation != current:
         connection._stub_answers.clear()
@@ -133,13 +108,7 @@ def _forget_if_moved(connection: Connection) -> None:
 
 
 def _completer(known: dict[int, Shape], connection: Connection | None) -> Callable[[Frame], Shape]:
-    """A function giving a node's shape with every type known.
-
-    Bottom-up: a step whose input carries an unknown type has that input
-    completed first, so every question is one stub deep and nothing ever
-    binds a whole chain. Completed shapes are written back into `known`,
-    which lives for one resolution only.
-    """
+    """A function giving one step's columns with every type filled in, asking DuckDB one step at a time."""
 
     def typed(node: Frame) -> Shape:
         shape = known[id(node)]
@@ -149,8 +118,7 @@ def _completer(known: dict[int, Shape], connection: Connection | None) -> Callab
             message = "types are the engine's to say; pass a connection"
             raise NeedsConnection(message)
         answered = node._ask(connection, typed)
-        # Names are ours, types are the engine's. Positions line up because
-        # the engine answers the same select list this library rendered.
+        # The names are this library's and the types DuckDB's; they line up because it answered our own select list.
         if len(answered) == len(shape):
             answered = tuple(Column(ours.name, theirs.type) for ours, theirs in zip(shape, answered, strict=True))
         known[id(node)] = answered
@@ -160,7 +128,7 @@ def _completer(known: dict[int, Shape], connection: Connection | None) -> Callab
 
 
 def _uses_of(expressions: Iterable[Expr]) -> tuple[Frame, ...]:
-    """The plans the expressions of a step refer to, each once, in order."""
+    """The plans a step's expressions refer to, each once, in order."""
     found: dict[int, Frame] = {}
     for expression in expressions:
         for plan in subqueries(expression):
@@ -170,12 +138,12 @@ def _uses_of(expressions: Iterable[Expr]) -> tuple[Frame, ...]:
 
 
 def _as_stub(shape: Shape) -> str:
-    """A select list producing an empty relation of this shape."""
+    """A select list producing no rows with these column names and types."""
     return ", ".join(f"NULL::{column.type} AS {quote(column.name)}" for column in shape)
 
 
 def _duplicates(names: list[str]) -> list[str]:
-    """The names appearing more than once as the engine sees them, by first spelling, in order of appearance."""
+    """The names appearing more than once as DuckDB compares them, by first spelling, in order of appearance."""
     seen: dict[str, list[str]] = {}
     for name in names:
         seen.setdefault(fold_name(name), []).append(name)
@@ -183,13 +151,13 @@ def _duplicates(names: list[str]) -> list[str]:
 
 
 def _has(shape: Shape, name: str) -> bool:
-    """Whether a shape carries a name, compared as the engine compares names."""
+    """Whether these columns include a name, compared the way DuckDB compares names."""
     wanted = fold_name(name)
     return any(fold_name(column.name) == wanted for column in shape)
 
 
 def _require_present(shape: Shape, names: Iterable[str], verb: str) -> None:
-    """Refuse a step naming a column its input does not have; the engine would not always say so."""
+    """Refuse a step naming a column its input does not have, which DuckDB would not always report."""
     missing = [name for name in names if not _has(shape, name)]
     if missing:
         listed = ", ".join(repr(name) for name in missing)
@@ -198,13 +166,7 @@ def _require_present(shape: Shape, names: Iterable[str], verb: str) -> None:
 
 
 def _require_unique(shape: Shape, verb: str) -> Shape:
-    """Refuse a step that would produce one name twice.
-
-    A frame's column names are its whole addressing scheme: `col(name)` in the
-    next step has to mean exactly one thing. DuckDB will not catch this once
-    the step is behind a WITH; it binds the later reference to whichever came
-    first and answers.
-    """
+    """Refuse a step producing one name twice, which DuckDB accepts behind a WITH by silently taking the first."""
     repeated = _duplicates([column.name for column in shape])
     if repeated:
         listed = ", ".join(repr(name) for name in repeated)
@@ -214,7 +176,7 @@ def _require_unique(shape: Shape, verb: str) -> Shape:
 
 
 def _type_of(name: str, shape: Shape) -> str | None:
-    """The type of a column in a shape, if it is known."""
+    """The type of one column, if it is known."""
     wanted = fold_name(name)
     for column in shape:
         if fold_name(column.name) == wanted:
@@ -223,15 +185,10 @@ def _type_of(name: str, shape: Shape) -> str | None:
 
 
 def _contributed(expression: Expr, source: Shape) -> list[Column] | None:
-    """What one select-list expression adds, or None if the engine names it.
-
-    A name the caller wrote is known here. A name DuckDB invents, such as the
-    `(x * 2.5)` it gives an unaliased computation, is not, and that is what
-    sends the step to the binder.
-    """
+    """What one select-list item adds, or None when only DuckDB names it, as with an unaliased `x * 2.5`."""
     alias = expression._alias
     while isinstance(expression, FamilyExpr):
-        # A family wrapper renders as what it wraps, so it resolves as it too.
+        # A namespace such as .str() produces the SQL of what it wraps, so it names its column the same way.
         expression = expression.inner
     if isinstance(expression, Star):
         if alias:
@@ -245,22 +202,20 @@ def _contributed(expression: Expr, source: Shape) -> list[Column] | None:
         bare = expression.parts[-1]
         return [Column(alias or bare, _type_of(bare, source))]
     if alias:
-        # The caller named it, but an expression computed it, so the type is
-        # the engine's to say.
+        # The caller named it, but an expression computed it, so only DuckDB can say the type.
         return [Column(alias, None)]
     return None
 
 
 class JoinKind(NamedTuple):
-    """What one kind of join renders as, and what it needs and keeps."""
+    """One join kind: its keyword, whether it needs a condition, and whether it keeps the right side's columns."""
 
     keyword: str
     needs_on: bool
     keeps_right: bool
 
 
-#: The join kinds. Closed, so `how` can never carry text into the statement,
-#: and one row per kind, so nothing about a kind is decided in two places.
+#: The join kinds, listed once and closed, so `how` can never carry caller text into the SQL.
 _JOIN_KINDS = {
     "inner": JoinKind("INNER", needs_on=True, keeps_right=True),
     "left": JoinKind("LEFT", needs_on=True, keeps_right=True),
@@ -287,14 +242,7 @@ def _option(name: str) -> str:
 
 
 def _option_value(name: str, value: object) -> str:
-    """A COPY option value, spelled as SQL spells it.
-
-    An expression renders as itself, so `star()` is `*` and `col("x")` a
-    name. A list or tuple is the parenthesised list COPY reads a column
-    list from, `('grp', 'id')`. A dict is a struct. Anything else is a
-    literal. Written into the text, because COPY takes no parameters; a
-    `param()` in here has nothing to bind it, so it is refused.
-    """
+    """A COPY option value, written into the SQL because COPY takes no parameters, so a `param()` is refused."""
     if isinstance(value, Expr):
         held = parameters_in(value)
         if held:
@@ -307,11 +255,7 @@ def _option_value(name: str, value: object) -> str:
 
 
 def _options_clause(options: dict[str, object]) -> str:
-    """The `(NAME value, ...)` of a COPY, or nothing when there are no options.
-
-    Rendered with no sink active, so a literal is written into the text
-    whatever is going on around it: COPY cannot bind one.
-    """
+    """The `(NAME value, ...)` of a COPY, with values written into the text because COPY cannot bind any."""
     if not options:
         return ""
     with suspended_sinks():
@@ -319,12 +263,7 @@ def _options_clause(options: dict[str, object]) -> str:
 
 
 def _as_expr(value: object) -> Expr:
-    """One expression, for the verbs that take a single column at a time.
-
-    Unlike `_as_exprs`, a list is not a sequence of arguments here: there is
-    only one slot to fill, so a list can only have been meant as a value, and
-    `lit` is how you say that.
-    """
+    """One expression, for verbs with a single slot to fill, where a list can only have been meant as a value."""
     if isinstance(value, Expr):
         return value
     if isinstance(value, str):
@@ -335,17 +274,14 @@ def _as_expr(value: object) -> Expr:
 
 def _as_exprs(values: Iterable[object] | object) -> list[Expr]:
     """Accept an expression, a column name, or a sequence of either."""
-    # Any iterable but text is a sequence of columns. A generator or a set is
-    # as good as a list here, and a string is one name, not its characters.
+    # Any iterable but text is a sequence of columns, and a string is one name, not its characters.
     items = list(values) if isinstance(values, Iterable) and not isinstance(values, (str, bytes, Expr)) else [values]
     out: list[Expr] = []
     for item in items:
         if isinstance(item, Expr):
             out.append(item)
         elif isinstance(item, str):
-            # A bare string here is a column name, unlike inside an expression
-            # where it is a value. The position decides, and there is nothing
-            # else a string could usefully mean in a select list.
+            # A bare string is a column name here, unlike inside an expression, where it is a value.
             out.append(col(item))
         else:
             message = f"expected a column name or expression, got {item!r}"
@@ -360,20 +296,15 @@ def _type_name(value: object) -> str:
 
 
 class NeedsConnection(ValueError):
-    """Working this out means asking the engine, and no connection was given."""
+    """Working this out means asking DuckDB, and no connection was given."""
 
 
-# --- steps: one record per verb, rendering as a function of it ---------------
+# --- steps: one record per verb, whose SQL is a function of that record ------
 
 
 @dataclasses.dataclass(frozen=True, eq=False)
 class Step:
-    """One verb of a plan and its arguments, as plain values.
-
-    A step is data, not a closure: what it renders to, what it produces, and
-    which expressions it holds are all functions of the record. That is what
-    lets a plan be pickled, compared, and read.
-    """
+    """One verb of a plan and its arguments, held as plain data so a plan can be pickled, compared and read."""
 
     def __post_init__(self) -> None:
         """Checks on the arguments. Steps with arguments to check override this."""
@@ -384,15 +315,15 @@ class Step:
         self.__post_init__()
 
     def render(self, names: tuple[str, ...], shapes: tuple[Shape | None, ...]) -> str:
-        """The SQL of this step over its inputs' step names, given their shapes if known."""
+        """The SQL for this step, given the names of its inputs and their columns where those are known."""
         raise NotImplementedError
 
     def shape(self, shapes: tuple[Shape, ...]) -> Shape | None:
-        """What this step produces, from its inputs' shapes; None if only the engine knows."""
+        """The columns this step produces, from its inputs' columns, or None when only DuckDB knows."""
         return None
 
     def needs_shapes(self) -> bool:
-        """Whether `render()` cannot do without its inputs' shapes."""
+        """Whether the SQL for this step cannot be built without knowing its inputs' columns."""
         return False
 
     def expressions(self) -> tuple[Expr, ...]:
@@ -400,11 +331,7 @@ class Step:
         return ()
 
     def __eq__(self, other: object) -> bool:
-        """Same verb, same arguments. Expressions compare by what they render to.
-
-        Written out because a generated dataclass `__eq__` would ask each
-        expression `==`, which builds a comparison node instead of answering.
-        """
+        """Same verb and arguments; written out because a generated one would use `==`, which builds an expression."""
         if type(other) is not type(self):
             return NotImplemented
         return _comparable(self) == _comparable(other)
@@ -414,13 +341,7 @@ class Step:
 
 
 def _comparable(value: object) -> object:
-    """A step's fields as plain values, expressions as their rendered text.
-
-    Rendered into a sink, so the text carries `$n` for each literal and each
-    `param()`, and the sink says which value or which name each one is.
-    Rendered without one, every parameter would read as NULL and two plans
-    bound to different parameters would compare equal.
-    """
+    """A step's fields as plain data, expressions as SQL text plus their bound values, so different values differ."""
     if isinstance(value, Step):
         return (type(value).__name__, tuple(_comparable(getattr(value, f.name)) for f in dataclasses.fields(value)))
     if isinstance(value, Expr):
@@ -434,7 +355,7 @@ def _comparable(value: object) -> object:
 
 
 def _at_least_one(items: Sized, verb: str, what: str = "column") -> None:
-    """Refuse a step given nothing to work on, which would render a dangling clause."""
+    """Refuse a step given nothing to work on, which would leave a dangling clause in the SQL."""
     if not items:
         message = f"{verb} needs at least one {what}"
         raise TypeError(message)
@@ -464,13 +385,7 @@ class Sql(Step):
 
 @dataclasses.dataclass(frozen=True, eq=False)
 class TableFunction(Step):
-    """A table function in a FROM clause: `read_csv('x.csv', header := true)`, `range(10)`.
-
-    The engine names and types the columns, and for a file it opens the
-    file to do so, so the question is asked with the arguments written
-    in; execution binds them. A `param()` has no value at that moment and
-    `read_csv(NULL)` is refused by the parser, so it is refused here.
-    """
+    """A table function in a FROM clause; DuckDB may open the file to learn the columns, so a `param()` is refused."""
 
     name: tuple[str, ...]
     args: tuple[Expr, ...]
@@ -495,12 +410,7 @@ class TableFunction(Step):
 
 
 def _argument(value: object) -> Expr:
-    """A table-function argument from a Python value, spelled as SQL spells it.
-
-    An expression is itself. A path is its text. A list is a list literal,
-    paths inside it made text, so `read_parquet([a, b])` binds one list. A
-    dict is a struct. Anything else is a literal, bound at execution.
-    """
+    """A table function argument from a Python value, with a path turned into its text and anything else a literal."""
     if isinstance(value, Expr):
         return value
     if isinstance(value, os.PathLike):
@@ -533,9 +443,7 @@ class Values(Step):
             return f"SELECT {_as_stub(self.heading)} WHERE FALSE"
         rendered = ", ".join("(" + ", ".join(v.fragment() for v in row) + ")" for row in self.rows)
         columns = ", ".join(quote(c.name) for c in self.heading)
-        # A type given is a cast, so the shape this step reports is what
-        # the engine produces. A column given without one takes the type
-        # the engine infers from the values.
+        # A type given becomes a cast, so the columns this step reports are the ones DuckDB produces.
         selected = ", ".join(
             f"{quote(c.name)}::{c.type} AS {quote(c.name)}" if c.type is not None else quote(c.name)
             for c in self.heading
@@ -590,17 +498,12 @@ class WithColumns(Step):
     def render(self, names: tuple[str, ...], shapes: tuple[Shape | None, ...]) -> str:
         source = names[0]
         if shapes[0] is None:
-            # Nothing is known about the input, so the SQL cannot say which
-            # names it replaces. This form needs no such knowledge: keep every
-            # input column but the ones being set, then add those. The price
-            # is order: a replaced column moves to the end.
+            # The input's columns are unknown here, so a replaced column is re-added and moves to the end.
             excluded = ", ".join(render_literal(name) for name, _ in self.columns)
             added = ", ".join(e.alias(n).as_select() for n, e in self.columns)
             return f"SELECT COLUMNS(lambda c: c NOT IN ({excluded})), {added} FROM {source}"
         existing = {fold_name(column.name) for column in shapes[0]}
-        # A name already present is replaced in place, keeping column order; a
-        # new one is appended. EXCLUDE cannot serve both, because excluding a
-        # name that is not there is an error.
+        # REPLACE keeps a column in place and cannot serve a new name, since excluding one that is absent is an error.
         replaced = [f"{e.fragment()} AS {quote(n)}" for n, e in self.columns if fold_name(n) in existing]
         appended = [e.alias(n).as_select() for n, e in self.columns if fold_name(n) not in existing]
         star = f"* REPLACE ({', '.join(replaced)})" if replaced else "*"
@@ -609,8 +512,7 @@ class WithColumns(Step):
     def shape(self, shapes: tuple[Shape, ...]) -> Shape | None:
         setting = {fold_name(name) for name, _ in self.columns}
         existing = {fold_name(column.name) for column in shapes[0]}
-        # A replaced column keeps its position, a new one is appended, and both
-        # take their type from the engine because an expression made it.
+        # A replaced column keeps its place and a new one is appended; DuckDB types both, since an expression made them.
         kept = [Column(c.name, None) if fold_name(c.name) in setting else c for c in shapes[0]]
         new = (Column(name, None) for name, _ in self.columns if fold_name(name) not in existing)
         return _require_unique((*kept, *new), "with_columns")
@@ -729,8 +631,7 @@ class Unnest(Step):
         return f"SELECT * REPLACE ({expanded}) FROM {names[0]}"
 
     def shape(self, shapes: tuple[Shape, ...]) -> Shape | None:
-        # Names and order are untouched; an opened column becomes its element
-        # type, which only the engine knows.
+        # Names and order are untouched, and an opened column takes its element type, which only DuckDB knows.
         opened = {fold_name(name) for name in self.columns}
         return tuple(Column(c.name, None) if fold_name(c.name) in opened else c for c in shapes[0])
 
@@ -777,8 +678,7 @@ class Aggregate(Step):
 @dataclasses.dataclass(frozen=True, eq=False)
 class Describe(Step):
     def render(self, names: tuple[str, ...], shapes: tuple[Shape | None, ...]) -> str:
-        # Wrapped in a SELECT because a bare SUMMARIZE cannot follow a WITH,
-        # and every step but the first is reached through one.
+        # Wrapped in a SELECT because a bare SUMMARIZE cannot follow a WITH, and every later step sits behind one.
         return f"SELECT * FROM (SUMMARIZE SELECT * FROM {names[0]})"
 
 
@@ -806,7 +706,7 @@ class Join(Step):
         return self.suffix is not None and self._kind().keeps_right
 
     def _clashing(self, left: Shape, right: Shape) -> list[str]:
-        """Right-hand names the left already carries; USING keys fold and do not clash."""
+        """Right-hand names the left already carries; USING keys merge into one column and do not clash."""
         left_names = {fold_name(column.name) for column in left}
         folded = {fold_name(key) for key in self.using}
         return [c.name for c in right if fold_name(c.name) in left_names and fold_name(c.name) not in folded]
@@ -834,14 +734,11 @@ class Join(Step):
         )
         projection = "*"
         if shared:
-            # Only when renaming: the plain star keeps the SQL closest to what
-            # the reader wrote, and USING's own folding intact. USING keys are
-            # excluded from the right side because they are already in l.*.
+            # Listed out only when renaming, so a plain star keeps USING's merging intact; the keys are already in l.*.
             excluded = f" EXCLUDE ({', '.join(keys)})" if keys else ""
             renamed = ", ".join(f"{quote(name)} AS {quote(name + str(self.suffix))}" for name in shared)
             projection = f"l.*, r.*{excluded} RENAME ({renamed})"
-        # Both sides are aliased so joining a frame to itself works, and so an
-        # ON condition can tell the sides apart, as l["id"].
+        # Both sides are aliased so a frame can join to itself and a condition can tell the sides apart, as l["id"].
         return f"SELECT {projection} FROM {names[0]} AS l {kind.keyword} JOIN {names[1]} AS r{clause}"
 
     def shape(self, shapes: tuple[Shape, ...]) -> Shape | None:
@@ -864,8 +761,7 @@ class Join(Step):
             for c in right_shape
             if fold_name(c.name) not in folded
         ]
-        # The renamed copies have to be free too: suffixing onto a name the
-        # left already holds only moves the clash.
+        # The renamed copies must be free too: suffixing onto a name the left already holds only moves the clash.
         return _require_unique((*left_shape, *carried), "join")
 
     def expressions(self) -> tuple[Expr, ...]:
@@ -881,12 +777,12 @@ class SetOp(Step):
         return f"SELECT * FROM {names[0]} {self.keyword} SELECT * FROM {names[1]}"
 
     def shape(self, shapes: tuple[Shape, ...]) -> Shape | None:
-        # By name, a column only on the right is added, so the engine decides.
+        # Matching by name can add a column from the right, so only DuckDB knows the result.
         return None if self.by_name else shapes[0]
 
 
 def _projected(chosen: tuple[Expr, ...], source: Shape, verb: str) -> Shape | None:
-    """Shape of a select list, or None where the engine names a column."""
+    """The columns a select list produces, or None where only DuckDB can name one."""
     out: list[Column] = []
     for expression in chosen:
         columns = _contributed(expression, source)
@@ -897,18 +793,13 @@ def _projected(chosen: tuple[Expr, ...], source: Shape, verb: str) -> Shape | No
 
 
 class Frame(PlanBase):
-    """One step of a query. Immutable: every verb returns a new frame."""
+    """One step of a plan. Immutable, so every verb returns a new frame."""
 
     def __init__(self, step: Step, inputs: tuple[Frame, ...] = ()) -> None:
-        #: What this step is: its verb and arguments, as data. Rendering,
-        #: shape, and the expressions held are all functions of it, and its
-        #: expressions render only when the plan does, inside the parameter
-        #: sink, so their literals are bound rather than written into the SQL.
+        #: This step's verb and arguments; its expressions become SQL only when the plan does, so values are bound.
         self._step = step
         self._inputs = inputs
-        #: Plans this step refers to through subqueries in its expressions.
-        #: Part of the graph, so they render once as steps of their own, but
-        #: not named to the step: an expression finds its plan by identity.
+        #: Plans reached through subqueries here, which become steps of their own so each is built once.
         self._uses = _uses_of(step.expressions())
 
     @property
@@ -921,13 +812,11 @@ class Frame(PlanBase):
         """The plans this step reads."""
         return self._inputs
 
-    # -- graph and rendering
+    # -- building the SQL
 
     def _order(self) -> list[Frame]:
         """Every node this frame depends on, inputs before the nodes using them."""
-        # An explicit stack rather than recursion: a chain built in a loop can
-        # be thousands of steps deep, and every render and schema lookup comes
-        # through here.
+        # An explicit stack, not recursion: a chain built in a loop can be thousands of steps deep.
         seen: set[int] = set()
         order: list[Frame] = []
         stack: list[tuple[Frame, bool]] = [(self, False)]
@@ -940,27 +829,16 @@ class Frame(PlanBase):
                 continue
             seen.add(id(node))
             stack.append((node, True))
-            # Reversed, so the inputs are visited left to right as they would
-            # be by recursion. Step numbering and parameter order follow this.
+            # Reversed, so inputs are visited left to right; step numbering and parameter order follow that.
             stack.extend((parent, False) for parent in reversed(node._inputs + node._uses))
         return order
 
     def render(self, connection: Connection | None = None) -> str:
-        """The whole query as SQL, with one CTE per step, values written in.
+        """The whole query as SQL, one CTE per step, values written in and any frame used twice appearing once.
 
-        With a connection, the shapes are those execution would use on it;
-        the executed text itself binds values as `$n`, which
-        `render_parameterized` gives. Without one, it is a pure function of
-        the plan, and two things follow. A step whose SQL depends on its
-        input's columns renders a form that does not need them, and that form
-        can order columns differently: `with_columns` moves a replaced column
-        to the end, where the executed form keeps it in place. A suffixed
-        join has no such form and raises `NeedsConnection`. And nothing is checked:
-        two columns of one name in a join, or a
-        table that does not exist, are found when the plan runs, not here.
-
-        A frame used twice appears once: the graph is walked by identity, so
-        the engine sees the reuse rather than a duplicated subtree.
+        Without a connection nothing is checked, and a step needing its input's columns falls back to a form that
+        does not, which can move a replaced column to the end; a join with a suffix has no such form and raises
+        `NeedsConnection`.
         """
         order = self._order()
         shapes = self._shapes(connection, order) if connection is not None else None
@@ -969,22 +847,17 @@ class Frame(PlanBase):
     def render_parameterized(
         self, connection: Connection | None = None, *, parameters: Mapping[str, object] | None = None
     ) -> tuple[str, list[Any]]:
-        """The query as execution sends it: SQL with `$n` placeholders, and the values in order.
-
-        Lifted literals and `param()` placeholders share the numbering, so
-        every `param()` must be supplied, as it must be to run.
-        """
+        """The SQL with `$n` placeholders and the values in order; every `param()` must be given one."""
         sql, values = self._sql_and_values(connection=connection, parameters=parameters)
         return sql, values or []
 
     def _render(self, shapes: dict[int, Shape] | None = None, order: list[Frame] | None = None) -> str:
-        """The SQL, given whatever shapes are known."""
+        """The SQL, given whatever column names and types are known."""
         order = self._order() if order is None else order
         names = {id(node): quote(f"_s{i}") for i, node in enumerate(order)}
 
         def body_of(node: Frame) -> str:
-            # Shapes are handed down, never read off the node. A step that
-            # needs to know its input's columns says so by using them.
+            # Columns are handed down, never read off the node; a step needing its input's says so by using them.
             given = tuple((shapes or {}).get(id(parent)) for parent in node._inputs)
             return node._step.render(tuple(names[id(p)] for p in node._inputs), given)
 
@@ -998,13 +871,7 @@ class Frame(PlanBase):
         return Frame(step, inputs or (self,))
 
     def _definition(self, connection: Connection) -> str:
-        """The SQL for a macro body, resolved only as far as rendering needs.
-
-        A body may name a macro parameter, which the engine binds only once
-        the macro exists, so a step referring to one cannot be asked about.
-        The steps that must know their inputs' columns, a suffixed join, get
-        those inputs resolved; everything else renders as it would blind.
-        """
+        """The SQL for a macro body, worked out only as far as building it needs."""
         order = self._order()
         needed: set[int] = set()
         for node in order:
@@ -1018,7 +885,7 @@ class Frame(PlanBase):
         shapes = self._shapes(connection, order, needed) if needed else None
         return self._render(shapes, order)
 
-    # -- shape: names derived here, types from the binder
+    # -- column names worked out here, types asked of DuckDB
 
     def _shapes(
         self,
@@ -1026,16 +893,7 @@ class Frame(PlanBase):
         order: list[Frame] | None = None,
         only: set[int] | None = None,
     ) -> dict[int, Shape]:
-        """The shape of every step, worked out fresh, keyed by identity.
-
-        Returned rather than stored. Which columns a source has is a fact
-        about one catalog at one moment: it changes with the connection and it
-        changes under DDL, so a plan that kept it would render by whatever it
-        was told first.
-
-        `only` restricts the work to those steps, which must be closed under
-        inputs and uses: a macro body resolves just what its rendering needs.
-        """
+        """Every step's columns, asked afresh each time since what a source holds changes."""
         known: dict[int, Shape] = {}
         typed = _completer(known, connection)
         for node in self._order() if order is None else order:
@@ -1055,14 +913,7 @@ class Frame(PlanBase):
         return known
 
     def _ask(self, connection: Connection, typed: Callable[[Frame], Shape]) -> Shape:
-        """Ask the engine about this step alone.
-
-        A step with inputs is asked over empty tables of the right shape, so
-        the question stays small however long the chain is, and names no
-        catalog object. That makes its answer a function of the text, so it is
-        remembered on the connection. A source does name the catalog, and its
-        answer is only true of the connection that gave it, so it is not.
-        """
+        """Ask DuckDB about this step alone, over empty inputs; an answer naming no table is remembered."""
         stubs: list[str] = []
         names: dict[int, str] = {}
         given: list[Shape] = []
@@ -1073,76 +924,50 @@ class Frame(PlanBase):
             stubs.append(f"{stub} AS (SELECT {_as_stub(shape)} WHERE FALSE)")
             names[id(parent)] = stub
         for position, used in enumerate(self._uses):
-            # A subquery's plan is stubbed too, so the question stays free of
-            # the catalog even when an expression refers to another plan.
+            # A subquery's plan is emptied out too, so the question still names no table.
             stub = quote(f"_use{position}")
             stubs.append(f"{stub} AS (SELECT {_as_stub(typed(used))} WHERE FALSE)")
             names[id(used)] = stub
         with suspended_sinks(), rendering_steps(names):
             body = self._step.render(tuple(names[id(p)] for p in self._inputs), tuple(given))
         if not stubs:
-            # A source. Its answer belongs to this catalog, so it is asked
-            # every time rather than remembered.
+            # A source's answer belongs to one database, so it is asked every time rather than remembered.
             output, _ = connection._engine().bind(body)
             return tuple(Column(name, type_text) for name, type_text in output)
         return _stub_shape(connection, f"WITH {', '.join(stubs)}\n{body}")
 
     def resolve(self, connection: Connection | None = None) -> Shape:
-        """What this step produces, in order.
-
-        Names are derived wherever this library decided them, which is most
-        verbs. Where DuckDB decides a name, such as the `(x * 2.5)` it invents
-        for an unaliased computation, the engine is asked. Types are left
-        unknown until something asks, because nothing about rendering needs
-        them.
-        """
+        """The columns this plan produces, in order; their types are known only once DuckDB is asked."""
         return self._shapes(connection)[id(self)]
 
     def schema(self, connection: Connection | None = None) -> list[tuple[str, str]]:
-        """The columns this frame produces, as (name, type).
-
-        Types are the engine's to say, so this asks it if it has not already.
-        `.columns` alone usually costs nothing.
-        """
+        """The columns this plan produces, as (name, type), asking DuckDB for the types, unlike `.columns`."""
         shapes = self._shapes(connection)
-        # Complete this step the way an input is completed for a step above
-        # it: one stub, over typed inputs.
+        # Filled in the way an input is for the step above it: one question, over inputs already typed.
         shape = _completer(shapes, connection)(self)
         unresolved = [column.name for column in shape if column.type is None]
-        if unresolved:  # pragma: no cover (the binder types everything it returns)
+        if unresolved:  # pragma: no cover (DuckDB types every column it reports)
             message = f"no type reported for {unresolved}"
             raise Error(message)
         return [(column.name, type_text) for column in shape if (type_text := column.type) is not None]
 
     def columns(self, connection: Connection | None = None) -> list[str]:
-        """The column names.
-
-        Worked out here wherever this library decided them, so a connection is
-        only needed when the engine named something, or to read a source.
-        """
+        """The column names; a connection is only needed when DuckDB named something or a source must be read."""
         return [column.name for column in self.resolve(connection)]
 
     def types(self, connection: Connection | None = None) -> list[str]:
-        """The column types. The engine's to say, so it gets asked."""
+        """The column types, which only DuckDB can say, so it is asked."""
         return [type_text for _, type_text in self.schema(connection)]
 
     def describe(self) -> Frame:
-        """Per-column statistics, as a frame: count, min, max, average, quartiles.
-
-        This reads the rows, unlike `.schema`, which only asks the binder.
-        """
+        """Per-column statistics as a plan: count, min, max, average and quartiles. Reads the rows, unlike `.schema`."""
         return self._derive(Describe())
 
     # -- verbs
 
     def filter(self, predicate: Expr) -> Frame:
-        """Keep the rows where `predicate` holds.
-
-        Takes an expression. For a condition written as SQL, wrap it:
-        `filter(sql_expr("..."))`, so that every place raw text enters a
-        query says so at the call.
-        """
-        if not isinstance(predicate, Expr):  # the annotation says Expr; callers do not always listen
+        """Keep the rows where `predicate` holds; for a condition written as SQL, use `filter(sql_expr("..."))`."""
+        if not isinstance(predicate, Expr):  # the annotation says Expr, and callers do not always listen
             message = (  # type: ignore[unreachable]
                 f"filter takes an expression, not {type(predicate).__name__}; "
                 f"for a condition written as SQL, use filter(sql_expr(...))"
@@ -1151,10 +976,7 @@ class Frame(PlanBase):
         return self._derive(Filter(predicate))
 
     def select(self, *columns: object) -> Frame:
-        """Keep only these columns or expressions.
-
-        Pure projection: it does not group, unlike the older client's `select`.
-        """
+        """Keep only these columns or expressions; it projects and never groups."""
         return self._derive(Select(tuple(_as_exprs(list(columns)))))
 
     def with_columns(self, **columns: object) -> Frame:
@@ -1197,35 +1019,22 @@ class Frame(PlanBase):
         seed: int | None = None,
         method: str | None = None,
     ) -> Frame:
-        """A random subset: `n` rows, or `percent` of them.
-
-        Give a `seed` to get the same rows every run. `method` is reservoir,
-        bernoulli or system; the default suits whichever size you asked for.
-        """
+        """A random subset: `n` rows, or `percent` of them, with `seed` repeating a draw."""
         if (n is None) == (percent is None):
             message = "sample takes either n or percent"
             raise TypeError(message)
-        # Bernoulli and system sample each row independently, so they cannot
-        # hit an exact count. Only reservoir can, so that is the default for n.
+        # Only reservoir can hit an exact count; the others sample each row independently.
         size = f"{int(n)} ROWS" if n is not None else f"{float(percent or 0)} PERCENT"
         chosen = _option(method) if method else ("RESERVOIR" if n is not None else "BERNOULLI")
         arguments = f"{chosen}, {int(seed)}" if seed is not None else chosen
         return self._derive(Sample(size, arguments))
 
     def unnest(self, *columns: str) -> Frame:
-        """Expand list columns to one row per element, repeating the rest.
-
-        Unnesting two columns together walks them in step rather than making
-        every pairing; the shorter one runs out as NULL.
-        """
+        """Expand list columns to one row per element; two unnested together walk in step, not paired."""
         return self._derive(Unnest(tuple(columns)))
 
     def unpivot(self, *columns: str, name: str = "name", value: str = "value") -> Frame:
-        """Turn columns into rows, one row per column named.
-
-        The columns not named are kept and repeat down the rows. `name` and
-        `value` name the two columns that replace the ones folded away.
-        """
+        """Turn the named columns into rows; the others repeat, and `name` and `value` name the two new columns."""
         return self._derive(Unpivot(tuple(columns), name, value))
 
     def aggregate(self, *aggregates: object, group_by: Iterable[object] | object | None = None) -> Frame:
@@ -1245,23 +1054,13 @@ class Frame(PlanBase):
         how: str = "inner",
         suffix: str | None = None,
     ) -> Frame:
-        """Join to another frame.
+        """Join to another frame, on a column name or a list of them for a USING join, which merges the column.
 
-        `on` is a column name, or a list of them, for a USING join, where the
-        column is merged. Any other condition is a function of the two sides,
-        `on=lambda l, r: l["id"] == r["order_id"]`, in which `l["id"]` is that
-        side's column; it runs once, when the join is built, and must return
-        an expression. A condition that names no side may be an expression.
-
-        `how` is inner, left, right, outer, semi, anti, cross, positional,
-        natural or asof.
-
-        A join carries every column of both sides through, so two sides sharing
-        a name would leave the result with that name twice. A later `col(name)`
-        would then silently mean whichever came first. That is refused when the
-        plan is resolved or run; `render()` with no connection cannot know the
-        sides' columns and renders the join unchecked. Pass `suffix` to rename
-        the right side's copies instead.
+        Any other condition is a function of the two sides, `on=lambda l, r: l["id"] == r["order_id"]`, which runs
+        once when the join is built and must return an expression.
+        `how` is inner, left, right, outer, semi, anti, cross, positional, natural or asof.
+        Both sides' columns are carried through, so a name on both is refused when the plan is resolved or run, since
+        `col` could not tell the two apart; pass `suffix` to rename the right side's copies.
         """
         using: tuple[str, ...] = ()
         condition: Expr | None = None
@@ -1310,42 +1109,22 @@ class Frame(PlanBase):
         return Frame(SetOp("EXCEPT"), (self, other))
 
     def __getitem__(self, name: object) -> Frame:
-        """A single column, as a plan: `plan["x"]` narrows the plan, where `expr["x"]` reaches into a value.
-
-        Takes `object` rather than `str` because Python will pass integers
-        here on its own if it decides a plan is a sequence.
-        """
+        """A single column as a plan; `plan["x"]` narrows the plan, where `expr["x"]` reaches inside a value."""
         if not isinstance(name, str):
-            # Without this, Python's old sequence protocol would take
-            # `for row in plan` to mean plan[0], plan[1], ... and build plans
-            # forever, because __getitem__ never runs out.
+            # Without this, `for row in plan` would fall back to plan[0], plan[1] and never stop.
             message = f"a plan is indexed by column name, not by {type(name).__name__}"
             raise TypeError(message)
         return self.select(col(name))
 
     def __iter__(self) -> Iterator[tuple[Any, ...]]:
-        """Refuse to iterate without a connection.
-
-        Defined only to say so: leaving it out would let the old sequence
-        protocol fall back to __getitem__ and loop forever.
-        """
+        """Refuse to iterate without a connection, and stop the old sequence protocol falling back to `__getitem__`."""
         message = "iterating a plan needs a connection; use rows(connection)"
         raise TypeError(message)
 
     # -- as a value inside another query
 
     def scalar(self) -> Expr:
-        """This query used where a single value is expected.
-
-        It must return one row and one column. It is not correlated: it cannot
-        see the columns of the query it lands in. It becomes a step of the plan
-        it lands in, one CTE however many times it is used; that it is then
-        computed once is the engine's treatment of a CTE used more than once,
-        which a test holds it to.
-
-            budget = totals.aggregate(col("amount").mean().alias("m"))
-            orders.filter(col("amount") > budget.scalar())
-        """
+        """This query where a single value is expected; it must give one row and one column."""
         return SubQuery(self)
 
     # -- execution
@@ -1356,14 +1135,7 @@ class Frame(PlanBase):
         connection: Connection | None = None,
         parameters: Mapping[str, object] | None = None,
     ) -> tuple[str, list[Any] | None]:
-        """The SQL for this frame and the values it binds.
-
-        With a connection, the text execution uses on it. Rendered inside a
-        sink, so lifted literals are bound as `$n` instead of being written
-        into the text. A `param(name)` takes its value from `parameters`;
-        every name must be supplied, and every name supplied must be used, so
-        a typo cannot pass silently either way.
-        """
+        """The SQL with literals pulled out as `$n`, and the values, each of which must be used."""
         order = self._order()
         shapes = self._resolution(connection, order) if connection is not None else None
         with ParamSink() as sink:
@@ -1394,12 +1166,7 @@ class Frame(PlanBase):
 
     @staticmethod
     def _on(connection: object) -> Connection:
-        """The connection a plan runs on, refusing anything else.
-
-        A `dbapi.Connection` looks the part: it has an engine handle too. But
-        its cursors account for the one live result per connection, and a plan
-        run around them would leave that accounting wrong.
-        """
+        """The connection a plan runs on; a `dbapi.Connection` is refused because it tracks its cursors' live result."""
         if not isinstance(connection, Connection):
             message = (
                 f"a plan runs on a duckdb.Connection, not {_type_name(connection)}; "
@@ -1409,14 +1176,7 @@ class Frame(PlanBase):
         return connection
 
     def _resolution(self, connection: Connection, order: list[Frame]) -> dict[int, Shape] | None:
-        """The shapes execution renders with, worked out on this connection.
-
-        Every time, because it is what tells a join which columns clash and
-        what refuses a step that would produce one name twice, and both
-        answers belong to the catalog being read. A lone source is the one
-        plan that needs none: its text is the query, and some statements the
-        engine will run it cannot describe in advance (PIVOT is one).
-        """
+        """The columns the SQL is built with; a lone source skips it, DuckDB cannot describe a PIVOT."""
         return None if not self._inputs and not self._uses else self._shapes(connection, order)
 
     def _execute(self, connection: Connection, parameters: Mapping[str, object] | None) -> LiveResult:
@@ -1460,11 +1220,8 @@ class Frame(PlanBase):
         return [dict(zip(names, row, strict=True)) for row in self.rows(connection, parameters=parameters)]
 
     def to_numpy(self, connection: Connection, *, parameters: Mapping[str, object] | None = None) -> dict[str, Any]:
-        """Every column as a numpy array; columns holding NULLs come back masked.
-
-        Converted chunk by chunk from the engine's own buffers, never through
-        row tuples. numpy is imported here, not when duckdb is.
-        """
+        """Every column as a numpy array; NULLs come back masked and values come straight from DuckDB's buffers."""
+        # Imported here so that importing duckdb does not require numpy.
         from ._numpy import fetch_numpy
 
         connection = self._on(connection)
@@ -1481,8 +1238,7 @@ class Frame(PlanBase):
     ) -> pandas.DataFrame:
         """The rows as a pandas DataFrame.
 
-        Columns holding NULLs get pandas nullable dtypes with `pd.NA`;
-        columns without get plain numpy dtypes. ENUM becomes Categorical,
+        Columns holding NULLs get pandas nullable dtypes and the rest plain numpy ones, ENUM becomes Categorical,
         TIMESTAMPTZ comes back UTC-aware, and DATE follows `date_as_object`.
         """
         from ._numpy import to_dataframe
@@ -1493,11 +1249,7 @@ class Frame(PlanBase):
             return to_dataframe(result.result, date_as_object=date_as_object)
 
     def on(self, connection: Connection) -> Bound:
-        """This plan on a connection, so the terminals take no argument.
-
-        `plan.on(con).rows()` reads the way a dataframe does; the plan itself
-        still holds no connection, and the same plan can be put on another.
-        """
+        """This plan with a connection filled in, so `plan.on(con).rows()` takes no argument; the plan is unchanged."""
         return Bound(self, self._on(connection))
 
     def count(self, connection: Connection, *, parameters: Mapping[str, object] | None = None) -> int:
@@ -1540,16 +1292,9 @@ class Frame(PlanBase):
     ) -> list[tuple[Any, ...]]:
         """`COPY (this plan) TO path (options)`, returning the rows the statement returns.
 
-        The options are COPY's own, under their SQL names, `format` among
-        them: `copy_to(con, "x.parquet", format="parquet", compression="zstd")`;
-        with none, the engine picks the format from the path's extension.
-        A value is written as SQL writes it: a list is a column list, so
-        `partition_by=["grp", "id"]`; `star()` is `*`, so
-        `force_quote=star()`; a dict is a struct, as `kv_metadata` takes.
-
-        What comes back is what COPY returns: one row with the count, or
-        with `return_files=True` the count and the files, or with
-        `return_stats=True` one row per file written.
+        The options are COPY's own under their SQL names, `format` among them; with none, the path's extension decides.
+        A value is written as SQL writes it: a list is a column list, `star()` is `*`, and a dict is a struct.
+        COPY's own result comes back: the count, the files with `return_files`, or a row per file with `return_stats`.
         """
         clause = _options_clause(options)
         target = render_literal(os.fspath(path))
@@ -1588,7 +1333,7 @@ class Frame(PlanBase):
         parameters: Mapping[str, object] | None = None,
         **options: object,
     ) -> list[tuple[Any, ...]]:
-        """Write newline-delimited JSON, or one array with `array=True`: `copy_to` with `format="json"`."""
+        """Write newline-delimited JSON, or one array with `array=True`; `copy_to` with `format="json"`."""
         return self.copy_to(connection, path, parameters=parameters, format="json", **options)
 
     # -- looking at it
@@ -1596,10 +1341,7 @@ class Frame(PlanBase):
     def explain(
         self, connection: Connection, *, analyze: bool = False, parameters: Mapping[str, object] | None = None
     ) -> str:
-        """The query plan, as text.
-
-        With `analyze` the query runs and the plan carries what each step cost.
-        """
+        """How DuckDB will run the query, as text; with `analyze` it runs and each step carries what it cost."""
         connection = self._on(connection)
         keyword = "EXPLAIN ANALYZE" if analyze else "EXPLAIN"
         sql, values = self._sql_and_values(lambda q: f"{keyword} {q}", connection, parameters)
@@ -1615,8 +1357,7 @@ class Frame(PlanBase):
         self, connection: Connection, limit: int = 10, *, parameters: Mapping[str, object] | None = None
     ) -> str:
         """The first rows drawn as a table. What `show` prints."""
-        # One row past the limit, so the footer can say there are more without
-        # counting them all.
+        # One row past the limit, so the footer can say there are more without counting them all.
         head = self.limit(limit + 1)
         rows = head.rows(connection, parameters=parameters)
         return _box(head.columns(connection), head.types(connection), rows[:limit], more=len(rows) > limit)
@@ -1626,8 +1367,7 @@ class Frame(PlanBase):
         try:
             rendered = self.render()
         except NeedsConnection as reason:
-            # The one step that cannot render blind is a suffixed join. A repr
-            # that raised would make a debugger useless, so say why instead.
+            # A repr that raised would make a debugger useless, so a join with a suffix says why instead.
             return f"<Frame, renders with a connection: {reason}>"
         first = rendered.splitlines()
         shown = first[0] if len(first) == 1 else f"{first[0]} ... ({len(first)} lines)"
@@ -1635,11 +1375,7 @@ class Frame(PlanBase):
 
 
 class Bound:
-    """A plan on a connection: every terminal, with the connection filled in.
-
-    Built by `plan.on(con)`. Holds the plan and the connection and nothing
-    else; the plan is unchanged and still runs anywhere.
-    """
+    """A plan and a connection together, from `plan.on(con)`, so the calls that run it take no connection."""
 
     __slots__ = ("connection", "plan")
 
@@ -1648,7 +1384,7 @@ class Bound:
         self.connection = connection
 
     def render_parameterized(self, *, parameters: Mapping[str, object] | None = None) -> tuple[str, list[Any]]:
-        """The query as execution sends it: SQL with `$n` placeholders, and the values in order."""
+        """The query as it is sent to run: SQL with `$n` placeholders, and the values in order."""
         return self.plan.render_parameterized(self.connection, parameters=parameters)
 
     def rows(self, *, parameters: Mapping[str, object] | None = None) -> list[tuple[Any, ...]]:
@@ -1702,7 +1438,7 @@ class Bound:
         return self.plan.render(self.connection)
 
     def explain(self, *, analyze: bool = False, parameters: Mapping[str, object] | None = None) -> str:
-        """The query plan, as text."""
+        """How DuckDB will run the query, as text."""
         return self.plan.explain(self.connection, analyze=analyze, parameters=parameters)
 
     def show(self, limit: int = 10, *, parameters: Mapping[str, object] | None = None) -> None:
@@ -1756,8 +1492,7 @@ class Bound:
         try:
             return self.preview()
         except (ValueError, Error) as reason:
-            # A debugger pane or a notebook shows this unasked, so a plan
-            # that cannot run here is described rather than raised.
+            # A notebook or debugger shows this unasked, so a plan that cannot run here is described, not raised.
             return f"<Bound {self.plan!r}, does not run here: {reason}>"
 
     def _repr_html_(self) -> str:
@@ -1826,42 +1561,20 @@ def _box(columns: list[str], types: list[str], rows: list[tuple[Any, ...]], *, m
 
 
 def sql(query: str) -> Frame:
-    """A plan from SQL text.
-
-    Nothing is checked here and no connection is involved. The text is used as
-    written, so never build one from input you do not trust.
-    """
+    """A plan from SQL text, used exactly as written, so never build one from input you do not trust."""
     return Frame(Sql(query))
 
 
 def table(name: str | tuple[str, ...]) -> Frame:
-    """A plan reading a table or view by name; a file name reads the file.
-
-    A string is one name, quoted whole and never split: `table("orders.csv")`
-    and `table("data/*.parquet")` read the files as `FROM "orders.csv"` does,
-    and a table called `a.b` is `table("a.b")`. A qualified name is a tuple,
-    `table(("main", "orders"))`, at any depth. For a reader's options, use
-    `read_csv` and its siblings.
-
-    What the table holds is the catalog's to say, and is asked of whichever
-    connection the plan runs on.
-    """
+    """A plan reading a table, view or file by name; a string is never split, so a qualified name is a tuple."""
     return Frame(Table(name_parts(name, "table name")))
 
 
 def table_function(name: str | tuple[str, ...], *args: object, **named: object) -> Frame:
-    """A plan over a table function: `table_function("read_csv", "x.csv", header=True)`.
+    """A plan over a table function: `table_function("read_csv", "x.csv", header=True)`, `table_function("range", 10)`.
 
-    Any table function the engine has, extensions included, by its name, a
-    tuple for a schema-qualified one, and its arguments: positional ones as
-    given, named ones as `name := value`. A
-    string, number or date is bound at execution; a list is a list; a dict
-    is a struct; an expression is written as itself. `read_csv`,
-    `read_parquet` and `read_json` are this with the name filled in.
-
-        table_function("range", 10)
-        table_function("glob", "data/*.parquet")
-        table_function("query_table", "orders")
+    Any table function DuckDB has, with positional arguments as given and named ones written as `name := value`.
+    A string, number or date is bound when the query runs, a list is a list, and a dict is a struct.
     """
     parts = name_parts(name, "function name")
     return Frame(
@@ -1870,34 +1583,21 @@ def table_function(name: str | tuple[str, ...], *args: object, **named: object) 
 
 
 def read_csv(path: object, **named: object) -> Frame:
-    """A plan over `read_csv(path, ...)`: one file, a list of files, or a glob.
-
-    The named arguments are the reader's own, under their SQL names:
-    `header`, `delim`, `columns`, `types`, `skip`, `nullstr`, `dateformat`,
-    `compression`, `union_by_name`, `filename`, and the rest.
-    """
+    """A plan over `read_csv(path, ...)`: one file, a list of them or a glob, with the reader's own named arguments."""
     return table_function("read_csv", path, **named)
 
 
 def read_parquet(path: object, **named: object) -> Frame:
-    """A plan over `read_parquet(path, ...)`: one file, a list of files, or a glob."""
+    """A plan over `read_parquet(path, ...)`: one file, a list of them or a glob."""
     return table_function("read_parquet", path, **named)
 
 
 def read_json(path: object, **named: object) -> Frame:
-    """A plan over `read_json(path, ...)`: one file, a list of files, or a glob."""
+    """A plan over `read_json(path, ...)`: one file, a list of them or a glob."""
     return table_function("read_json", path, **named)
 
 
 def values(rows: Iterable[Iterable[object]], columns: Iterable[str | tuple[str, str]]) -> Frame:
-    """A plan over rows given here, in memory.
-
-    `columns` names them, as names or as (name, type) pairs. Every value is
-    bound as a parameter when the plan runs, so it exists before any
-    database does and carries no text into the query.
-
-        values([(1, "nl"), (2, "be")], columns=["id", "country"])
-        values([], columns=[("id", "INTEGER")])   # no rows needs the types
-    """
+    """A plan over rows given here; `columns` are names or (name, type) pairs."""
     heading = tuple(Column(c, None) if isinstance(c, str) else Column(*c) for c in columns)
     return Frame(Values(tuple(tuple(Lit(v) for v in row) for row in rows), heading))

@@ -1,23 +1,4 @@
-"""The old client's connection surface, for migration.
-
-The shipping client's `duckdb.connect()` returns a connection that executes
-and fetches directly: `conn.execute(...).fetchall()`, with `description` and
-`rowcount` on the connection, `cursor()` handing back a duplicate whose
-lifetime is tied to its parent, and `sql()`/`table()`/`query()` returning
-lazy relations. This face reproduces that contract over the new seam so
-migrating code keeps running while it moves. The native surface and the
-strict PEP 249 face in `duckdb.dbapi` stay what they are; new code has no
-reason to be here.
-
-Old habits are reproduced deliberately, the questionable ones included:
-`cursor()` is an independent transaction unlike dbapi's shared one, closing
-a connection closes its cursors, `rowcount` is always -1, relations compose
-SQL text, `connect()` hands out connections into one shared database
-instance per path (with the old config-mismatch refusal), and a module-level
-default connection backs `execute()` and friends. What the face still lacks
-is measured by the adopted suite under compat/, and every remaining
-difference is a behavior-change-log entry, not an accident.
-"""
+"""The previous duckdb package's API, reproduced quirks and all so code written against it keeps running."""
 
 from __future__ import annotations
 
@@ -133,10 +114,7 @@ __all__ = [
     "threadsafety",
 ]
 
-#: The old exception names, each aliased to the class this package raises for
-#: the same engine error, or to the nearest ancestor when the old class drew a
-#: finer line than the engine's error codes do. ConnectionException covered
-#: "closed or unusable", which this package reports as InterfaceError.
+#: The previous package's exception names, mapped to the class raised for the same error, or to its nearest ancestor.
 BinderException = ProgrammingError
 CatalogException = CatalogError
 ConnectionException = InterfaceError
@@ -160,12 +138,12 @@ SyntaxException = ParserError
 TransactionException = TransactionError
 TypeMismatchException = ProgrammingError
 
-#: The old client advertised itself to the engine as python/<major.minor>.
+#: The previous package identified itself to DuckDB as python/<major.minor>.
 __formatted_python_version__ = f"{sys.version_info.major}.{sys.version_info.minor}"
 
 
 def _name(key: object) -> str:
-    """A parameter name the old client's way: str as is, bytes decoded, anything else through str()."""
+    """A parameter name as the previous package took it: str as is, bytes decoded, anything else through str()."""
     if isinstance(key, str):
         return key
     if isinstance(key, bytes):
@@ -173,17 +151,14 @@ def _name(key: object) -> str:
     return str(key)
 
 
-#: Type texts describe() treats as numeric, mirroring the old client: those
-#: get every summary statistic cast to DOUBLE, the rest get NULL for the
-#: numeric-only ones and VARCHAR casts for the rest.
+#: Types describe() treats as numeric: those get DOUBLE statistics, the rest NULL wherever a statistic needs numbers.
 _NUMERIC_TYPES = frozenset({
     "TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT",
     "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT", "UHUGEINT",
     "FLOAT", "DOUBLE", "DECIMAL",
 })  # fmt: skip
 
-#: A join condition that is only column names becomes USING, anything else
-#: ON, the same reading the old client's parser applied.
+#: A join condition that is only column names becomes USING, anything else ON.
 _IDENTIFIER_LIST = re.compile(r'\s*[\w"]+(\s*,\s*[\w"]+)*\s*$')
 
 _JOIN_KINDS = {
@@ -198,9 +173,7 @@ _JOIN_KINDS = {
 #: Distinct default aliases per relation, so unaliased relations can join.
 _relation_numbers = itertools.count()
 
-#: Statement types the parser certifies as pure queries: those stay lazy
-#: relations, re-running per bare fetchall as the old client's did. Anything
-#: else executes exactly once at sql() time.
+#: Statement types that stay lazy relations and re-run on each bare fetchall; anything else runs once at sql() time.
 _LAZY_STATEMENTS = frozenset({"select", "explain", "relation", "logical_plan"})
 
 _CLOSED_MESSAGE = "Connection Error: Connection has already been closed"
@@ -209,14 +182,7 @@ _CLOSED_MESSAGE = "Connection Error: Connection has already been closed"
 def _materialized_relation(
     connection: CompatConnection, schema: builtins.list[tuple[str, str]], rows: builtins.list[tuple[Any, ...]]
 ) -> CompatRelation:
-    """Rows already produced, carried as a typed VALUES scan.
-
-    The old client wrapped a RETURNING result as a materialized relation:
-    fetches re-read the same rows and verbs compose on top. A VALUES scan
-    of the rendered values gives both for free, since re-running it has no
-    side effects. The text is O(rows) and re-parsed per run, so this suits
-    the small row sets RETURNING produces, not bulk results.
-    """
+    """Rows already produced, carried as a VALUES scan that can be re-read and built on; its SQL grows with them."""
     from .expr import suspended_sinks
     from .frame import values as frame_values
 
@@ -234,11 +200,7 @@ def _quantile_parameter(q: object) -> str:
 
 
 def _operand(value: object, *, select: bool = False) -> str:
-    """A verb operand as SQL text: expressions render, strings pass through.
-
-    Only a select-list item carries an expression's alias; anywhere else,
-    a WHERE or a join condition, `AS` would be a syntax error.
-    """
+    """An operand as SQL text; only a select-list item keeps an alias, since `AS` anywhere else is a syntax error."""
     from .expr import Expr, suspended_sinks
 
     if isinstance(value, CompatExpression):
@@ -250,13 +212,7 @@ def _operand(value: object, *, select: bool = False) -> str:
 
 
 class CompatExpression:
-    """An old-client expression: the native expression layer under the old names.
-
-    Wraps a native `Expr` (or a CASE mid-build), so the semantics are the
-    native layer's: a bare value operand is a value, matching the old
-    Expression objects, whose divergent string-as-column reading lived in
-    the text verbs, not here.
-    """
+    """The previous package's expression names, where a bare operand is a value and never a column name."""
 
     __slots__ = ("_case", "_expr")
 
@@ -267,8 +223,7 @@ class CompatExpression:
     def _value(self) -> Expr:
         if self._expr is not None:
             return self._expr
-        # A CASE nothing finished: unmatched rows are NULL, as the old
-        # client's implicit else was.
+        # An unfinished CASE leaves unmatched rows NULL, as the previous package did.
         return cast("ThenBuilder", self._case).end()
 
     def __repr__(self) -> str:
@@ -412,14 +367,14 @@ class CompatExpression:
         return CompatExpression(self._case.otherwise(_expression_operand(value)))
 
     def get_name(self) -> str:
-        """The rendered name, unquoted when it is one plain identifier."""
+        """The expression as SQL text, without quotes when it is one plain name."""
         rendered = repr(self)
         if rendered.startswith('"') and rendered.endswith('"') and '"' not in rendered[1:-1].replace('""', ""):
             return rendered[1:-1].replace('""', '"')
         return rendered
 
     def show(self) -> None:
-        """Print the expression, as the old client's did."""
+        """Print the expression, as the previous package printed it."""
         print(repr(self))
 
 
@@ -434,11 +389,7 @@ def _expression_operand(value: object) -> Expr:
 
 
 def _parse_name(text: str) -> tuple[str, ...]:
-    """Split a dotted name as the old client did, with the engine's qualified-name grammar.
-
-    A quote opens a part and must close it, `""` inside quotes is a literal
-    quote, dots separate parts. The messages are the engine's own.
-    """
+    """Split a dotted name as DuckDB does: dots separate parts, quotes wrap one, and `""` inside quotes is a quote."""
     parts: list[str] = []
     entry = ""
     i = 0
@@ -486,7 +437,7 @@ def _parse_name(text: str) -> tuple[str, ...]:
 
 
 def _native_name(text: str, what: str = "name") -> tuple[str, ...]:
-    """A dotted name split the old way, checked as the native verbs check names, refused in the old words."""
+    """A dotted name checked as the rest of the package checks names, but split and refused as before."""
     from .expr import name_parts
 
     parts = _parse_name(text)
@@ -498,11 +449,7 @@ def _native_name(text: str, what: str = "name") -> tuple[str, ...]:
 
 
 def ColumnExpression(*parts: str) -> CompatExpression:
-    """A column reference: a dotted string is split as the old client split it, or the parts are given.
-
-    An empty name is refused here; the old client reached an internal error
-    with it. A part that is not a string is written as its text, as before.
-    """
+    """A column reference from a dotted string or from its parts; an empty name is refused rather than crashing."""
     from .expr import star
 
     if not parts:
@@ -566,19 +513,12 @@ def CoalesceOperator(*args: object) -> CompatExpression:
     return CompatExpression(coalesce(*(_expression_operand(a) for a in args)))
 
 
-#: The old class name, for isinstance checks in migrating code.
+#: The previous package's class name, for isinstance checks in migrating code.
 Expression = CompatExpression
 
 
 class CompatRelation:
-    """A lazy relation the old client's way: SQL text composed over one connection.
-
-    The old verbs take SQL fragments as text, so composition is textual and
-    never touches the native expression layer. Fetching follows the old
-    model: `fetchone`/`fetchmany` run the relation once and drain the held
-    result; a bare `fetchall` with nothing held runs fresh every call;
-    `execute()` resets the held result.
-    """
+    """A lazy relation built as SQL text; fetches read a held result, and a bare fetchall runs the query afresh."""
 
     def __init__(
         self,
@@ -589,31 +529,26 @@ class CompatRelation:
         kind: str | None = None,
         name: str | None = None,
     ) -> None:
-        #: Held strongly, so a relation keeps its cursor alive (old GH-315).
+        #: Held strongly, so a relation keeps its connection alive, which the previous package's issue 315 required.
         self._connection = connection
         self._sql = sql
         self._relation_alias = alias
-        #: The table this relation reads whole, when it does: insert() is a
-        #: table-relation verb, as it was on the old client.
+        #: The table this relation reads whole, if any: insert() and update() work only on those, as before.
         self._table = table
         self._kind = kind
-        #: A table or view relation joins under its own name, as it did on
-        #: the old client, so conditions may qualify columns with it.
+        #: A table or view relation joins under its own name, so conditions can qualify columns with it.
         self._name = name
         self._number = next(_relation_numbers)
         self._result: LiveResult | None = None
         self._closed = False
-        #: Bound eagerly, as the old relations were: a bad fragment or a
-        #: closed connection errors at the verb, not at the first fetch.
+        #: Checked eagerly, so a bad fragment or a closed connection fails at the verb, not at the first fetch.
         self._schema = self._bind()
 
     def _bind(self) -> builtins.list[tuple[str, str]] | None:
         try:
             schema, _ = self._connection._engine().bind(self._sql)
         except InvalidInputError as error:
-            # PIVOT and friends expand into multiple engine statements and
-            # refuse to bind; they still execute, so the schema stays unknown
-            # until a result exists.
+            # The PIVOT family expands into several statements and cannot report columns until it runs.
             if "expands into multiple engine statements" in str(error):
                 return None
             raise
@@ -622,8 +557,7 @@ class CompatRelation:
         return schema
 
     def __getattr__(self, name: str) -> NoReturn:
-        # The old client reported a closed connection before an unknown verb;
-        # reached only for names this face does not carry.
+        # The previous package reported a closed connection before it reported an unknown verb.
         if not name.startswith("_") and self._connection._raw is None:
             raise ConnectionException(_CLOSED_MESSAGE)
         message = f"'CompatRelation' object has no attribute {name!r}"
@@ -650,7 +584,7 @@ class CompatRelation:
         return CompatRelation(self._connection, f"SELECT * FROM {self._source()} WHERE {_operand(condition)}")
 
     def project(self, *columns: object, groups: str = "") -> CompatRelation:
-        """The listed columns or expressions; `groups` was accepted and ignored there too."""
+        """The listed columns or expressions; `groups` was accepted and ignored before as well."""
         rendered = ", ".join(_operand(column, select=True) for column in columns)
         return CompatRelation(self._connection, f"SELECT {rendered} FROM {self._source()}")
 
@@ -662,12 +596,7 @@ class CompatRelation:
         return CompatRelation(self._connection, f"SELECT {aggregates} FROM {self._source()}{grouped}")
 
     def query(self, virtual_table_name: str, sql: str) -> CompatRelation | None:
-        """Run SQL that refers to this relation by the given name.
-
-        The relation is registered as a temporary view under the name, as
-        the old client registered it; a statement without rows runs on the
-        spot and returns None, the old way.
-        """
+        """Run SQL that refers to this relation by the given name, registered as a temporary view under it."""
         with self._run(f"CREATE OR REPLACE TEMPORARY VIEW {quote(virtual_table_name)} AS {self._sql}") as result:
             result.drain()
         return self._connection.sql(sql)
@@ -685,7 +614,7 @@ class CompatRelation:
             raise ConnectionException(_CLOSED_MESSAGE) from None
 
     def __repr__(self) -> str:
-        """The first rows as a table, the way the old relations printed."""
+        """The first rows as a table, the way the previous package printed a relation."""
         from .frame import sql as frame_sql
 
         try:
@@ -694,7 +623,7 @@ class CompatRelation:
             raise ConnectionException(_CLOSED_MESSAGE) from None
 
     def select(self, *args: object, groups: str = "") -> CompatRelation:
-        """The old alias of `project`."""
+        """Another name for `project`."""
         return self.project(*args)
 
     def order(self, order_expr: str) -> CompatRelation:
@@ -702,7 +631,7 @@ class CompatRelation:
         return CompatRelation(self._connection, f"SELECT * FROM {self._source()} ORDER BY {order_expr}")
 
     def sort(self, *args: object) -> CompatRelation:
-        """The old alias family of `order`, taking keys as text or expressions."""
+        """Another name for `order`, taking sort keys as text or as expressions."""
         from .expr import Expr, suspended_sinks
 
         def key(value: object) -> str:
@@ -729,8 +658,7 @@ class CompatRelation:
         return CompatRelation(self._connection, f"SELECT DISTINCT {unique_aggr} FROM {self._source()}")
 
     def _combine_guard(self, other: CompatRelation) -> None:
-        # The old client refused to combine with a relation whose connection
-        # is gone, in the closed-connection words.
+        # Combining with a relation whose connection is gone was refused in the closed-connection words.
         if other._connection._raw is None:
             raise ConnectionException(_CLOSED_MESSAGE)
 
@@ -754,7 +682,7 @@ class CompatRelation:
         partition_by: builtins.list[str] | None = None,
         write_partition_columns: bool | None = None,
     ) -> None:
-        """Write the relation as CSV: the old pandas-flavored names over the native COPY sink."""
+        """Write the relation as CSV, under the pandas-flavored option names the previous package used."""
         from .expr import star
         from .frame import sql as frame_sql
 
@@ -779,7 +707,7 @@ class CompatRelation:
             if value is not None
         }
         if quoting is not None:
-            # The old client accepted csv.QUOTE_ALL (and its name) alone.
+            # The previous package accepted csv.QUOTE_ALL and its name, nothing else.
             if str(quoting).lower() not in ("1", "all", "force", "quote_all"):
                 message = f"Unsupported value for 'quoting': {quoting!r}"
                 raise InvalidInputException(message)
@@ -808,7 +736,7 @@ class CompatRelation:
         filename_pattern: str | None = None,
         file_size_bytes: str | int | None = None,
     ) -> None:
-        """Write the relation as Parquet, over the native COPY sink."""
+        """Write the relation as Parquet."""
         from .frame import sql as frame_sql
 
         options: dict[str, Any] = {
@@ -837,7 +765,7 @@ class CompatRelation:
     to_parquet = write_parquet
 
     def update(self, set: Mapping[str, object], *, condition: object = None) -> None:
-        """UPDATE the table this relation reads; a table-relation verb, as it was."""
+        """UPDATE the table this relation reads; only a relation reading one whole table has it, as before."""
         if self._connection._raw is None:
             raise ConnectionException(_CLOSED_MESSAGE)
         from .expr import render_literal
@@ -870,7 +798,7 @@ class CompatRelation:
         return name in self.columns
 
     def fetch_df_chunk(self, vectors_per_chunk: int = 1, *, date_as_object: bool = False) -> pandas.DataFrame:
-        """Up to this many engine chunks of the held result as a DataFrame; empty at the end."""
+        """Up to this many batches of the held result as a DataFrame; empty once the result is exhausted."""
         import numpy as np
 
         from ._numpy import _columns_from_views, _frame_from_columns
@@ -906,9 +834,7 @@ class CompatRelation:
             raise InvalidInputException(message)
         clause = f"ON ({condition})"
         if _IDENTIFIER_LIST.fullmatch(condition):
-            # Name-shaped conditions join USING, but only when they really
-            # are column references: a literal like "true" binds on its own
-            # and belongs in ON, the way the old parser decided.
+            # A name-shaped condition joins USING only if it really is a column; "true" resolves on its own.
             try:
                 self._connection._engine().bind(f"SELECT {condition}")
             except ProgrammingError:
@@ -927,28 +853,24 @@ class CompatRelation:
         )
 
     def union(self, union_rel: CompatRelation) -> CompatRelation:
-        """UNION ALL, as the old client's union was."""
+        """UNION ALL: the previous package's union kept duplicates."""
         self._combine_guard(union_rel)
         return CompatRelation(self._connection, f"({self._sql}) UNION ALL ({union_rel._sql})")
 
     def except_(self, other_rel: CompatRelation) -> CompatRelation:
-        """EXCEPT ALL, as the old client's except_ was."""
+        """EXCEPT ALL: the previous package's except_ kept duplicates."""
         self._combine_guard(other_rel)
         return CompatRelation(self._connection, f"({self._sql}) EXCEPT ALL ({other_rel._sql})")
 
     def intersect(self, other_rel: CompatRelation) -> CompatRelation:
-        """INTERSECT ALL, as the old client's intersect was."""
+        """INTERSECT ALL: the previous package's intersect kept duplicates."""
         self._combine_guard(other_rel)
         return CompatRelation(self._connection, f"({self._sql}) INTERSECT ALL ({other_rel._sql})")
 
-    # -- the old aggregate shorthands, all one template
+    # -- aggregate shorthands, all one template
 
     def _aggregate_operand(self, piece: str, function: str, parameter: str) -> str:
-        # The old client parsed each operand and quoted it as an identifier
-        # when the parse failed, which is how reserved words and spaced
-        # names worked. The binder stands in for the parser here: a
-        # parse-level failure routes to the quoted form, a binding failure
-        # is left for the built relation to report.
+        # An operand DuckDB cannot parse is quoted as a name, which is how reserved and spaced words worked.
         if piece == "*":
             return piece
         arguments = f"{piece},{parameter}" if parameter else piece
@@ -966,9 +888,7 @@ class CompatRelation:
         if groups and window_spec:
             message = "Either groups or window must be set (can't be both at the same time)"
             raise InvalidInputException(message)
-        # The old client silently discarded a trailing "order by ..." in the
-        # groups; rows keep their scan order, and the adopted tests rely on
-        # exactly that.
+        # A trailing "order by ..." in the groups is dropped as before, and the copied tests rely on that.
         marker = groups.lower().find(" order by ")
         if marker != -1:
             groups = groups[:marker]
@@ -997,13 +917,13 @@ class CompatRelation:
         function_parameter: str = "",
         projected_columns: str = "",
     ) -> CompatRelation:
-        """Any function by name over the listed columns, the old passthrough."""
+        """Any function by name over the listed columns."""
         return self._aggregate_call(function_name, function_aggr, group_expr, "", projected_columns, function_parameter)
 
     def any_value(
         self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
     ) -> CompatRelation:
-        """The engine's any_value aggregate over each listed column."""
+        """The any_value aggregate over each listed column."""
         return self._aggregate_call("any_value", expression, groups, window_spec, projected_columns)
 
     def arg_max(
@@ -1051,7 +971,7 @@ class CompatRelation:
         window_spec: str = "",
         projected_columns: str = "",
     ) -> CompatRelation:
-        """The bitstring aggregate over each listed column, with the old min/max checks."""
+        """The bitstring aggregate over each listed column, with the same min and max checks as before."""
         if (min is None) != (max is None):
             message = "Both min and max values must be set"
             raise InvalidInputException(message)
@@ -1124,7 +1044,7 @@ class CompatRelation:
     def mean(
         self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
     ) -> CompatRelation:
-        """The average, under its old alias."""
+        """The average, under another name."""
         return self._aggregate_call("avg", expression, groups, window_spec, projected_columns)
 
     def median(
@@ -1159,7 +1079,7 @@ class CompatRelation:
         window_spec: str = "",
         projected_columns: str = "",
     ) -> CompatRelation:
-        """The discrete quantile, under its old shorthand name."""
+        """The discrete quantile, under its shorthand name."""
         return self._aggregate_call(
             "quantile", expression, groups, window_spec, projected_columns, _quantile_parameter(q)
         )
@@ -1193,7 +1113,7 @@ class CompatRelation:
     def std(
         self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
     ) -> CompatRelation:
-        """The sample standard deviation, under its old shorthand name."""
+        """The sample standard deviation, under its shorthand name."""
         return self._aggregate_call("stddev_samp", expression, groups, window_spec, projected_columns)
 
     stddev = std
@@ -1225,7 +1145,7 @@ class CompatRelation:
     def var(
         self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
     ) -> CompatRelation:
-        """The sample variance, under its old shorthand name."""
+        """The sample variance, under its shorthand name."""
         return self._aggregate_call("var_samp", expression, groups, window_spec, projected_columns)
 
     var_samp = var
@@ -1237,7 +1157,7 @@ class CompatRelation:
         """The population variance over each listed column."""
         return self._aggregate_call("var_pop", expression, groups, window_spec, projected_columns)
 
-    # -- the old window shorthands
+    # -- window shorthands
 
     def _window_call(self, call: str, window_spec: str, projected_columns: str) -> CompatRelation:
         prefix = f"{projected_columns}, " if projected_columns else ""
@@ -1278,7 +1198,7 @@ class CompatRelation:
         ignore_nulls: bool = False,
         projected_columns: str = "",
     ) -> CompatRelation:
-        """The lagging value over the window, with the old offset and default arguments."""
+        """The lagging value over the window, with an offset and a default."""
         suffix = " ignore nulls" if ignore_nulls else ""
         return self._window_call(
             f"lag({expression}, {int(offset)}, {default_value}{suffix})", window_spec, projected_columns
@@ -1293,7 +1213,7 @@ class CompatRelation:
         ignore_nulls: bool = False,
         projected_columns: str = "",
     ) -> CompatRelation:
-        """The leading value over the window, with the old offset and default arguments."""
+        """The leading value over the window, with an offset and a default."""
         suffix = " ignore nulls" if ignore_nulls else ""
         return self._window_call(
             f"lead({expression}, {int(offset)}, {default_value}{suffix})", window_spec, projected_columns
@@ -1322,7 +1242,7 @@ class CompatRelation:
     # -- materialization and introspection
 
     def create(self, table_name: str) -> None:
-        """A new table holding this relation's rows, through the native verb."""
+        """A new table holding this relation's rows."""
         from .frame import sql as frame_sql
 
         if self._connection._raw is None:
@@ -1345,7 +1265,7 @@ class CompatRelation:
     to_view = create_view
 
     def insert_into(self, table_name: str) -> None:
-        """Append this relation's rows to a table by position, through the native verb."""
+        """Append this relation's rows to a table, matching columns by position."""
         from .frame import sql as frame_sql
 
         if self._connection._raw is None:
@@ -1356,14 +1276,13 @@ class CompatRelation:
             raise ConnectionException(_CLOSED_MESSAGE) from None
 
     def insert(self, values: object) -> None:
-        """Append one row of values; a table-relation verb, as it was."""
+        """Append one row of values; only a relation reading one whole table has this, as before."""
         if self._table is None:
             message = "'DuckDBPyRelation.insert' can only be used on a table relation"
             raise InvalidInputException(message)
         from .frame import values as frame_values
 
-        # The connection speaks before the row is inspected, as it did on
-        # the old client: the closed words beat an arity complaint.
+        # A closed connection is reported before the row is inspected, as it was before.
         if self._connection._raw is None:
             raise ConnectionException(_CLOSED_MESSAGE)
         row = tuple(cast("Iterable[Any]", values))
@@ -1373,7 +1292,7 @@ class CompatRelation:
             raise ConnectionException(_CLOSED_MESSAGE) from None
 
     def describe(self) -> CompatRelation:
-        """The old summary: count/mean/stddev/min/max/median per column, one row each."""
+        """Count, mean, stddev, min, max and median per column, one row each."""
         aggregates = ("count", "mean", "stddev", "min", "max", "median")
         numeric_only = {"mean", "stddev", "median"}
         inner = []
@@ -1397,7 +1316,7 @@ class CompatRelation:
         return CompatRelation(self._connection, f"SELECT {', '.join(outer)} FROM {source}")
 
     def explain(self, type: str = "standard") -> str:
-        """The engine's plan for this relation, as text; "analyze" runs it."""
+        """DuckDB's query plan for this relation, as text; "analyze" runs the query as well."""
         keyword = "EXPLAIN ANALYZE" if "analyze" in str(type).lower() else "EXPLAIN"
         with self._run(f"{keyword} {self._sql}") as result:
             rows = result.fetch_all()
@@ -1415,19 +1334,19 @@ class CompatRelation:
 
     @property
     def type(self) -> str:
-        """The old relation kind: TABLE, VIEW, MATERIALIZED or QUERY."""
+        """The kind of relation: TABLE, VIEW, MATERIALIZED or QUERY."""
         if self._table:
             return "TABLE_RELATION"
         return self._kind or "QUERY_RELATION"
 
     @property
     def columns(self) -> builtins.list[str]:
-        """The column names, from binding the text."""
+        """The column names, which DuckDB reports without running the query."""
         return [entry[0] for entry in self.description]
 
     @property
     def types(self) -> builtins.list[str]:
-        """The column types, as text; the old client returned type objects."""
+        """The column types, as text; the previous package returned type objects."""
         return [entry[1] for entry in self.description]
 
     dtypes = types
@@ -1438,7 +1357,7 @@ class CompatRelation:
         return (len(self), len(self.columns))
 
     def __len__(self) -> int:
-        """The row count, through the native count terminal."""
+        """The row count, which runs the query."""
         from .frame import sql as frame_sql
 
         try:
@@ -1447,7 +1366,7 @@ class CompatRelation:
             raise ConnectionException(_CLOSED_MESSAGE) from None
 
     def __getitem__(self, name: str) -> CompatRelation:
-        """A single-column projection, as the old subscript was."""
+        """A single-column projection."""
         return self.project(name)
 
     def execute(self) -> CompatRelation:
@@ -1511,8 +1430,7 @@ class CompatRelation:
             except InterfaceError:
                 raise self._stale() from None
             finally:
-                # A conversion that failed midway must not orphan the open
-                # result: one live result would block the next statement.
+                # A conversion that fails midway must not leave the result open, blocking the next statement.
                 result.close()
         with self._run() as result:
             return fetch_numpy(result.result)
@@ -1536,13 +1454,13 @@ class CompatRelation:
         with self._run() as result:
             return to_dataframe(result.result, date_as_object=date_as_object)
 
-    #: The old client's aliases for `fetchdf`.
+    #: Other names for `fetchdf`.
     df = fetchdf
     to_df = fetchdf
 
     @property
     def description(self) -> builtins.list[tuple[Any, ...]]:
-        """Column metadata, from the held result or from binding the text."""
+        """Column metadata, from the held result or from the columns DuckDB reports without running the query."""
         if self._closed:
             message = "result closed"
             raise InvalidInputException(message)
@@ -1566,9 +1484,7 @@ class CompatRelation:
             self._result = None
 
     def _stale(self) -> InvalidInputError:
-        # The held result was force-closed under us, by the connection's
-        # close cascade; adopt the closed state so every fetch reports it
-        # with the one exception this class promises.
+        # The held result was closed under us when the connection closed, so report it as a closed result.
         self._result = None
         self._closed = True
         message = "result closed"
@@ -1583,8 +1499,7 @@ class CompatRelation:
         return cast("LiveResult", self._result)
 
 
-#: Python annotations the old client mapped onto SQL types when inferring a
-#: UDF signature.
+#: Python annotations mapped onto SQL types when a registered function's types are inferred.
 _ANNOTATION_TYPES: dict[object, str] = {
     bool: "BOOLEAN",
     int: "BIGINT",
@@ -1600,8 +1515,7 @@ _ANNOTATION_TYPES: dict[object, str] = {
 }
 
 
-#: The old client's refusal of a None return under DEFAULT null handling,
-#: verbatim; adopted tests match on its last line.
+#: The previous package's wording for a None return under default null handling; its tests match the last line.
 _NULL_RETURN_ERROR = """
 The returned result contained NULL values, but the 'null_handling' was set to DEFAULT.
 If you want more control over NULL values then 'null_handling' should be set to SPECIAL.
@@ -1613,14 +1527,14 @@ The UDF is not expected to return NULL values.
 
 
 def _udf_choice(value: object) -> str:
-    """A UDF option as lowercase text, taking the old enums by their name."""
+    """A registration option as lowercase text, taking the previous package's enums by their name."""
     name = getattr(value, "name", None)
     text = name if isinstance(name, str) else str(value)
     return text.lower()
 
 
 def _annotation_text(annotation: object, where: str) -> str:
-    """The SQL type an annotation stood for in the old client's inference."""
+    """The SQL type an annotation stands for."""
     if isinstance(annotation, str):
         return annotation
     origin = get_origin(annotation)
@@ -1656,9 +1570,7 @@ def _udf_signature(
     namespace = getattr(inspect.unwrap(function), "__globals__", {})
 
     def resolved(annotation: object) -> object:
-        # Evaluated as inspect would, one at a time, so that a name Python
-        # does not know is a SQL type written as text rather than an error;
-        # "INTEGER[]" is not even Python syntax.
+        # A name Python does not know is a SQL type written as text; "INTEGER[]" is not even Python syntax.
         if not isinstance(annotation, str):
             return annotation
         try:
@@ -1690,31 +1602,24 @@ def _udf_signature(
 
 
 class CompatConnection(Connection):
-    """A connection speaking the old client's execute-and-fetch vocabulary."""
+    """A connection that runs statements and fetches from them directly, as the previous package's connections did."""
 
     def __init__(self, database: _duckdb.Database, catalog: _Catalog | None = None) -> None:
         super().__init__(database, catalog)
         self._held: LiveResult | None = None
-        #: Whether anything was fetched from the held result yet: the old
-        #: client silently discarded an untouched result when the next
-        #: statement arrived, and kept a touched one, fully materialized.
+        #: Whether anything was fetched yet: an untouched result is dropped when the next statement arrives.
         self._held_touched = False
         self._compat_description: list[tuple[Any, ...]] | None = None
-        #: Cursors made from this connection; the old client closed them with it.
+        #: Cursors made from this connection, which close with it as they did before.
         self._cursors: weakref.WeakSet[CompatConnection] = weakref.WeakSet()
-        #: The shared-instance holder, kept so the cache entry lives while we do.
+        #: Keeps this path's shared database alive for as long as this connection is open.
         self._instance: _Instance | None = None
 
     def execute(self, sql: str, parameters: Sequence[Any] | Mapping[Any, Any] | None = None) -> CompatConnection:
-        """Run a statement, holding its rows for the fetch family. Returns self.
-
-        A statement that produces no rows is applied on the spot: the old
-        client's INSERT took effect at execute, and this face keeps that.
-        """
+        """Run a statement, holding its rows to fetch from; one that produces no rows takes effect right away."""
         self._release_held()
         if isinstance(parameters, Mapping):
-            # The old client took any parameter-dict key, so {1: v} fills $1;
-            # the native seam refuses non-strings, and the leniency lives here.
+            # The previous package took any dict key, so {1: v} fills $1, and that leniency lives here.
             parameters = {_name(key): value for key, value in parameters.items()}
         result = self._execute(sql, parameters)
         if result.result.result_type == "rows":
@@ -1739,7 +1644,7 @@ class CompatConnection(Connection):
             self.execute(sql, parameters)
         return self
 
-    # The old face reshapes the native registration signature on purpose.
+    # A different signature from Connection.create_function on purpose: this one is the previous package's.
     def create_function(  # type: ignore[override]
         self,
         name: str,
@@ -1752,12 +1657,7 @@ class CompatConnection(Connection):
         exception_handling: object = "default",
         side_effects: bool = False,
     ) -> CompatConnection:
-        """Register a Python callable, with the old face's inference and options.
-
-        Types omitted here are inferred from the function's annotations, as
-        the old client did. `exception_handling` "return_null" turns any
-        Python error into a NULL result instead of failing the query.
-        """
+        """Register a Python callable; omitted types come from annotations, and "return_null" makes errors NULL."""
         if _udf_choice(type) != "native":
             message = "Arrow UDFs are not supported yet; only type='native'"
             raise NotImplementedException(message)
@@ -1771,9 +1671,7 @@ class CompatConnection(Connection):
         refuse_none = nulls != "special"
         target = function
         if shield or refuse_none:
-            # The old client's semantics: an error becomes NULL only under
-            # return_null, and a None (or pandas NA) return under DEFAULT
-            # null handling is refused, never written as NULL.
+            # As before: errors become NULL only under return_null, and a None return is refused by default.
             def old_semantics(*args: object) -> object:
                 try:
                     result = function(*args)
@@ -1797,7 +1695,7 @@ class CompatConnection(Connection):
         return self
 
     def remove_function(self, name: str) -> CompatConnection:
-        """The old unregister. The engine keeps a function until the database closes."""
+        """Refused: DuckDB keeps a registered function until the database closes."""
         message = (
             f"remove_function({name!r}) is not supported: the engine keeps a registered "
             "function until the database closes; registering the same name again replaces it"
@@ -1810,7 +1708,7 @@ class CompatConnection(Connection):
         return rows[0] if rows else None
 
     def fetchmany(self, size: int = 1) -> list[tuple[Any, ...]]:
-        """Up to `size` rows; the old client's default is one."""
+        """Up to `size` rows, defaulting to one as before."""
         if size <= 0:
             return []
         return self._require_held().fetch_rows(size)
@@ -1830,11 +1728,7 @@ class CompatConnection(Connection):
             self._release_held()
 
     def fetchdf(self, date_as_object: bool = False) -> pandas.DataFrame | None:
-        """The held result as a pandas DataFrame, or None when nothing is held.
-
-        None rather than an error on the empty case, because the old
-        client's `df()` answered that way after the result was consumed.
-        """
+        """The held result as a pandas DataFrame, or None when nothing is held, as the previous package answered."""
         if self._held is None:
             return None
         from ._numpy import to_dataframe
@@ -1845,7 +1739,7 @@ class CompatConnection(Connection):
             self._release_held()
 
     def fetch_df_chunk(self, vectors_per_chunk: int = 1, *, date_as_object: bool = False) -> pandas.DataFrame:
-        """Up to this many engine chunks of the held result as a DataFrame; empty at the end."""
+        """Up to this many batches of the held result as a DataFrame; empty once the result is exhausted."""
         import numpy as np
 
         from ._numpy import _columns_from_views, _frame_from_columns
@@ -1862,7 +1756,7 @@ class CompatConnection(Connection):
             _columns_from_views(np, names, views, result.schema_types), date_as_object=date_as_object
         )
 
-    #: The old client's aliases for `fetchdf`.
+    #: Other names for `fetchdf`.
     df = fetchdf
     fetch_df = fetchdf
 
@@ -1873,26 +1767,14 @@ class CompatConnection(Connection):
 
     @property
     def rowcount(self) -> int:
-        """Always -1, as the old client reported it. Real counts live in `run()` and dbapi."""
+        """Always -1, as the previous package reported it; real counts live in `run()` and in `duckdb.dbapi`."""
         return -1
 
     def sql(self, query: str) -> CompatRelation | None:
-        """A lazy relation for a query; anything else runs on the spot, the old way.
-
-        The statement classifies itself: it is executed (which prepares but
-        runs nothing), asked what it is, and the classification result is
-        closed before this returns, so no result is ever left open on the
-        connection. A parser-certified query comes back lazy; a statement
-        producing rows any other way (RETURNING above all) runs exactly
-        once, its rows carried in a materialized relation; the rest is
-        drained on the spot and returns None.
-        """
+        """A lazy relation for a query; anything else runs once now, carrying its rows or returning None."""
         cleaned = query.strip().rstrip(";")
         if self._held is not None and not self._held_touched:
-            # The old client silently discarded a held result nothing had
-            # fetched from when the next statement arrived; a touched one it
-            # kept, materialized. This client streams, so the touched case
-            # raises the engine's own live-result refusal instead.
+            # An untouched result is dropped as before; a touched one meets DuckDB's refusal, since we stream.
             self._release_held()
         try:
             probe = self._execute(cleaned)
@@ -1903,8 +1785,7 @@ class CompatConnection(Connection):
             try:
                 statement = probe.result.statement_type
             except InvalidInputError:
-                # Only the multi-expanding statements (the PIVOT family)
-                # cannot answer before stepping, and those are queries.
+                # Only the PIVOT family cannot answer before stepping, and those are queries.
                 statement = "select"
             if statement not in _LAZY_STATEMENTS:
                 if probe.result.result_type == "rows":
@@ -1918,7 +1799,7 @@ class CompatConnection(Connection):
         return None
 
     def query(self, query: str) -> CompatRelation | None:
-        """The old alias of `sql`."""
+        """Another name for `sql`."""
         return self.sql(query)
 
     def table(self, name: str) -> CompatRelation:
@@ -1930,7 +1811,7 @@ class CompatConnection(Connection):
         return CompatRelation(self, f"SELECT * FROM {identifier(_parse_name(name))}", kind="VIEW_RELATION", name=name)
 
     def table_function(self, name: str, params: object = None) -> CompatRelation:
-        """A relation over a table function, through the native source."""
+        """A relation over a table function."""
         from .expr import suspended_sinks
         from .frame import table_function as frame_table_function
 
@@ -1944,7 +1825,7 @@ class CompatConnection(Connection):
         return CompatRelation(self, sql)
 
     def begin(self) -> CompatConnection:
-        """BEGIN TRANSACTION, as a method because the old connection had one."""
+        """BEGIN TRANSACTION, as a method because the previous package had one."""
         self.run("BEGIN TRANSACTION")
         return self
 
@@ -1959,27 +1840,15 @@ class CompatConnection(Connection):
         return self
 
     def cursor(self) -> CompatConnection:
-        """An independent duplicate with its own transaction and temp schema.
-
-        The old client's `cursor()` behaved this way, and this face keeps it:
-        the PEP 249 cursor that shares its parent's transaction lives in
-        `duckdb.dbapi`, not here. Closing this connection closes the cursor,
-        as the old client did.
-        """
+        """An independent duplicate with its own transaction; the cursor that shares one is in `duckdb.dbapi`."""
         child = cast("CompatConnection", self.duplicate())
-        # The child shares the instance holder: any live cursor keeps the
-        # path's shared-database cache entry alive, as the old client did.
+        # A live cursor keeps this path's shared database alive, as it did before.
         child._instance = self._instance
         self._cursors.add(child)
         return child
 
     def close(self) -> None:
-        """Close this connection and every cursor made from it.
-
-        Every step runs whatever any one of them raises: close must always
-        mean closed, never a connection left usable because one cursor's
-        close failed first.
-        """
+        """Close this connection and every cursor made from it; a failure in one step still closes the rest."""
         failures: list[BaseException] = []
         for child in list(self._cursors):
             try:
@@ -2005,8 +1874,7 @@ class CompatConnection(Connection):
         self._compat_description = None
 
     def _require_held(self) -> LiveResult:
-        # The held check speaks first, so fetching after close() reports the
-        # old client's "No open result set" rather than a closed connection.
+        # Checked first, so fetching after close() reports "No open result set", not a closed connection.
         if self._held is None:
             message = "No open result set"
             raise InvalidInputException(message)
@@ -2015,13 +1883,7 @@ class CompatConnection(Connection):
 
 
 class _Instance:
-    """One shared database and its catalog, held so the cache can reference it weakly.
-
-    The engine's Database object cannot take weak references, so this plain
-    holder stands in: every connection to the path keeps the holder alive,
-    and when the last one closes, the holder dies and the cache entry with
-    it, releasing the file.
-    """
+    """Holds a shared database, since DuckDB's own object takes no weak reference and the cache needs one."""
 
     __slots__ = ("__weakref__", "catalog", "database")
 
@@ -2030,9 +1892,7 @@ class _Instance:
         self.catalog = catalog
 
 
-#: One shared database instance per path, as the old client's connect() gave
-#: out. Weak, so the instance dies with its last connection and a later
-#: connect() opens the file afresh.
+#: One shared database per path, held weakly so the file is released once its last connection closes.
 _instances: dict[str, tuple[weakref.ref[_Instance], frozenset[tuple[str, str]]]] = {}
 _instances_lock = threading.Lock()
 
@@ -2040,13 +1900,7 @@ _instances_lock = threading.Lock()
 def connect(
     database: str | os.PathLike[str] = ":memory:", read_only: bool = False, config: Mapping[str, object] | None = None
 ) -> CompatConnection:
-    """Open a connection the old client's way: positional path, read_only flag, config dict.
-
-    Connections to the same path share one database instance, so two
-    writers see each other and `:memory:name` is shared; asking for the
-    same path with a different configuration is refused in the old
-    client's words. Plain in-memory databases are never shared.
-    """
+    """Open a connection; connections to one path share a database, and a plain in-memory one is never shared."""
     database = os.fspath(database)
     if database == ":default:":
         return default_connection()
@@ -2095,10 +1949,9 @@ def default_connection() -> CompatConnection:
 
 
 def set_default_connection(connection: CompatConnection) -> None:
-    """Route the module-level surface at this connection, as the old client allowed."""
+    """Point the module-level functions at this connection."""
     if not isinstance(cast("object", connection), CompatConnection):
-        # The old client's nanobind boundary rejected anything else with
-        # this wording, and the adopted tests match on it.
+        # The wording the previous package's argument check produced, which its tests match on.
         message = f"set_default_connection(): incompatible function arguments. Invoked with: {connection!r}"
         raise TypeError(message)
     global _default
@@ -2107,7 +1960,7 @@ def set_default_connection(connection: CompatConnection) -> None:
 
 
 def execute(sql: str, parameters: Sequence[Any] | Mapping[Any, Any] | None = None) -> CompatConnection:
-    """`execute` on the default connection, as the old module surface had."""
+    """`execute` on the default connection."""
     return default_connection().execute(sql, parameters)
 
 
@@ -2117,12 +1970,12 @@ def sql(query: str) -> CompatRelation | None:
 
 
 def query(query: str) -> CompatRelation | None:
-    """The old alias of module-level `sql`."""
+    """Another name for the module-level `sql`."""
     return default_connection().sql(query)
 
 
 def from_query(query: str) -> CompatRelation | None:
-    """The old alias of module-level `sql`."""
+    """Another name for the module-level `sql`."""
     return default_connection().sql(query)
 
 

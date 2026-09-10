@@ -1,13 +1,4 @@
-"""Run the engine's sqllogictest corpus through the bridge and report.
-
-    uv run python scripts/sqllogic_report.py [directory ...]
-
-Prints, per directory, how many files ran and why the rest were skipped,
-how many statements the bridge carried, how many query results matched,
-and every statement it did not carry or result it did not match. The test
-in tests/test_sqllogic.py holds floors; this is where to look when one
-moves.
-"""
+"""Report which of DuckDB's sqllogictest files run here and why the rest do not; read it when a test floor moves."""
 
 from __future__ import annotations
 
@@ -24,7 +15,7 @@ from tests.test_sqllogic import DIRECTORIES
 
 
 def main(directories: list[str]) -> int:
-    """Print the report; exit 1 if the corpus is not at hand."""
+    """Print the report; exit 1 when the sqllogictest files are not at hand."""
     root = corpus()
     if root is None:
         print("no duckdb checkout: set DUCKDB_SOURCE", file=sys.stderr)

@@ -1,15 +1,8 @@
 """Build a piece of SQL as a Python value.
 
-An expression describes a computation. It is not evaluated until you run it,
-and it holds no connection, schema or types, so one can be reused against
-different tables.
-
-    col("total") > 1000     ->  ("total" > 1000)
-
-Two rules differ from plain Python:
-
-- A bare string is a value, never a column name. Use `col` for a column.
-- Combine with `&`, `|` and `~`. Python's `and`/`or` cannot be overloaded.
+An expression such as `col("total") > 1000` describes a computation and holds no connection, schema or types, so the
+same one can be used against different tables. Two rules differ from plain Python: a bare string is a value and `col`
+names a column, and conditions combine with `&`, `|` and `~`, since Python's `and` and `or` cannot be overloaded.
 """
 
 from __future__ import annotations
@@ -59,18 +52,12 @@ _ASCII_LOWER = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
 
 
 def fold_name(name: str) -> str:
-    """A name as the engine compares names: ASCII case folded, every other character as written."""
+    """A name as DuckDB compares names: ASCII letters case folded, every other character as written."""
     return name.translate(_ASCII_LOWER)
 
 
 class PlanBase:
-    """What an expression knows about a plan: that it renders to a query.
-
-    `Frame` subclasses this. A base class rather than a protocol so that only
-    a plan is accepted where a plan is meant: a structural check would take
-    anything with a `render` method, a template engine included, and splice
-    it into the SQL.
-    """
+    """What an expression needs of a query; a base class, so nothing else with a `render` method can be spliced in."""
 
     def render(self, connection: Any = None) -> str:  # pragma: no cover (abstract)
         raise NotImplementedError
@@ -97,23 +84,14 @@ plain_identifier = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
 def function_name(name: str | tuple[str, ...]) -> str:
-    """The SQL for a function's name, written as the engine writes an identifier: bare unless it must be quoted.
-
-    A plain identifier that is not one of the engine's keywords is written
-    bare, anything else quoted, which is the engine's own rule and keeps
-    `sum("x")` readable. Never split. The parser's own forms, COALESCE among
-    them, are syntax rather than functions and refuse a quoted name, so they
-    are not rendered through here.
-    """
+    """A function's name as DuckDB writes it, quoted only when it must be; syntax forms like COALESCE bypass it."""
     return ".".join(
         part if plain_identifier.match(part) and fold_name(part) not in KEYWORDS else quote(part)
         for part in name_parts(name, "function name")
     )
 
 
-# What an operand may be without an explicit lit(). The temporal, decimal and
-# UUID types are here because the binding layer converts them exactly; leaving
-# them out made the expression layer narrower than the values it can bind.
+# What an operand may be without an explicit lit(); dates, decimals and UUIDs are here because they convert exactly.
 LITERAL_TYPES = (
     bool,
     int,
@@ -130,10 +108,7 @@ LITERAL_TYPES = (
     dict,
 )
 
-# Widening order for the numeric literals, so a list of mixed numbers gets an
-# element type that none of them overflows. Numbers are the only values that
-# widen: the engine refuses a list or a map that mixes text and numbers, and
-# a claimed VARCHAR would only move that refusal from the SQL to the binding.
+# Widening order for numeric literals, so a list of mixed numbers gets a type none overflows; only numbers widen.
 _NUMERIC_RANK = {"INTEGER": 1, "BIGINT": 2, "HUGEINT": 3, "DOUBLE": 4}
 
 _INT32 = 2**31
@@ -152,8 +127,7 @@ def _widen(types: list[str]) -> str | None:
 
 def sql_type_of(value: object) -> str | None:
     """The SQL type to bind a Python value as, or None when it is ambiguous."""
-    # Integer widths mirror DuckDB's literal typing, so a bound value lands on
-    # the same type an inline literal would have.
+    # Integer widths mirror DuckDB's own, so a bound value lands on the type an inline literal would have.
     if isinstance(value, bool):
         return "BOOLEAN"
     if isinstance(value, int):
@@ -188,11 +162,9 @@ def sql_type_of(value: object) -> str | None:
         element = _widen([t for t in element_types if t is not None])
         return f"{element}[]" if element else None
     if isinstance(value, dict):
-        # One rule for a dict, shared with `render_literal` and with the
-        # converter in pyconv.cpp: text keys make a STRUCT, any other keys a
-        # MAP. An empty dict is an empty STRUCT, which has no type to bind as
-        # and is written into the SQL instead.
+        # Text keys make a STRUCT and any others a MAP, the same rule `render_literal` and the C++ converter use.
         if not value:
+            # An empty dict is an empty STRUCT, which has no type to bind as, so it is written into the SQL.
             return None
         if all(isinstance(k, str) for k in value):
             fields = [(k, sql_type_of(v)) for k, v in value.items()]
@@ -211,11 +183,7 @@ def sql_type_of(value: object) -> str | None:
 
 def _needs_param(value: object) -> bool:
     """Whether a value is bound as a parameter rather than written into the SQL."""
-    # Text, bytes and composites: the injection surface, so never inlined.
-    # Temporal, decimal and UUID: bound because the converter keeps them exact,
-    # a Decimal's scale and a datetime's offset included.
-    # Numbers, booleans and NULL are absent here: nothing to escape, and
-    # inlining keeps DuckDB's own literal typing.
+    # Text and composites stay out of the SQL, decimals and dates bind exactly, and numbers inline as DuckDB types them.
     return isinstance(
         value,
         (str, bytes, list, tuple, dict, datetime.date, datetime.time, datetime.timedelta, decimal.Decimal, uuid.UUID),
@@ -223,7 +191,7 @@ def _needs_param(value: object) -> bool:
 
 
 def render_literal(value: object) -> str:
-    """A literal rendered into the SQL text. Only used where it is safe to."""
+    """A value written into the SQL text, only where that is safe."""
     if value is None:
         return "NULL"
     if isinstance(value, bool):
@@ -237,21 +205,16 @@ def render_literal(value: object) -> str:
             return "'Infinity'::DOUBLE"
         if value == float("-inf"):
             return "'-Infinity'::DOUBLE"
-        # A Python float is a double. Written bare, the engine would read 1.5
-        # as a DECIMAL literal, where a bound float arrives as DOUBLE.
+        # Written bare, DuckDB would read 1.5 as DECIMAL, where a Python float is a double.
         return f"{value!r}::DOUBLE"
     if isinstance(value, str):
         escaped = value.replace("'", "''")
         return f"'{escaped}'"
     if isinstance(value, bytes):
-        # One escape per byte. DuckDB reads exactly two hex digits after
-        # each escape, so a single one over the whole string would take
-        # everything past the first byte as literal text.
+        # One escape per byte: DuckDB reads exactly two hex digits after each, so one escape would cover only the first.
         escaped = "".join(f"\\x{byte:02x}" for byte in value)
         return f"'{escaped}'::BLOB"
-    # These render for the schema oracle only, where no sink is active. They
-    # are built from the object's own fields, never from caller text, so there
-    # is nothing here to escape.
+    # Reached only when no parameters are being collected; built from the value's own fields, so nothing needs escaping.
     if isinstance(value, datetime.datetime):
         keyword = "TIMESTAMPTZ" if value.tzinfo else "TIMESTAMP"
         return f"{keyword} '{value.isoformat(sep=' ')}'"
@@ -265,8 +228,7 @@ def render_literal(value: object) -> str:
         if not value.is_finite():
             message = f"cannot render a non-finite Decimal: {value!r}"
             raise TypeError(message)
-        # Width and scale come from the value itself: a bare DECIMAL is
-        # DECIMAL(18,3), which silently rounds anything finer.
+        # Width and scale come from the value: a bare DECIMAL is DECIMAL(18,3) and silently rounds anything finer.
         _, digits, exponent = value.as_tuple()
         scale = max(0, -int(exponent))
         width = max(len(digits) + max(int(exponent), 0), scale + 1)
@@ -279,8 +241,7 @@ def render_literal(value: object) -> str:
     if isinstance(value, (list, tuple)):
         return "[" + ", ".join(render_literal(item) for item in value) + "]"
     if isinstance(value, dict):
-        # The schema oracle's form only; a dict binds as a parameter when a
-        # sink is active. Text keys are a struct, anything else a map.
+        # Reached only when nothing is collecting parameters; text keys make a struct, anything else a map.
         if all(isinstance(k, str) for k in value):
             entries = ", ".join(f"{render_literal(k)}: {render_literal(v)}" for k, v in value.items())
             return "{" + entries + "}"
@@ -290,23 +251,16 @@ def render_literal(value: object) -> str:
     raise TypeError(message)
 
 
-# --- parameter sink --------------------------------------------------------
+# --- collecting the values a query binds -----------------------------------
 
 _sink_stack: contextvars.ContextVar[tuple[ParamSink, ...]] = contextvars.ContextVar("duckdb_param_sink", default=())
 
-#: The refusal a `param()` meets when it renders with no sink active, or None
-#: where the NULL stand-in is right. Separate from the sink stack, so that a
-#: nested `suspended_sinks()` cannot lift it.
+#: The error a `param()` raises when nothing is collecting values, or None where standing in NULL is right.
 _param_refusal: contextvars.ContextVar[str | None] = contextvars.ContextVar("duckdb_param_refusal", default=None)
 
 
 class ParamSink:
-    """Collects the values a plan binds, in render order, numbering them `$n`.
-
-    Lifted literals and `param()` placeholders share one numbering space.
-    Rendering with no sink active leaves real literals in place, which is what
-    the schema oracle needs: an untyped `$n` tells the binder nothing.
-    """
+    """Collects the values a query binds, numbered `$1`, `$2` and so on; `param()` shares the numbering."""
 
     __slots__ = ("_token", "entries")
 
@@ -315,7 +269,7 @@ class ParamSink:
         self.entries: list[tuple[str, Any, str | None]] = []
 
     def add_literal(self, value: object, type_text: str | None) -> int:
-        """Record a lifted literal, returning its 1-based position."""
+        """Record a value pulled out of the SQL, returning its 1-based position."""
         self.entries.append(("literal", value, type_text))
         return len(self.entries)
 
@@ -332,15 +286,13 @@ class ParamSink:
         _sink_stack.reset(self._token)
 
 
-#: While a plan renders, the step name of every plan in its graph, keyed by
-#: identity. A subquery whose plan is in here renders as a reference to that
-#: step instead of inlining its text, so a plan used twice is computed once.
+#: While a query is being built, each step's name by identity, so a subquery used twice becomes one reference.
 _step_names: contextvars.ContextVar[dict[int, str] | None] = contextvars.ContextVar("duckdb_step_names", default=None)
 
 
 @contextlib.contextmanager
 def rendering_steps(names: dict[int, str]) -> Iterator[None]:
-    """Make step names visible to subqueries for the duration of a render."""
+    """Make the step names visible to subqueries while the SQL is built."""
     token = _step_names.set(names)
     try:
         yield
@@ -349,11 +301,7 @@ def rendering_steps(names: dict[int, str]) -> Iterator[None]:
 
 
 def _children(value: object) -> Iterable[object]:
-    """What an expression-tree walk descends into: the fields of a node, the items of a list or tuple.
-
-    The one definition of a child, so that a field holding its expressions
-    in a list is walked like any other.
-    """
+    """What a walk over an expression descends into: a node's fields, and the items of a list or tuple."""
     if isinstance(value, Expr):
         return vars(value).values()
     if isinstance(value, (list, tuple)):
@@ -362,7 +310,7 @@ def _children(value: object) -> Iterable[object]:
 
 
 def parameters_in(value: object) -> list[str]:
-    """The names of every `param()` an expression (or a container of them) holds, in tree order."""
+    """The names of every `param()` an expression, or a container of them, holds, in tree order."""
     found: list[str] = []
     stack: list[object] = [value]
     while stack:
@@ -375,7 +323,7 @@ def parameters_in(value: object) -> list[str]:
 
 
 def subqueries(value: object) -> list[PlanBase]:
-    """Every plan an expression (or a container of them) refers to, in tree order, each once."""
+    """Every query an expression, or a container of them, refers to, in tree order, each once."""
     found: list[PlanBase] = []
     seen: set[int] = set()
     stack: list[object] = [value]
@@ -391,18 +339,14 @@ def subqueries(value: object) -> list[PlanBase]:
 
 
 def active_sink() -> ParamSink | None:
-    """The innermost sink, if one is active."""
+    """The innermost collector of parameter values, if one is active."""
     stack = _sink_stack.get()
     return stack[-1] if stack else None
 
 
 @contextlib.contextmanager
 def suspended_sinks() -> Iterator[None]:
-    """Render with no sink, so literals stay in the text.
-
-    The schema oracle needs this. An untyped `$1` tells the binder nothing,
-    while the literal it stands for tells it everything.
-    """
+    """Build SQL with values written in, since `$1` tells DuckDB nothing when it is asked for column types."""
     token = _sink_stack.set(())
     try:
         yield
@@ -412,12 +356,7 @@ def suspended_sinks() -> Iterator[None]:
 
 @contextlib.contextmanager
 def refusing_parameters(message: str) -> Iterator[None]:
-    """Make a `param()` that renders with no sink raise `TypeError(message)` instead of standing in NULL.
-
-    For a rendering that has nothing to bind a parameter to, a macro
-    definition: NULL would be written into it and every call would answer
-    NULL.
-    """
+    """Make a `param()` raise `TypeError(message)` rather than stand in NULL, which a macro body would bake in."""
     token = _param_refusal.set(message)
     try:
         yield
@@ -440,21 +379,7 @@ def _coerce(other: object) -> Expr | Any:
 
 
 def _as_lambda(function: Callable[..., object]) -> Expr:
-    """A SQL lambda from a Python one, by running it once with a variable per parameter.
-
-    The function is called at build time with expressions standing for its
-    parameters, so whatever it returns is the body, already a tree; the
-    names in the SQL are the Python parameters' own. It must build an
-    expression: a plain value is taken as a constant body, and anything
-    else is refused here, where the mistake is.
-
-    Every parameter becomes a lambda variable, so the signature must be
-    plain positional names: no defaults, which would silently pick a
-    different engine overload, and no keyword-only, `*args` or `**kwargs`
-    parameters. A callable with no parameters is refused too: a SQL lambda
-    has no zero-variable form, and a bare function where a value was meant
-    is usually a call that was never made.
-    """
+    """A SQL lambda from a Python one, called once when built; a default would pick a different DuckDB overload."""
     label = getattr(function, "__name__", None) or repr(function)
     try:
         parameters = list(inspect.signature(function).parameters.values())
@@ -504,15 +429,7 @@ class FuncNamespaces:
     """The function namespace entries, on their own class because `str` and `list` shadow builtins."""
 
     def str(self) -> StrExpr:
-        """This expression as text: the string functions, `col("s").str().upper()`.
-
-        A function namespace is a method scope, not a cast: nothing is
-        checked here, and the engine still judges every call. The families
-        exist for two reasons: without them, every engine function would be
-        a method on every expression, several hundred names after each dot;
-        and the family prefixes could not be dropped, since `.list().min()`
-        can mean `list_min` only while `.min()` still means the aggregate.
-        """
+        """This expression with the string functions in scope, `col("s").str().upper()`; nothing is checked or cast."""
         from ._func_namespaces import StrExpr
 
         return StrExpr(cast("Expr", self))
@@ -530,10 +447,7 @@ class FuncNamespaces:
         return ListExpr(cast("Expr", self))
 
     def json(self) -> JsonExpr:
-        """This expression as a JSON document: `col("payload").json().extract("$.id")`.
-
-        JSON is text underneath, so the string functions are in scope too.
-        """
+        """This expression as JSON, with the string functions in scope too: `col("p").json().extract("$.id")`."""
         from ._func_namespaces import JsonExpr
 
         return JsonExpr(cast("Expr", self))
@@ -546,10 +460,10 @@ class Expr(AggregateMethods, FuncNamespaces):
         self._alias: str | None = None
         self._order: str | None = None
 
-    # -- rendering
+    # -- turning into SQL
 
     def fragment(self) -> str:
-        """The SQL for this node, parenthesised so precedence never bites."""
+        """The SQL for this node, parenthesised so precedence cannot change what it means."""
         raise NotImplementedError
 
     def as_select(self) -> str:
@@ -563,12 +477,7 @@ class Expr(AggregateMethods, FuncNamespaces):
         return f"{rendered} {self._order}" if self._order else rendered
 
     def _with(self, **changes: object) -> Expr:
-        """A copy carrying different presentation. Nodes stay immutable.
-
-        Mutable fields are copied, not shared. Subclasses keep their operands
-        in lists and dicts, and a clone that aliased them would let a change
-        through one name show up under the other.
-        """
+        """A copy with different presentation, its lists and dicts copied so a change cannot reach the original."""
         clone = object.__new__(type(self))
         clone.__dict__.update(
             (name, list(value) if isinstance(value, list) else dict(value) if isinstance(value, dict) else value)
@@ -609,8 +518,7 @@ class Expr(AggregateMethods, FuncNamespaces):
         return Binary(op, left, right)
 
     def __eq__(self, other: object) -> Expr | Any:  # type: ignore[override]
-        # `col("x") == None` is a SQL NULL comparison, which is never true. That
-        # is SQL's answer, and surfacing it beats inventing one.
+        # `col("x") == None` is a SQL NULL comparison and never true, which is SQL's answer rather than an invented one.
         return self._binary("=", other)
 
     def __ne__(self, other: object) -> Expr | Any:  # type: ignore[override]
@@ -681,19 +589,12 @@ class Expr(AggregateMethods, FuncNamespaces):
         return Index(self, key)
 
     def __iter__(self) -> Iterator[Any]:
-        # Without this, Python's old sequence protocol would take `for x in e`
-        # to mean e[0], e[1], ... and build indexes forever.
+        # Without this, `for x in e` would fall back to e[0], e[1] and never stop.
         message = "an expression is not iterable; index it with a field name or a position"
         raise TypeError(message)
 
     def __bool__(self) -> bool:
-        """Refuse to be treated as a condition.
-
-        `==` builds a node rather than comparing, so an expression is always
-        truthy. That makes `col("a") in [col("b")]` true, and `if col("x") ==
-        1:` always taken. Raising turns both into an error at the line that
-        wrote them.
-        """
+        """Refuse to be a condition: `==` builds an expression, so `if col("x") == 1:` would always be taken."""
         message = "an expression has no truth value; combine with & | ~, and test with .is_null()"
         raise TypeError(message)
 
@@ -705,14 +606,12 @@ class Expr(AggregateMethods, FuncNamespaces):
 
     def n_unique(self) -> Expr:
         """How many distinct values there are, ignoring NULL."""
-        # count(DISTINCT x) is syntax, not a function name, so it cannot go in
-        # the shortcut table with the others.
+        # count(DISTINCT x) is syntax, not a function name, so it cannot go in the table with the others.
         return Distinct("count", self)
 
     def concat(self, *others: object) -> Expr:
         """Join text values."""
-        # SQL concatenates with ||; + on two text values is an error. An
-        # expression carries no types, so + cannot work out which was meant.
+        # SQL concatenates with ||, and an expression carries no types, so + cannot tell which was meant.
         return Concat([self, *(_lift(o) for o in others)])
 
     def is_null(self) -> Expr:
@@ -724,18 +623,13 @@ class Expr(AggregateMethods, FuncNamespaces):
         return Postfix("IS NOT NULL", self)
 
     def isin(self, values: Iterable[object] | PlanBase | Expr) -> Expr:
-        """Membership: in a list of values, in a one-column plan, or in a list-typed expression.
-
-        An empty list is never a match. Given an expression, the engine reads
-        it as a list and tests membership of it row by row: `x IN xs`.
-        """
+        """Membership of a list of values, a one-column query, or a list-typed column; an empty list never matches."""
         if isinstance(values, PlanBase):
             return Binary("IN", self, SubQuery(values))
         if isinstance(values, Expr):
             return Binary("IN", self, values)
         if isinstance(values, (str, bytes)):
-            # Iterating text would test each character. Nobody means that, and
-            # one value is what `==` is for.
+            # Iterating text would test each character, which nobody means, and one value is what `==` is for.
             message = (
                 f"isin takes a list of values, a query or a list-typed expression; for one value use == {values!r}"
             )
@@ -743,11 +637,7 @@ class Expr(AggregateMethods, FuncNamespaces):
         return In(self, [_lift(v) for v in values])
 
     def like(self, pattern: object, *, escape: str | None = None) -> Expr:
-        """Text match, where `%` is any run of characters and `_` is any one.
-
-        LIKE is an operator rather than a function, so `fn("like", ...)` cannot
-        reach it. Negate with `~`.
-        """
+        """Text match where `%` is any run of characters and `_` is any one; negate with `~`."""
         return Like("LIKE", self, _lift(pattern), escape)
 
     def ilike(self, pattern: object, *, escape: str | None = None) -> Expr:
@@ -767,13 +657,7 @@ class Expr(AggregateMethods, FuncNamespaces):
         return Cast(self, type_text, safe=True)
 
     def where(self, predicate: object) -> Expr:
-        """Aggregate only the rows where the predicate holds: `sum(x) FILTER (WHERE ...)`.
-
-        Applies to an aggregate call, `count_all()` included. Put it before
-        `.over()` when the aggregate is a window. Which calls aggregate is the
-        engine's to say: extensions add aggregates, so there is no closed list
-        here, and a scalar call is refused when the plan is bound or run.
-        """
+        """Aggregate only rows where the predicate holds; goes before `.over()`, and a scalar call fails at run time."""
         if not isinstance(self, (Func, Distinct)):
             message = "where() applies to an aggregate call, as col('x').sum() or fn('sum', ...)"
             raise TypeError(message)
@@ -789,9 +673,7 @@ class Expr(AggregateMethods, FuncNamespaces):
     ) -> Expr:
         """Turn an aggregate into a window function.
 
-        `rows` or `range` bounds the window as (start, end), each counted from
-        the current row: a negative number is that many before, a positive
-        number that many after, 0 is the current row and None is unbounded.
+        `rows` and `range` bound it as (start, end), counted from the current row, with None meaning unbounded.
         So `rows=(-2, 0)` is the current row and the two before it.
         """
         partitions = [_lift(e) for e in _as_list(partition_by)] if partition_by is not None else []
@@ -814,17 +696,12 @@ class Expr(AggregateMethods, FuncNamespaces):
         return Func(function, [self, *(_lift(a) for a in args)])
 
     def _call_at(self, function: str, position: int, *args: object) -> Expr:
-        """A function call with this expression at `position` among the arguments.
-
-        For the functions that take their subject other than first, as
-        `date_trunc('month', ts)` and `list_prepend(e, list)` do.
-        """
+        """A function call with this expression at `position`, for functions like `date_trunc` that take it later."""
         lifted = [_lift(a) for a in args]
         return Func(function, [*lifted[:position], self, *lifted[position:]])
 
     def __repr__(self) -> str:
-        # Rendered into a sink and read back, so a parameter shows its name
-        # and a literal its value, where a blind render shows NULL and text.
+        # Values are collected and put back, so a parameter shows its name where the plain SQL would show NULL.
         with ParamSink() as sink:
             text = self.fragment()
         for position, (kind, value, _) in reversed(list(enumerate(sink.entries, 1))):
@@ -845,7 +722,7 @@ class Col(Expr):
 
 
 class Side:
-    """One side of a join, inside its condition: `l["id"]` is that side's column."""
+    """One side of a join, inside its condition, where `l["id"]` is that side's column."""
 
     def __init__(self, alias: str) -> None:
         self.alias = alias
@@ -867,11 +744,7 @@ class Side:
 
 
 class Index(Expr):
-    """A struct field, list element or map entry: `expr[key]`.
-
-    The key is part of the plan's shape, like a column name, so it is written
-    into the SQL rather than bound: the binder needs a struct field's name.
-    """
+    """A struct field, list element or map entry; the key is written into the SQL, since a field name must be."""
 
     def __init__(self, base: Expr, key: str | int) -> None:
         super().__init__()
@@ -883,32 +756,22 @@ class Index(Expr):
 
 
 class FamilyExpr(Expr):
-    """A function namespace over an expression: the same expression, with one family's methods in scope.
+    """The same expression with one group of functions in scope; the SQL, name and sort direction are unchanged."""
 
-    Entering one (`.str()`, `.dt()`, `.list()`, `.json()`) asserts how the
-    expression is meant; it changes nothing about the expression, which is
-    why this renders as what it wraps and keeps its alias and order. A
-    family class is a method scope, not a type: the engine still owns the
-    types and judges every call.
-    """
-
-    #: Method name to (function, position of the expression, parameter types),
-    #: filled in by each generated family class; the tests read it.
+    #: Method name to (function, where the expression goes, parameter types), filled in by each generated class.
     SPEC: ClassVar[dict[str, tuple[str, int, list[str]]]] = {}
 
     def __init__(self, inner: Expr) -> None:
         super().__init__()
         self.inner = inner
-        # A name or direction set before entering the family must survive it.
+        # A name or sort direction set before entering must survive it.
         self._alias = inner._alias
         self._order = inner._order
 
     def fragment(self) -> str:
         return self.inner.fragment()
 
-    # The aggregate builders gate on what the call really is, which only the
-    # wrapped expression can answer; they apply there and keep the family in
-    # scope, so entering one before or after them reads the same.
+    # These check what the call really is, which only the wrapped expression can answer, then wrap the result again.
 
     def where(self, predicate: object) -> Expr:
         """`Expr.where`, applied to the wrapped aggregate call."""
@@ -944,12 +807,11 @@ class Star(Expr):
 
 
 class Lit(Expr):
-    """A Python value: inlined where that is safe, otherwise bound as `$n`."""
+    """A Python value, written into the SQL where that is safe and otherwise bound as `$n`."""
 
     def __init__(self, value: object) -> None:
         super().__init__()
-        # A snapshot: a plan is a value, so a list or dict the caller goes on
-        # changing must not change the plan with it.
+        # A snapshot, so a list or dict the caller goes on changing cannot change the query with it.
         try:
             self.value = copy.deepcopy(value) if isinstance(value, (list, tuple, dict)) else value
         except (TypeError, copy.Error) as reason:
@@ -967,7 +829,7 @@ class Lit(Expr):
 
 
 class Param(Expr):
-    """A named placeholder whose value is supplied at execution."""
+    """A named placeholder whose value is supplied when the query runs."""
 
     def __init__(self, name: str) -> None:
         super().__init__()
@@ -979,15 +841,13 @@ class Param(Expr):
             refusal = _param_refusal.get()
             if refusal is not None:
                 raise TypeError(refusal)
-            # Rendering without a sink happens for the schema oracle, where an
-            # untyped placeholder tells the binder nothing. NULL binds and
-            # carries no type either, which is the honest stand-in.
+            # Only reached when DuckDB is being asked for column types, where NULL says as little as a placeholder.
             return "NULL"
         return f"${sink.add_reference(self.name)}"
 
 
 class Raw(Expr):
-    """A SQL fragment supplied by the caller, spliced in unchanged."""
+    """A piece of SQL supplied by the caller, spliced in unchanged."""
 
     def __init__(self, sql: str) -> None:
         super().__init__()
@@ -1085,12 +945,7 @@ class Like(Expr):
 
 
 class Variable(Expr):
-    """A lambda's parameter: a name bound inside the lambda, not a column.
-
-    Inside the body the engine gives the name to the variable even when a
-    column has it too, so the Python parameter's name decides what it
-    shadows.
-    """
+    """A lambda's parameter, which takes the name even where a column has it too, so the Python name decides."""
 
     def __init__(self, name: str) -> None:
         super().__init__()
@@ -1122,12 +977,9 @@ class SubQuery(Expr):
     def fragment(self) -> str:
         names = _step_names.get()
         if names is not None and id(self.query) in names:
-            # The plan is a step of the query being rendered, so this is a
-            # reference to it. Rendered once as a CTE, however often it is
-            # used, which is what "computed once" means.
+            # Already a step of the query being built, so a reference to it, computed once however often it is used.
             return f"(SELECT * FROM {names[id(self.query)]})"
-        # Rendered on its own, with its own steps local to these parentheses.
-        # Its literals still reach whichever sink is active.
+        # Built on its own, with its own steps inside these parentheses; its values still reach the collector.
         return f"({self.query.render()})"
 
 
@@ -1156,14 +1008,13 @@ class Func(Expr):
 
     def fragment(self) -> str:
         rendered = ", ".join(a.fragment() for a in self.args)
-        # IGNORE NULLS goes inside the call, where DuckDB reads it; after the
-        # closing parenthesis it is a syntax error.
+        # IGNORE NULLS goes inside the call, where DuckDB reads it; after the closing parenthesis it is a syntax error.
         tail = " IGNORE NULLS" if self._ignore_nulls else ""
         return f"{function_name(self.name)}({rendered}{tail})" + _filter_clause(self._filter)
 
 
 class Coalesce(Expr):
-    """COALESCE, written as the parser's own form: it is syntax, not a catalog function."""
+    """COALESCE, written as the parser's own form, since it is syntax rather than a function."""
 
     def __init__(self, args: list[Expr]) -> None:
         super().__init__()
@@ -1174,7 +1025,7 @@ class Coalesce(Expr):
 
 
 class Distinct(Expr):
-    """An aggregate over distinct values, such as `count(DISTINCT x)`."""
+    """An aggregate over the distinct values, such as `count(DISTINCT x)`."""
 
     def __init__(self, name: str | tuple[str, ...], operand: Expr) -> None:
         super().__init__()
@@ -1291,11 +1142,7 @@ class ThenBuilder:
 
 
 def col(name: str) -> Expr:
-    """A column, by its name: quoted whole, so any name works and none is split.
-
-    A join side's column is `l["name"]` inside the join's condition; a struct
-    field is `col("st")["field"]`.
-    """
+    """A column by name, quoted whole so any name works and none is split; a struct field is `col("st")["field"]`."""
     if not isinstance(name, str):
         message = f"col() takes one column name, not {name!r}; a join side's column is l[name] inside the join's on"  # type: ignore[unreachable]
         raise TypeError(message)
@@ -1318,16 +1165,12 @@ def star(exclude: Iterable[str] = (), rename: dict[str, str] | None = None) -> E
 
 
 def fn(name: str | tuple[str, ...], *args: object) -> Expr:
-    """Any SQL function by name, a tuple for a schema-qualified one. Arguments follow the usual binding rules."""
+    """Any SQL function by name, a tuple for a schema-qualified one, with the arguments treated as anywhere else."""
     return Func(name, [_lift(a) for a in args])
 
 
 def sql_expr(sql: str) -> Expr:
-    """A raw fragment, spliced in unchanged.
-
-    Nothing in it is quoted, escaped or bound. Never build one from untrusted
-    input.
-    """
+    """A raw SQL fragment, spliced in unchanged and never escaped, so never build one from untrusted input."""
     return Raw(sql)
 
 
@@ -1342,11 +1185,7 @@ def coalesce(*values: object) -> Expr:
 
 
 def count_all() -> Expr:
-    """How many rows there are: `count(*)`.
-
-    Not a method, because it counts rows rather than a column's values.
-    `col("x").count()` skips NULLs; this does not.
-    """
+    """How many rows there are, as `count(*)`; unlike `col("x").count()`, NULLs are not skipped."""
     return Func("count", [Star()])
 
 

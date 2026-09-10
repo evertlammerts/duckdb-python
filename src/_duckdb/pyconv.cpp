@@ -26,23 +26,16 @@ using duckdb::cxx::Value;
 
 namespace {
 
-// DuckDB counts days and microseconds from the Unix epoch; Python's date and
-// datetime count from year 1. Convert by offsetting from the epoch rather than
-// reimplementing the calendar.
+// DuckDB counts from the Unix epoch, Python from year 1, so convert by offsetting instead of by calendar math.
 
-// DuckDB reserves the extremes of the storage type for the infinite dates,
-// which have no Python counterpart. The previous client clamped them to
-// date/datetime min and max, and the adopted test suite expects that, so the
-// behaviour deliberately carries over: an infinite date returned this way no
-// longer round-trips as infinite.
+// DuckDB reserves the extremes of each storage type for infinite dates, which Python cannot represent, so they
+// clamp to date and datetime min and max as the previous duckdb package did; such a value no longer round-trips.
 constexpr int32_t DATE_POSITIVE_INFINITY = 2147483647;
 constexpr int32_t DATE_NEGATIVE_INFINITY = -2147483647;
 constexpr int64_t TIMESTAMP_POSITIVE_INFINITY = 9223372036854775807LL;
 constexpr int64_t TIMESTAMP_NEGATIVE_INFINITY = -9223372036854775807LL;
 
-// The infinity sentinels live in the column's own unit; scaling first
-// overflows (UB) and destroys them, so they pass through unscaled and the
-// microsecond comparison in EpochDateTime still sees them.
+// Scaling the infinity markers would overflow and destroy them, so they pass through in their own unit.
 int64_t MicrosFromUnit(int64_t raw, int64_t multiply, int64_t divide) {
 	if (raw == TIMESTAMP_POSITIVE_INFINITY || raw == TIMESTAMP_NEGATIVE_INFINITY) {
 		return raw;
@@ -50,18 +43,13 @@ int64_t MicrosFromUnit(int64_t raw, int64_t multiply, int64_t divide) {
 	return multiply != 1 ? raw * multiply : raw / divide;
 }
 
-// Python's date stops at year 9999 while DuckDB reaches year 5874897, so a
-// value can be perfectly valid in the engine and unrepresentable here. Report
-// that as a conversion error rather than letting datetime raise OverflowError,
-// whose message names an internal day count and not the column.
+// DuckDB dates reach far past Python's year 9999, so name the offending value; OverflowError names a day count.
 [[noreturn]] void ThrowUnrepresentable(const std::string &what, const std::string &rendered) {
 	throw duckdb::cxx::Exception(4001 /* TYPE_CONVERSION */,
 	                             "Conversion Error: " + what + " " + rendered +
 	                                 " is outside the range Python's datetime can represent");
 }
-// `text` renders the offending value for the error message and runs only on
-// that path, so the bulk row converter can defer building a Value until a
-// value actually fails.
+// `text` runs only on the failure path, so the bulk converter builds a Value only when one actually fails.
 template <class TEXT>
 nb::object EpochDate(ConversionContext &ctx, int32_t days, TEXT &&text) {
 	if (days == DATE_POSITIVE_INFINITY) {
@@ -77,16 +65,14 @@ nb::object EpochDate(ConversionContext &ctx, int32_t days, TEXT &&text) {
 	}
 }
 
-// A time of day is a microsecond offset with no date, so build it by offsetting
-// midnight and dropping the date part.
+// A time of day carries no date, so build it by offsetting midnight and dropping the date part.
 nb::object TimeFromMicros(ConversionContext &ctx, int64_t micros) {
 	return (ctx.epoch_naive + ctx.timedelta_cls(0, 0, micros)).attr("time")();
 }
 
 template <class TEXT>
 nb::object EpochDateTime(ConversionContext &ctx, int64_t micros, bool utc, TEXT &&text) {
-	// Keep the infinities as aware as the column they came from: mixing an
-	// aware value with a naive one raises TypeError on comparison.
+	// The clamped limits keep the column's time zone, since comparing an aware value with a naive one raises.
 	if (micros == TIMESTAMP_POSITIVE_INFINITY) {
 		nb::object limit = ctx.datetime_cls.attr("max");
 		return utc ? limit.attr("replace")(nb::arg("tzinfo") = ctx.timezone_utc) : limit;
@@ -103,8 +89,7 @@ nb::object EpochDateTime(ConversionContext &ctx, int64_t micros, bool utc, TEXT 
 	}
 }
 
-// For the types whose text form is exact but whose binary form has no Python
-// counterpart: HUGEINT is wider than any C integer nanobind converts.
+// For types whose text form is exact but whose binary form is wider than any C integer nanobind converts.
 nb::object IntFromText(ConversionContext &ctx, const std::string &text) {
 	return ctx.int_cls(text);
 }
@@ -133,9 +118,7 @@ ConversionContext::ConversionContext() {
 
 namespace {
 
-// Whether values of this type convert to something Python can hash. A LIST
-// or ARRAY becomes a list, a STRUCT or MAP a dict, and a UNION whatever its
-// active member is.
+// Whether values of this type land on something Python can hash; lists and dicts cannot be dictionary keys.
 bool KeysHashable(const LogicalType &type) {
 	switch (type.GetTypeId()) {
 	case LogicalTypeId::LIST:
@@ -206,8 +189,7 @@ nb::object ValueToPython(const Value &value, ConversionContext &ctx) {
 	case LogicalTypeId::TIMESTAMP_MS:
 		return EpochDateTime(ctx, MicrosFromUnit(value.Get<duckdb::cxx::timestamp_ms_t>().millis, 1'000, 1), false, [&value] { return value.ToText(); });
 	case LogicalTypeId::TIMESTAMP_NS:
-		// Python datetime resolves to microseconds, so sub-microsecond digits
-		// are dropped. A deliberate divergence, not a rounding bug.
+		// Python datetime stops at microseconds, so finer digits are dropped on purpose.
 		return EpochDateTime(ctx, MicrosFromUnit(value.Get<duckdb::cxx::timestamp_ns_t>().nanos, 1, 1'000), false, [&value] { return value.ToText(); });
 	case LogicalTypeId::TIMESTAMP_TZ_NS:
 		return EpochDateTime(ctx, MicrosFromUnit(value.Get<duckdb::cxx::timestamp_tz_ns_t>().nanos, 1, 1'000), true, [&value] { return value.ToText(); });
@@ -221,16 +203,13 @@ nb::object ValueToPython(const Value &value, ConversionContext &ctx) {
 	}
 	case LogicalTypeId::INTERVAL: {
 		const auto interval = value.Get<duckdb::cxx::interval_t>();
-		// A month is not a fixed duration, so this mapping is lossy for any
-		// interval carrying months. A deliberate divergence: the previous
-		// client folded months at 30 days and this matches it.
+		// A month has no fixed length, so months fold at 30 days as the previous package did. Lossy on purpose.
 		return ctx.timedelta_cls(static_cast<int64_t>(interval.months) * 30 + interval.days, 0,
 		                         interval.micros);
 	}
 	case LogicalTypeId::HUGEINT:
 	case LogicalTypeId::UHUGEINT:
-		// Exact: the text form of an integer loses nothing, and Python ints are
-		// arbitrary precision.
+		// Exact: an integer's text form loses nothing and a Python int has no width limit.
 		return IntFromText(ctx, value.ToText());
 	case LogicalTypeId::DECIMAL:
 		// Exact, and deliberately not float: Decimal(str) preserves the scale.
@@ -257,11 +236,7 @@ nb::object ValueToPython(const Value &value, ConversionContext &ctx) {
 		return out;
 	}
 	case LogicalTypeId::MAP: {
-		// A dict, when the key type allows it. A MAP keyed by a LIST or a
-		// STRUCT has keys that arrive as lists and dicts, which cannot be
-		// hashed; such a map becomes a list of (key, value) pairs instead of
-		// failing the whole fetch. Decided from the type, so every map in a
-		// column, the empty ones included, comes back in the same shape.
+		// A MAP with unhashable keys becomes (key, value) pairs rather than failing, decided per column not row.
 		const auto count = value.GetChildCount();
 		if (!KeysHashable(type.GetMapKeyType())) {
 			nb::list pairs;
@@ -281,9 +256,7 @@ nb::object ValueToPython(const Value &value, ConversionContext &ctx) {
 		// Child 0 is the tag, child 1 the active member.
 		return ValueToPython(value.GetChild(1), ctx);
 	default:
-		// BIT, BIGNUM, VARIANT, GEOMETRY, and anything a newer engine adds.
-		// Degrading to the SQL text keeps unknown types readable instead of
-		// failing the whole fetch.
+		// BIT, BIGNUM, VARIANT, GEOMETRY and whatever a later DuckDB adds: the SQL text beats failing the fetch.
 		return nb::cast(value.ToText());
 	}
 }
@@ -292,8 +265,7 @@ namespace {
 
 namespace cxx = duckdb::cxx;
 
-// The exact text of an int64-tier decimal: digits with the point placed by
-// the scale, so Decimal(text) preserves both value and scale.
+// A decimal's exact text, point placed by the scale, so Decimal(text) keeps both the value and the scale.
 std::string DecimalText(int64_t raw, uint8_t scale) {
 	const bool negative = raw < 0;
 	const auto magnitude = negative ? ~static_cast<uint64_t>(raw) + 1 : static_cast<uint64_t>(raw);
@@ -307,8 +279,7 @@ std::string DecimalText(int64_t raw, uint8_t scale) {
 	return negative ? "-" + digits : digits;
 }
 
-// A 128-bit value as an exact Python int: upper * 2^64 + lower, with the
-// upper limb already lifted so one function serves both signednesses.
+// A 128-bit value as an exact Python int, upper * 2^64 + lower, the caller having converted the upper half.
 nb::object CombineLimbs(ConversionContext &ctx, nb::object upper, uint64_t lower) {
 	if (!upper.is_valid()) {
 		throw nb::python_error();
@@ -337,20 +308,14 @@ struct VectorSink {
 	}
 };
 
-// Converts elements [first, last) of a vector, handing each converted value
-// to `sink(position, object)` as a new reference, position relative to
-// `first`. The type is dispatched once and the flattened view read directly;
-// nested types recurse into their children, and the per-value path stays the
-// fallback for the rare rest. Stable-ABI calls only: this extension builds
-// under Py_LIMITED_API.
+// Elements [first, last) of one column, each handed to `sink(position, object)` as a new reference with
+// `position` relative to `first`. Limited-API calls only, since the extension builds against the stable ABI.
 template <class SINK>
 void EmitElements(cxx::Vector &vector, const LogicalType &type, cxx::idx_t first, cxx::idx_t last,
                   ConversionContext &ctx, SINK &&sink) {
 	using Id = LogicalTypeId;
-	// Dictionary, constant and other encodings become flat data plus
-	// validity, the one layout the typed reads below can serve. Flattening
-	// also drops any selection, so element indices equal row indices, which
-	// the nested cases below rely on for their child ranges.
+	// Compact encodings expand to plain values plus a NULL mask, the one layout the reads below can serve, and
+	// element indices then equal row indices, which the nested cases rely on for their child ranges.
 	vector.Flatten();
 	const auto view = vector.GetView();
 	const auto typed = [&](auto convert) {
@@ -436,8 +401,7 @@ void EmitElements(cxx::Vector &vector, const LogicalType &type, cxx::idx_t first
 		const bool utc = id == Id::TIMESTAMP_TZ || id == Id::TIMESTAMP_TZ_NS;
 		typed([&](cxx::idx_t i) {
 			const auto raw = view.Data<int64_t>()[i];
-			// The sub-microsecond floor of the ns variants matches the
-			// per-value path; sentinels pass through in their own unit.
+			// Nanosecond columns floor to microseconds as the per-value path does; markers keep their unit.
 			const auto micros = id == Id::TIMESTAMP_SEC ? MicrosFromUnit(raw, 1'000'000, 1)
 			                    : id == Id::TIMESTAMP_MS ? MicrosFromUnit(raw, 1'000, 1)
 			                    : id == Id::TIMESTAMP_NS || id == Id::TIMESTAMP_TZ_NS
@@ -475,8 +439,7 @@ void EmitElements(cxx::Vector &vector, const LogicalType &type, cxx::idx_t first
 			typed([&](cxx::idx_t i) {
 				const auto &limbs = view.Data<cxx::int128_t>()[i];
 				nb::object unscaled = CombineLimbs(ctx, nb::steal(PyLong_FromLongLong(limbs.upper)), limbs.lower);
-				// scaleb under the wide context is exact: Decimal(int) never
-				// rounds, and the context precision clears int128's digits.
+				// Exact: Decimal(int) never rounds and the wide context covers every digit 128 bits can hold.
 				return ctx.decimal_cls(unscaled)
 				    .attr("scaleb")(-static_cast<int>(scale), ctx.decimal_context)
 				    .release()
@@ -493,8 +456,7 @@ void EmitElements(cxx::Vector &vector, const LogicalType &type, cxx::idx_t first
 		break;
 	}
 	case Id::ENUM: {
-		// The dictionary becomes Python strings once; every row is then one
-		// new reference into it.
+		// The labels become Python strings once; each row is then one new reference into that list.
 		const auto size = type.GetEnumSize();
 		std::vector<nb::object> dictionary;
 		dictionary.reserve(size);
@@ -511,9 +473,7 @@ void EmitElements(cxx::Vector &vector, const LogicalType &type, cxx::idx_t first
 	}
 	case Id::LIST:
 	case Id::MAP: {
-		// Both lay out as list entries over child vectors: one child of
-		// elements for LIST, the keys and the values for MAP. Only the slice
-		// the served rows reference is converted.
+		// Both index child columns by offset and length; only the slice the served rows reference is converted.
 		const auto *entries = view.Data<cxx::list_entry_t>();
 		auto lo = std::numeric_limits<uint64_t>::max();
 		uint64_t hi = 0;
@@ -544,9 +504,7 @@ void EmitElements(cxx::Vector &vector, const LogicalType &type, cxx::idx_t first
 				EmitElements(child, child_type, lo, hi, ctx, VectorSink {values});
 			}
 		}
-		// A MAP keyed by an unhashable type becomes (key, value) pairs, the
-		// same shape the per-value path gives, decided from the type so every
-		// row of the column matches.
+		// Unhashable keys become (key, value) pairs, decided from the type so every row of the column matches.
 		const bool hashable = is_map && KeysHashable(type.GetMapKeyType());
 		for (cxx::idx_t e = first; e < last; e++) {
 			const auto element = view.SelAt(e);
@@ -661,8 +619,7 @@ void EmitElements(cxx::Vector &vector, const LogicalType &type, cxx::idx_t first
 		break;
 	}
 	default:
-		// UNION, BIT, BIGNUM, VARIANT, TIME_TZ, TIME_NS, and whatever a
-		// newer engine adds: one cell at a time through the per-value path.
+		// UNION, BIT, BIGNUM, VARIANT, TIME_TZ, TIME_NS and later additions go one value at a time.
 		typed([&](cxx::idx_t i) { return ValueToPython(vector.GetValue(i), ctx).release().ptr(); });
 		break;
 	}
@@ -674,8 +631,7 @@ void AppendChunkRows(const duckdb::cxx::DataChunk &chunk, const std::vector<Logi
                      duckdb::cxx::idx_t start, duckdb::cxx::idx_t end, ConversionContext &ctx, nb::list &out) {
 	const auto columns = chunk.GetVectorCount();
 	const auto rows = end - start;
-	// The tuples are built first and filled column by column, held here so an
-	// exception mid-fill releases them (tuple dealloc accepts empty slots).
+	// Held here so an exception part way through releases them; a tuple with empty slots deallocates fine.
 	std::vector<nb::object> tuples;
 	tuples.reserve(rows);
 	for (cxx::idx_t r = 0; r < rows; r++) {
@@ -703,13 +659,10 @@ namespace {
 
 using duckdb::cxx::Connection;
 
-// date(1970, 1, 1).toordinal(); Python counts days from year 1, DuckDB from
-// the epoch.
+// date(1970, 1, 1).toordinal(), since Python counts days from year 1 and DuckDB from the epoch.
 constexpr int64_t EPOCH_ORDINAL = 719163;
 
-// Whole microseconds between two Python datetimes, using Python's own
-// arithmetic rather than total_seconds(), which is a float and loses precision
-// on timestamps far from the epoch.
+// Whole microseconds between two datetimes; total_seconds() is a float and loses digits far from the epoch.
 int64_t MicrosSince(const nb::object &epoch, nb::handle moment, ConversionContext &ctx) {
 	nb::object delta = nb::steal(PyNumber_Subtract(moment.ptr(), epoch.ptr()));
 	if (!delta.is_valid()) {
@@ -722,9 +675,7 @@ int64_t MicrosSince(const nb::object &epoch, nb::handle moment, ConversionContex
 	return nb::cast<int64_t>(count);
 }
 
-// Round-trip a value through its text form and let the engine parse it. Exact
-// for integers of any width and for decimals, neither of which has a runtime
-// C++ type here to build directly.
+// Through text, which is exact for integers of any width and for decimals, neither having a C++ type here.
 template <class SCOPE>
 Value FromText(SCOPE &scope, const std::string &text, const LogicalType &target) {
 	const duckdb::cxx::varchar_t borrowed(text);
@@ -736,8 +687,7 @@ Value FromText(SCOPE &scope, const std::string &text, const LogicalType &target)
 	    nb::cast<std::string>(nb::handle(Py_TYPE(object.ptr())).attr("__name__")));
 }
 
-// The body doubles as the raw message, so a callback boundary, where the
-// engine adds the prefix itself, can report the body alone.
+// The message is carried twice, with and without the prefix, since DuckDB adds its own inside a callback.
 [[noreturn]] void ThrowInvalidInput(const std::string &body) {
 	throw duckdb::cxx::InvalidInputException("Invalid Input Error: " + body, body);
 }
@@ -754,21 +704,16 @@ template <class SCOPE>
 Value PythonToValue(SCOPE &scope, nb::handle object, ConversionContext &ctx) {
 	using duckdb::cxx::LogicalTypeId;
 
-	// A NULL still needs a type to carry it. SQLNULL would be the honest
-	// choice but create_type_from_id rejects it, so INTEGER stands in: NULL
-	// casts from any type to any other, so the binder still lands on whatever
-	// the statement wants.
+	// A NULL still needs a type; SQLNULL is rejected, and INTEGER works because a NULL casts to anything.
 	if (object.is_none()) {
 		return Value::CreateNull(scope, scope.CreateType(LogicalTypeId::INTEGER));
 	}
-	// Before the int branch: a Python bool IS an int, so testing int first
-	// would silently bind True as 1.
+	// Before the int branch: a Python bool is an int, so testing int first would silently pass True as 1.
 	if (nb::isinstance<nb::bool_>(object)) {
 		return Value::Create(scope, nb::cast<bool>(object));
 	}
 	if (nb::isinstance<nb::int_>(object)) {
-		// Widest type that holds the value; the binder narrows from there.
-		// Choosing narrowly here would reject values the column can hold.
+		// The widest type that holds the value, since narrowing here would reject values the column can hold.
 		int64_t narrow = 0;
 		if (nb::try_cast<int64_t>(object, narrow)) {
 			return Value::Create(scope, narrow);
@@ -788,8 +733,7 @@ Value PythonToValue(SCOPE &scope, nb::handle object, ConversionContext &ctx) {
 	}
 	if (nb::isinstance<nb::bytes>(object)) {
 		const auto bytes = nb::cast<nb::bytes>(object);
-		// blob_t carries a uint32 length, so anything larger would wrap and
-		// bind silently truncated. Every other overflow here throws.
+		// A BLOB length is 32 bits, so anything larger would wrap and be passed silently truncated.
 		if (bytes.size() > std::numeric_limits<uint32_t>::max()) {
 			ThrowInvalidInput("bytes value is larger than a BLOB can hold");
 		}
@@ -814,9 +758,7 @@ Value PythonToValue(SCOPE &scope, nb::handle object, ConversionContext &ctx) {
 		nb::object combined = ctx.datetime_cls.attr("combine")(ctx.epoch_date, naive);
 		const int64_t micros = MicrosSince(ctx.epoch_naive, combined, ctx);
 
-		// An aware time binds as TIME_TZ. Dropping the offset here would be a
-		// silent loss, and the read direction already returns TIME_TZ aware, so
-		// the round trip has to keep it.
+		// A time with a time zone becomes TIME_TZ; dropping the offset would silently break the round trip.
 		nb::object offset = object.attr("utcoffset")();
 		if (!offset.is_none()) {
 			const auto seconds =
@@ -831,8 +773,7 @@ Value PythonToValue(SCOPE &scope, nb::handle object, ConversionContext &ctx) {
 		return Value::Create(scope, duckdb::cxx::dtime_t {micros});
 	}
 	if (nb::isinstance(object, ctx.timedelta_cls)) {
-		// timedelta carries no months, so this direction is lossless; the
-		// reverse is not, which is why months are folded at 30 days there.
+		// timedelta carries no months, so this direction is lossless where the reverse folds months at 30 days.
 		duckdb::cxx::interval_t interval {};
 		interval.months = 0;
 		interval.days = nb::cast<int32_t>(object.attr("days"));
@@ -841,22 +782,14 @@ Value PythonToValue(SCOPE &scope, nb::handle object, ConversionContext &ctx) {
 		return Value::Create(scope, interval);
 	}
 	if (nb::isinstance(object, ctx.decimal_cls)) {
-		// Via text: there is no runtime decimal type to build, and going
-		// through double would lose the scale that makes it a Decimal.
-		//
-		// The width and scale come from the value itself. A fixed DECIMAL(38,10)
-		// would silently repad, turning Decimal("123.456") into
-		// Decimal("123.4560000000") and losing the scale the caller chose.
+		// Through text, since a double loses the scale; the width comes from the value, so nothing is repadded.
 		nb::object parts = object.attr("as_tuple")();
 		nb::object exponent = parts.attr("exponent");
 		if (!nb::isinstance<nb::int_>(exponent)) {
-			// NaN and the infinities carry a string exponent and have no
-			// DECIMAL counterpart at all.
+			// NaN and the infinities carry a string exponent and have no DECIMAL counterpart.
 			ThrowInvalidInput("cannot bind a non-finite Decimal");
 		}
-		// A Decimal is digits x 10^exponent. A negative exponent is the scale;
-		// a positive one adds trailing zeroes the digit tuple does not carry,
-		// so Decimal("1E+2") needs three integer places, not one.
+		// A Decimal is digits x 10^exponent, so a positive exponent adds integer places the digit tuple omits.
 		const auto power = nb::cast<int>(exponent);
 		const auto digits = static_cast<int>(nb::cast<nb::tuple>(parts.attr("digits")).size());
 		const auto scale = std::max(0, -power);
@@ -879,16 +812,13 @@ Value PythonToValue(SCOPE &scope, nb::handle object, ConversionContext &ctx) {
 			children.push_back(PythonToValue(scope, item, ctx));
 		}
 		if (children.empty()) {
-			// An empty list still needs a child type, and nothing in the value
-			// says which. INTEGER for the same reason a bare NULL takes it.
+			// An empty list still needs an element type and nothing says which, so INTEGER stands in again.
 			return Value::CreateList(scope, scope.CreateType(LogicalTypeId::INTEGER));
 		}
 		return Value::CreateList(scope, children);
 	}
 	if (nb::isinstance<nb::dict>(object)) {
-		// A dict is the only Python type that maps onto two DuckDB types, so
-		// the rule is stated rather than guessed per call: string keys read as
-		// a STRUCT, anything else as a MAP.
+		// A dict maps onto two DuckDB types, so the rule is fixed: string keys make a STRUCT, anything else a MAP.
 		auto mapping = nb::cast<nb::dict>(object);
 		bool all_strings = true;
 		for (auto entry : mapping) {
@@ -924,8 +854,7 @@ nb::list VectorElements(duckdb::cxx::Vector &vector, const LogicalType &type, du
 	if (list == nullptr) {
 		throw nb::python_error();
 	}
-	// Slots start out empty, which list dealloc accepts, so an exception
-	// mid-fill releases what was already converted.
+	// Empty slots are fine for list dealloc, so an exception part way through still releases what was made.
 	auto out = nb::steal<nb::list>(list);
 	EmitElements(vector, type, first, last, ctx, [&](size_t position, PyObject *object) {
 		// SetItem steals `object` whatever it returns.

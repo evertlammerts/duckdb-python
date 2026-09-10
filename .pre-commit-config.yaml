@@ -1,16 +1,12 @@
-# Fast checks only. Anything needing a built extension (pytest, mypy) runs in
-# CI, not here: a hook that needs a 20-minute engine build is a hook people
-# disable.
-#
-# compat/suite holds the old client's tests verbatim; even a whitespace fixer
-# would drift them from their source.
+# Fast checks only: anything needing a built extension runs in CI, since a hook that waits on a build gets turned off.
+# compat/suite holds the previous package's tests unchanged, so even a whitespace fixer would drift them.
 exclude: ^compat/suite/
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
       - id: check-added-large-files
-        # The engine is never committed; it is built or downloaded.
+        # DuckDB itself is never committed; it is built or downloaded.
         args: [--maxkb=512]
       - id: check-merge-conflict
       - id: check-yaml

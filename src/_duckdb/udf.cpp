@@ -13,17 +13,11 @@
 namespace duckdb_python {
 namespace {
 
-/// Carried by a registered Python scalar function and read by every exec
-/// call.
+/// What a registered Python scalar function carries into every call.
 ///
-/// The callable is borrowed, not owned. An owning reference here would be
-/// invisible to Python's cycle collector, so a callable that reaches its own
-/// connection (a bound method, a closure over a module global) would pin the
-/// database forever. The owner is instead the Database's registry, which its
-/// traverse slot visits. Its clear slot drops the registry and nothing else,
-/// and by then no query can run: finalizers and weakref callbacks have all
-/// run before any clear slot, and a garbage Database is reachable from
-/// nothing that could call into the engine.
+/// The callable is borrowed, not owned: an owning reference here would be invisible to Python's cycle
+/// collector, so a callable that reaches its own connection would keep the database alive forever. The
+/// Database's registry owns it instead, and by the time that is dropped no query can still run.
 struct PyFunctionData {
 	PyFunctionData(nb::handle callable, std::string name, std::vector<cxx::LogicalType> parameter_types,
 	               bool skip_nulls, std::shared_ptr<ModuleState> module)
@@ -42,10 +36,7 @@ bool IsPandasNA(nb::handle object) {
 	return nb::cast<std::string>(nb::handle(Py_TYPE(object.ptr())).attr("__name__")) == "NAType";
 }
 
-/// The engine runs this on its own threads, so the GIL is taken here, once
-/// per batch. The arguments are trusted to match the declared parameter
-/// types: no signature carries ANY, since create_function refuses it and
-/// ParseType would too, so the binder has cast them.
+/// Called from DuckDB's own threads, so the GIL is taken here once per batch; the arguments arrive already cast.
 void PyScalarExec(cxx::ScalarFunction::ExecInput &input) {
 	auto &data = input.GetUserData<PyFunctionData>();
 	const auto rows = input.GetRowCount();
@@ -78,9 +69,7 @@ void PyScalarExec(cxx::ScalarFunction::ExecInput &input) {
 					throw nb::python_error();
 				}
 			}
-			// DEFAULT null handling promises NULL in, NULL out without a
-			// call, but the engine still runs the batch over such rows, so
-			// the row skip lives here.
+			// NULL in means NULL out, but DuckDB still runs the batch over those rows, so the skip is here.
 			if (any_null && data.skip_nulls) {
 				result.SetNull(r);
 				continue;
@@ -95,12 +84,10 @@ void PyScalarExec(cxx::ScalarFunction::ExecInput &input) {
 				continue;
 			}
 			try {
-				// SetValue casts to the vector's type, so the declared
-				// return type is enforced right here.
+				// SetValue casts to the column's type, so the declared return type is enforced here.
 				result.SetValue(r, PythonToValue(context, object, data.module->conversion));
 			} catch (const UnsupportedTypeException &error) {
-				// pandas' NA is unbindable but means NULL, as the old
-				// client treated it.
+				// pandas' NA has no DuckDB value but means NULL, as the previous package treated it.
 				if (IsPandasNA(object)) {
 					result.SetNull(r);
 					continue;
@@ -111,16 +98,11 @@ void PyScalarExec(cxx::ScalarFunction::ExecInput &input) {
 			}
 		}
 	} catch (const cxx::Exception &error) {
-		// The engine prefixes what a callback reports with its own error
-		// class, so it gets the body alone, which the facade keeps apart from
-		// the prefixed what() of an engine error.
+		// DuckDB prefixes a callback's error with its own class name, so hand it the message body alone.
 		const auto &body = error.GetRawMessage();
 		throw cxx::InvalidInputException(body.empty() ? error.what() : body);
 	} catch (nb::python_error &error) {
-		// Rendered while the GIL is still held; what() needs it. Summary
-		// before traceback, in the old client's words, which callers and
-		// adopted tests match on. The engine prefixes callback errors
-		// itself, so no "Invalid Input Error:" here.
+		// Rendered while the GIL is still held, and worded as the previous duckdb package did; tests match it.
 		std::string summary;
 		try {
 			summary = nb::cast<std::string>(nb::handle(error.type()).attr("__name__"));

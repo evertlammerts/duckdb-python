@@ -1,12 +1,5 @@
-# Builds the DuckDB engine bundle once per platform per engine SHA, and
-# publishes it as a workflow artifact for the wheel jobs to consume.
-#
-# The engine is NOT committed to this repository. It is also not downloaded:
-# DuckDB does not yet publish a libduckdb carrying the V2 C API (the `nightly`
-# release tag does not exist, and released libduckdb exports no duckdb_v2_*
-# symbols), so DuckDBCppApi.cmake's download mode cannot be used. When core
-# starts publishing those artifacts this whole workflow goes away and the
-# build switches to download mode.
+# Builds the DuckDB library once per platform and uploads it for the wheel jobs.
+# Neither committed nor downloaded: no released libduckdb yet carries the C API this needs, so it is built here.
 name: Engine bundle
 
 on:
@@ -38,10 +31,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Runner labels match duckdb-python main's wheel matrix. No
-          # universal2: Intel and arm64 macOS each get their own wheel.
-          # Linux builds inside the manylinux image so the engine's glibc floor
-          # matches the wheel tag rather than the runner's glibc.
+          # Runner labels follow the previous duckdb package's wheel matrix.
+          # No universal2: Intel and arm64 macOS each get their own wheel.
+          # Linux builds inside the manylinux image so the glibc floor matches the wheel tag, not the runner.
           - { target: windows-amd64,  runner: windows-2022,    container: "", msvc_arch: x64 }
           - { target: windows-arm64,  runner: windows-11-arm,  container: "", msvc_arch: ARM64 }
           - { target: linux-x86_64,   runner: ubuntu-24.04,    container: "quay.io/pypa/manylinux_2_28_x86_64" }
@@ -54,12 +46,8 @@ jobs:
       run:
         shell: bash
     env:
-      # tpch is built in so the TPC-H harness has data. Without it those tests
-      # skip, and a harness that always skips is worse than none.
-      #
-      # Declared here, not on the build step, so it can go in the cache key.
-      # Keyed on the SHA alone, adding an extension reused a bundle built
-      # without it and the whole TPC-H suite skipped without saying so.
+      # tpch is built in so the TPC-H tests have data instead of skipping.
+      # Declared here so it reaches the cache key: keyed on the commit alone, a bundle built without it was reused.
       CORE_EXTENSIONS: "core_functions;json;parquet;icu;tpch"
 
     steps:
@@ -82,22 +70,14 @@ jobs:
           # No tags: the version comes from engine.pin, not from `git describe`.
           fetch-depth: 1
 
-      # ccache does not help the MSVC build, so it is skipped there.
-      #
-      # Its only job here is making an engine.pin bump cheap: a full build is
-      # already avoided by the SHA-keyed bundle cache above. The manylinux
-      # images carry ccache 3.7.7 from EPEL, which predates zstd compression,
-      # so the same budget holds far fewer of DuckDB's ~2000 objects than 4.x
-      # does on macOS. 3.x also prints stats in a format ccache-action cannot
-      # parse, which is why only the macOS jobs show a summary.
+      # ccache does not help MSVC, and here it only makes a version change cheap: the cache above avoids full builds.
+      # The manylinux images carry ccache 3.7.7, which holds far fewer objects and prints stats this action cannot read.
       - name: Set up ccache
         if: steps.cache.outputs.cache-hit != 'true' && runner.os != 'Windows'
         uses: hendrikmuhs/ccache-action@v1
         with:
           key: engine-${{ matrix.target }}
-          # The 500MB default is well under a full DuckDB build. Kept at 1G so
-          # four targets stay clear of the 10GB repository cache limit that the
-          # engine bundles also draw on.
+          # 500MB is under a full DuckDB build; 1G keeps four targets clear of the 10GB cache limit.
           max-size: 1G
 
       - name: Build the engine bundle
@@ -105,8 +85,7 @@ jobs:
         env:
           # Selects the Visual Studio target architecture. Empty off Windows.
           CMAKE_GENERATOR_PLATFORM: ${{ matrix.msvc_arch }}
-          # Match the floor the wheels are built against, per arch. See the
-          # note in wheels.yml.
+          # Match the floor the wheels are built against; see the note in wheels.yml.
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.target == 'macos-arm64' && '11.0' || '10.14' }}
           CMAKE_C_COMPILER_LAUNCHER: ${{ runner.os != 'Windows' && 'ccache' || '' }}
           CMAKE_CXX_COMPILER_LAUNCHER: ${{ runner.os != 'Windows' && 'ccache' || '' }}

@@ -55,8 +55,7 @@ class TestModuleInterface:
         ],
     )
     def test_ticks_constructors(self, constructor: str, expected: object) -> None:
-        # Read in UTC: date.fromtimestamp has no tz parameter and reads local
-        # time, so tick zero must be 1970-01-01 wherever this runs.
+        # date.fromtimestamp reads local time, so tick zero must still be 1970-01-01 wherever this runs.
         assert getattr(dbapi, constructor)(0) == expected
 
     def test_binary_constructor(self) -> None:
@@ -82,8 +81,7 @@ class TestTypeObjects:
         assert dbapi.NUMBER != "VARCHAR"
 
     def test_rowid_matches_nothing(self) -> None:
-        # DuckDB has no row identifier type; the object exists because PEP 249
-        # lists it, not because anything is ever equal to it.
+        # DuckDB has no row identifier type; the object exists only because PEP 249 lists it.
         assert dbapi.ROWID != "BIGINT"
 
     def test_description_type_codes_compare(self, con: dbapi.Connection) -> None:
@@ -125,8 +123,7 @@ class TestCursor:
         assert cur.fetchmany(10) == [(4,)]
 
     def test_fetch_crosses_chunk_boundaries(self, con: dbapi.Connection) -> None:
-        # Chunks are 2048 rows, so this spans several and would break a
-        # converter that forgot where it stopped inside one.
+        # Rows arrive in batches of 2048, so this spans several and catches a converter that loses its place.
         cur = con.cursor()
         cur.execute("SELECT i FROM range(5000) t(i)")
         seen: list[tuple[int, ...]] = []
@@ -159,8 +156,7 @@ class TestCursor:
         assert cur.fetchone() == (5,)
 
     def test_fetch_without_execute_is_an_interface_error(self, con: dbapi.Connection) -> None:
-        # PEP 249: fetching before executing is an InterfaceError, because the
-        # fault is in how the API was used, not in the database.
+        # PEP 249: the fault is in how the API was used, not in the database, so InterfaceError.
         cur = con.cursor()
         with pytest.raises(dbapi.InterfaceError):
             cur.fetchone()
@@ -197,11 +193,7 @@ class TestCursor:
 
 
 class TestTransactions:
-    """Cursors share their connection's transaction, as PEP 249 requires.
-
-    The previous client gave every cursor its own engine connection, so two
-    cursors could not see each other's uncommitted work.
-    """
+    """Cursors share their connection's transaction, which the previous duckdb package did not do."""
 
     def test_cursors_share_the_transaction(self, con: dbapi.Connection) -> None:
         writer, reader = con.cursor(), con.cursor()
@@ -233,8 +225,7 @@ class TestTransactions:
         con.commit()
 
     def test_commit_on_a_closed_connection_is_refused(self) -> None:
-        # PEP 249: any operation on a closed connection is an Error. Falling
-        # through because no transaction is open would hide a use after close.
+        # PEP 249 makes any operation on a closed connection an error, so this must not fall through.
         con = dbapi.connect()
         con.close()
         with pytest.raises(dbapi.InterfaceError, match="closed"):
@@ -248,8 +239,7 @@ class TestTransactions:
             con.rollback()
 
     def test_close_still_rolls_back_and_stays_idempotent(self) -> None:
-        # close() rolls back through rollback() before it drops the engine
-        # handle, so the refusal above must not reach that call.
+        # close() rolls back before dropping the connection, so the refusal above must not reach that call.
         con = dbapi.connect()
         con.cursor().execute("CREATE TABLE t (v INTEGER)")
         con.close()
@@ -328,12 +318,10 @@ class TestConnection:
 
 
 class TestInterrupt:
-    """`Connection.interrupt()` from another thread, as the native connection has it."""
+    """`Connection.interrupt()` from another thread, the same as on duckdb.Connection."""
 
     def test_interrupt_cancels_from_another_thread(self, con: dbapi.Connection) -> None:
-        # Interrupt repeatedly until the query dies: one shot at a fixed delay
-        # can fire before execution starts, land on nothing, and leave the
-        # query running unbounded.
+        # One interrupt at a fixed delay can land before the query starts and leave it running, so repeat.
         stop = threading.Event()
 
         def keep_interrupting() -> None:
@@ -356,9 +344,7 @@ class TestInterrupt:
             stop.set()
             worker.join()
         assert isinstance(caught.value, dbapi.OperationalError)
-        # The statement failed inside the transaction this connection had
-        # opened, which the engine aborts; after the rollback PEP 249 asks
-        # for at that point, the connection is usable again.
+        # The failure aborted the open transaction, so the rollback PEP 249 asks for makes it usable again.
         con.rollback()
         cur.execute("SELECT 1")
         assert cur.fetchone() == (1,)
@@ -377,7 +363,7 @@ class TestInterrupt:
 
 
 class TestRowcount:
-    """Real DML counts, where the previous client always reported -1."""
+    """Real DML counts, where the previous duckdb package always reported -1."""
 
     def test_insert_reports_rows_written(self, con: dbapi.Connection) -> None:
         cur = con.cursor()
@@ -402,14 +388,14 @@ class TestRowcount:
 
 
 class TestResultExclusivity:
-    """The engine allows one live result per connection; cursors share one."""
+    """DuckDB allows one live result per connection, so cursors share it."""
 
     def test_a_sibling_execute_invalidates_an_unread_result(self, con: dbapi.Connection) -> None:
         first, second = con.cursor(), con.cursor()
         first.execute("SELECT i FROM range(100) t(i)")
         assert first.fetchone() == (0,)
         second.execute("SELECT 1")
-        # PEP 249 permits this, and it is what ODBC does without MARS.
+        # PEP 249 permits this, and it is what ODBC does by default.
         with pytest.raises(dbapi.InterfaceError):
             first.fetchone()
 
@@ -422,12 +408,7 @@ class TestResultExclusivity:
 
 
 class TestFailedExecute:
-    """A statement that raises leaves no metadata behind.
-
-    `description` documents itself as the last query's columns. After a failed
-    execute there is no last query, so keeping the previous one's values would
-    describe a statement that never ran.
-    """
+    """A statement that raises leaves no metadata behind, since keeping it would describe a query that never ran."""
 
     def test_description_is_cleared(self, con: dbapi.Connection) -> None:
         cur = con.cursor()
@@ -493,12 +474,7 @@ class TestExecutemanyRowcount:
 
 
 class TestExecutemanyHoldsNoResult:
-    """After executemany nothing is held, whatever the statement produced.
-
-    The last set's rows used to stay open: description set, the connection's
-    result slot taken, and fetchall() answering with one set's rows as if
-    they were the outcome of the whole call.
-    """
+    """After executemany nothing is held, where the last set's rows used to stay open as if they were the answer."""
 
     def test_a_row_producing_statement_is_not_left_open(self, con: dbapi.Connection) -> None:
         cur = con.cursor()

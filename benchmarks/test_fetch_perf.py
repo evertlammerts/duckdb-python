@@ -1,4 +1,4 @@
-"""OUT-row fetch: rows(), the iterator, and the dbapi fetch loops. See benchmarks/README.md."""
+"""Rows coming back to Python: rows(), the iterator, and the dbapi fetch loops. See benchmarks/README.md."""
 
 from __future__ import annotations
 
@@ -12,12 +12,10 @@ import duckdb
 if TYPE_CHECKING:
     from pytest_codspeed import BenchmarkFixture
 
-# gate: OUT-row fetch materializes every row to Python (binding-dominated);
-# the range() scan is cheap.
+# gate: every row is built as a Python object, so this measures the package and not DuckDB.
 pytestmark = pytest.mark.gate
 
-# scaled() shrinks N under BENCH_SCALE in the CI sweep; full N locally. The
-# range(2048) probe is the compile+fetch fixed-cost baseline, NOT scaled.
+# The range(2048) probe measures the fixed cost of a query, so it is deliberately not scaled.
 N_ROW = scaled(200_000)
 N_STR = scaled(100_000)
 N_NEST = scaled(50_000)

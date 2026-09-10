@@ -1,13 +1,4 @@
-"""A strict PEP 249 interface, isolated from the native surface.
-
-The execute/fetch/cursor vocabulary exists because PEP 249 asks for it, not
-because it is the natural way to use DuckDB. Keeping it in its own module means
-the native surface owes it nothing, and neither inherits the other's habits.
-
-Cursors share their connection's engine connection, so they share its
-transaction, which is what PEP 249 requires. The previous client gave every
-cursor its own connection and so could not honour that.
-"""
+"""A strict PEP 249 interface, kept in its own module so it and the rest of the package share no habits."""
 
 from __future__ import annotations
 
@@ -78,7 +69,7 @@ paramstyle = "qmark"
 
 
 class _TypeSet:
-    """A DB-API type object: equal to every engine type it stands for."""
+    """A DB-API type object: equal to every SQL type name it stands for."""
 
     def __init__(self, name: str, *members: str) -> None:
         self.name = name
@@ -138,8 +129,7 @@ Timestamp = datetime.datetime
 
 def DateFromTicks(ticks: float) -> datetime.date:
     """The date of a Unix timestamp."""
-    # date.fromtimestamp has no tz parameter and reads local time, so the
-    # date is taken from an aware datetime instead.
+    # date.fromtimestamp reads local time, so the date comes from a UTC datetime instead.
     return datetime.datetime.fromtimestamp(ticks, tz=datetime.UTC).date()
 
 
@@ -188,10 +178,7 @@ class Cursor:
 
     @property
     def rowcount(self) -> int:
-        """Rows affected by the last statement, or -1 when not applicable.
-
-        Real counts, where the previous client always reported -1.
-        """
+        """Rows affected by the last statement, or -1 when that does not apply."""
         return self._rowcount
 
     def _require_open(self) -> Connection:
@@ -210,19 +197,11 @@ class Cursor:
     # -- execution
 
     def execute(self, operation: str, parameters: Parameters | None = None) -> Cursor:
-        """Run one statement.
-
-        The engine allows one live result per connection, and cursors share
-        theirs, so this releases whatever result is open first, including one
-        belonging to a sibling cursor. PEP 249 permits that; it is what ODBC
-        does without MARS.
-        """
+        """Run one statement, first releasing any open result, since DuckDB allows one per connection."""
         connection = self._require_open()
         connection._claim_result_slot(self)
         connection._begin_if_needed()
-        # Cleared before the call, not after: if it raises there is no last
-        # query, and leaving the previous one's metadata in place would make
-        # description and rowcount describe a statement that never ran.
+        # Cleared before the call: a failure must not leave the previous statement's metadata looking current.
         self._description = None
         self._rowcount = -1
         result = connection._engine().execute(operation, parameters)
@@ -232,10 +211,7 @@ class Cursor:
             self._description = [(name, type_text, None, None, None, None, None) for name, type_text in result.schema]
             return self
 
-        # Anything that is not a row-producing statement is drained here and
-        # now. Side effects land on drain, so a result dropped without draining
-        # means the INSERT simply never happened. Draining also yields a real
-        # rowcount, where the previous client always reported -1.
+        # A statement takes effect only as its result is run out, so an INSERT dropped unread never happened.
         try:
             self._rowcount = result.drain()
         finally:
@@ -246,18 +222,9 @@ class Cursor:
         return self
 
     def executemany(self, operation: str, seq_of_parameters: Sequence[Parameters]) -> Cursor:
-        """Run one statement once per parameter set.
-
-        DuckDB has no batched bind, so the sets run in order, and no result is
-        held afterwards: PEP 249 leaves a row-producing statement undefined
-        here, and keeping the last set's rows would be a guess at what was
-        meant. `description` is None and a fetch is refused. `rowcount` is the
-        total across the sets for statements that report one, which is what
-        sqlite3 and most drivers do, and -1 otherwise.
-        """
+        """Run each parameter set in order; PEP 249 leaves rows undefined here, so none are kept."""
         connection = self._require_open()
-        # A statement run zero times is still the last one asked for, so the
-        # metadata of whatever ran before must not survive it.
+        # A statement run zero times is still the last one asked for, so earlier metadata must not survive it.
         connection._claim_result_slot(self)
         self._description = None
         self._rowcount = -1
@@ -356,7 +323,7 @@ class Connection:
         self._open_cursor: Cursor | None = None
 
     def _engine(self) -> _duckdb.Connection:
-        """The engine connection, or a clear error once closed."""
+        """The open DuckDB connection, or a clear error once it is closed."""
         if self._raw is None:
             message = "connection is closed"
             raise InterfaceError(message)
@@ -373,12 +340,7 @@ class Connection:
             self._open_cursor = None
 
     def _run(self, sql: str) -> None:
-        """Run a statement of our own, without disturbing a cursor's result.
-
-        Drained, not just closed: a statement's effect lands when its result is
-        drained, so closing BEGIN without draining leaves no transaction open
-        and every later rollback silently does nothing.
-        """
+        """Run a statement of our own; a BEGIN whose result is closed unread opens no transaction at all."""
         result = self._engine().execute(sql)
         try:
             result.drain()
@@ -386,12 +348,7 @@ class Connection:
             result.close()
 
     def _begin_if_needed(self) -> None:
-        """Open a transaction before the first statement after connect(), commit() or rollback().
-
-        PEP 249 wants auto-commit off from the start and DuckDB has no
-        session-level switch for it, so every statement, a SELECT included,
-        runs inside a transaction opened here.
-        """
+        """Open a transaction first: PEP 249 wants autocommit off, and DuckDB has no session-level switch for it."""
         if self._autocommit or self._in_transaction:
             return
         self._run("BEGIN TRANSACTION")
@@ -409,11 +366,7 @@ class Connection:
         return Cursor(self)
 
     def interrupt(self) -> None:
-        """Cancel the statement this connection is running.
-
-        Made to be called from another thread; the statement fails with
-        `InterruptError`, an `OperationalError`.
-        """
+        """Cancel the statement this connection is running, from another thread; it fails with `InterruptError`."""
         self._engine().interrupt()
 
     def commit(self) -> None:
@@ -433,10 +386,7 @@ class Connection:
             self._in_transaction = False
 
     def close(self) -> None:
-        """Close the connection, discarding any open transaction.
-
-        PEP 249: closing without committing rolls back.
-        """
+        """Close the connection; PEP 249 says an uncommitted transaction rolls back."""
         if self._raw is None:
             return
         try:
@@ -453,8 +403,7 @@ class Connection:
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        # PEP 249 leaves this to the driver. Commit on success, roll back on
-        # error, which is what every caller means by `with connection:`.
+        # PEP 249 leaves this to the driver, and `with connection:` is meant as commit on success.
         if exc_type is None:
             self.commit()
         else:
@@ -462,14 +411,6 @@ class Connection:
 
 
 def connect(database: str | os.PathLike[str] = ":memory:", *, autocommit: bool = False, **options: str) -> Connection:
-    """Open a connection.
-
-    Args:
-        database: A database file, or ":memory:".
-        autocommit: When false, statements run inside a transaction that
-            commit() ends and close() rolls back.
-        **options: Settings applied when the database is opened. Some can only
-            be chosen here, before the database exists.
-    """
+    """Open a connection; unless `autocommit` is on, statements run inside a transaction that `commit()` ends."""
     engine = _duckdb.Database(os.fspath(database), [(k, str(v)) for k, v in options.items()])
     return Connection(engine.connect(), autocommit=autocommit)

@@ -30,9 +30,7 @@ namespace cxx = duckdb::cxx;
 namespace duckdb_python {
 namespace {
 
-// An engine error carries a numeric code; duckdb.exceptions owns the mapping
-// from code to class. One catch clause covers every engine exception, including
-// the two the C++ API gives a dedicated type, since all of them carry the code.
+// Every DuckDB error carries a numeric code and duckdb.exceptions maps it to a class, so one catch suffices.
 void TranslateException(const std::exception_ptr &captured, void *payload) {
 	auto &state = *static_cast<ModuleState *>(payload);
 	try {
@@ -48,14 +46,10 @@ void TranslateException(const std::exception_ptr &captured, void *payload) {
 
 class Connection;
 
-/// One open database: the engine instance, the module state it was opened
-/// through, and the callables registered on it.
+/// One open database, together with the Python functions registered on it.
 ///
-/// Every Connection and Result on this database holds a reference to it, so
-/// the ownership graph the collector sees is the one that exists: children
-/// keep the database alive and die first, and the engine instance goes with
-/// the last of them. The callables are held here and only here; see
-/// PyFunctionData for why the engine borrows them.
+/// Every Connection and Result holds a reference to its Database, so the garbage collector sees the real
+/// ownership and the database outlives them. The registered callables are owned here and nowhere else.
 class Database {
 public:
 	Database(std::shared_ptr<ModuleState> module, const std::string &path,
@@ -89,8 +83,7 @@ private:
 	}
 
 	std::shared_ptr<ModuleState> module;
-	// The registry outlives the engine instance, in destruction as in the
-	// collector's clear.
+	// Declared before the database so it is destroyed after it, since DuckDB only borrows these callables.
 	std::vector<nb::object> callables;
 	cxx::Database database;
 };
@@ -105,12 +98,9 @@ public:
 		return connection.Parent();
 	}
 
-	/// Run one statement, optionally binding parameters.
+	/// Run one statement, with `parameters` either a sequence filling $1, $2, ... in order or a mapping by name.
 	///
-	/// `parameters` is either a sequence, binding $1, $2, ... in order, or a
-	/// mapping, binding $name. NamedParam carries both shapes: an empty name
-	/// means positional. A statement cannot mix the two, which the engine
-	/// enforces at bind time.
+	/// An empty name in the list handed to DuckDB means positional, and a statement cannot mix the two forms.
 	std::unique_ptr<Result> Execute(const std::string &sql, nb::handle parameters) {
 		auto held = Live();
 		auto &live = *held.engine;
@@ -123,8 +113,7 @@ public:
 		std::vector<cxx::NamedParam> bound;
 		if (nb::isinstance<nb::dict>(parameters)) {
 			for (auto entry : nb::cast<nb::dict>(parameters)) {
-				// Checked, because nanobind's failed cast would surface as a
-				// raw std::bad_cast instead of an error naming the mistake.
+				// Checked here because a failed nanobind cast surfaces as std::bad_cast, which names nothing.
 				if (!nb::isinstance<nb::str>(entry.first)) {
 					throw cxx::InvalidInputException(
 					    "Invalid Input Error: parameter names must be strings");
@@ -138,9 +127,7 @@ public:
 			}
 		}
 
-		// Parameters need a parsed statement; the string overload takes none.
-		// Exactly one statement, so a caller cannot smuggle a second past the
-		// parameter binding.
+		// Parameters need a parsed statement, and exactly one, so a second cannot slip past unparameterised.
 		auto statements = live.ParseSQL(sql);
 		auto statement = statements.Next();
 		if (!statement) {
@@ -154,11 +141,7 @@ public:
 		return std::make_unique<Result>(std::move(held.database), connection.Module(), std::move(result));
 	}
 
-	/// What a statement would produce, without running it.
-	///
-	/// The binder is the only authority on schema. Predicting types in Python
-	/// would mean reimplementing DuckDB's type resolution and drifting from it.
-	/// Returns the output columns and the parameters the statement expects.
+	/// The columns a statement would produce and the parameters it expects, asked of DuckDB rather than guessed.
 	std::pair<std::vector<std::pair<std::string, std::string>>,
 	          std::vector<std::pair<std::string, std::string>>>
 	Bind(const std::string &sql) {
@@ -186,9 +169,7 @@ public:
 		auto &owner = Database::From(held.database);
 		RegisterScalarFunction(*held.engine, name, callable, parameters, returns, nulls, level,
 		                       connection.Module());
-		// Registered, so the engine now borrows the callable; the registry
-		// keeps it alive from here on, and a failed registration left nothing
-		// behind to keep.
+		// DuckDB borrows the callable only once registration succeeds, so only then must the registry keep it.
 		owner.Callables().push_back(std::move(callable));
 	}
 
@@ -204,9 +185,7 @@ public:
 		Live().engine->SetOption(cxx::DatabaseOption(name, value));
 	}
 
-	/// Release the engine connection now rather than when this object is
-	/// collected. Idempotent; every other method refuses afterwards, and a
-	/// closed connection pins nothing.
+	/// Disconnect now rather than at collection; repeatable, and every other method refuses afterwards.
 	void Close() {
 		connection.Release();
 	}
@@ -224,10 +203,7 @@ std::unique_ptr<Connection> Database::Connect() {
 	return std::make_unique<Connection>(nb::find(*this), module, std::move(connection));
 }
 
-/// GC slots. An instance of a heap type holds its type, so every traverse
-/// visits it. A child visits the one reference it holds to its Database and
-/// a Database visits each callable it registered, so the collector's count
-/// of every holder comes out right.
+/// Garbage collector hooks: each object reports its type and every Python reference it holds, or cycles leak.
 int TraverseDatabase(PyObject *self, visitproc visit, void *arg) {
 	Py_VISIT(Py_TYPE(self));
 	// Not constructed yet when the constructor raised.
@@ -240,9 +216,7 @@ int TraverseDatabase(PyObject *self, visitproc visit, void *arg) {
 	return 0;
 }
 
-/// Drops the callables and nothing else. The engine instance must survive a
-/// clear: a garbage Connection may still hold its engine connection until
-/// its own clear or dealloc runs, and the collector orders those arbitrarily.
+/// Drops only the callables, since a Connection collected in the same pass may still use the database.
 int ClearDatabase(PyObject *self) {
 	if (nb::inst_ready(self)) {
 		nb::inst_ptr<Database>(self)->Callables().clear();
@@ -292,8 +266,7 @@ NB_MODULE(_duckdb, m) {
 
 	m.doc() = "DuckDB Python extension module.";
 
-	// Created here, in the module's exec function, so it belongs to this
-	// interpreter and is reachable only through the bindings registered below.
+	// Created per import, so each interpreter gets its own and reaches it only through the bindings below.
 	auto state = std::make_shared<ModuleState>();
 	nb::register_exception_translator(&TranslateException, state.get());
 
@@ -308,8 +281,7 @@ NB_MODULE(_duckdb, m) {
 
 	nb::class_<Database>(m, "Database", nb::type_slots(kDatabaseSlots))
 	    .def("__init__",
-	         // options is taken as a handle so None is accepted, matching the
-	         // stub and the way Connection::execute takes its parameters.
+	         // A handle so None is accepted, matching the type stub and how Connection::execute takes parameters.
 	         [state](Database *self, const std::string &path, nb::handle options) {
 		         std::vector<std::pair<std::string, std::string>> settings;
 		         if (!options.is_none()) {
@@ -347,8 +319,7 @@ NB_MODULE(_duckdb, m) {
 	    .def_prop_ro("column_count", &ChunkView::ColumnCount)
 	    .def("type_id", &ChunkView::TypeId, nb::arg("column"))
 	    .def("type_text", &ChunkView::TypeText, nb::arg("column"))
-	    // keep_alive: the memoryviews borrow the chunk's memory, so the view
-	    // object must outlive them whatever the caller drops.
+	    // keep_alive: the memoryviews borrow this object's memory, so it stays alive for as long as they do.
 	    .def("data", &ChunkView::Data, nb::arg("column"), nb::keep_alive<0, 1>())
 	    .def("validity", &ChunkView::Validity, nb::arg("column"), nb::keep_alive<0, 1>())
 	    .def("decimal_scale", &ChunkView::DecimalScale, nb::arg("column"))
@@ -358,5 +329,5 @@ NB_MODULE(_duckdb, m) {
 	         nb::arg("column"));
 
 	m.def("library_version", []() { return cxx::LibraryVersion(); },
-	      "The version of the DuckDB engine this extension is linked against.");
+	      "The DuckDB version this extension module is linked against.");
 }

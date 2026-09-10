@@ -1,22 +1,4 @@
-"""Run the adopted old-client tests and report how this client measures up.
-
-The files under compat/suite are copied verbatim from duckdb-python main and
-are never edited to pass: the repo's own suite is the gate, this one is the
-parity measurement. Outcomes cluster into passed, missing surface (the old
-API point does not exist here), behavior (it exists and answers differently),
-and skipped. The report prints the top failure signatures and always exits 0.
-
-Each file runs in its own subprocess with a timeout. The old suite assumes
-the old client's semantics of its own surface: one adopted test leaves a
-delayed interrupt_main() behind that aborts whatever pytest session it lands
-in, and a lost interrupt leaves a query running unbounded. Isolation keeps
-one file's bomb or hang from hiding every file after it.
-
-    compat_report.py [suite file or directory ...] [extra pytest args]
-
-A path argument, resolved against the invoking directory, narrows the run to
-the suite files under it; everything else is handed to pytest.
-"""
+"""Run the previous duckdb package's tests, copied unchanged under compat/suite, and report what passes here."""
 
 from __future__ import annotations
 
@@ -31,12 +13,10 @@ from pathlib import Path
 
 import pytest
 
-#: A failure whose message reads like an absent name is a surface gap; the
-#: rest is the old surface existing here and answering differently.
+#: A message about a missing name means the API point is absent, not that it behaves differently.
 MISSING = re.compile(r"AttributeError|ImportError|ModuleNotFoundError|has no attribute|cannot import name")
 
-#: A third-party module absent from the venv measures the environment, not
-#: this client; only duckdb's own names count against the surface.
+#: A missing third-party module measures the environment, so only duckdb's own names count as gaps.
 ENVIRONMENT = re.compile(r"No module named '(?!duckdb)")
 
 MARKER = "COMPATJSON:"
@@ -87,8 +67,7 @@ class Recorder:
             else:
                 self._failure(report)
         elif report.when == "teardown" and report.failed:
-            # A test whose fixtures failed to tear down did not fully pass;
-            # counting it as passed would overstate the parity number.
+            # A test whose teardown failed did not fully pass; counting it would overstate the number.
             if report.nodeid in self._call_passed:
                 self._call_passed.discard(report.nodeid)
                 self.outcomes["passed"] -= 1
@@ -121,14 +100,12 @@ def main() -> int:
         return run_child(sys.argv[2:])
     arguments = [a for a in sys.argv[1:] if a != "--facade"]
     facade = len(arguments) != len(sys.argv) - 1
-    # Resolved here, against the invoking directory: the children run in a
-    # scratch directory, where a relative path would name nothing.
+    # Resolved here: the children run in a scratch directory, where a relative path would name nothing.
     chosen = [Path(a).resolve() for a in arguments if Path(a).exists()]
     passthrough = [a for a in arguments if not Path(a).exists()]
     environment = dict(os.environ)
     if facade:
-        # compat/conftest.py reads this and patches duckdb.connect to the
-        # migration face, previewing what a drop-in connect() would score.
+        # compat/conftest.py reads this and points duckdb.connect at the compatibility API.
         environment["DUCKDB_COMPAT_FACADE"] = "1"
     suite = Path(__file__).resolve().parent.parent / "compat" / "suite"
     files = sorted(suite.rglob("test_*.py"))
@@ -139,9 +116,9 @@ def main() -> int:
             print(f"no suite files under {listed}; the suite is {suite}", file=sys.stderr)
     outcomes: collections.Counter[str] = collections.Counter()
     signatures: collections.Counter[str] = collections.Counter()
-    # A scratch working directory: the adopted tests write files like test.db
-    # into their cwd, which must never be the repository.
+    # The copied tests write files like test.db into the working directory, which must never be the repository.
     scratch = tempfile.mkdtemp(prefix="compat-")
+    # One copied test leaves a delayed interrupt_main() behind, so each file gets a process it can only hurt itself in.
     for path in files:
         name = str(path.relative_to(suite))
         try:

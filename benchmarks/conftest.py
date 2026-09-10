@@ -1,11 +1,4 @@
-"""Shared fixtures and marker registration for the benchmark suite. See benchmarks/README.md.
-
-Markers are registered here because the repo's pytest config sets
-`filterwarnings = ["error"]` and `--strict-markers`, so an unregistered mark
-would fail collection. Every benchmark carries exactly one of `gate` /
-`informational`, so the CI steps `-m gate` and `-m informational` cover the
-suite with no overlap.
-"""
+"""Shared fixtures and marker registration for the benchmark suite. See benchmarks/README.md."""
 
 from __future__ import annotations
 
@@ -20,7 +13,7 @@ if TYPE_CHECKING:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Register the gate/informational markers (required under filterwarnings=error)."""
+    """Register the markers; unregistered ones fail collection here, and a benchmark carries exactly one."""
     config.addinivalue_line(
         "markers",
         "gate: binding-dominated, instruction-count gate-able under Callgrind (deterministic).",
@@ -33,11 +26,7 @@ def pytest_configure(config: pytest.Config) -> None:
 
 @pytest.fixture
 def con() -> Iterator[duckdb.Connection]:
-    """Yield a fresh single-threaded connection, closed on teardown.
-
-    `threads=1` pins engine parallelism so counts and walltime do not shift
-    with the runner's core count.
-    """
+    """A fresh single-threaded connection; `threads=1` keeps counts steady whatever the runner's core count."""
     connection = duckdb.connect(threads="1")
     yield connection
     connection.close()

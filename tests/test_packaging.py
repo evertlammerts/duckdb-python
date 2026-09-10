@@ -1,8 +1,4 @@
-"""Invariants about what the built artifact contains and how it is tagged.
-
-These describe the installed wheel. An editable install redirects the extension
-and the engine elsewhere, so they are skipped there rather than asserted.
-"""
+"""What the installed wheel must contain and how it must be tagged; an editable install is skipped instead."""
 
 from __future__ import annotations
 
@@ -20,8 +16,7 @@ ENGINE_LIBRARY_NAMES = ("libduckdb.dylib", "libduckdb.so", "duckdb.dll")
 
 @pytest.mark.skipif(not installed_as_wheel(), reason="editable install redirects the extension")
 def test_engine_ships_beside_the_extension() -> None:
-    # The engine is linked, never dlopened, and is found through an rpath
-    # pointing at the extension's own directory.
+    # DuckDB is linked, never dlopened, and found through a run path into the extension's own directory.
     package_dir = Path(duckdb.__file__).parent
     found = [name for name in ENGINE_LIBRARY_NAMES if (package_dir / name).exists()]
     assert found, f"no engine library in {package_dir}"
@@ -30,9 +25,7 @@ def test_engine_ships_beside_the_extension() -> None:
 @pytest.mark.skipif(not gil_enabled(), reason="free-threaded builds are not abi3")
 @pytest.mark.skipif(sys.version_info < (3, 12), reason="nanobind has no stable ABI below 3.12")
 def test_extension_is_built_against_the_stable_abi() -> None:
-    # STABLE_ABI silently does nothing if CMake was not asked for
-    # Development.SABIModule. The wheel is still tagged abi3 either way, so the
-    # filename is the only honest signal.
+    # A stable-ABI build silently does nothing without CMake's SABIModule, so only the file name is honest.
     assert ".abi3." in Path(duckdb._duckdb.__file__).name
 
 
@@ -46,6 +39,5 @@ def test_extension_is_version_specific_below_3_12() -> None:
 
 @pytest.mark.freethreaded
 def test_gil_stays_disabled_after_import() -> None:
-    # The module declares free-threading support; without that declaration
-    # CPython silently re-enables the GIL on import.
+    # Without the module's free-threading declaration CPython silently switches the lock back on at import.
     assert not gil_enabled()

@@ -1,19 +1,4 @@
-"""The engine's own sqllogictest corpus, run through `sql()` and `run()`.
-
-Anything the engine accepts must pass through this layer unchanged. The
-engine's `test/sql/` files are the fullest statement of what it accepts, so
-the SELECT-shaped directories are run here file by file, each on a fresh
-database, and held to the outcomes the files record.
-
-Two measurements per directory. *Carried*: every statement ran with the
-outcome its file expects; a shortfall is a bridge bug, or version skew
-between the corpus and the engine. *Matched*: every compared query returned
-the rows its file expects; a shortfall is either a real difference or a
-formatting rule the runner does not know yet, and each is listed.
-
-Needs a duckdb checkout (DUCKDB_SOURCE, or the sibling the main worktree
-carries) and takes a minute, so it runs only when asked: `pytest -m corpus`.
-"""
+"""DuckDB's own SQL test files run through sql() and run(); needs a DuckDB checkout, so `pytest -m corpus`."""
 
 from __future__ import annotations
 
@@ -32,8 +17,7 @@ if TYPE_CHECKING:
 
 DIRECTORIES = ["aggregate", "join", "subquery", "cte", "window", "setops", "order", "cast", "filter", "projection"]
 
-#: What each directory reached on 2026-08-30, as a floor. A drop is a
-#: regression; a rise is a reason to raise the floor.
+#: Per directory, the share of statements that ran as expected and of compared queries that matched, as a floor.
 FLOORS = {
     "aggregate": (0.99, 0.96),
     "join": (0.99, 0.98),
@@ -75,7 +59,7 @@ def test_the_engine_corpus_rides_the_bridge(directory: str, tmp_path: Path) -> N
     assert matched >= matched_floor * compared, report
 
 
-# The engine's own VARCHAR cast is the reference for how a value prints.
+# DuckDB's own VARCHAR cast is the reference for how a value prints.
 PRINTED = [
     "[MAP {1: 'a'}, MAP {2: 'b', 3: 'c'}]",
     "{'m': MAP {1: 'a'}}",
@@ -114,8 +98,6 @@ PRINTED = [
 
 @pytest.mark.parametrize("expression", PRINTED)
 def test_the_runner_prints_a_value_as_the_engine_does(expression: str) -> None:
-    # Review round 5, findings 8 and 9: a LIST of MAP, a MAP inside a STRUCT,
-    # and a negative interval all print as the engine prints them.
     con = duckdb.connect()
     plan = duckdb.sql(f"SELECT {expression} AS v, ({expression})::VARCHAR AS text")
     ((value, text),) = plan.rows(con)
@@ -130,8 +112,7 @@ def test_placeholders_resolve_as_the_engines_runner_resolves_them(tmp_path: Path
 
 
 def test_a_file_using_the_current_placeholder_spelling_runs_to_its_queries(tmp_path: Path) -> None:
-    # The engine's files write `{TEST_DIR}` now; a runner that only knew the
-    # older spelling failed the setup and never reached the queries.
+    # DuckDB's files write {TEST_DIR} now; knowing only the older spelling failed the setup before any query ran.
     file = tmp_path / "copy.test"
     file.write_text(
         "statement ok\nCOPY (SELECT 7 AS a) TO '{TEST_DIR}/one.csv' (HEADER)\n\n"
@@ -148,7 +129,7 @@ def test_an_expected_error_matches_as_the_engines_runner_matches_it() -> None:
     assert error_matches(message, ["<!REGEX>:.*Parser Error.*"])
     assert error_matches(message, [])
     assert not error_matches(message, ["<REGEX>:Parser Error.*"])
-    assert not error_matches(message, ["referenced column"])  # case matters, as it does in the engine's runner
+    assert not error_matches(message, ["referenced column"])  # case matters, as it does in DuckDB's own runner
 
 
 @pytest.mark.parametrize(
@@ -174,8 +155,7 @@ def test_an_expected_error_matches_as_the_engines_runner_matches_it() -> None:
     ],
 )
 def test_values_compare_by_the_columns_type(expected: str, actual: str, column_type: str, verdict: bool) -> None:
-    # The letter in a `query` line plays no part in the engine's runner; the
-    # result's SQL type decides whether text compares as a number.
+    # The letter on a query line plays no part; the result's SQL type decides whether text compares as a number.
     assert close_enough(expected, actual, column_type) is verdict
 
 

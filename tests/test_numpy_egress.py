@@ -1,8 +1,4 @@
-"""Columnar egress: engine chunks to numpy and pandas without Arrow.
-
-NULLs are the axis that matters: masked arrays on the numpy path, nullable
-dtypes on the pandas path, and plain dtypes wherever no NULL occurs.
-"""
+"""Results converted straight to numpy and pandas, where NULLs decide masked arrays and nullable dtypes."""
 
 from __future__ import annotations
 
@@ -77,8 +73,7 @@ class TestToNumpy:
         assert out["ts"][0] == np.datetime64("2026-09-01T12:00:00", "us")
 
     def test_decimal_becomes_float64_at_its_scale(self, con: duckdb.Connection) -> None:
-        # The numpy path trades exactness for vectors, as the old client did;
-        # exact Decimals come from the row egress.
+        # numpy trades exactness for vectors, as the previous package did; exact Decimals come from the rows.
         out = duckdb.sql("SELECT 1.250::DECIMAL(18,3) AS d, 2.5::DECIMAL(38,1) AS wide").to_numpy(con)
         assert out["d"].dtype == np.dtype("float64")
         assert out["d"][0] == 1.25
@@ -142,7 +137,7 @@ class TestToPandas:
         assert as_object["d"][0] == datetime.date(2026, 9, 1)
 
     def test_strings_follow_pandas_inference(self, con: duckdb.Connection) -> None:
-        # The same shape a hand-built pd.DataFrame gives the same values.
+        # The same values a hand-built pd.DataFrame would hold, with the dtype pandas would choose.
         frame = duckdb.sql("SELECT unnest(['a', NULL]) AS s").to_pandas(con)
         assert frame["s"][0] == "a"
         assert pd.isna(frame["s"][1])

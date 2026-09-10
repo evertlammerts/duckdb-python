@@ -1,23 +1,4 @@
-"""Where the layer stands against the engine's own feature taxonomy.
-
-DuckDB's `test/sql/` directory is one entry per feature the engine tests.
-Each is classified here, with a reason, into one of five kinds:
-
-    verb-tested   the verbs reach it and a named test class proves it
-    verb-untested the verbs reach it and nothing here proves it yet
-    sql_expr      reachable inside an expression through `sql_expr()`
-    bridge        a statement: `sql()` or `run()` carry it, no verb does
-    engine        engine behaviour, not a SQL surface this layer presents
-
-The test refuses drift in both directions: a directory the engine adds is
-unclassified until someone classifies it, and a directory that disappears
-must leave the table. Every verb-tested claim names the class that proves
-it, and that class has to exist.
-
-The corpus is the duckdb source tree, found through DUCKDB_SOURCE or the
-sibling checkout the main worktree carries. Without one the corpus checks
-skip; the internal checks run regardless.
-"""
+"""How this package covers each feature DuckDB's own tests cover, and a check that neither side drifts."""
 
 from __future__ import annotations
 
@@ -27,14 +8,18 @@ from pathlib import Path
 
 import pytest
 
+#: A method reaches this feature and a named test class proves it.
 VERB_TESTED = "verb-tested"
+#: A method reaches this feature and nothing here proves it yet.
 VERB_UNTESTED = "verb-untested"
+#: Reachable only inside an expression, through sql_expr().
 SQL_EXPR = "sql_expr"
+#: A statement rather than a query, so sql() and run() carry it and no method builds it.
 BRIDGE = "bridge"
+#: DuckDB's own behaviour, not something this package presents as an API.
 ENGINE = "engine"
 
-#: directory -> (kind, reason, proof). The proof is `module.Class` for a
-#: verb-tested entry and None otherwise.
+#: Directory -> (kind, reason, proof), where the proof names a test class and only a verb-tested entry has one.
 FEATURES: dict[str, tuple[str, str, str | None]] = {
     "aggregate": (VERB_TESTED, "aggregate(), group_by().agg(), the generated methods", "test_frame.TestAggregation"),
     "alter": (BRIDGE, "ALTER is DDL; run() carries it", None),
@@ -143,7 +128,7 @@ KINDS = {VERB_TESTED, VERB_UNTESTED, SQL_EXPR, BRIDGE, ENGINE}
 
 
 def corpus() -> Path | None:
-    """The engine's test/sql directory, if a duckdb checkout is at hand."""
+    """DuckDB's own test/sql directory, if a checkout of its source is at hand."""
     candidates = [Path(os.environ["DUCKDB_SOURCE"])] if "DUCKDB_SOURCE" in os.environ else []
     candidates.append(Path(__file__).resolve().parents[2] / "main" / "external" / "duckdb")
     for root in candidates:
@@ -181,7 +166,7 @@ def test_the_corpus_and_the_table_agree() -> None:
 
 
 def test_the_shape_of_the_answer() -> None:
-    """A record more than a gate: how the 73 features split. 25 / 0 / 2 / 24 / 22."""
+    """A record of how the 73 features split: 25 / 0 / 2 / 24 / 22."""
     counts = {kind: sum(1 for k, _, _ in FEATURES.values() if k == kind) for kind in KINDS}
     assert counts[VERB_TESTED] == 25
     assert counts[VERB_UNTESTED] == 0, "a verb reaches a feature nothing proves; write the test"

@@ -1,20 +1,6 @@
-"""Assemble a self-contained DuckDB engine bundle.
+"""Assemble a DuckDB library and the C++ API headers into one directory the extension can be built against.
 
-The bundle holds the engine library plus the C++ API and the two headers it
-needs, so that pointing both DUCKDB_CPP_DIR and DUCKDB_ROOT at it is enough to
-build the extension. CI produces one per platform and passes it to the wheel
-jobs as an artifact.
-
-Reconstructs the scripts/package_cpp_api.py referenced by DuckDB's
-tools/cpp/example/README.md, which did not land in main. Delete this once it
-does.
-
-    build_engine_bundle.py <duckdb-checkout> <output-dir> [--build-type Release]
-                           [--duckdb-version v2.0.0-alpha40145]
-
-The version is the name core's nightly built the checkout under. The engine
-names itself by it and looks up extensions under it; without it a checkout
-without tags names itself v<release>-dev<count> and can INSTALL nothing.
+Stands in for DuckDB's own scripts/package_cpp_api.py, which its tools/cpp README names but does not ship.
 """
 
 from __future__ import annotations
@@ -26,8 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Only what duckdb_cpp.cpp pulls in: duckdb_cpp.hpp, duckdb_extension_v2.h, and
-# duckdb_v2.h, which itself includes nothing but libc headers.
+# Only what duckdb_cpp.cpp pulls in; duckdb_v2.h itself includes nothing but libc headers.
 CPP_API_FILES = ("tools/cpp/duckdb_cpp.hpp", "tools/cpp/duckdb_cpp.cpp")
 HEADER_FILES = ("src/include/duckdb_v2.h", "src/include/duckdb_extension_v2.h")
 CMAKE_FILE = "tools/cpp/cmake/DuckDBCppApi.cmake"
@@ -53,13 +38,7 @@ def find_first(root: Path, names: tuple[str, ...]) -> Path | None:
 
 
 def build_engine(src: Path, build_dir: Path, build_type: str, duckdb_version: str | None) -> None:
-    """Configure and build libduckdb through CMake directly.
-
-    DuckDB's Makefile is a wrapper around exactly this, but it is not portable
-    to the Windows runners, so we call CMake ourselves. Always configured, even
-    over an existing build directory: the version is baked in at configure
-    time, and a stale one is invisible until INSTALL fails.
-    """
+    """Configure and build libduckdb with CMake directly, because DuckDB's Makefile is not portable to Windows."""
     configure = [
         "cmake",
         "-S",
@@ -75,17 +54,13 @@ def build_engine(src: Path, build_dir: Path, build_type: str, duckdb_version: st
     if core_extensions := os.environ.get("CORE_EXTENSIONS"):
         configure.append(f"-DCORE_EXTENSIONS={core_extensions}")
     if duckdb_version:
+        # DuckDB names itself by this and finds extensions under that name, so a checkout without tags installs none.
         configure.append(f"-DDUCKDB_EXPLICIT_VERSION={duckdb_version}")
     else:
-        # The cache keeps the last configure's value, so without this a new
-        # commit's build would carry an old nightly's name and load its
-        # extensions.
+        # The CMake cache keeps the last value, so a new commit would otherwise build under the old version name.
         configure.append("-UDUCKDB_EXPLICIT_VERSION")
     if sys.platform == "win32":
-        # Let CMake pick the Visual Studio generator. With Ninja on PATH the
-        # Windows runners resolve the compiler to a MinGW gcc that rejects
-        # DuckDB's -march flags ("bad value 'armv8-a' for '-march=' switch").
-        # DuckDB's own Makefile passes the platform the same way.
+        # With Ninja on PATH the Windows runners pick a MinGW gcc that rejects DuckDB's -march flags.
         if platform := os.environ.get("CMAKE_GENERATOR_PLATFORM"):
             configure += ["-A", platform]
     elif shutil.which("ninja"):
@@ -95,16 +70,7 @@ def build_engine(src: Path, build_dir: Path, build_type: str, duckdb_version: st
 
 
 def exports_v2(lib: Path) -> bool | None:
-    """Whether the library exports the V2 C API. None when undeterminable.
-
-    Only ever authoritative when a real symbol reader answered. `nm` does not
-    read PE reliably and `dumpbin` needs a developer shell, so on Windows this
-    usually returns None. That is deliberate: the real gate is the link probe
-    in DuckDBCppApi.cmake, which compiles against `duckdb_v2_library_version`
-    at the point of use. This check exists only to fail early and legibly when
-    someone points the build at a released libduckdb, and a check that cannot
-    see the answer must say so rather than guess.
-    """
+    """Whether the library exports the V2 C API. None when no symbol reader could look, which is normal on Windows."""
     if sys.platform != "win32" and shutil.which("nm"):
         out = subprocess.run(["nm", "-g", str(lib)], capture_output=True, text=True, check=False)
         if out.returncode == 0:
@@ -155,7 +121,7 @@ def main() -> int:
     for rel in CPP_API_FILES + HEADER_FILES:
         shutil.copy2(src / rel, out / Path(rel).name)
     shutil.copy2(src / CMAKE_FILE, out / "cmake" / Path(CMAKE_FILE).name)
-    # Follow any symlink chain (libduckdb.dylib -> libduckdb.1.5.dylib).
+    # Copy the real file, not the symlink standing in for it.
     shutil.copy2(runtime.resolve(), out / "lib" / runtime.name)
     # Windows links against the import library and loads the DLL, so it needs both.
     if imp := find_first(build_dir, IMPORT_NAMES):

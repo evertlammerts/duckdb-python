@@ -82,8 +82,7 @@ class TestAStringIsOneName:
         assert left.join(right, on="k.1").rows(con) == [(1, 5, 9)]
 
     def test_drop_takes_any_name_through_exclude(self, con: duckdb.Connection, dotted: duckdb.Frame) -> None:
-        # One form for every name: the engine quotes EXCLUDE's list like any
-        # other identifier (duckdb/duckdb#25370), so nothing is special-cased.
+        # DuckDB quotes EXCLUDE's list like any other identifier (duckdb/duckdb#25370), so nothing is special.
         assert dotted.drop("id").render().splitlines()[-1] == 'SELECT * EXCLUDE ("id") FROM "_s0"'
         assert dotted.drop("id").rows(con) == [(21,)]
         assert dotted.drop("hello.world").render().splitlines()[-1] == 'SELECT * EXCLUDE ("hello.world") FROM "_s0"'

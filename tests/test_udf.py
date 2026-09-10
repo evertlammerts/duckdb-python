@@ -31,7 +31,7 @@ def rows(con: duckdb.Connection, sql: str) -> list[tuple[object, ...]]:
         return result.fetch_all()
 
 
-# The raw module takes the facade enums; the string forms belong to duckdb.Connection.
+# The extension module takes enum values; the string forms belong to duckdb.Connection.
 DEFAULT = _duckdb.FunctionNullHandling.DEFAULT
 CONSISTENT = _duckdb.FunctionStability.CONSISTENT
 
@@ -202,10 +202,7 @@ class TestExecution:
         con.create_function("bump", bump, ["BIGINT"], "BIGINT")
         con.run("CREATE TABLE big AS SELECT i FROM range(1000000) t(i)")
         assert rows(con, "SELECT sum(bump(i)) FROM big") == [(sum(range(1000000)) + 1000000,)]
-        # More than one thread proves the fetch loop released the GIL: the
-        # engine's own workers acquired it to call back into Python while
-        # this thread was driving the query. A held GIL would deadlock here,
-        # not fail.
+        # More than one thread proves the fetch released the global interpreter lock; holding it would deadlock.
         assert len(seen) >= 2
 
     def test_the_function_runs_inside_other_threads_queries(self, con: duckdb.Connection) -> None:
@@ -278,7 +275,7 @@ class TestFailure:
 
 
 class TestCollection:
-    """A callable that reaches its own connection is a cycle the collector must see through the engine."""
+    """A callable that holds its own connection is a reference cycle Python's collector must see."""
 
     def test_a_connection_held_by_a_bound_method_is_collected(self) -> None:
         class Service:
@@ -294,9 +291,7 @@ class TestCollection:
         assert ref() is None
 
     def test_duplicates_and_live_results_do_not_hide_the_cycle(self) -> None:
-        # More handles share the database here than references the registry
-        # holds per callable, so a traverse that counted once per handle
-        # would get the collector's arithmetic wrong.
+        # More handles share the database than the registry holds references, so a miscount shows up here.
         class Service:
             def __init__(self) -> None:
                 self.con = duckdb.connect()
@@ -343,7 +338,7 @@ class TestCollection:
 
 
 class TestClosedHandles:
-    """Closing a raw handle is what the collector's clear does; every method refuses afterwards."""
+    """Closing a handle is also what Python's collector does to it, and every method refuses afterwards."""
 
     def test_a_closed_result_refuses_every_call(self) -> None:
         connection = _duckdb.Database().connect()
@@ -381,8 +376,7 @@ class TestClosedHandles:
                 call()
 
     def test_a_connection_keeps_its_database_alive(self) -> None:
-        # A Database has no close: its children hold it, and the engine
-        # instance goes with the last of them.
+        # A Database has no close: its connections hold it, and it goes with the last of them.
         assert not hasattr(_duckdb.Database, "close")
         database = _duckdb.Database()
         connection = database.connect()
@@ -390,8 +384,7 @@ class TestClosedHandles:
         def probe(x: int) -> int:
             return x
 
-        # The database owns its registered callables, so one outliving its
-        # last Python reference shows the database itself has.
+        # The database owns its registered callables, so one outliving its last reference shows it is alive.
         connection.create_scalar_function("probe", probe, ["BIGINT"], "BIGINT", DEFAULT, CONSISTENT)
         ref = weakref.ref(probe)
         del database, probe
@@ -403,10 +396,7 @@ class TestClosedHandles:
         assert ref() is None, "a closed connection still pinned its database"
 
     def test_closing_from_another_thread_during_execute_is_safe(self) -> None:
-        # A consistent function over constant arguments is folded by the
-        # optimizer, which runs inside execute(): the gate below therefore
-        # holds the worker inside execute, with the GIL released, until the
-        # close has landed. Deterministic, no timing involved.
+        # A constant argument is worked out inside execute(), so the gate holds the worker there, with no timing.
         connection = _duckdb.Database().connect()
         started = threading.Event()
         release = threading.Event()
@@ -447,9 +437,7 @@ class TestClosedHandles:
 
         def run() -> None:
             try:
-                # Long enough to still be running when the close lands, yet
-                # short enough to end on its own: once closed, the handle
-                # cannot interrupt the engine any more.
+                # Long enough to outlast the close, short enough to end on its own once nothing can interrupt it.
                 outcome.append(connection.execute("SELECT count(*) FROM range(20_000_000_000)").fetch_all())
             except BaseException as error:
                 outcome.append(error)

@@ -1,9 +1,5 @@
-# Publishes the wheel matrix to test.pypi. Dispatched by hand with the version
-# to stamp; nothing publishes on its own.
-#
-# The upload authenticates through test.pypi's trusted publishing: the duckdb
-# project there must list this repository, this file and the test-pypi
-# environment as a publisher. No token is stored anywhere.
+# Publishes the wheel matrix to test.pypi, by hand only: nothing publishes on its own.
+# The upload uses trusted publishing, which must name this repository, this file and the environment. No token.
 name: Release
 
 on:
@@ -14,16 +10,12 @@ on:
         required: true
         type: string
 
-# Queue releases, never cancel one: a run that is already publishing must
-# finish. The called wheel workflow groups under this run's workflow name, so
-# the two groups cannot collide.
+# Queue releases, never cancel one: a run that is already publishing must finish.
 concurrency:
   group: release
   cancel-in-progress: false
 
-# The one workflow that reaches an index gets the least token: checkout only.
-# The publish job grants itself the OIDC token it needs; artifact transfer
-# rides the runner's own token, not this one.
+# The one workflow that reaches an index gets the least token; the publish job grants itself what it needs.
 permissions:
   contents: read
 
@@ -32,16 +24,13 @@ jobs:
     name: Preflight
     runs-on: ubuntu-24.04
     steps:
-      # workflow_dispatch runs on whichever branch the UI picked; a feature
-      # branch reaching the index would be an accident.
+      # A dispatch runs on whichever branch was picked, and a feature branch reaching the index would be an accident.
       - name: A release comes from neo
         if: github.ref != 'refs/heads/neo'
         run: |
           echo "dispatch from neo, not ${GITHUB_REF#refs/heads/}" >&2
           exit 1
-      # The shape tests/test_version.py holds __version__ to, checked here so
-      # a typo fails in seconds rather than after the wheel matrix. The index
-      # never takes a file name twice, so every publish needs a fresh version.
+      # Checked here so a typo fails in seconds, not after the wheel matrix; the index never takes a name twice.
       - name: The version reads as PEP 440
         env:
           VERSION: ${{ inputs.version }}
@@ -64,8 +53,7 @@ jobs:
       name: test-pypi
       url: https://test.pypi.org/project/duckdb/${{ inputs.version }}/
     permissions:
-      # id-token lets trusted publishing exchange this run's OIDC token for an
-      # upload token; actions lets the job read the run's own artifacts.
+      # id-token lets trusted publishing get an upload token; actions lets the job read this run's artifacts.
       id-token: write
       actions: read
     steps:
@@ -87,10 +75,7 @@ jobs:
             esac
           done
 
-      # Wheels only, deliberately no sdist: building from source needs an
-      # engine bundle at the pinned SHA, which no installer can reach, so an
-      # sdist would only turn "no wheel for this platform" into a CMake error
-      # mid-install.
+      # Wheels only: an sdist would need a DuckDB build no installer can reach, and fail mid-install instead.
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/

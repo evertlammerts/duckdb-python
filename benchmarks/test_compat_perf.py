@@ -1,9 +1,4 @@
-"""The duckdb.compat migration face: its overhead over the native path. See benchmarks/README.md.
-
-Each bench here has a native twin in test_fetch_perf.py at the same N
-(test_rows_int, test_rows_str), so the compat wrapper's cost is the delta
-between the pair, not a number read alone.
-"""
+"""What `duckdb.compat` adds: each bench has a twin in test_fetch_perf.py. See benchmarks/README.md."""
 
 from __future__ import annotations
 
@@ -19,8 +14,7 @@ if TYPE_CHECKING:
 
     from pytest_codspeed import BenchmarkFixture
 
-# gate: the wrapper layers (held result, description, relation SQL composition)
-# are client code on top of the same fetch path the native benches measure.
+# gate: the wrapper is Python on top of the same fetch path the other benches measure.
 pytestmark = pytest.mark.gate
 
 N_ROW = scaled(200_000)

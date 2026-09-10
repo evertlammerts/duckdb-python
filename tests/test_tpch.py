@@ -1,23 +1,4 @@
-"""TPC-H as a coverage probe for the frame layer.
-
-Three questions per query, kept separate because they fail for different
-reasons and suggest different work:
-
-1. Does the SQL bridge carry it? `sql()` must accept any query DuckDB accepts,
-   so a failure here is a bug in the bridge.
-2. Can the frame verbs express it? All 22 can, so a failure here is a
-   regression rather than a gap.
-3. Does it give the right answer? Expressing a query wrongly is worse than not
-   expressing it, so every verb version is compared row for row.
-
-The verb versions are split by how much the reader has to restructure the
-query. `TestExpressedDirectly` follows the SQL's own shape.
-`TestExpressedAfterRewriting` does not, and each of those names the rewrite it
-needed. That split is the useful measurement: the second class is where the API
-asks something of the user that SQL does not.
-
-TPC-H contains no window functions, no set operations, no DML and no nested
-types, so 22 of 22 is a floor, not a definition of done.
+"""TPC-H as a coverage probe: every query as SQL, and as a chain of verbs, against the same answers.
 
 Derived from TPC-H. Not comparable to published TPC-H results.
 """
@@ -43,9 +24,7 @@ SCALE = 0.01  # small enough to stay fast, large enough that joins do work
 def tpch() -> Iterator[duckdb.Connection]:
     con = duckdb.connect()
     try:
-        # No INSTALL or LOAD: the extension is built into the engine bundle, and
-        # asking for it by name would try to download one for a development
-        # build that no repository has.
+        # No INSTALL or LOAD: the tpch extension is built in, and asking by name would try to download one.
         con.run(f"CALL dbgen(sf={SCALE})")
     except duckdb.exceptions.Error as error:  # pragma: no cover
         pytest.skip(f"the engine was built without the tpch extension: {error}")
@@ -74,25 +53,21 @@ def revenue() -> Expr:
 
 @pytest.mark.parametrize("path", QUERIES, ids=lambda p: p.stem)
 def test_the_sql_bridge_carries_every_query(tpch: duckdb.Connection, path: Path) -> None:
-    """`sql()` accepts any query the engine accepts, and the rows come back.
-
-    This is the floor. The bridge is what makes an unexpressible query a
-    non-problem, so it has to hold for all 22.
-    """
+    """`sql()` accepts any query DuckDB accepts, which is what makes an unexpressible query harmless."""
     rows = duckdb.sql(query_text(path)).rows(tpch)
     assert isinstance(rows, list)
 
 
 @pytest.mark.parametrize("path", QUERIES, ids=lambda p: p.stem)
 def test_schema_is_available_without_running(tpch: duckdb.Connection, path: Path) -> None:
-    """The binder answers the shape of every query without executing it."""
+    """Every query's column names and types are available without running it."""
     frame = duckdb.sql(query_text(path))
     assert frame.columns(tpch), "no columns reported"
     assert len(frame.columns(tpch)) == len(frame.types(tpch))
 
 
 class TestExpressedDirectly:
-    """Queries whose verb version follows the shape of the SQL."""
+    """Queries whose verb version follows the structure of the SQL."""
 
     def test_q01(self, tpch: duckdb.Connection) -> None:
         disc = revenue()
@@ -155,7 +130,7 @@ class TestExpressedDirectly:
         assert actual.rows(tpch) == answer(tpch, "q05")
 
     def test_q06(self, tpch: duckdb.Connection) -> None:
-        # The simplest shape in the set: restrict, then one aggregate.
+        # The simplest query in the set: restrict, then one aggregate.
         actual = (
             duckdb.table("lineitem")
             .filter(
@@ -169,9 +144,7 @@ class TestExpressedDirectly:
         assert actual.rows(tpch) == answer(tpch, "q06")
 
     def test_q07(self, tpch: duckdb.Connection) -> None:
-        # `nation` is joined twice. SQL tells the two apart with the aliases
-        # n1 and n2; here the second join suffixes its side, so the customer's
-        # nation arrives as n_name_cust.
+        # `nation` is joined twice, and the second join suffixes its side, so it arrives as n_name_cust.
         actual = (
             duckdb.table("supplier")
             .join(
@@ -198,8 +171,7 @@ class TestExpressedDirectly:
         assert actual.rows(tpch) == answer(tpch, "q07")
 
     def test_q08(self, tpch: duckdb.Connection) -> None:
-        # The customer's nation is joined first, so it keeps the plain names
-        # and feeds the region join. The supplier's is suffixed.
+        # The customer's nation is joined first, keeps the plain names, and feeds the region join.
         actual = (
             duckdb.table("part")
             .filter(col("p_type") == "ECONOMY ANODIZED STEEL")
@@ -295,8 +267,7 @@ class TestExpressedDirectly:
             )
         )
         value = (col("ps_supplycost") * col("ps_availqty")).sum()
-        # Written as a fragment so the engine reads it as the DECIMAL the query
-        # means. A Python float would make the whole comparison DOUBLE.
+        # Raw SQL keeps the DECIMAL the query means; a Python float would make the comparison DOUBLE.
         threshold = german.aggregate((value * sql_expr("0.0001000000")).alias("t"))
         actual = (
             german.group_by(col("ps_partkey"))
@@ -338,8 +309,7 @@ class TestExpressedDirectly:
         assert actual.rows(tpch) == answer(tpch, "q14")
 
     def test_q15(self, tpch: duckdb.Connection) -> None:
-        # The query the graph was built for: `totals` feeds both the join and
-        # the subquery that finds the maximum, and is computed once.
+        # `totals` feeds both the join and the subquery for the maximum, and is computed once.
         totals = (
             duckdb.table("lineitem")
             .filter((col("l_shipdate") >= date("1996-01-01")) & (col("l_shipdate") < date("1996-04-01")))
@@ -428,24 +398,10 @@ class TestExpressedDirectly:
 
 
 class TestExpressedAfterRewriting:
-    """Queries the verbs reach only if the reader restructures them first.
-
-    Two rewrites cover all of these, and both are mechanical once you know
-    them:
-
-    - `EXISTS` / `NOT EXISTS` over an equality is a semi or anti join.
-    - A correlated scalar subquery is a group-by on the correlation key,
-      joined back. This is the decorrelation the optimizer performs anyway;
-      here the user has to write it.
-
-    That the answers match is not the interesting part. The interesting part is
-    that a reader holding the SQL cannot transcribe it, which is the real cost
-    of the missing feature and the argument for the SQL bridge.
-    """
+    """Queries the verbs reach only if the reader restructures them first, and each test names its rewrite."""
 
     def test_q02(self, tpch: duckdb.Connection) -> None:
-        # min(ps_supplycost) correlated on p_partkey, decorrelated. `europe` is
-        # used by both the grouping and the join, so it is computed once.
+        # The correlated min() becomes a group-by joined back, and `europe` is used twice but computed once.
         europe = (
             duckdb.table("partsupp")
             .join(duckdb.table("supplier"), on=lambda left, right: left["ps_suppkey"] == right["s_suppkey"])
@@ -475,8 +431,7 @@ class TestExpressedAfterRewriting:
         assert actual.rows(tpch) == answer(tpch, "q02")
 
     def test_q04(self, tpch: duckdb.Connection) -> None:
-        # EXISTS becomes a semi join: the left rows that have a match, without
-        # the right side's columns.
+        # EXISTS becomes a semi join: the left rows that have a match, without the right side's columns.
         actual = (
             duckdb.table("orders")
             .filter((col("o_orderdate") >= date("1993-07-01")) & (col("o_orderdate") < date("1993-10-01")))
@@ -492,10 +447,7 @@ class TestExpressedAfterRewriting:
         assert actual.rows(tpch) == answer(tpch, "q04")
 
     def test_q13(self, tpch: duckdb.Connection) -> None:
-        # The original puts the comment test in the LEFT JOIN's ON clause. On
-        # the preserved side that is the same as filtering the right input
-        # first, which is what a frame can say. A frame's `on` is a join
-        # condition, not a place to hang extra restrictions.
+        # `on` is a join condition, and for a LEFT JOIN filtering the right input first says the same thing.
         orders = duckdb.table("orders").filter(~col("o_comment").like("%special%requests%"))
         per_customer = (
             duckdb.table("customer")
@@ -511,8 +463,7 @@ class TestExpressedAfterRewriting:
         assert actual.rows(tpch) == answer(tpch, "q13")
 
     def test_q17(self, tpch: duckdb.Connection) -> None:
-        # avg(l_quantity) correlated on l_partkey, decorrelated into a grouped
-        # frame and joined back.
+        # The correlated avg() becomes a group-by on l_partkey, joined back.
         thresholds = (
             duckdb.table("lineitem")
             .group_by(col("l_partkey").alias("t_partkey"))
@@ -531,10 +482,7 @@ class TestExpressedAfterRewriting:
         assert actual.rows(tpch) == answer(tpch, "q17")
 
     def test_q20(self, tpch: duckdb.Connection) -> None:
-        # Two nested IN subqueries, which `isin` takes directly, around a sum
-        # correlated on two columns, which has to be decorrelated. The inner
-        # join also does the work of the original's `>`: a partsupp row with no
-        # shipments compares against NULL there and drops out here.
+        # The correlated sum is rewritten as a join, which drops the rows the original's NULL comparison did.
         forest = duckdb.table("part").filter(col("p_name").like("forest%")).select(col("p_partkey"))
         shipped = (
             duckdb.table("lineitem")
@@ -567,9 +515,7 @@ class TestExpressedAfterRewriting:
         assert actual.rows(tpch) == answer(tpch, "q20")
 
     def test_q21(self, tpch: duckdb.Connection) -> None:
-        # EXISTS and NOT EXISTS over the same table become a semi join and an
-        # anti join, chained. Both correlate on more than equality, which an
-        # `on` expression carries.
+        # EXISTS and NOT EXISTS become a semi join and an anti join, both correlating on more than equality.
         late = duckdb.table("lineitem").filter(col("l_receiptdate") > col("l_commitdate"))
 
         def another_supplier(left: duckdb.Side, right: duckdb.Side) -> duckdb.Expr:
@@ -596,8 +542,7 @@ class TestExpressedAfterRewriting:
         assert actual.rows(tpch) == answer(tpch, "q21")
 
     def test_q22(self, tpch: duckdb.Connection) -> None:
-        # The scalar subquery here is uncorrelated, so `scalar()` takes it as
-        # written. Only the NOT EXISTS needs rewriting, into an anti join.
+        # The scalar subquery is uncorrelated, so only the NOT EXISTS needs rewriting into an anti join.
         code = fn("substring", col("c_phone"), 1, 2)
         codes = ["13", "31", "23", "29", "30", "18", "17"]
         average = (
@@ -619,12 +564,7 @@ class TestExpressedAfterRewriting:
 
 
 def test_every_query_is_classified_and_proven() -> None:
-    """The two classes together must account for all 22 queries.
-
-    Both sets are read from the test methods rather than written out, so the
-    record cannot claim a query the tests do not actually prove, and adding a
-    query file without expressing it fails here.
-    """
+    """The two classes account for all 22 queries, read from the test methods rather than written out."""
 
     def covered(cls: type) -> set[str]:
         return {name[len("test_") :] for name in vars(cls) if name.startswith("test_q")}
@@ -633,8 +573,5 @@ def test_every_query_is_classified_and_proven() -> None:
     assert not direct & rewritten, f"a query cannot be in both classes: {sorted(direct & rewritten)}"
     files = {path.stem for path in QUERIES}
     assert direct | rewritten == files, f"unclassified: {sorted(files ^ (direct | rewritten))}"
-    # The measurement that matters. Two thirds transcribe; the rest need the
-    # reader to know a rewrite. Nothing needs the SQL bridge any more, which is
-    # a statement about TPC-H as much as about the API: it has no recursive
-    # CTE, no PIVOT and no window function.
+    # Two thirds transcribe directly and the rest need a known rewrite; none needs raw SQL any more.
     assert len(rewritten) == 7

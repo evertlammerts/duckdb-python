@@ -1,18 +1,5 @@
 #!/usr/bin/env python3
-"""Committed-baseline instruction-count comparison for the benchmark suite. See benchmarks/README.md.
-
-pytest-codspeed's hooks call `callgrind_dump_stats_at(<uri>)` per benchmark, so callgrind writes ONE dump each,
-headed by `desc: Trigger: Client Request: <uri>` with the count on `totals:` (`events: Ir`). This parses those
-raw dumps directly (no CodSpeed account/token/runner). Run-to-run noise is ~0.1%, so the 5% gate threshold sits
-far above it (PYTHONHASHSEED pinned in CI).
-
-Two modes (CI-only; no valgrind on macOS arm64):
-  regen:   write baseline.json from a fresh run: counts + provenance + binding fractions + auto-move.
-  compare: diff a fresh run against baseline.json. Gate benches over threshold are regressions; informational
-           are reported only. Report-only by default; `--enforce` exits non-zero on a gate regression.
-
-baseline.json and benchmarks/requirements-bench.txt are regenerated together so counts match the frozen pins.
-"""
+"""Compare benchmark instruction counts against the committed baseline. See benchmarks/README.md."""
 
 from __future__ import annotations
 
@@ -26,14 +13,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 SCHEMA_VERSION = 1
-GATE_DEFAULT_THRESHOLD_PCT = 5.0
-BINDING_FRACTION_CUTOFF = 0.25  # a gate whose isolable binding fraction is below this is auto-moved to
-#                                 informational (a threshold on its engine-diluted total is not meaningful).
+GATE_DEFAULT_THRESHOLD_PCT = 5.0  # run-to-run noise is about 0.1%, so this sits far above it
+BINDING_FRACTION_CUTOFF = 0.25  # below this share, a bench is mostly DuckDB and a threshold on it means little
 
-# Floor map: the engine-control bench that is the "engine floor" of a numeric-produce gate.
-# binding_fraction = 1 - floor_Ir / bench_Ir. ONLY numeric-produce benches are listed (their per-element binding
-# is a bulk memcpy of ~engine magnitude); every other gate is high-binding and needs no fraction. Add a mapping
-# (and, if needed, a floor) to evaluate more benches.
+# Which DuckDB-only bench each numeric bench is measured against; the others are so clearly ours it is not needed.
 _E = "benchmarks/test_engine_control_perf.py"
 FLOOR_MAP = {
     "benchmarks/test_produce_numpy_perf.py::test_to_numpy_numeric": f"{_E}::test_engine_sum_2col_500k",
@@ -45,13 +28,11 @@ _TRIGGER_RE = re.compile(r"^desc:\s*Trigger:\s*Client Request:\s*(?P<uri>.+?)\s*
 _TOTALS_RE = re.compile(r"^totals:\s*(?P<ir>\d+)\s*$")
 
 
-# --------------------------------------------------------------------------- #
-# callgrind parsing
-# --------------------------------------------------------------------------- #
+# -- callgrind parsing
 
 
 def _normalize_uri(raw: str) -> str:
-    """Return a repo-relative benchmark key (strip a leading absolute path if the run was outside a git repo)."""
+    """Return a repo-relative benchmark key, dropping the absolute prefix a run outside the repo leaves."""
     raw = raw.strip()
     if "::" not in raw:
         return raw
@@ -63,11 +44,7 @@ def _normalize_uri(raw: str) -> str:
 
 
 def parse_profiles(profile_dir: Path) -> dict[str, int]:
-    """Parse every callgrind dump in `profile_dir`; return {benchmark_uri: instruction_count}.
-
-    Keeps only dumps whose Trigger is a benchmark Client Request (contains `::`); skips metadata/termination
-    dumps. If a uri appears more than once (should not happen) the max is kept.
-    """
+    """Every benchmark's instruction count, read from the callgrind dumps in `profile_dir`."""
     counts: dict[str, int] = {}
     files = sorted(profile_dir.rglob("*")) if profile_dir.exists() else []
     for f in files:
@@ -92,9 +69,7 @@ def parse_profiles(profile_dir: Path) -> dict[str, int]:
     return counts
 
 
-# --------------------------------------------------------------------------- #
-# helpers
-# --------------------------------------------------------------------------- #
+# -- helpers
 
 
 def _sha256(path: Path) -> str:
@@ -102,13 +77,13 @@ def _sha256(path: Path) -> str:
 
 
 def _load_gate_set(gate_list: Path | None) -> set[str]:
-    """Load the set of gate benchmark uris from a `pytest -m gate --collect-only -q` node-id list."""
+    """Load the benchmarks that may be gated, from a `pytest -m gate --collect-only -q` listing."""
     if not gate_list or not gate_list.exists():
         return set()
     out = set()
     for raw in gate_list.read_text().splitlines():
         line = raw.strip()
-        if "::" in line:  # a pytest node-id (the workflow pre-filters the collect-only output to '::' lines)
+        if "::" in line:  # a pytest node id; the workflow already filtered the listing down to these
             out.add(_normalize_uri(line))
     return out
 
@@ -117,13 +92,11 @@ def _pct(base: int, new: int) -> float:
     return 0.0 if base == 0 else (new - base) / base * 100.0
 
 
-# --------------------------------------------------------------------------- #
-# regen
-# --------------------------------------------------------------------------- #
+# -- writing a baseline
 
 
 def regen(args: argparse.Namespace) -> int:
-    """Write baseline.json from a valgrind run: counts + provenance + Option-B binding fractions/auto-move."""
+    """Write baseline.json from a valgrind run: the counts, where they came from, and what may be gated."""
     counts = parse_profiles(Path(args.profiles))
     if not counts:
         print(f"ERROR: no benchmark dumps found under {args.profiles}", file=sys.stderr)
@@ -140,7 +113,7 @@ def regen(args: argparse.Namespace) -> int:
         if source_marker == "gate" and floor_uri and floor_uri in counts and ir > 0:
             binding_fraction = round(max(0.0, 1.0 - counts[floor_uri] / ir), 4)
             if binding_fraction < args.cutoff:
-                marker = "informational"  # Option-B auto-move: engine-diluted, threshold not meaningful
+                marker = "informational"  # mostly DuckDB, so a threshold on the total would not mean much
                 auto_moved.append(uri)
         benches[uri] = {
             "marker": marker,
@@ -178,20 +151,18 @@ def regen(args: argparse.Namespace) -> int:
     return 0
 
 
-# --------------------------------------------------------------------------- #
-# compare
-# --------------------------------------------------------------------------- #
+# -- comparing against one
 
 
 def compare(args: argparse.Namespace) -> int:
-    """Diff a fresh valgrind run against baseline.json and print a report (report-only unless --enforce)."""
+    """Diff a fresh valgrind run against baseline.json and print a report; only --enforce lets it fail."""
     new_counts = parse_profiles(Path(args.profiles))
     if not new_counts:
         print(f"ERROR: no benchmark dumps found under {args.profiles}", file=sys.stderr)
         return 2
     baseline_path = Path(args.baseline)
     if not baseline_path.exists():
-        # Bootstrap state: no committed baseline yet. Report the run and instruct to regenerate; never fail.
+        # No committed baseline yet: report the run and never fail.
         print(f"No baseline at {baseline_path} yet -- run the workflow with regen=true to create it.")
         print(f"This run produced {len(new_counts)} benchmark instruction counts.")
         return 0
@@ -199,7 +170,7 @@ def compare(args: argparse.Namespace) -> int:
     meta = baseline.get("meta", {})
     base_benches = baseline.get("benchmarks", {})
 
-    # scale guard: a baseline built at BENCH_SCALE=X is only comparable to a run at the same scale.
+    # A baseline built at one BENCH_SCALE is only comparable to a run at the same scale.
     run_scale = os.environ.get("BENCH_SCALE", "")
     base_scale = meta.get("bench_scale", "")
     if run_scale != base_scale:
@@ -208,7 +179,7 @@ def compare(args: argparse.Namespace) -> int:
             "not comparable. Regenerate the baseline at this scale."
         )
 
-    # pin-drift guard: the baseline's counts only compare cleanly against the pinned data libs it was built with.
+    # The counts only compare cleanly against the pinned data libraries the baseline was built with.
     if args.pins:
         cur = _sha256(Path(args.pins))
         base_pins = meta.get("requirements_bench_sha256", "")
@@ -218,8 +189,7 @@ def compare(args: argparse.Namespace) -> int:
                 "may not be pure binding. Regenerate the baseline with the current pins."
             )
 
-    # engine-bump guard: engine-inclusive counts shift when engine.pin changes. If the SHA differs from the
-    # baseline's, don't treat gate deltas as hard failures (they may reflect the bump); warn to regenerate.
+    # The counts include DuckDB, so when its version differs from the baseline's a rise may not be ours.
     engine_changed = bool(
         args.engine_sha and meta.get("duckdb_engine_sha") and args.engine_sha != meta["duckdb_engine_sha"]
     )
@@ -281,9 +251,7 @@ def _print_report(meta: dict, rows: list[tuple[str, str, str]], *, engine_change
     print(f"Summary: {len(rows)} benchmarks, {n_reg} gate regression(s)" + ("" if enforce else "  (report-only)"))
 
 
-# --------------------------------------------------------------------------- #
-# cli
-# --------------------------------------------------------------------------- #
+# -- command line
 
 
 def main(argv: list[str] | None = None) -> int:

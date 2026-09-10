@@ -1,4 +1,4 @@
-"""The package version and the engine version are separate things."""
+"""The package version and the DuckDB version are separate things."""
 
 from __future__ import annotations
 
@@ -21,12 +21,10 @@ def test_package_version_matches_installed_metadata() -> None:
 def test_engine_version_is_reported() -> None:
     engine = duckdb.duckdb_version()
     assert engine, "engine reported an empty version"
-    # A depth-1 checkout with no tags makes DuckDB's `git describe` fail, and
-    # the engine then reports something that is not a version at all.
+    # A shallow checkout with no tags makes DuckDB's git describe fail, and it then reports a non-version.
     assert re.match(r"^v?\d+\.\d+\.\d+", engine), engine
 
 
 def test_package_and_engine_versions_are_not_conflated() -> None:
-    # They are released on separate cadences. Reporting one as the other is a
-    # regression that reads as harmless until someone version-gates on it.
+    # They are released separately, so reporting one as the other looks harmless until someone gates on it.
     assert duckdb.__version__ != duckdb.duckdb_version()

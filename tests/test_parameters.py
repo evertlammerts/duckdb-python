@@ -51,8 +51,7 @@ def test_value_survives_a_roundtrip(con: _duckdb.Connection, value: object) -> N
 
 
 def test_bool_is_not_bound_as_an_integer(con: _duckdb.Connection) -> None:
-    # In Python a bool IS an int, so a converter that tests int first binds
-    # True as 1 and the type is silently lost.
+    # A bool is an int in Python, so checking for int first would bind True as 1 and lose the type.
     assert roundtrip(con, True) is True
     assert con.execute("SELECT typeof($1)", [True]).fetch_all()[0][0] == "BOOLEAN"
 
@@ -67,8 +66,7 @@ def test_bool_is_not_bound_as_an_integer(con: _duckdb.Connection) -> None:
     ids=["hugeint_max", "hugeint_min", "uhugeint_max"],
 )
 def test_integers_wider_than_64_bits(con: _duckdb.Connection, value: int) -> None:
-    # Past int64 the value goes through its text form, which is exact for
-    # integers of any width.
+    # Past 64 bits the value travels as text, which is exact for integers of any width.
     assert roundtrip(con, value) == value
 
 
@@ -83,11 +81,7 @@ def test_naive_datetime_stays_naive(con: _duckdb.Connection) -> None:
 
 
 class TestDecimal:
-    """Width and scale come from the value, not from a fixed default.
-
-    A fixed DECIMAL(38,10) would repad, turning Decimal("123.456") into
-    Decimal("123.4560000000") and losing the scale the caller chose.
-    """
+    """Width and scale come from the value: a fixed DECIMAL(38,10) would repad and lose the caller's scale."""
 
     @pytest.mark.parametrize("text", ["123.456", "0.10", "-5", "0", "-0.001", "99999999999999999999"])
     def test_scale_is_preserved_exactly(self, con: _duckdb.Connection, text: str) -> None:
@@ -95,21 +89,18 @@ class TestDecimal:
         assert repr(roundtrip(con, value)) == repr(value)
 
     def test_positive_exponent_widens_instead_of_truncating(self, con: _duckdb.Connection) -> None:
-        # Decimal("1E+2") carries one digit and an exponent; the trailing zeroes
-        # are not in the digit tuple, so the width has to account for them.
+        # Decimal("1E+2") keeps its zeroes in the exponent, not the digits, so the width must allow for them.
         assert roundtrip(con, decimal.Decimal("1E+2")) == decimal.Decimal(100)
 
     @pytest.mark.parametrize("text", ["NaN", "Infinity", "-Infinity"])
     def test_non_finite_is_refused_clearly(self, con: _duckdb.Connection, text: str) -> None:
-        # These have no DECIMAL counterpart. Refuse with a message about the
-        # Decimal rather than letting a cast fail deeper down.
+        # These have no DECIMAL counterpart, and a message about the Decimal beats a cast failing deeper down.
         with pytest.raises(exceptions.InvalidInputError, match="non-finite"):
             roundtrip(con, decimal.Decimal(text))
 
 
 def test_null_casts_into_any_target(con: _duckdb.Connection) -> None:
-    # A NULL needs a carrier type, but must not pin the statement to it: the
-    # binder has to stay free to land wherever the query wants.
+    # A NULL needs some type to travel as, but must not pin the statement to it.
     assert con.execute("SELECT $1::VARCHAR, $1::INTEGER, $1::DATE", [None]).fetch_all()[0] == (
         None,
         None,
@@ -132,9 +123,7 @@ def test_positional_parameters_bind_in_order(con: _duckdb.Connection) -> None:
 
 
 def test_dict_maps_to_struct_or_map_by_its_keys(con: _duckdb.Connection) -> None:
-    # A dict is the only Python type mapping onto two DuckDB types, so the rule
-    # is stated rather than guessed: string keys are a STRUCT, anything else a
-    # MAP. Assert the shape, not the engine's exact rendering of it.
+    # A dict maps onto two DuckDB types: text keys a STRUCT, anything else a MAP, however it is spelled.
     struct_type = con.execute("SELECT typeof($1)", [{"a": 1}]).fetch_all()[0][0]
     assert struct_type.startswith("STRUCT")
     map_type = con.execute("SELECT typeof($1)", [{1: "a"}]).fetch_all()[0][0]
@@ -150,18 +139,13 @@ def test_unsupported_type_names_itself(con: _duckdb.Connection) -> None:
 
 
 def test_parameters_reject_multiple_statements(con: _duckdb.Connection) -> None:
-    # Binding across a statement boundary has no defined meaning, so refuse it
-    # rather than silently binding into the first.
+    # A value spanning two statements has no meaning, so it is refused rather than applied to the first.
     with pytest.raises(exceptions.InvalidInputError, match="exactly one statement"):
         con.execute("SELECT $1; SELECT $1", [1])
 
 
 class TestAwareTime:
-    """An aware `time` binds as TIME_TZ rather than losing its offset.
-
-    The read direction already returns TIME_TZ aware, so binding it back
-    naively made the round trip asymmetric and silently dropped the offset.
-    """
+    """An aware `time` goes in as TIME_TZ, since reading one back already keeps its offset."""
 
     def test_offset_survives_a_roundtrip(self, con: _duckdb.Connection) -> None:
         aware = datetime.time(13, 45, 6, tzinfo=datetime.timezone(datetime.timedelta(hours=2)))
@@ -191,5 +175,5 @@ class TestAwareTime:
 
 
 def test_database_options_accepts_none(con: _duckdb.Connection) -> None:
-    # The stub allows None, so the binding has to as well.
+    # The type stubs allow None, so the code has to as well.
     assert _duckdb.Database(":memory:", None).connect() is not None

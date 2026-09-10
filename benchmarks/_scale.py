@@ -1,19 +1,10 @@
-"""Env-gated row-count scaling for the benchmark suite.
-
-Callgrind is 20-50x, so the O(rows) benches at full N make the CI sweep too slow. `scaled(n)` shrinks row counts
-ONLY when `BENCH_SCALE=<divisor>` is set (which the CI sweep sets); unset -> full N, so local walltime A/B is
-unchanged. A gate bench and the engine floor it is compared against share a base N, so routing BOTH through
-`scaled()` keeps them at an identical scaled N and the binding fraction stays valid. Scaling reduces row counts
-only; it must never change the data patterns the benches depend on (real nulls, mixed ASCII, LIMIT-no-ORDER-BY).
-A floor keeps a scaled bench row-dominated so per-element work still dominates; the small-N `*_gate` probes are
-already fast and are NOT scaled.
-"""
+"""Row-count scaling for the benchmarks: CI measures under a slow profiler, so `BENCH_SCALE` shrinks the sizes."""
 
 from __future__ import annotations
 
 import os
 
-FLOOR = 20_000  # a scaled bench never drops below this (stays row-dominated, ~10x the range(2048) probes)
+FLOOR = 20_000  # below this a bench stops being about the rows, so scaling never goes further
 
 
 def bench_scale() -> int:
@@ -28,7 +19,7 @@ def bench_scale() -> int:
 
 
 def scaled(n: int) -> int:
-    """Return `n` at full scale, or `max(n // BENCH_SCALE, min(n, FLOOR))` when scaling is enabled."""
+    """Return `n`, or a smaller row count when `BENCH_SCALE` is set; only counts shrink, never the data pattern."""
     d = bench_scale()
     if d <= 1:
         return n

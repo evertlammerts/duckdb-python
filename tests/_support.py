@@ -1,4 +1,4 @@
-"""Interpreter capability checks shared by the test modules."""
+"""Checks on the running interpreter and on the duckdb install, shared by the test modules."""
 
 from __future__ import annotations
 
@@ -6,22 +6,13 @@ import sys
 
 
 def gil_enabled() -> bool:
-    """Whether this interpreter is running with the GIL.
-
-    `sys._is_gil_enabled` arrived in 3.13. Before that there is no free-threaded
-    build, so the GIL is always on.
-    """
+    """Whether this interpreter holds the global interpreter lock, which every version before 3.13 always does."""
     probe = getattr(sys, "_is_gil_enabled", None)
     return True if probe is None else bool(probe())
 
 
 def installed_as_wheel() -> bool:
-    """Whether duckdb is installed as a wheel rather than an editable checkout.
-
-    An editable install redirects the extension and the engine into the build
-    directory, so the layout invariants a wheel must satisfy do not hold and
-    asserting them would only produce noise.
-    """
+    """Whether duckdb is installed as a wheel; an editable install puts its files in the build directory instead."""
     import sysconfig
     from pathlib import Path
 

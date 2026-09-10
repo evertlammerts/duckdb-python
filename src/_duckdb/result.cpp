@@ -13,10 +13,7 @@
 namespace duckdb_python {
 namespace {
 
-// Step participates in executing the query: WAITING means "call again", never
-// "wait for someone else". Sleeping between calls only serializes the work,
-// so the step loop runs hot, releasing the GIL for one quantum of stepping at
-// a time and retaking it for the Ctrl-C check in between.
+// Stepping does the query's own work, so WAITING means "call again" and sleeping would only serialise it.
 constexpr std::chrono::milliseconds kStepQuantum {20};
 
 /// The kind of SQL statement a result came from, as lowercase text.
@@ -111,8 +108,7 @@ cxx::idx_t Result::Drain() {
 	pending.reset();
 	cxx::idx_t changed = 0;
 	Stream([&](cxx::QueryResult &live, cxx::DataChunk chunk) {
-		// Asked per chunk: a statement group knows its result type only
-		// once stepping has prepared the statement that produces it.
+		// Asked per batch: a multi-statement result knows its type only once stepping reaches that statement.
 		if (chunk.GetRowCount() > 0 && live.GetResultType() == cxx::QueryResult::ResultType::CHANGED_ROWS) {
 			changed += static_cast<cxx::idx_t>(chunk.GetVector(0).GetValue(0).Get<int64_t>());
 		}
@@ -143,12 +139,11 @@ nb::list Result::FetchRows(size_t count) {
 					}
 				}
 				AppendChunkRows(*pending, *column_types, offset, offset + want, ctx, rows);
-				// Advanced only on success, so a failed conversion can
-				// be retried from the same row.
+				// Advanced only on success, so a failed conversion can be retried from the same row.
 				offset += want;
 			}
 			if (offset < available) {
-				return rows; // count reached mid-chunk
+				return rows; // count reached mid-batch
 			}
 			pending.reset();
 			offset = 0;
@@ -204,8 +199,7 @@ Pinned<cxx::QueryResult> Result::Live() {
 
 template <class SINK>
 Result::Pumped Result::Pump(cxx::QueryResult &live, SINK &sink) {
-	// The engine may run this thread's share of the query inside Step;
-	// never hold the GIL across it, or a callback into Python deadlocks.
+	// Step may run part of the query here, and a Python callback inside it would deadlock on a held GIL.
 	nb::gil_scoped_release release;
 	const auto deadline = std::chrono::steady_clock::now() + kStepQuantum;
 	while (std::chrono::steady_clock::now() < deadline) {
@@ -221,7 +215,7 @@ Result::Pumped Result::Pump(cxx::QueryResult &live, SINK &sink) {
 		case cxx::QueryResult::StepStatus::CANCELLED:
 			return Pumped::Cancelled;
 		default:
-			// WAITING: stepping is the progress; go again.
+			// WAITING: stepping is itself the progress, so go again.
 			break;
 		}
 	}
@@ -231,8 +225,7 @@ Result::Pumped Result::Pump(cxx::QueryResult &live, SINK &sink) {
 template <class SINK>
 bool Result::Stream(SINK &&sink) {
 	while (true) {
-		// Pinned before the GIL is dropped and for the whole quantum, so
-		// a concurrent Close cannot free the engine result underneath.
+		// Held for the whole slice, before the GIL is dropped, so a concurrent close cannot free the result.
 		auto live = Live();
 		const auto pumped = Pump(*live.engine, sink);
 		if (pumped == Pumped::Cancelled) {

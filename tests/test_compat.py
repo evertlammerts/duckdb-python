@@ -1,8 +1,4 @@
-"""The migration face: the old client's connection vocabulary over the new seam.
-
-Parity with the old client is measured by the adopted suite under compat/;
-these tests gate the face itself.
-"""
+"""duckdb.compat: the previous duckdb package's API, kept so existing code can migrate."""
 
 from __future__ import annotations
 
@@ -53,7 +49,7 @@ class TestExecuteAndFetch:
         assert list(con.fetchnumpy()["i"]) == [1, 2, 3, 4]
 
     def test_a_statement_without_rows_applies_at_execute(self) -> None:
-        # The old client's INSERT took effect at execute, with no fetch step.
+        # In the previous package an INSERT took effect at execute, with no fetch step.
         con = compat.connect()
         con.execute("CREATE TABLE t (v INTEGER)")
         con.execute("INSERT INTO t VALUES (1), (2)")
@@ -66,8 +62,7 @@ class TestExecuteAndFetch:
         assert con.execute("SELECT sum(v) FROM t").fetchone() == (6,)
 
     def test_parameter_names_coerce_the_old_way(self) -> None:
-        # The old client stringified any parameter-dict key; the native seam
-        # refuses non-strings, so the leniency lives in this face alone.
+        # Only duckdb.compat stringifies a non-string parameter key; the rest of the package refuses one.
         con = compat.connect()
         assert con.execute("SELECT $1 AS a", {1: 5}).fetchall() == [(5,)]
         assert con.execute("SELECT $1 AS a", {b"1": 5}).fetchall() == [(5,)]
@@ -88,14 +83,13 @@ class TestExecuteAndFetch:
         con = compat.connect()
         con.execute("CREATE TABLE t (v INTEGER)")
         assert con.description is None
-        # The old contract: never a real count. run() and dbapi carry those.
+        # The previous package never reported a real count here; run() and duckdb.dbapi do.
         assert con.rowcount == -1
 
 
 class TestOldConnectionShape:
     def test_cursor_is_an_independent_duplicate(self) -> None:
-        # The old client's cursor() semantics, kept deliberately: its own
-        # transaction, unlike duckdb.dbapi's shared-transaction cursors.
+        # Deliberately the previous package's semantics: its own transaction, unlike duckdb.dbapi's shared one.
         con = compat.connect()
         cur = con.cursor()
         assert isinstance(cur, compat.CompatConnection)
@@ -107,7 +101,7 @@ class TestOldConnectionShape:
         assert cur.execute("SELECT count(*) FROM t").fetchone() == (1,)
 
     def test_plans_run_on_a_compat_connection(self) -> None:
-        # A subclass of the native connection, so the new surface stays whole.
+        # It subclasses the package's own connection, so everything else still works on it.
         con = compat.connect()
         con.execute("CREATE TABLE t AS SELECT 7 AS v")
         assert duckdb.table("t").rows(con) == [(7,)]
@@ -134,7 +128,7 @@ class TestOldConnectionShape:
         con.close()
         with pytest.raises(exceptions.InterfaceError, match="closed"):
             con.execute("SELECT 1")
-        # The old fetch answer on a closed connection: the result speaks first.
+        # On a closed connection the previous package reported the missing result, not the closed connection.
         with pytest.raises(exceptions.InvalidInputError, match="No open result set"):
             con.fetchall()
 
@@ -160,15 +154,14 @@ class TestOldConnectionShape:
         broken.close = boom  # type: ignore[method-assign]
         with pytest.raises(RuntimeError, match="cursor close failed"):
             con.close()
-        # The failure did not stop the sweep: the other cursor and the
-        # connection itself are closed all the same.
+        # One failing cursor must not stop the sweep: the rest still close.
         with pytest.raises(exceptions.InterfaceError, match="closed"):
             intact.execute("SELECT 1")
         with pytest.raises(exceptions.InterfaceError, match="closed"):
             con.execute("SELECT 1")
 
     def test_closing_a_connection_closes_its_cursors(self) -> None:
-        # The old lifetime coupling, kept: cursors die with their parent.
+        # Kept from the previous package: cursors die with the connection that made them.
         con = compat.connect()
         cursor = con.cursor()
         con.close()
@@ -190,8 +183,7 @@ class TestOldConnectionShape:
 
 class TestCompatRelation:
     def test_old_fetch_model(self) -> None:
-        # A bare fetchall re-runs each call; fetchone and fetchmany hold and
-        # drain one result; execute() resets it.
+        # fetchall re-runs the query; fetchone and fetchmany walk one result to its end; execute() restarts it.
         con = compat.connect()
         relation = rel(con, "SELECT * FROM range(3)")
         assert relation.fetchall() == [(0,), (1,), (2,)]
@@ -250,8 +242,7 @@ class TestCompatRelation:
         relation = rel(con, "SELECT 1 AS x").execute()
         with pytest.raises(RuntimeError, match="conversion failed"):
             relation.fetchnumpy()
-        # The engine allows one live result per connection: an orphaned open
-        # result would refuse this statement.
+        # DuckDB allows one live result per connection, so an orphaned one would refuse this statement.
         assert con.execute("SELECT 2").fetchone() == (2,)
 
     def test_a_connection_close_marks_relations_closed_the_compat_way(self) -> None:
@@ -281,7 +272,7 @@ class TestSharedInstances:
         assert first.execute("SELECT count(*) FROM b").fetchone() == (1,)
         first.close()
         second.close()
-        # The instance died with its last connection, so this opens afresh.
+        # The shared database died with its last connection, so this opens a fresh one.
         third = compat.connect(path)
         assert third.execute("SELECT count(*) FROM a").fetchone() == (1,)
 
@@ -299,8 +290,7 @@ class TestSharedInstances:
         cursor = con.cursor()
         del con
         gc.collect()
-        # The cursor holds the instance, so this joins it instead of hitting
-        # the engine's already-attached refusal.
+        # The cursor keeps the database open, so this joins it instead of being refused as already attached.
         again = compat.connect(path)
         assert again.execute("SELECT count(*) FROM t").fetchone() == (1,)
         again.close()
@@ -312,15 +302,14 @@ class TestSharedInstances:
         cursor = con.cursor()
         del con
         gc.collect()
-        # A dead instance here would silently hand back a fresh empty database.
+        # If the database had died here, this would silently open a fresh empty one.
         again = compat.connect(":memory:compat_cursor_hold")
         assert again.execute("SELECT v FROM t").fetchone() == (7,)
         again.close()
         cursor.close()
 
     def test_a_path_and_the_equal_string_share_the_database(self, tmp_path: Path) -> None:
-        # One instance per file, however the file was spelled: a second
-        # instance would be refused by the engine as already open.
+        # One database per file however the path is spelled; a second would be refused as already open.
         path = tmp_path / "typed.db"
         by_string = compat.connect(str(path))
         by_path = compat.connect(path)
@@ -423,16 +412,14 @@ class TestStatementDispatch:
         assert relation.fetchall() == [(5,)]
         assert relation.fetchall() == [(5,)]
         assert duckdb.table("t").count(con) == 1
-        # Verbs compose over the materialized rows, as they did on the old
-        # client's result-backed relations.
+        # Relation methods compose over the stored rows, as they did in the previous package.
         assert relation.filter("v > 1").fetchall() == [(5,)]
 
     def test_selects_stay_lazy_and_leave_no_result_open(self) -> None:
         con = compat.connect()
         relation = con.sql("SELECT 1 AS a")
         assert relation is not None
-        # A second statement runs immediately: sql() closed its
-        # classification result before returning.
+        # A second statement runs immediately, so sql() closed the result it used to classify the first.
         assert con.run("SELECT 1") == 0
 
     def test_ddl_and_transaction_control_run_on_the_spot(self) -> None:
@@ -449,19 +436,16 @@ class TestStatementDispatch:
         relation = con.sql("SELECT 1")
         assert relation is not None
         assert relation.fetchall() == [(1,)]
-        # The old client's silent discard: nothing had been fetched, so the
-        # held result is gone rather than the statement refused.
+        # Nothing had been fetched, so the held result is dropped rather than the statement refused.
         with pytest.raises(exceptions.InvalidInputError, match="No open result set"):
             con.fetchall()
 
     def test_sql_refuses_loudly_over_a_touched_held_result(self) -> None:
-        # A recorded divergence: the old client kept a touched result because
-        # it had materialized it; this client streams and says so.
+        # A deliberate difference: the previous package read every row up front, so it could keep a partly read one.
         con = compat.connect()
         con.execute("SELECT * FROM range(10000)")
         assert con.fetchone() == (0,)
-        # The engine reports it under RESOURCE_IN_USE, the code a file held
-        # by another connection gets, which maps to OperationalError.
+        # DuckDB reports this under the same code as a file held by another connection, so OperationalError.
         with pytest.raises(exceptions.OperationalError, match="live result"):
             con.sql("SELECT 1")
         # The held result is untouched by the refusal.
@@ -484,7 +468,7 @@ class TestStatementDispatch:
 
 
 class TestRelationVerbs:
-    # One gating behavior per verb family; the adopted suite measures, this gates.
+    # One behaviour per method family; the copied tests measure coverage, these check it works.
 
     def test_aggregate_shorthand_with_groups_and_projection(self) -> None:
         con = compat.connect()
@@ -549,9 +533,7 @@ class TestRelationVerbs:
         assert con.table("vt").type == "TABLE_RELATION"
 
     def test_comments_in_aggregate_operands_fail_loudly(self) -> None:
-        # A recorded divergence: the old parser round-trip discarded the
-        # comment silently; here the operand quote-falls-back and the bind
-        # names it. Literals containing -- are data and keep working.
+        # A deliberate difference: a -- comment in the operand is no longer stripped, so it fails as an unknown column.
         con = compat.connect()
         relation = con.sql("SELECT 'a--b' AS s, 1 AS v")
         assert relation is not None
@@ -561,8 +543,7 @@ class TestRelationVerbs:
 
 
 class TestDogfoodedVerbs:
-    # The writers ride the native COPY sinks; the expression face rides the
-    # native expression layer. These gate the translation boundaries.
+    # The write and expression methods forward to the package's own COPY and expression layers.
 
     def test_write_csv_roundtrips_through_the_native_sink(self, tmp_path: Path) -> None:
         con = compat.connect()
@@ -659,8 +640,7 @@ class TestExpressionCompat:
         assert picked.columns == ["c", "g"]
 
     def test_project_keeps_an_alias(self) -> None:
-        # The rows came out right while the name was lost: the alias rode
-        # the expression but never reached the SELECT list.
+        # The rows were right while the name was lost: the alias never reached the SELECT list.
         con = compat.connect()
         con.run("CREATE TABLE orders AS SELECT 1 AS total")
         relation = con.table("orders").project(compat.ColumnExpression("total").alias("t"))
@@ -689,8 +669,7 @@ class TestExpressionCompat:
         assert mixed.fetchall() == [(1, 3, 2)]
 
     def test_filter_still_takes_an_aliased_expression(self) -> None:
-        # A WHERE cannot carry AS, so the alias is left off there rather
-        # than rendered into a syntax error.
+        # A WHERE cannot carry AS, so the alias is dropped there instead of becoming a syntax error.
         con = compat.connect()
         relation = rel(con, "SELECT unnest([1, 2, 3]) AS v")
         kept = relation.filter((compat.ColumnExpression("v") > 1).alias("big"))
@@ -731,9 +710,7 @@ class TestCreateFunction:
         assert con.execute("SELECT maybe(2), maybe(3)").fetchall() == [(None, 3)]
 
     def test_a_string_annotation_is_a_sql_type(self) -> None:
-        # Deferred by this module's __future__ import, the annotation arrives
-        # as text that evaluates to the string "VARCHAR"; the text is the
-        # type, not a Python name to look up.
+        # With deferred annotations the text arrives as a string; it names a SQL type, not a Python name to look up.
         con = compat.connect()
 
         def shout(text: "VARCHAR") -> "VARCHAR":  # type: ignore[name-defined]  # noqa: F821, UP037
@@ -752,9 +729,7 @@ class TestCreateFunction:
         assert con.execute("SELECT widen(2, 1.5)").fetchall() == [(3.0,)]
 
     def test_undeferred_string_annotations_are_sql_types_too(self) -> None:
-        # Without the __future__ import an annotation is the bare string, which
-        # inspect's own evaluation turned into a NameError before the text
-        # could be read as a type; "INTEGER[]" is not even Python syntax.
+        # Evaluating such an annotation used to raise NameError, and "INTEGER[]" is not even Python syntax.
         con = compat.connect()
 
         def total(values: object) -> object:

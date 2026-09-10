@@ -1,12 +1,4 @@
-"""Engine chunks to numpy and pandas, with no Arrow round trip.
-
-The seam's ChunkView hands out zero-copy buffer views per column; assembly
-is vectorized numpy, and columns without a fixed-width layout fall back to
-per-cell objects. NULLs stay lossless: `fetch_numpy` masks them,
-`to_dataframe` uses pandas nullable dtypes where they occur and plain numpy
-dtypes where they do not. numpy and pandas are imported inside the
-functions, so importing duckdb never drags them in.
-"""
+"""Results to numpy and pandas; both are imported inside the functions, so importing duckdb never pulls them in."""
 
 from __future__ import annotations
 
@@ -17,8 +9,7 @@ if TYPE_CHECKING:
 
     from . import _duckdb
 
-#: The facade's LogicalTypeId values this converter dispatches on. Mirrored
-#: rather than bound; the round-trip tests hold the mirror to the engine.
+#: DuckDB's type-id numbers, copied rather than imported; the round-trip tests check the copy against DuckDB.
 _BOOLEAN = 10
 _TINYINT = 11
 _SMALLINT = 12
@@ -72,9 +63,7 @@ _NULLABLE_PD = {
     "float64": "Float64",
 }
 
-#: The engine's temporal infinity sentinels, and where they clamp to. The row
-#: egress clamps them to Python's date/datetime min and max; these are the
-#: same instants as epoch counts, so both paths agree.
+#: DuckDB's infinite date and timestamp markers, and the instants they clamp to, matching what fetching rows gives.
 _DATE_INF = 2147483647
 _DATE_CLAMP = (2932896, -719162)
 _TS_INF = 9223372036854775807
@@ -95,20 +84,13 @@ def _mask(np: Any, validity: Any, count: int) -> Any:
 
 
 def _int128_to_float(np: Any, data: Any, mask: Any, *, signed: bool) -> Any:
-    """int128 limbs to float64 the way the engine's own double cast does: sign-magnitude.
-
-    Combining two's-complement limbs directly in float64 cancels
-    catastrophically for negatives: the low limb sits near 2^64, rounds to
-    exactly 2^64, and small negative values collapse to 0.0. The magnitude
-    is negated across the limbs in integer arithmetic first.
-    """
+    """128-bit ints to float64 by sign and magnitude: combining two's-complement halves loses small negatives."""
     kind = "<i8" if signed else "<u8"
     limbs = np.frombuffer(data, dtype=np.dtype([("lower", "<u8"), ("upper", kind)]))
     lower = limbs["lower"]
     upper = limbs["upper"]
     if mask is not None:
-        # NULL slots hold undefined limbs; zeroed so masked positions stay
-        # a deterministic 0.0.
+        # NULL slots hold undefined halves; zeroed so masked positions stay a predictable 0.0.
         lower = np.where(mask, np.uint64(0), lower)
         upper = np.where(mask, 0, upper)
     scale = 18446744073709551616.0
@@ -116,8 +98,7 @@ def _int128_to_float(np: Any, data: Any, mask: Any, *, signed: bool) -> Any:
         return upper.astype("float64") * scale + lower.astype("float64")
     negative = upper < 0
     upper_bits = upper.astype("uint64")
-    # Two's-complement negation across the limbs: ~x + 1, with the +1
-    # carrying into the upper limb exactly when the lower limb is zero.
+    # The +1 of a two's-complement negation carries into the upper half exactly when the lower half is zero.
     magnitude_lower = np.where(negative, ~lower + np.uint64(1), lower)
     magnitude_upper = np.where(negative, ~upper_bits + (lower == 0).astype("uint64"), upper_bits)
     combined = magnitude_upper.astype("float64") * scale + magnitude_lower.astype("float64")
@@ -125,11 +106,7 @@ def _int128_to_float(np: Any, data: Any, mask: Any, *, signed: bool) -> Any:
 
 
 def _convert_column(np: Any, view: _duckdb.ChunkView, column: int, count: int) -> tuple[Any, Any, str, Any]:
-    """One chunk column as (values, mask, kind, meta).
-
-    `kind` selects the assembly: numeric, date, datetime, datetimetz,
-    timedelta, enum, or object.
-    """
+    """One column of a batch as (values, mask, kind, meta), where the kind names how the pieces go together."""
     type_id = view.type_id(column)
     mask = _mask(np, view.validity(column), count)
 
@@ -140,12 +117,11 @@ def _convert_column(np: Any, view: _duckdb.ChunkView, column: int, count: int) -
     if type_id == _DATE:
         days = np.frombuffer(view.data(column), dtype="int32").copy()
         if mask is not None:
-            # NULL slots hold undefined day counts; zeroed before the unit
-            # conversion, or extreme garbage overflows datetime64.
+            # NULL slots hold undefined day counts; zeroed first, or extreme garbage overflows datetime64.
             days[mask] = 0
         days[days == _DATE_INF] = _DATE_CLAMP[0]
         days[days == -_DATE_INF] = _DATE_CLAMP[1]
-        # DATE maps to datetime64[us], matching the old client.
+        # DATE lands as datetime64[us], as the previous duckdb package had it.
         return days.astype("datetime64[D]").astype("datetime64[us]"), mask, "date", "us"
 
     unit = _TS_UNIT.get(type_id)
@@ -154,8 +130,7 @@ def _convert_column(np: Any, view: _duckdb.ChunkView, column: int, count: int) -
         if mask is not None:
             raw[mask] = 0
         if unit != "ns":
-            # In nanoseconds the sentinel already is the last representable
-            # instant, so it needs no clamp; the negative one is NaT + 1.
+            # In nanoseconds the marker is already the last instant there is, and its negative is NaT + 1.
             raw[raw == _TS_INF] = _TS_CLAMP[unit][0]
             raw[raw == -_TS_INF] = _TS_CLAMP[unit][1]
         values = raw.view(f"datetime64[{unit}]")
@@ -165,17 +140,15 @@ def _convert_column(np: Any, view: _duckdb.ChunkView, column: int, count: int) -
         record = np.frombuffer(
             view.data(column), dtype=np.dtype([("months", "<i4"), ("days", "<i4"), ("micros", "<i8")])
         )
-        # Months folded at 30 days, matching the row egress.
+        # Months count as 30 days, the same as fetching rows does.
         total = (record["months"].astype("int64") * 30 + record["days"]) * 86_400_000_000 + record["micros"]
         if mask is not None:
             total[mask] = 0
         return total.view("timedelta64[us]"), mask, "timedelta", None
 
     if type_id == _DECIMAL:
-        # DECIMAL maps to float64 on this path, matching the old client;
-        # exact Decimals come from the row egress.
-        # Every decimal tier has a fixed-width layout, so data is never None.
-        decimal_data = cast("memoryview", view.data(column))
+        # DECIMAL becomes float64 here as the previous duckdb package had it; fetching rows gives exact Decimals.
+        decimal_data = cast("memoryview", view.data(column))  # every decimal width is fixed-width, so never None
         element = len(decimal_data) // count if count else 8
         if element == 16:
             ints = _int128_to_float(np, decimal_data, mask, signed=True)
@@ -184,8 +157,7 @@ def _convert_column(np: Any, view: _duckdb.ChunkView, column: int, count: int) -
         return ints / (10.0 ** view.decimal_scale(column)), mask, "numeric", None
 
     if type_id in (_HUGEINT, _UHUGEINT):
-        # float64 like the old client: the vector layout is worth the
-        # precision loss past 2^53; exact ints come from the row egress.
+        # float64 as before: the column layout is worth losing precision past 2^53, and rows stay exact.
         values = _int128_to_float(np, view.data(column), mask, signed=type_id == _HUGEINT)
         return values, mask, "numeric", None
 
@@ -230,7 +202,7 @@ def _empty_column(np: Any, type_id: int, enum_values: Any) -> tuple[Any, Any, st
 def _columns_from_views(
     np: Any, names: list[str], views: Any, types_meta: list[tuple[int, int, Any]]
 ) -> list[tuple[str, Any, Any, str, Any]]:
-    """Chunk views into per-column (name, values, mask, kind, meta)."""
+    """Batches of rows turned into per-column (name, values, mask, kind, meta)."""
     pieces: list[list[tuple[Any, Any, str, Any]]] = [[] for _ in names]
     for view in views:
         count = view.row_count
@@ -238,8 +210,7 @@ def _columns_from_views(
         for i in range(len(names)):
             values, mask, kind, meta = _convert_column(np, view, i, count)
             if skip:
-                # A prior row fetch consumed the chunk's head; only the rest
-                # is delivered, or mixed fetch styles repeat rows.
+                # A prior row fetch consumed the head of this batch, and delivering it again would repeat rows.
                 values = values[skip:]
                 if mask is not None:
                     mask = mask[skip:]
@@ -271,7 +242,7 @@ def _all_views(result: _duckdb.Result) -> Any:
 
 
 def _result_to_columns(result: _duckdb.Result) -> list[tuple[str, Any, Any, str, Any]]:
-    """Consume a seam result into per-column (name, values, mask, kind, meta)."""
+    """Consume a whole result into per-column (name, values, mask, kind, meta)."""
     import numpy as np
 
     names = [name for name, _ in result.schema]
@@ -298,13 +269,7 @@ def fetch_numpy(result: _duckdb.Result) -> dict[str, Any]:
 
 
 def to_dataframe(result: _duckdb.Result, *, date_as_object: bool = False) -> pandas.DataFrame:
-    """The whole result as a pandas DataFrame.
-
-    Columns holding NULLs get pandas nullable dtypes with `pd.NA`; columns
-    without get plain numpy dtypes, so a clean result costs nothing extra.
-    ENUM becomes Categorical, TIMESTAMPTZ comes back UTC-aware, and DATE
-    follows `date_as_object`.
-    """
+    """The whole result as a pandas DataFrame; only columns that hold NULLs get pandas nullable dtypes."""
     return _frame_from_columns(_result_to_columns(result), date_as_object=date_as_object)
 
 
@@ -335,9 +300,7 @@ def _frame_from_columns(converted: list[tuple[str, Any, Any, str, Any]], *, date
             if mask is not None:
                 values = values.copy()
                 values[mask] = None
-            # Inference, not dtype=object: pandas then gives strings its own
-            # string dtype and missing markers, the way a frame built by hand
-            # from the same values would look.
+            # Inference, not dtype=object, so strings get pandas' own string dtype as a hand-built frame would.
             series = pd.Series(values)
         columns[name] = series
     return pd.DataFrame(columns)

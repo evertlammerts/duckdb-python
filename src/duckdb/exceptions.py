@@ -1,13 +1,4 @@
-"""The exception hierarchy.
-
-Rooted in PEP 249 so DB-API consumers can catch what they expect, with a
-concrete leaf per engine error code that carries a distinct meaning.
-
-The leaves are derived from the engine's error-code space, not from the
-previous client's class list. Some of its classes drew distinctions the V2 code
-space does not make, and inventing leaves the engine cannot produce would mean
-raising them from guesswork, so those classes are deliberately gone.
-"""
+"""Errors follow PEP 249, with one class for each error code DuckDB (the engine) reports, and no invented ones."""
 
 from __future__ import annotations
 
@@ -47,11 +38,7 @@ class Warning(Exception):
 
 
 class Error(Exception):
-    """Base of every error the engine reports, and of `InterfaceError`.
-
-    A plan refused before the engine sees it raises Python's own
-    `TypeError` or `ValueError` instead, `NeedsConnection` among them.
-    """
+    """Base of every error the engine reports; a query refused before it runs raises TypeError or ValueError."""
 
 
 class InterfaceError(Error):
@@ -139,8 +126,7 @@ class ConversionError(DataError):
 
 # --- code to class ---------------------------------------------------------
 
-# Every code that carries a distinct meaning gets an entry. Codes sharing a
-# meaning share a class; the message keeps the detail.
+# Codes that share a meaning share a class; the message carries the detail.
 _BY_NAME: dict[str, type[Error]] = {
     "API": InterfaceError,
     # I/O
@@ -204,10 +190,5 @@ _BY_CODE: dict[int, type[Error]] = {ERROR_CODES[name]: cls for name, cls in _BY_
 
 
 def class_for_code(code: int) -> type[Error]:
-    """The exception class for an engine error code.
-
-    Unknown codes map to `DatabaseError` rather than raising: a newer engine
-    may report a code this build has never seen, and losing the error to a
-    lookup failure would be worse than reporting it imprecisely.
-    """
+    """The class for an error code; one this build has never seen gives `DatabaseError` rather than being lost."""
     return _BY_CODE.get(code, DatabaseError)

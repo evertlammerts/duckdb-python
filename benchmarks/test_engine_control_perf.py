@@ -1,11 +1,4 @@
-"""Pure-engine floor (no Python egress): the binding-fraction reference. See benchmarks/README.md.
-
-`SELECT sum(...) FROM range(N)` aggregates to one scalar, so the fetch is
-negligible: these measure SQL compile plus the engine aggregate with ~zero
-per-row egress. Comparing a produce/fetch bench against the matching-N floor
-here quantifies how much of its cost is binding vs engine. Informational
-(they measure the engine), never gated.
-"""
+"""The DuckDB floor: `sum()` returns one row, so almost nothing crosses into Python. See benchmarks/README.md."""
 
 from __future__ import annotations
 
@@ -21,9 +14,7 @@ if TYPE_CHECKING:
 
 pytestmark = pytest.mark.informational
 
-# N matched to the benches these floor, and routed through scaled() with the
-# SAME base N, so a floor and its bench stay at an identical scaled N and the
-# binding fraction stays valid. The 2048 small-N floor is NOT scaled.
+# A floor and the bench it floors go through scaled() with the same base N, or the comparison means nothing.
 Q_1C_SMALL = "SELECT sum(i::BIGINT) FROM range(2048) t(i)"
 Q_1C_200K = f"SELECT sum(i::BIGINT) FROM range({scaled(200_000)}) t(i)"
 Q_2C_500K = (

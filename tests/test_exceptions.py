@@ -1,4 +1,4 @@
-"""The exception hierarchy covers the engine's code space and stays PEP 249."""
+"""The exception hierarchy covers every DuckDB error code and stays PEP 249."""
 
 from __future__ import annotations
 
@@ -28,8 +28,7 @@ PEP249_HIERARCHY = [
 
 
 def test_every_engine_code_maps_to_a_class() -> None:
-    # An engine bump that adds a code should fail here rather than silently
-    # start reporting it as a bare DatabaseError.
+    # A DuckDB upgrade that adds a code should fail here, not quietly report it as a bare DatabaseError.
     unmapped = sorted(set(ERROR_CODES) - set(exceptions._BY_NAME))
     assert not unmapped, f"engine codes with no exception class: {unmapped}"
 
@@ -52,15 +51,12 @@ def test_every_leaf_descends_from_error() -> None:
 
 
 def test_unknown_code_degrades_instead_of_raising() -> None:
-    # A newer engine may report a code this build has never seen. Losing the
-    # error to a lookup failure would be worse than reporting it imprecisely.
+    # A newer DuckDB may report an unknown code; reporting it imprecisely beats losing the error entirely.
     assert exceptions.class_for_code(999_999) is exceptions.DatabaseError
 
 
 def test_a_file_held_open_elsewhere_is_an_operational_error(tmp_path: Path) -> None:
-    # A file another connection or process holds is a condition of the
-    # environment, not a mistake in the statement: OperationalError, where
-    # the code used to map to ProgrammingError.
+    # A file held elsewhere is a condition of the environment, not a mistake in the statement.
     path = str(tmp_path / "held.db")
     holder = duckdb.connect(path)
     try:
@@ -72,6 +68,5 @@ def test_a_file_held_open_elsewhere_is_an_operational_error(tmp_path: Path) -> N
 
 
 def test_warning_is_not_an_error() -> None:
-    # PEP 249 keeps Warning outside the Error tree, so `except Error` must not
-    # swallow it.
+    # PEP 249 keeps Warning outside the Error tree, so `except Error` must not swallow it.
     assert not issubclass(exceptions.Warning, exceptions.Error)

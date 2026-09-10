@@ -1,7 +1,4 @@
-# Nightly instruction-count sweep under Callgrind, compared against the
-# committed benchmarks/baseline.json (report-only; see benchmarks/README.md).
-# Dispatch with regen=true to produce a fresh baseline as an artifact, then
-# commit it together with benchmarks/requirements-bench.txt.
+# Nightly instruction counts under Callgrind, compared with the committed baseline. See benchmarks/README.md.
 name: CodSpeed
 
 on:
@@ -28,12 +25,10 @@ jobs:
     needs: engine
     runs-on: ubuntu-24.04
     env:
-      # Hash randomization moves dict-iteration instruction counts run to run;
-      # pinned so the only signal is the code.
+      # Hash randomization moves instruction counts run to run; pinned so the only signal is the code.
       PYTHONHASHSEED: "0"
       CODSPEED_ENV: "1"
-      # Callgrind is ~100x; scaled-down Ns keep the sweep inside the job
-      # budget. Counts only compare against a baseline at the same scale.
+      # Callgrind is about 100x slower, so the row counts shrink to fit the job budget.
       BENCH_SCALE: "10"
     steps:
       - uses: actions/checkout@v4
@@ -48,16 +43,14 @@ jobs:
       - uses: ./.github/actions/build-and-install
 
       - name: Install the frozen bench pins
-        # After the build, so the pinned data libs override whatever the
-        # groups resolved: counts must match the pins the baseline names.
+        # After the build, so the pinned data libraries override whatever the build resolved.
         run: uv pip install -r benchmarks/requirements-bench.txt
 
       - name: Install valgrind
         run: sudo apt-get update && sudo apt-get install -y valgrind
 
       - name: Run the suite under Callgrind
-        # The venv python directly, not `uv run`: uv would wrap the process
-        # and valgrind must instrument the interpreter itself.
+        # The venv python directly: valgrind must instrument the interpreter, not a uv wrapper.
         run: |
           mkdir -p profiles
           valgrind --tool=callgrind --instr-atstart=no \

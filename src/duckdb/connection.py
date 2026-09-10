@@ -1,13 +1,4 @@
-"""Connecting, and running statements.
-
-A connection is somewhere to run things, and nothing else holds one. Plans are
-built with `duckdb.table` and `duckdb.sql`, which need no connection, and are
-run by passing one: `plan.rows(con)`, or `plan.on(con).rows()`.
-
-`run()` executes a statement and reports how many rows it changed. There is no
-cursor here and no fetch family; those belong to PEP 249 and live in
-`duckdb.dbapi`.
-"""
+"""Connections, and running statements. Queries are built without one and take a connection when they run."""
 
 from __future__ import annotations
 
@@ -28,12 +19,7 @@ __all__ = ["Connection", "connect"]
 
 
 class LiveResult:
-    """A result a plan is reading, known to its connection.
-
-    Exists so that `close()` can reach every result still open. The engine
-    handle behind a result is what keeps a database open, and a result held by
-    a paused iterator would otherwise outlive the connection that made it.
-    """
+    """A result still being read, tracked so `close()` can reach it: an open result keeps the database open."""
 
     __slots__ = ("__weakref__", "result")
 
@@ -60,19 +46,14 @@ class LiveResult:
 
 
 class _Catalog:
-    """What connections to one database share: a count of the statements that may have changed it.
-
-    A stub answer depends on the functions and types the catalog holds, and
-    a sibling connection can change those. Each connection remembers the
-    count its answers were given under and forgets them when it has moved.
-    """
+    """A counter of catalog changes, shared by connections to one database so each sees a sibling's change."""
 
     def __init__(self) -> None:
         self.generation = 0
         self.lock = threading.Lock()
 
     def changed(self) -> None:
-        """Note a statement that may have changed what a query binds to."""
+        """Record a statement that may have changed which columns or functions a name refers to."""
         with self.lock:
             self.generation += 1
 
@@ -83,31 +64,18 @@ class Connection:
     def __init__(self, database: _duckdb.Database, catalog: _Catalog | None = None) -> None:
         self._database: _duckdb.Database | None = database
         self._raw: _duckdb.Connection | None = database.connect()
-        #: Shared with the connections `duplicate()` makes from this one, so a
-        #: change through any of them is seen by all. Two connections opened
-        #: separately to one file share nothing here, and a change through
-        #: one is not seen by the other until it runs a changing statement.
+        #: Shared by duplicate() only, so those connections see each other's changes and separately opened ones do not.
         self._catalog = catalog if catalog is not None else _Catalog()
-        #: Answers to stub questions asked of this connection. A stub names no
-        #: table, so its answer survives DDL, but it does depend on this
-        #: connection's settings, which is why it is kept here and not shared.
+        #: Column types DuckDB reported without running a query, kept per connection since settings change the answer.
         self._stub_answers: dict[str, object] = {}
         self._stub_lock = threading.Lock()
         self._stub_generation = self._catalog.generation
-        #: Results plans are still reading. Weak, so a result that has been
-        #: consumed and dropped leaves on its own; `close()` closes the rest.
-        #: Guarded, because plans run from any thread and close from another.
+        #: Results still being read; weak so finished ones drop out, guarded because close() may run in another thread.
         self._live: weakref.WeakSet[LiveResult] = weakref.WeakSet()
         self._live_lock = threading.Lock()
 
     def _execute(self, sql: str, parameters: Sequence[Any] | Mapping[str, Any] | None = None) -> LiveResult:
-        """Run a statement and track its result. Every execution comes through here.
-
-        A statement can change what a stub answer depends on: SET
-        integer_division changes what `x / y` binds to, LOAD adds functions,
-        CREATE MACRO redefines one. A query cannot, so a plan's own SELECT
-        leaves the answers alone and anything else forgets them.
-        """
+        """Run a statement and track its result; every execution comes through here."""
         if _may_change_binding(sql):
             self._catalog.changed()
         return self._track(self._engine().execute(sql, parameters))
@@ -116,8 +84,7 @@ class Connection:
         live = LiveResult(result)
         with self._live_lock:
             if self._raw is None:
-                # Closed between this result's execute and now. A result left
-                # untracked would hold the engine past a close that returned.
+                # An untracked result would keep the database open past a close that already returned.
                 live.close()
                 message = "connection is closed"
                 raise InterfaceError(message)
@@ -131,39 +98,23 @@ class Connection:
         return self._raw
 
     def run(self, sql: str, parameters: Sequence[Any] | Mapping[str, Any] | None = None) -> int:
-        """Run a statement and report how many rows it changed.
-
-        For statements that produce rows, use `sql()` instead.
-        """
-        # Closed on the way out whatever happens: a failure in drain would
-        # otherwise leave the result open, and one live result per connection
-        # means the next statement could not start.
+        """Run a statement and report how many rows it changed; use `sql()` for statements that produce rows."""
+        # A result left open by a failed run would block the connection's next statement.
         with self._execute(sql, parameters) as result:
             return result.drain()
 
     def interrupt(self) -> None:
-        """Cancel the query this connection is running.
-
-        Made to be called from another thread while a query runs; the query
-        fails with `InterruptError`. A Ctrl-C in the querying thread does
-        the same without this being called.
-        """
+        """Cancel the query this connection is running, from another thread; Ctrl-C in the running one does the same."""
         self._engine().interrupt()
 
     @contextlib.contextmanager
     def transaction(self) -> Iterator[None]:
-        """Run the block as one transaction: COMMIT on success, ROLLBACK on any error.
-
-        Statements and plans inside the block run on this connection, so
-        they share the transaction. The engine refuses a nested BEGIN in
-        its own words.
-        """
+        """Run the block as one transaction: COMMIT on success, ROLLBACK on any error."""
         self.run("BEGIN TRANSACTION")
         try:
             yield
         except BaseException:
-            # A rollback that fails must not hide the error that caused it;
-            # a closed connection has discarded the transaction already.
+            # A failing rollback must not hide the error that caused it.
             with contextlib.suppress(Error):
                 self.run("ROLLBACK")
             raise
@@ -179,15 +130,14 @@ class Connection:
         replace: bool = False,
         temporary: bool = False,
     ) -> None:
-        """Define a macro from an expression or a plan.
+        """Define a macro from an expression (scalar) or a query (table); literals are written into the body.
 
-        An expression makes a scalar macro, a plan a table macro. `name` is a
-        string, or a tuple for a schema-qualified macro. `parameters` are
-        names, or (name, default) pairs. The body is rendered as written,
-        with `col(name)` referring to a parameter, and the engine checks it
-        when the macro is defined. Literals in the body are written into it,
-        since a definition has no parameters to bind, and for the same reason
-        a `param()` in the body is refused.
+        Args:
+            name: The macro name, or a tuple for a schema-qualified one.
+            parameters: Parameter names, or (name, default) pairs; `col(name)` in the body refers to one.
+            body: The expression or query the macro stands for; a `param()` in it is refused.
+            replace: Redefine a macro of that name if one exists.
+            temporary: Make the macro last only for this database session.
         """
         from .expr import Expr, identifier, name_parts, quote, refusing_parameters, render_literal, suspended_sinks
         from .frame import Frame, NeedsConnection
@@ -200,9 +150,7 @@ class Connection:
             if isinstance(body, Expr):
                 definition = body.fragment()
             elif isinstance(body, Frame):
-                # Rendered blind first, so `col(name)` can mean a parameter
-                # the engine only knows once the macro exists. A body that
-                # needs its inputs' columns, a suffixed join, renders here.
+                # Written out without asking DuckDB first, since a parameter only exists once the macro does.
                 try:
                     definition = "TABLE " + body.render()
                 except NeedsConnection:
@@ -224,27 +172,15 @@ class Connection:
         null_handling: str = "default",
         stability: str = "consistent",
     ) -> None:
-        """Register a Python callable as a scalar SQL function on this database.
+        """Register a Python callable as a scalar SQL function; a macro is orders of magnitude faster where it fits.
 
-        `parameters` and `returns` are SQL type texts, like "BIGINT" or
-        "STRUCT(a INTEGER, b VARCHAR)"; arguments arrive as the Python values
-        those types fetch as, and the returned value is converted back and
-        cast to `returns`. The function is called once per row, from the
-        engine's own threads.
-
-        With `null_handling` "default" a NULL argument makes the result NULL
-        without calling the function; "special" passes None through and lets
-        the function decide. Returning None makes the result NULL either way.
-
-        `stability` declares how cacheable results are: "consistent" lets the
-        engine fold repeated and constant calls, "volatile" makes it call once
-        per row every time, which is the honest choice for anything random,
-        stateful or side-effecting. "consistent_within_query" gives the same
-        result for every row within one query, like `now()`, and possibly a
-        different one in the next query.
-
-        Anything expressible as an expression runs orders of magnitude faster
-        as a macro; see `create_macro`.
+        Args:
+            name: The function's bare, unqualified name.
+            function: Called once per row, from DuckDB's own threads.
+            parameters: SQL type texts the arguments are cast to before the call.
+            returns: The SQL type text the returned value is cast to.
+            null_handling: "default" makes a NULL argument a NULL result without a call; "special" passes None in.
+            stability: "consistent" lets DuckDB reuse results, "volatile" never, "consistent_within_query" per query.
         """
         if not isinstance(name, str):
             message = (  # type: ignore[unreachable]
@@ -260,10 +196,7 @@ class Connection:
         if level is None:
             message = "Invalid Input Error: stability must be 'consistent', 'volatile' or 'consistent_within_query'"
             raise InvalidInputError(message)
-        # ANY would leave arguments un-cast, and the extension reads them by
-        # the declared types; supporting it needs a bind callback that
-        # captures the bound types. Refused on the text, since the engine's
-        # type parser refuses ANY with a message that does not say why.
+        # ANY would leave arguments uncast while values are read by their declared type; DuckDB refuses it obscurely.
         texts = list(parameters)
         if any(_is_any(text) for text in texts):
             message = "Invalid Input Error: ANY parameters are not supported yet"
@@ -272,32 +205,22 @@ class Connection:
             message = "Invalid Input Error: an ANY return type is not supported yet"
             raise InvalidInputError(message)
         self._engine().create_scalar_function(name, function, texts, returns, nulls, level)
-        # A new function changes what names bind to, like CREATE MACRO does.
+        # A new function changes what a name in a later query can refer to.
         self._catalog.changed()
 
     def duplicate(self) -> Connection:
-        """A second connection to the same database, with its own transaction.
-
-        Builds `type(self)`, so a subclass duplicates as itself.
-        """
+        """A second connection to the same database, with its own transaction; a subclass duplicates as itself."""
         if self._database is None:
             message = "connection is closed"
             raise InterfaceError(message)
         return type(self)(self._database, self._catalog)
 
     def close(self) -> None:
-        """Close the connection, releasing the database. Idempotent.
-
-        Every result still being read is closed first: an iterator paused
-        half-way through `rows()` holds an engine handle, and closing has to
-        mean the database is released, not released once that iterator is
-        garbage collected.
-        """
+        """Close the connection and release the database. Idempotent, and results still being read are closed too."""
         with self._live_lock:
             pending = list(self._live)
             self._live.clear()
-            # Marked closed under the lock, so a result tracked from now on is
-            # refused rather than orphaned.
+            # Marked closed under the lock, so a result tracked from now on is refused, not orphaned.
             self._raw = None
             self._database = None
         failures: list[BaseException] = []
@@ -338,19 +261,14 @@ def _is_any(text: str) -> bool:
     return text.strip(" \t\n\r\f\v").upper() == "ANY"
 
 
-#: The first word of a statement that only reads. Anything else may change
-#: what the binder would answer, so it forgets the stub answers.
+#: First words of a statement that only reads; anything else may change what a later query resolves to.
 _READ_ONLY = frozenset({"SELECT", "WITH", "FROM", "VALUES", "DESCRIBE", "SUMMARIZE", "EXPLAIN", "SHOW"})
 
 
 def _may_change_binding(sql: str) -> bool:
-    """Whether a statement could change how a later query binds.
-
-    Decided by the first keyword, looking past `EXPLAIN` and `EXPLAIN
-    ANALYZE`: the latter runs the statement it wraps, so `EXPLAIN ANALYZE
-    SET ...` changes as much as the `SET` would.
-    """
+    """Whether a statement could change what a later query resolves names to, judged by its first keyword."""
     words = sql.upper().split()
+    # EXPLAIN ANALYZE runs the statement it wraps, so the wrapped one is what counts.
     if words and words[0] == "EXPLAIN":
         words = words[1:]
         if words and words[0] == "ANALYZE":
@@ -359,10 +277,5 @@ def _may_change_binding(sql: str) -> bool:
 
 
 def connect(database: str | os.PathLike[str] = ":memory:", **options: str) -> Connection:
-    """Open a connection.
-
-    Args:
-        database: A database file, or ":memory:".
-        **options: Settings applied as the database is opened.
-    """
+    """Open a connection to a database file or ":memory:", applying any settings given as keyword arguments."""
     return Connection(_duckdb.Database(os.fspath(database), [(k, str(v)) for k, v in options.items()]))

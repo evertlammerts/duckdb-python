@@ -1,5 +1,4 @@
-# Lint and format. Deliberately needs no engine and no built extension, so it
-# reports in seconds instead of waiting on a build.
+# Lint and format only: nothing here needs a build, so it reports in seconds.
 name: Checks
 
 on:

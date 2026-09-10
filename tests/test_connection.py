@@ -1,4 +1,4 @@
-"""The connection surface: options, interruption, and statement handling."""
+"""Connection behaviour: options, interruption, and statement handling."""
 
 from __future__ import annotations
 
@@ -29,15 +29,13 @@ def test_unknown_setting_is_reported() -> None:
 
 
 def test_database_accepts_open_time_options() -> None:
-    # Some settings can only be chosen before the database exists, so the
-    # options path is not interchangeable with set_option afterwards.
+    # Some settings can only be chosen before the database exists, so this is not the same as set_option.
     con = _duckdb.Database(":memory:", [("threads", "2")]).connect()
     assert con.get_option("threads") == "2"
 
 
 def test_connect_accepts_a_path(tmp_path: Path) -> None:
-    # A Path used to reach the engine's binding unconverted and be refused
-    # with its argument-type error.
+    # A Path used to reach DuckDB unconverted and be refused as the wrong argument type.
     with duckdb.connect(tmp_path / "by_path.db") as con:
         con.run("CREATE TABLE t AS SELECT 1 AS v")
         assert duckdb.sql("SELECT v FROM t").rows(con) == [(1,)]
@@ -57,8 +55,7 @@ def test_interrupt_cancels_a_running_query() -> None:
 
     worker = threading.Thread(target=run)
     worker.start()
-    # Give the query time to actually start; interrupting before it does is a
-    # no-op and the test would hang rather than fail.
+    # Interrupting before the query starts does nothing, and the test would hang instead of failing.
     time.sleep(0.5)
     con.interrupt()
     worker.join(timeout=30)
@@ -81,12 +78,7 @@ def test_comment_only_statement_with_parameters_is_refused() -> None:
 
 
 class TestOneEnvironment:
-    """All databases are opened through a single Environment.
-
-    The Environment exists to notice a second attempt to open a database
-    already open in this process. Giving each Database its own would remove
-    that guard silently, which is what an earlier version did.
-    """
+    """One shared Environment opens every database, so a second attempt to open the same file is noticed."""
 
     def test_opening_the_same_file_twice_is_refused(self, tmp_path: Path) -> None:
         path = str(tmp_path / "same.db")
@@ -106,8 +98,7 @@ class TestOneEnvironment:
         assert second.execute("SELECT count(*) FROM t").fetch_all() == [(0,)]
 
     def test_memory_databases_are_independent(self) -> None:
-        # ":memory:" names no file, so each is its own database and the guard
-        # does not apply.
+        # ":memory:" names no file, so each is its own database and the guard does not apply.
         one = _duckdb.Database(":memory:").connect()
         two = _duckdb.Database(":memory:").connect()
         one.execute("CREATE TABLE only_in_one (v INTEGER)").drain()
@@ -127,9 +118,7 @@ class TestPublicInterrupt:
 
     def test_interrupt_cancels_from_another_thread(self) -> None:
         con = duckdb.connect()
-        # Interrupt repeatedly until the query dies: one shot at a fixed delay
-        # can fire before execution starts, land on nothing, and leave the
-        # query running unbounded.
+        # One interrupt at a fixed delay can land before the query starts and leave it running, so repeat.
         stop = threading.Event()
 
         def keep_interrupting() -> None:
@@ -160,13 +149,10 @@ class TestPublicInterrupt:
 
     @pytest.mark.skipif(sys.platform == "win32", reason="simulated Ctrl-C delivery differs on Windows")
     def test_a_keyboard_interrupt_stops_a_drain(self) -> None:
-        # run() steps the result with the GIL released, retaking it a few
-        # times a second for the signal check, so the Ctrl-C lands promptly
-        # however long the statement would run.
+        # run() gives the interpreter back a few times a second to check for signals, so Ctrl-C lands promptly.
         con = duckdb.connect()
         interrupter = threading.Timer(0.3, _thread.interrupt_main)
-        # The rescue bounds a lost Ctrl-C: the query dies as InterruptError,
-        # failing this test promptly instead of hanging the whole suite.
+        # The rescue bounds a lost Ctrl-C so this test fails promptly instead of hanging the suite.
         rescue = threading.Timer(10, con.interrupt)
         interrupter.start()
         rescue.start()
@@ -182,12 +168,10 @@ class TestPublicInterrupt:
 
     @pytest.mark.skipif(sys.platform == "win32", reason="simulated Ctrl-C delivery differs on Windows")
     def test_a_keyboard_interrupt_stops_a_streaming_fetch(self) -> None:
-        # Chunks flow and the signal check runs once per chunk; a query whose
-        # one chunk arrives only at the end waits on the engine's own step
-        # granularity instead, measured at seconds, not tested here.
+        # The signal check runs once per batch of rows; a query whose first batch comes only at the end is not covered.
         con = duckdb.connect()
         interrupter = threading.Timer(0.3, _thread.interrupt_main)
-        # Same rescue as the drain test: a lost Ctrl-C fails fast, never hangs.
+        # Same rescue as the test above: a lost Ctrl-C fails fast instead of hanging.
         rescue = threading.Timer(10, con.interrupt)
         interrupter.start()
         rescue.start()
@@ -237,8 +221,7 @@ class TestTransaction:
             duckdb.table("gone").count(con)
 
     def test_a_keyboard_interrupt_rolls_back(self) -> None:
-        # BaseException, not Exception: a Ctrl-C mid-block must not leave the
-        # transaction open.
+        # BaseException, not Exception: a Ctrl-C mid-block must not leave the transaction open.
         con = duckdb.connect()
         con.run("CREATE TABLE t (v INTEGER)")
         with pytest.raises(KeyboardInterrupt):
@@ -270,8 +253,7 @@ class TestTransaction:
         assert duckdb.sql("SELECT 1").rows(con) == [(1,)]
 
     def test_a_failed_rollback_does_not_hide_the_error(self) -> None:
-        # Closing mid-block makes the rollback itself fail; the block's own
-        # error must still be the one that surfaces.
+        # Closing mid-block makes the rollback itself fail; the block's own error must still be the one that surfaces.
         con = duckdb.connect()
         with pytest.raises(RuntimeError, match="abort"):
             abort_inside(con, con.close)

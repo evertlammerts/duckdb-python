@@ -1,4 +1,4 @@
-"""Engine values become the right Python objects, including at the edges."""
+"""DuckDB values become the right Python objects, including at the edges."""
 
 from __future__ import annotations
 
@@ -18,8 +18,7 @@ def con() -> _duckdb.Connection:
 
 
 def scalar(con: _duckdb.Connection, sql: str) -> Any:  # noqa: ANN401
-    # Any is the honest type: the point of these tests is that the converter
-    # returns a different Python type per SQL type.
+    # Any is honest here: the whole point is that each SQL type gives a different Python type.
     return con.execute(sql).fetch_all()[0][0]
 
 
@@ -72,8 +71,7 @@ def test_uuid_becomes_a_uuid(con: _duckdb.Connection) -> None:
 
 
 def test_nanosecond_timestamps_truncate_to_microseconds(con: _duckdb.Connection) -> None:
-    # Python's datetime resolves to microseconds. A deliberate divergence, so
-    # pin it rather than let a future change round instead of truncate.
+    # Python's datetime stops at microseconds, so pin truncation rather than let a later change round instead.
     assert scalar(con, "SELECT TIMESTAMP_NS '2026-08-27 13:45:06.123456789'") == datetime.datetime(
         2026, 8, 27, 13, 45, 6, 123456
     )
@@ -85,12 +83,7 @@ def test_time_tz_carries_its_offset(con: _duckdb.Connection) -> None:
 
 
 class TestInfinity:
-    """DuckDB's infinite dates have no Python counterpart.
-
-    They are clamped to date/datetime min and max, matching the previous client
-    and the adopted suite. A deliberate divergence: a clamped value no longer
-    round-trips as infinite.
-    """
+    """DuckDB's infinite dates clamp to Python's min and max, so they no longer round-trip as infinite."""
 
     def test_positive_date(self, con: _duckdb.Connection) -> None:
         assert scalar(con, "SELECT 'infinity'::DATE") == datetime.date.max
@@ -105,8 +98,7 @@ class TestInfinity:
         assert scalar(con, "SELECT '-infinity'::TIMESTAMP") == datetime.datetime.min
 
     def test_stays_aware_for_tz_columns(self, con: _duckdb.Connection) -> None:
-        # A naive limit here would raise TypeError the moment anyone compared
-        # it against an aware datetime.
+        # A naive limit here would raise TypeError the moment anyone compared it against an aware datetime.
         value = scalar(con, "SELECT 'infinity'::TIMESTAMPTZ")
         assert value.tzinfo is not None
         assert value > datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
@@ -119,16 +111,13 @@ class TestInfinity:
 
 
 def test_dates_beyond_python_report_a_conversion_error(con: _duckdb.Connection) -> None:
-    # DuckDB reaches year 5874897; Python stops at 9999. The engine value is
-    # valid, so this must name the value rather than leak OverflowError with an
-    # internal day count.
+    # DuckDB reaches year 5874897 and Python stops at 9999, so the error must name the value, not a day count.
     with pytest.raises(exceptions.ConversionError, match="10000-01-01"):
         scalar(con, "SELECT '10000-01-01'::DATE")
 
 
 def test_unknown_types_degrade_to_text(con: _duckdb.Connection) -> None:
-    # The open tail: a type with no mapping returns its SQL text rather than
-    # failing the whole fetch. This is what keeps future engine types readable.
+    # A type with no mapping returns its SQL text, so a future DuckDB type stays readable instead of failing.
     assert scalar(con, "SELECT '101'::BIT") == "101"
 
 
@@ -145,8 +134,7 @@ def test_engine_errors_surface_as_typed_exceptions(con: _duckdb.Connection) -> N
 
 
 class TestBulkRowConversion:
-    # The row path converts column-at-a-time off the flattened vectors; these
-    # pin the indexing edges that per-value conversion never had.
+    # Rows are converted a column at a time, which has indexing edges that per-value conversion never had.
 
     def test_lists_with_null_and_empty_rows_interleaved(self, con: _duckdb.Connection) -> None:
         rows = con.execute(
@@ -196,8 +184,7 @@ class TestBulkRowConversion:
         assert rows[9999] == (9999, [9999, None, 19998], {"k": "v9999"})
 
     def test_int128_values_are_exact_at_the_extremes(self, con: _duckdb.Connection) -> None:
-        # The UHUGEINT operand is a literal: an expression like 2 ^ 127 binds
-        # as DOUBLE and would test nothing.
+        # The UHUGEINT operand is a literal: an expression like 2 ^ 127 is a DOUBLE and would test nothing.
         top = 170141183460469231731687303715884105727
         umax = 340282366920938463463374607431768211455
         rows = con.execute(f"SELECT {top}::HUGEINT AS h, (-{top})::HUGEINT AS n, {umax}::UHUGEINT AS u").fetch_all()
