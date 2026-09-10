@@ -8,8 +8,8 @@ import sys
 def gil_enabled() -> bool:
     """Whether this interpreter is running with the GIL.
 
-    `sys._is_gil_enabled` arrived in 3.13. On 3.12, the oldest interpreter this
-    package supports, there is no free-threaded build, so the GIL is always on.
+    `sys._is_gil_enabled` arrived in 3.13. Before that there is no free-threaded
+    build, so the GIL is always on.
     """
     probe = getattr(sys, "_is_gil_enabled", None)
     return True if probe is None else bool(probe())

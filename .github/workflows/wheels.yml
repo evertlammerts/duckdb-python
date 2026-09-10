@@ -1,9 +1,9 @@
 # Builds and verifies the wheel matrix against the engine bundle.
 #
-# Two wheels per platform: one stable-ABI wheel covering CPython 3.12 and every
-# later version, and one free-threaded wheel per free-threaded interpreter.
-# release.yml calls this workflow with a version to stamp; a push or pull
-# request builds whatever pyproject.toml already says.
+# We build the following wheels per platform:
+# - A version-specific wheel for CPython 3.11 because nanobind (in linked mode) doesn't support the stable ABI < py3.12
+# - A stable ABI wheel for all Python >= 3.12
+# - For each free-threaded Python version we build one wheel, since free-threading doesn't fall under the stable ABI
 name: Build and test
 
 on:
@@ -39,16 +39,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # target and flavor are real axes so they cross-product: 6 x 2 = 12
+        # target and flavor are real axes so they cross-product: 6 x 3 = 18
         # jobs. `include` only attaches fields to those combinations. Putting
         # the targets in `include` instead silently collapses the matrix to one
         # job per flavor, because include entries do not multiply, they merge
         # and the last match wins.
         target:
           [windows-amd64, windows-arm64, linux-x86_64, linux-aarch64, macos-arm64, macos-x86_64]
-        # STABLE_ABI applies on non-free-threaded >= 3.12; FREE_THREADED applies
-        # on t interpreters. One CMake path serves both.
-        flavor: [abi3, ft314]
+        # One CMake path serves all three: nanobind applies STABLE_ABI only on
+        # non-free-threaded >= 3.12 and FREE_THREADED only on t interpreters.
+        flavor: [cp311, abi3, ft314]
         exclude:
           # No free-threaded CPython is published for Windows on ARM64. uv does
           # not fail on that: it silently downloads the x86_64 build onto the
@@ -64,6 +64,7 @@ jobs:
           - { target: linux-aarch64,  runner: ubuntu-24.04-arm, container: "quay.io/pypa/manylinux_2_28_aarch64", plat: manylinux_2_28_aarch64 }
           - { target: macos-arm64,    runner: macos-15,         container: "" }
           - { target: macos-x86_64,   runner: macos-15-intel,   container: "" }
+          - { flavor: cp311, python: "3.11" }
           - { flavor: abi3,  python: "3.12" }
           - { flavor: ft314, python: "3.14t" }
     runs-on: ${{ matrix.runner }}
@@ -162,6 +163,37 @@ jobs:
           print("abi3 OK:", ext)
           EOF
 
+      - name: Assert the 3.11 wheel is version-specific
+        # Both the wheel tag and the extension inside must name 3.11, never abi3.
+        if: matrix.flavor == 'cp311'
+        run: |
+          PY=$(command -v python3 || command -v python)
+          "$PY" - <<'EOF'
+          import glob, re, sys, zipfile
+          whl = glob.glob("dist/*.whl")[0]
+          print(whl)
+          if "-cp311-cp311-" not in whl:
+              sys.exit(f"wheel is not cp311-cp311-tagged: {whl}")
+          names = zipfile.ZipFile(whl).namelist()
+          ext = [n for n in names if "_duckdb" in n and n.endswith((".so", ".pyd", ".dylib"))]
+          if not ext:
+              sys.exit(f"no extension module found in {whl}: {names}")
+          if not all(re.search(r"cp311|cpython-311", n) for n in ext):
+              sys.exit(f"tagged cp311 but the extension is not built for 3.11: {ext}")
+          print("cp311 OK:", ext)
+          EOF
+
+      - name: The 3.11 wheel imports on 3.11
+        if: matrix.flavor == 'cp311'
+        run: |
+          whl=$(ls "$PWD"/dist/*.whl)
+          uv venv --python 3.11 "$RUNNER_TEMP/t3.11"
+          PY="$RUNNER_TEMP/t3.11/bin/python"
+          [ -x "$PY" ] || PY="$RUNNER_TEMP/t3.11/Scripts/python.exe"
+          VIRTUAL_ENV="$RUNNER_TEMP/t3.11" uv pip install "$whl"
+          # Run from elsewhere so the source tree cannot shadow the install.
+          (cd "$RUNNER_TEMP" && "$PY" -c "import duckdb; print('3.11 ->', duckdb.__version__, duckdb.duckdb_version())")
+
       - name: One wheel, every interpreter
         if: matrix.flavor == 'abi3'
         run: |
@@ -195,8 +227,13 @@ jobs:
           path: dist/*.whl
 
   test:
-    name: Types and tests
+    name: Types and tests / ${{ matrix.python }}
     needs: engine
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 has its own extension build, so the suite runs there as well.
+        python: ["3.11", "3.12"]
     runs-on: ubuntu-24.04
     container: quay.io/pypa/manylinux_2_28_x86_64
     defaults:
@@ -212,6 +249,8 @@ jobs:
 
       - uses: ./.github/actions/engine-bundle
       - uses: ./.github/actions/build-and-install
+        with:
+          python: ${{ matrix.python }}
 
       # mypy needs the built extension present: the stub is checked against it,
       # not accepted in place of it.

@@ -30,7 +30,7 @@ endif()
 # Development.SABIModule is what makes STABLE_ABI take effect. Without it the
 # build still succeeds and the wheel is still tagged abi3, but the extension
 # inside carries a version-specific suffix.
-find_package(Python 3.12 REQUIRED
+find_package(Python 3.11 REQUIRED
   COMPONENTS Interpreter Development.Module
   OPTIONAL_COMPONENTS Development.SABIModule)
 execute_process(
@@ -40,7 +40,7 @@ find_package(nanobind CONFIG REQUIRED)
 
 # nanobind applies STABLE_ABI only on non-free-threaded CPython 3.12 and up,
 # and FREE_THREADED only on free-threaded interpreters, so one call covers the
-# whole wheel matrix.
+# whole wheel matrix, with 3.11 getting a version-specific extension.
 nanobind_add_module(_duckdb STABLE_ABI FREE_THREADED NB_DOMAIN duckdb
   src/_duckdb/chunkview.cpp
   src/_duckdb/module.cpp

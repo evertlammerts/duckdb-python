@@ -6,7 +6,7 @@ build-backend = "scikit_build_core.build"
 name = "duckdb"
 description = "DuckDB in-process SQL OLAP database management system"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 version = "0.0.1.dev0"
 dependencies = []
@@ -14,7 +14,8 @@ dependencies = []
 [tool.scikit-build]
 minimum-version = "0.10"
 build-dir = "build/{wheel_tag}"
-wheel.py-api = "cp312"          # one abi3 wheel per platform, 3.12 and up
+# One abi3 wheel for 3.12 and up; nanobind has no stable ABI below that, so 3.11 gets a version-specific wheel.
+wheel.py-api = "cp312"
 wheel.packages = ["src/duckdb"]
 sdist.include = ["src", "CMakeLists.txt"]
 
@@ -61,7 +62,7 @@ markers = [
 [tool.ruff]
 line-length = 120
 indent-width = 4
-target-version = "py312"
+target-version = "py311"
 # compat/suite holds the old client's tests verbatim; nothing may rewrite
 # them. The harness around them is ours and is linted.
 extend-exclude = ["compat/suite"]
@@ -113,4 +114,5 @@ files = ["src/duckdb", "tests", "scripts"]
 strict = true
 warn_unreachable = true
 pretty = true
+# Not 3.11: numpy's stubs use the `type` statement, which mypy rejects below 3.12.
 python_version = "3.12"
