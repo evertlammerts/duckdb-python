@@ -501,7 +501,7 @@ std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::InternalConjunction(Expr
 }
 
 std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::InternalConstantExpression(Value val) {
-	return make_uniq<DuckDBPyExpression>(make_uniq<duckdb::ConstantExpression>(std::move(val)));
+	return make_uniq<DuckDBPyExpression>(duckdb::ConstantExpression::FromValue(val));
 }
 
 std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::ComparisonExpression(ExpressionType type,
@@ -521,7 +521,7 @@ std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::CaseExpression(const Duc
 
 	// Add NULL as default Else expression
 	auto &internal_expression = reinterpret_cast<duckdb::CaseExpression &>(*case_expr->expression);
-	internal_expression.ElseMutable() = make_uniq<duckdb::ConstantExpression>(Value(LogicalTypeId::SQLNULL));
+	internal_expression.ElseMutable() = duckdb::ConstantExpression::Null();
 	return case_expr;
 }
 

@@ -48,7 +48,7 @@ static void CreateArrowScan(const string &name, nb::object entry, TableFunctionR
 			}
 		}
 		auto list_value = Value::LIST(values);
-		children.push_back(make_uniq<ConstantExpression>(list_value));
+		children.push_back(ConstantExpression::FromValue(list_value));
 		table_function.function = make_uniq<FunctionExpression>("scan_arrow_ipc", std::move(children));
 		auto dependency_item = PythonDependencyItem::Create(stream_messages);
 		external_dependency->AddDependency("replacement_cache", std::move(dependency_item));
@@ -57,10 +57,10 @@ static void CreateArrowScan(const string &name, nb::object entry, TableFunctionR
 		auto stream_factory_produce = PythonTableArrowArrayStreamFactory::Produce;
 		auto stream_factory_get_schema = PythonTableArrowArrayStreamFactory::GetSchema;
 
-		children.push_back(make_uniq<ConstantExpression>(Value::POINTER(CastPointerToValue(stream_factory.get()))));
-		children.push_back(make_uniq<ConstantExpression>(Value::POINTER(CastPointerToValue(stream_factory_produce))));
+		children.push_back(ConstantExpression::FromValue(Value::POINTER(CastPointerToValue(stream_factory.get()))));
+		children.push_back(ConstantExpression::FromValue(Value::POINTER(CastPointerToValue(stream_factory_produce))));
 		children.push_back(
-		    make_uniq<ConstantExpression>(Value::POINTER(CastPointerToValue(stream_factory_get_schema))));
+		    ConstantExpression::FromValue(Value::POINTER(CastPointerToValue(stream_factory_get_schema))));
 
 		if (type == PyArrowObjectType::PyCapsule) {
 			// Disable projection+filter pushdown for bare capsules (single-use, no PyArrow wrapper)
@@ -124,7 +124,7 @@ unique_ptr<TableRef> PythonReplacementScan::TryReplacementObject(const nb::objec
 		} else {
 			string name = "df_" + StringUtil::GenerateRandomName();
 			auto new_df = PandasScanFunction::PandasReplaceCopiedNames(entry);
-			children.push_back(make_uniq<ConstantExpression>(Value::POINTER(CastPointerToValue(new_df.ptr()))));
+			children.push_back(ConstantExpression::FromValue(Value::POINTER(CastPointerToValue(new_df.ptr()))));
 			table_function->function = make_uniq<FunctionExpression>("pandas_scan", std::move(children));
 			auto dependency = make_uniq<ExternalDependency>();
 			dependency->AddDependency("replacement_cache", PythonDependencyItem::Create(entry));
@@ -192,7 +192,7 @@ unique_ptr<TableRef> PythonReplacementScan::TryReplacementObject(const nb::objec
 			throw NotImplementedException("Unsupported Numpy object");
 			break;
 		}
-		children.push_back(make_uniq<ConstantExpression>(Value::POINTER(CastPointerToValue(data.ptr()))));
+		children.push_back(ConstantExpression::FromValue(Value::POINTER(CastPointerToValue(data.ptr()))));
 		table_function->function = make_uniq<FunctionExpression>("pandas_scan", std::move(children));
 		auto dependency = make_uniq<ExternalDependency>();
 		dependency->AddDependency("replacement_cache", PythonDependencyItem::Create(entry));
