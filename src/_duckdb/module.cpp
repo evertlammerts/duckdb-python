@@ -21,6 +21,7 @@
 
 #include "chunkview.hpp"
 #include "lifetime.hpp"
+#include "registry.hpp"
 #include "result.hpp"
 #include "udf.hpp"
 
@@ -46,21 +47,27 @@ void TranslateException(const std::exception_ptr &captured, void *payload) {
 
 class Connection;
 
-/// One open database, together with the Python functions registered on it.
+/// One open database, together with the Python functions and objects registered on it.
 ///
 /// Every Connection and Result holds a reference to its Database, so the garbage collector sees the real
-/// ownership and the database outlives them. The registered callables are owned here and nowhere else.
+/// ownership and the database outlives them. The registered callables and objects are owned here and nowhere else.
 class Database {
 public:
 	Database(std::shared_ptr<ModuleState> module, const std::string &path,
 	         const std::vector<std::pair<std::string, std::string>> &options)
-	    : module(std::move(module)), database(Open(this->module->environment, path, options)) {
+	    : module(std::move(module)), registry(std::make_shared<Registry>()),
+	      database(Open(this->module->environment, path, options)) {
+		WithoutGil([&] { InstallRegistryScan(database, registry); });
 	}
 
 	std::unique_ptr<Connection> Connect();
 
 	std::vector<nb::object> &Callables() {
 		return callables;
+	}
+
+	Registry &Objects() {
+		return *registry;
 	}
 
 	/// The Database behind a reference a child holds.
@@ -81,8 +88,9 @@ private:
 	}
 
 	std::shared_ptr<ModuleState> module;
-	// Declared before the database so it is destroyed after it, since DuckDB only borrows these callables.
+	// Declared before the database so they are destroyed after it, since DuckDB only borrows these callables.
 	std::vector<nb::object> callables;
+	std::shared_ptr<Registry> registry;
 	cxx::Instance database;
 };
 
@@ -171,6 +179,27 @@ public:
 		owner.Callables().push_back(std::move(callable));
 	}
 
+	/// Register a Python object as the table `name`; a one-shot object is a stream, readable once.
+	void RegisterObject(const std::string &name, nb::object object, bool one_shot) {
+		auto held = Live();
+		Database::From(held.database).Objects().Add(name, std::move(object), one_shot);
+	}
+
+	bool UnregisterObject(const std::string &name) {
+		auto held = Live();
+		return Database::From(held.database).Objects().Remove(name);
+	}
+
+	/// "stream" or "object" for a registered name, None otherwise.
+	std::optional<std::string> RegisteredKind(const std::string &name) {
+		auto held = Live();
+		auto entry = Database::From(held.database).Objects().ByName(name);
+		if (!entry) {
+			return std::nullopt;
+		}
+		return std::string(entry->one_shot ? "stream" : "object");
+	}
+
 	void Interrupt() {
 		Live().engine->Interrupt();
 	}
@@ -208,16 +237,22 @@ int TraverseDatabase(PyObject *self, visitproc visit, void *arg) {
 	if (!nb::inst_ready(self)) {
 		return 0;
 	}
-	for (const auto &callable : nb::inst_ptr<Database>(self)->Callables()) {
+	auto &database = *nb::inst_ptr<Database>(self);
+	for (const auto &callable : database.Callables()) {
 		Py_VISIT(callable.ptr());
+	}
+	for (const auto &object : database.Objects().Objects()) {
+		Py_VISIT(object.ptr());
 	}
 	return 0;
 }
 
-/// Drops only the callables, since a Connection collected in the same pass may still use the database.
+/// Drops only the callables and objects, since a Connection collected in the same pass may still use the database.
 int ClearDatabase(PyObject *self) {
 	if (nb::inst_ready(self)) {
-		nb::inst_ptr<Database>(self)->Callables().clear();
+		auto &database = *nb::inst_ptr<Database>(self);
+		database.Callables().clear();
+		database.Objects().Clear();
 	}
 	return 0;
 }
@@ -295,6 +330,9 @@ NB_MODULE(_duckdb, m) {
 	    .def("bind", &Connection::Bind, nb::arg("sql"))
 	    .def("create_scalar_function", &Connection::CreateScalarFunction, nb::arg("name"), nb::arg("callable"),
 	         nb::arg("parameters"), nb::arg("returns"), nb::arg("null_handling"), nb::arg("stability"))
+	    .def("register_object", &Connection::RegisterObject, nb::arg("name"), nb::arg("obj"), nb::arg("one_shot"))
+	    .def("unregister_object", &Connection::UnregisterObject, nb::arg("name"))
+	    .def("registered_kind", &Connection::RegisteredKind, nb::arg("name"))
 	    .def("interrupt", &Connection::Interrupt)
 	    .def("get_option", &Connection::GetOption, nb::arg("name"))
 	    .def("set_option", &Connection::SetOption, nb::arg("name"), nb::arg("value"))

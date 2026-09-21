@@ -35,19 +35,28 @@ constexpr int32_t DATE_NEGATIVE_INFINITY = -2147483647;
 constexpr int64_t TIMESTAMP_POSITIVE_INFINITY = 9223372036854775807LL;
 constexpr int64_t TIMESTAMP_NEGATIVE_INFINITY = -9223372036854775807LL;
 
-// Scaling the infinity markers would overflow and destroy them, so they pass through in their own unit.
-int64_t MicrosFromUnit(int64_t raw, int64_t multiply, int64_t divide) {
-	if (raw == TIMESTAMP_POSITIVE_INFINITY || raw == TIMESTAMP_NEGATIVE_INFINITY) {
-		return raw;
-	}
-	return multiply != 1 ? raw * multiply : raw / divide;
-}
-
 // DuckDB dates reach far past Python's year 9999, so name the offending value; OverflowError names a day count.
 [[noreturn]] void ThrowUnrepresentable(const std::string &what, const std::string &rendered) {
 	throw duckdb::cxx::Exception(4001 /* TYPE_CONVERSION */,
 	                             "Conversion Error: " + what + " " + rendered +
 	                                 " is outside the range Python's datetime can represent");
+}
+
+// Scaling the infinity markers would overflow and destroy them, so they pass through in their own unit. A coarse
+// unit can hold an instant no microsecond count can, which is unrepresentable rather than a wrapped value.
+template <class TEXT>
+int64_t MicrosFromUnit(int64_t raw, int64_t multiply, int64_t divide, TEXT &&text) {
+	if (raw == TIMESTAMP_POSITIVE_INFINITY || raw == TIMESTAMP_NEGATIVE_INFINITY) {
+		return raw;
+	}
+	if (multiply == 1) {
+		return raw / divide;
+	}
+	int64_t micros;
+	if (__builtin_mul_overflow(raw, multiply, &micros)) {
+		ThrowUnrepresentable("timestamp", text());
+	}
+	return micros;
 }
 // `text` runs only on the failure path, so the bulk converter builds a Value only when one actually fails.
 template <class TEXT>
@@ -185,14 +194,14 @@ nb::object ValueToPython(const Value &value, ConversionContext &ctx) {
 	case LogicalTypeId::TIMESTAMP_TZ:
 		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_tz_t>().micros, true, [&value] { return value.ToText(); });
 	case LogicalTypeId::TIMESTAMP_SEC:
-		return EpochDateTime(ctx, MicrosFromUnit(value.Get<duckdb::cxx::timestamp_s_t>().seconds, 1'000'000, 1), false, [&value] { return value.ToText(); });
+		return EpochDateTime(ctx, MicrosFromUnit(value.Get<duckdb::cxx::timestamp_s_t>().seconds, 1'000'000, 1, [&value] { return value.ToText(); }), false, [&value] { return value.ToText(); });
 	case LogicalTypeId::TIMESTAMP_MS:
-		return EpochDateTime(ctx, MicrosFromUnit(value.Get<duckdb::cxx::timestamp_ms_t>().millis, 1'000, 1), false, [&value] { return value.ToText(); });
+		return EpochDateTime(ctx, MicrosFromUnit(value.Get<duckdb::cxx::timestamp_ms_t>().millis, 1'000, 1, [&value] { return value.ToText(); }), false, [&value] { return value.ToText(); });
 	case LogicalTypeId::TIMESTAMP_NS:
 		// Python datetime stops at microseconds, so finer digits are dropped on purpose.
-		return EpochDateTime(ctx, MicrosFromUnit(value.Get<duckdb::cxx::timestamp_ns_t>().nanos, 1, 1'000), false, [&value] { return value.ToText(); });
+		return EpochDateTime(ctx, MicrosFromUnit(value.Get<duckdb::cxx::timestamp_ns_t>().nanos, 1, 1'000, [&value] { return value.ToText(); }), false, [&value] { return value.ToText(); });
 	case LogicalTypeId::TIMESTAMP_TZ_NS:
-		return EpochDateTime(ctx, MicrosFromUnit(value.Get<duckdb::cxx::timestamp_tz_ns_t>().nanos, 1, 1'000), true, [&value] { return value.ToText(); });
+		return EpochDateTime(ctx, MicrosFromUnit(value.Get<duckdb::cxx::timestamp_tz_ns_t>().nanos, 1, 1'000, [&value] { return value.ToText(); }), true, [&value] { return value.ToText(); });
 	case LogicalTypeId::TIME_NS:
 		// Same microsecond floor as TIMESTAMP_NS.
 		return TimeFromMicros(ctx, value.Get<duckdb::cxx::dtime_ns_t>().nanos / 1'000);
@@ -401,13 +410,14 @@ void EmitElements(cxx::Vector &vector, const LogicalType &type, cxx::idx_t first
 		const bool utc = id == Id::TIMESTAMP_TZ || id == Id::TIMESTAMP_TZ_NS;
 		typed([&](cxx::idx_t i) {
 			const auto raw = view.Data<int64_t>()[i];
+			const auto text = [&] { return vector.GetValue(i).ToText(); };
 			// Nanosecond columns floor to microseconds as the per-value path does; markers keep their unit.
-			const auto micros = id == Id::TIMESTAMP_SEC ? MicrosFromUnit(raw, 1'000'000, 1)
-			                    : id == Id::TIMESTAMP_MS ? MicrosFromUnit(raw, 1'000, 1)
+			const auto micros = id == Id::TIMESTAMP_SEC ? MicrosFromUnit(raw, 1'000'000, 1, text)
+			                    : id == Id::TIMESTAMP_MS ? MicrosFromUnit(raw, 1'000, 1, text)
 			                    : id == Id::TIMESTAMP_NS || id == Id::TIMESTAMP_TZ_NS
-			                        ? MicrosFromUnit(raw, 1, 1'000)
+			                        ? MicrosFromUnit(raw, 1, 1'000, text)
 			                        : raw;
-			return EpochDateTime(ctx, micros, utc, [&] { return vector.GetValue(i).ToText(); }).release().ptr();
+			return EpochDateTime(ctx, micros, utc, text).release().ptr();
 		});
 		break;
 	}

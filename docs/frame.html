@@ -97,6 +97,14 @@ typed  = read_csv(<span class="s">"raw.csv"</span>, columns={<span class="s">"id
 orders.columns(con)                 <span class="c"># the engine reads the file's head to answer</span>
 orders.filter(col(<span class="s">"total"</span>) &gt; <span class="s">1000</span>).create(con, <span class="s">"big_orders"</span>)   <span class="c"># loading a file is a plan with a sink</span></code></pre>
   <p>Loading into a table that exists is <code>read_csv(...).insert_into(con, "orders")</code>, or the statement itself: <code>con.run("COPY orders FROM 'orders.csv' (HEADER)")</code>.</p>
+
+  <p class="lead-in">python objects</p>
+  <p>Anything that exports an Arrow stream can be registered under a name and read as a table on every connection to the database: a pyarrow <code>Table</code> or <code>RecordBatch</code>, a <code>RecordBatchReader</code>, or an Arrow stream capsule. The engine scans it in place; nothing is copied into the database. A reader or a capsule is a stream and is read once: a second query over it fails and says so, so register it again, or load it into a table first. Two <code>table()</code> steps naming a stream inside one plan share one CTE, so the plan reads it once.</p>
+  <pre><code>con.register(<span class="s">"orders"</span>, arrow_table)
+table(<span class="s">"orders"</span>).filter(col(<span class="s">"total"</span>) &gt; <span class="s">1000</span>).rows(con)
+table(<span class="s">"orders"</span>).create(con, <span class="s">"orders_kept"</span>)   <span class="c"># a stream, made rereadable</span>
+con.unregister(<span class="s">"orders"</span>)</code></pre>
+  <p>A name resolves the way a SQL identifier does, so <code>register("Orders", ...)</code> answers to <code>orders</code>. A table or view of the same name comes first, and a file name still reads the file. Registering a name again replaces the object.</p>
 </section>
 
 <section id="verbs">
@@ -435,6 +443,7 @@ orders.filter(sql_expr(<span class="s">"region = 'emea' AND total &gt; 1000"</sp
     <dt>con.interrupt()</dt><dd>Cancel the running query from another thread; it fails with <code>InterruptError</code>. Ctrl&#8209;C in the querying thread does the same and raises <code>KeyboardInterrupt</code>.</dd>
     <dt>con.create_macro(name, parameters, body, replace, temporary)</dt><dd>Define a macro from an expression or a plan; see <a href="extend.html">Macros and Extensions</a>.</dd>
     <dt>con.create_function(name, function, parameters, returns)</dt><dd>Register a Python function as a scalar SQL function; see <a href="udf.html">UDFs</a>.</dd>
+    <dt>con.register(name, obj) / con.unregister(name)</dt><dd>Read a Python object exporting an Arrow stream as the table <code>name</code>, on every connection to the database; a reader or a capsule is read once.</dd>
     <dt>con.duplicate()</dt><dd>A second connection to the same database, with its own transaction.</dd>
     <dt>con.close()</dt><dd>Close it. Also a context manager.</dd>
   </dl>

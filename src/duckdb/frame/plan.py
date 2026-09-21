@@ -790,6 +790,27 @@ def _projected(chosen: tuple[Expr, ...], source: Shape, verb: str) -> Shape | No
     return _require_unique(tuple(out), verb)
 
 
+def _merge_streams(order: list[Frame], connection: Connection) -> tuple[list[Frame], dict[int, int]]:
+    """One CTE per registered stream however many `table()` steps name it, since a stream can be read once.
+
+    Returns the order without the duplicates and, for each duplicate, the id of the step standing in for it.
+    """
+    first: dict[str, int] = {}
+    merged: dict[int, int] = {}
+    kept: list[Frame] = []
+    for node in order:
+        step = node._step
+        if isinstance(step, Table) and len(step.name) == 1:
+            key = fold_name(step.name[0])
+            if key in first:
+                merged[id(node)] = first[key]
+                continue
+            if connection._engine().registered_kind(step.name[0]) == "stream":
+                first[key] = id(node)
+        kept.append(node)
+    return kept, merged
+
+
 class Frame(PlanBase):
     """One step of a plan. Immutable, so every verb returns a new frame."""
 
@@ -840,7 +861,7 @@ class Frame(PlanBase):
         """
         order = self._order()
         shapes = self._shapes(connection, order) if connection is not None else None
-        return self._render(shapes, order)
+        return self._render(shapes, order, connection)
 
     def render_parameterized(
         self, connection: Connection | None = None, *, parameters: Mapping[str, object] | None = None
@@ -849,10 +870,19 @@ class Frame(PlanBase):
         sql, values = self._sql_and_values(connection=connection, parameters=parameters)
         return sql, values or []
 
-    def _render(self, shapes: dict[int, Shape] | None = None, order: list[Frame] | None = None) -> str:
+    def _render(
+        self,
+        shapes: dict[int, Shape] | None = None,
+        order: list[Frame] | None = None,
+        connection: Connection | None = None,
+    ) -> str:
         """The SQL, given whatever column names and types are known."""
         order = self._order() if order is None else order
+        merged: dict[int, int] = {}
+        if connection is not None:
+            order, merged = _merge_streams(order, connection)
         names = {id(node): quote(f"_s{i}") for i, node in enumerate(order)}
+        names.update({duplicate: names[first] for duplicate, first in merged.items()})
 
         def body_of(node: Frame) -> str:
             # Columns are handed down, never read off the node; a step needing its input's says so by using them.
@@ -881,7 +911,7 @@ class Frame(PlanBase):
                         needed.add(id(parent))
                         stack.extend(parent._inputs + parent._uses)
         shapes = self._shapes(connection, order, needed) if needed else None
-        return self._render(shapes, order)
+        return self._render(shapes, order, connection)
 
     # -- column names worked out here, types asked of DuckDB
 
@@ -1137,7 +1167,7 @@ class Frame(PlanBase):
         order = self._order()
         shapes = self._resolution(connection, order) if connection is not None else None
         with ParamSink() as sink:
-            sql = self._render(shapes, order)
+            sql = self._render(shapes, order, connection)
             if wrap is not None:
                 sql = wrap(sql)
         supplied = dict(parameters or {})

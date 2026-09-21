@@ -9,6 +9,7 @@ import weakref
 from typing import TYPE_CHECKING, Any
 
 from .. import _duckdb
+from .._sources import STREAM, kind_of
 from ..exceptions import Error, InterfaceError, InvalidInputError
 
 if TYPE_CHECKING:
@@ -206,6 +207,27 @@ class Connection:
             raise InvalidInputError(message)
         self._engine().create_scalar_function(name, function, texts, returns, nulls, level)
         # A new function changes what a name in a later query can refer to.
+        self._catalog.changed()
+
+    def register(self, name: str, obj: object) -> None:
+        """Make a Python object readable as the table `name`, on every connection to this database.
+
+        Anything that exports an Arrow stream is accepted: a pyarrow Table or RecordBatch, a RecordBatchReader, or
+        an Arrow stream capsule. A reader or a capsule is a stream, read once; register it again to read it again.
+        Registering a name again replaces the earlier object, and a real table of that name takes precedence.
+        """
+        if not isinstance(name, str):
+            message = f"a registered name is a string, not {name!r}"  # type: ignore[unreachable]
+            raise TypeError(message)
+        self._engine().register_object(name, obj, kind_of(obj) == STREAM)
+        # A new name changes what a later query resolves it to.
+        self._catalog.changed()
+
+    def unregister(self, name: str) -> None:
+        """Forget the object registered as `name`; a query bound over it before this still runs."""
+        if not self._engine().unregister_object(name):
+            message = f"Invalid Input Error: nothing is registered as {name!r}"
+            raise InvalidInputError(message)
         self._catalog.changed()
 
     def duplicate(self) -> Connection:

@@ -101,6 +101,15 @@ class Connection:
     ) -> None:
         """Register a Python callable as a scalar SQL function; the type texts reach DuckDB's parser unchanged."""
 
+    def register_object(self, name: str, obj: object, one_shot: bool) -> None:
+        """Make `obj` readable as the table `name` on this database; a one-shot object is a stream, read once."""
+
+    def unregister_object(self, name: str) -> bool:
+        """Forget the object registered as `name`; False when there was none."""
+
+    def registered_kind(self, name: str) -> str | None:
+        """The kind of a registered name, "stream" or "object", or None when nothing is registered as it."""
+
     def interrupt(self) -> None: ...
     def get_option(self, name: str) -> str: ...
     def set_option(self, name: str, value: str) -> None: ...

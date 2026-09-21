@@ -25,13 +25,14 @@ build = [
     "scikit-build-core>=0.10",
     "nanobind>=2.13",
 ]
-# numpy is what the egress tests need; the package itself depends on nothing.
+# numpy is what the egress tests need and pyarrow what the registry tests need; the package itself depends on nothing.
 dev = [
     "pytest>=8",
     "pytest-cov>=5",
     "ruff>=0.6",
     "mypy>=1.11",
     "numpy",
+    "pyarrow",
 ]
 # The benchmark harness; CI installs the frozen pins in benchmarks/requirements-bench.txt, so keep both in step.
 bench = [
@@ -98,3 +99,8 @@ warn_unreachable = true
 pretty = true
 # Not 3.11: numpy's stubs use the `type` statement, which mypy rejects below 3.12.
 python_version = "3.12"
+
+[[tool.mypy.overrides]]
+# pyarrow ships no stubs; only the registry tests import it.
+module = "pyarrow.*"
+ignore_missing_imports = true

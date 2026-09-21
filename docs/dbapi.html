@@ -328,6 +328,7 @@ Error
     <dt>con.commit()</dt><dd>Commit the open transaction, if any. Releases any open result.</dd>
     <dt>con.rollback()</dt><dd>Discard the open transaction, if any. Releases any open result.</dd>
     <dt>con.interrupt()</dt><dd>Cancel the statement the connection is running, from another thread; it fails with <code>InterruptError</code>.</dd>
+    <dt>con.register(name, obj) / con.unregister(name)</dt><dd>Read a Python object that exports an Arrow stream, such as a pyarrow <code>Table</code>, as the table <code>name</code> from every cursor and connection on the database. A <code>RecordBatchReader</code> or a stream capsule is read once. A real table of that name comes first.</dd>
     <dt>con.close()</dt><dd>Roll back, then close. Idempotent; every other call afterwards raises <code>InterfaceError</code>.</dd>
     <dt>with con:</dt><dd>The block as a transaction: commit on success, roll back on any exception. Does not close.</dd>
   </dl>
