@@ -115,11 +115,10 @@ unique_ptr<TableRef> PythonReplacementScan::TryReplacementObject(const nb::objec
 		} else {
 			string name = "df_" + StringUtil::GenerateRandomName();
 			auto new_df = PandasScanFunction::PandasReplaceCopiedNames(entry);
-			children.push_back(ConstantExpression::FromValue(Value::POINTER(CastPointerToValue(new_df.ptr()))));
 			table_function->function = make_uniq<FunctionExpression>("pandas_scan", std::move(children));
+			table_function->bind_info = make_shared_ptr<PandasScanInfo>(std::move(new_df));
 			auto dependency = make_uniq<ExternalDependency>();
 			dependency->AddDependency("replacement_cache", PythonDependencyItem::Create(entry));
-			dependency->AddDependency("copy", PythonDependencyItem::Create(new_df));
 			table_function->external_dependency = std::move(dependency);
 		}
 	} else if (DuckDBPyRelation::IsRelation(entry)) {
@@ -183,11 +182,10 @@ unique_ptr<TableRef> PythonReplacementScan::TryReplacementObject(const nb::objec
 			throw NotImplementedException("Unsupported Numpy object");
 			break;
 		}
-		children.push_back(ConstantExpression::FromValue(Value::POINTER(CastPointerToValue(data.ptr()))));
 		table_function->function = make_uniq<FunctionExpression>("pandas_scan", std::move(children));
+		table_function->bind_info = make_shared_ptr<PandasScanInfo>(std::move(data));
 		auto dependency = make_uniq<ExternalDependency>();
 		dependency->AddDependency("replacement_cache", PythonDependencyItem::Create(entry));
-		dependency->AddDependency("data", PythonDependencyItem::Create(data));
 		table_function->external_dependency = std::move(dependency);
 	} else {
 		// This throws an error later on!

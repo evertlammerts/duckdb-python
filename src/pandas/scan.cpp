@@ -14,17 +14,16 @@
 namespace duckdb {
 
 struct PandasScanFunctionData : public TableFunctionData {
-	PandasScanFunctionData(nb::handle df, idx_t row_count, vector<PandasColumnBindData> pandas_bind_data,
-	                       vector<LogicalType> sql_types, shared_ptr<DependencyItem> dependency)
-	    : df(df), row_count(row_count), lines_read(0), pandas_bind_data(std::move(pandas_bind_data)),
-	      sql_types(std::move(sql_types)), copied_df(std::move(dependency)) {
+	PandasScanFunctionData(shared_ptr<PandasScanInfo> info, idx_t row_count,
+	                       vector<PandasColumnBindData> pandas_bind_data, vector<LogicalType> sql_types)
+	    : info(std::move(info)), row_count(row_count), lines_read(0), pandas_bind_data(std::move(pandas_bind_data)),
+	      sql_types(std::move(sql_types)) {
 	}
-	nb::handle df;
+	shared_ptr<PandasScanInfo> info;
 	idx_t row_count;
 	atomic<idx_t> lines_read;
 	vector<PandasColumnBindData> pandas_bind_data;
 	vector<LogicalType> sql_types;
-	shared_ptr<DependencyItem> copied_df;
 
 	~PandasScanFunctionData() override {
 		try {
@@ -60,8 +59,7 @@ struct PandasScanGlobalState : public GlobalTableFunctionState {
 };
 
 PandasScanFunction::PandasScanFunction()
-    : TableFunction("pandas_scan", {LogicalType::POINTER}, PandasScanFunc, PandasScanBind, PandasScanInitGlobal,
-                    PandasScanInitLocal) {
+    : TableFunction("pandas_scan", {}, PandasScanFunc, PandasScanBind, PandasScanInitGlobal, PandasScanInitLocal) {
 	get_partition_data = PandasScanGetPartitionData;
 	cardinality = PandasScanCardinality;
 	table_scan_progress = PandasProgress;
@@ -82,8 +80,13 @@ OperatorPartitionData PandasScanFunction::PandasScanGetPartitionData(ClientConte
 unique_ptr<FunctionData> PandasScanFunction::PandasScanBind(ClientContext &context, TableFunctionBindInput &input,
                                                             vector<LogicalType> &return_types,
                                                             vector<Identifier> &names) {
+	if (!input.ref.bind_info) {
+		throw BinderException("pandas_scan requires a dataframe bind input");
+	}
+	DynamicCastCheck<PandasScanInfo>(input.ref.bind_info.get());
+	auto info = shared_ptr_cast<TableFunctionInfo, PandasScanInfo>(input.ref.bind_info);
 	nb::gil_scoped_acquire acquire;
-	nb::handle df(reinterpret_cast<PyObject *>(input.inputs[0].GetPointer()));
+	nb::handle df(info->df.obj);
 
 	vector<PandasColumnBindData> pandas_bind_data;
 
@@ -94,22 +97,9 @@ unique_ptr<FunctionData> PandasScanFunction::PandasScanBind(ClientContext &conte
 		Pandas::Bind(context, df, pandas_bind_data, return_types, names);
 	}
 	auto df_columns = nb::list(df.attr("keys")());
-
-	auto &ref = input.ref;
-
-	shared_ptr<DependencyItem> dependency_item;
-	if (ref.external_dependency) {
-		// This was created during the replacement scan if this was a pandas DataFrame (see python_replacement_scan.cpp)
-		dependency_item = ref.external_dependency->GetDependency("copy");
-		if (!dependency_item) {
-			// This was created during the replacement if this was a numpy scan
-			dependency_item = ref.external_dependency->GetDependency("data");
-		}
-	}
-
 	auto get_fun = df.attr("__getitem__");
 	idx_t row_count = nb::len(get_fun(df_columns[0]));
-	return make_uniq<PandasScanFunctionData>(df, row_count, std::move(pandas_bind_data), return_types, dependency_item);
+	return make_uniq<PandasScanFunctionData>(std::move(info), row_count, std::move(pandas_bind_data), return_types);
 }
 
 unique_ptr<GlobalTableFunctionState> PandasScanFunction::PandasScanInitGlobal(ClientContext &context,

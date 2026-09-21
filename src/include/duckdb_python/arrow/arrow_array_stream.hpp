@@ -16,6 +16,7 @@
 #include "duckdb/main/client_config.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb_python/nb/casters.hpp"
+#include "duckdb_python/registered_py_object.hpp"
 
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/vector.hpp"
@@ -77,17 +78,11 @@ public:
 	}
 
 	~PythonTableArrowArrayStreamFactory() override {
-		// Runs on arbitrary engine threads, possibly while the interpreter is tearing down, in
-		// which case the Python references are leaked rather than touched.
-		if (nb::detail::cleanup_guard guard {}) {
-			arrow_object = nb::object();
-			cached_arrow_table = nb::object();
-			if (cached_schema.release) {
+		// The release callback of a schema taken from a Python producer may itself be Python.
+		if (cached_schema.release) {
+			if (nb::detail::cleanup_guard guard {}) {
 				cached_schema.release(&cached_schema);
 			}
-		} else {
-			arrow_object.release();
-			cached_arrow_table.release();
 		}
 	}
 
@@ -97,14 +92,14 @@ public:
 	static void GetSchemaInternal(nb::handle arrow_object, ArrowSchema &schema);
 
 	//! Arrow Object (i.e., Scanner, Record Batch Reader, Table, Dataset)
-	nb::object arrow_object;
+	PyObjectHolder arrow_object;
 
 	const ClientProperties client_properties;
 	const PyArrowObjectType cached_arrow_type;
 
 	//! Cached Arrow table from an unfiltered .collect().to_arrow() on a LazyFrame.
 	//! Avoids re-reading from source and re-converting on repeated scans without filters.
-	nb::object cached_arrow_table;
+	PyObjectHolder cached_arrow_table;
 
 private:
 	ArrowSchema cached_schema;

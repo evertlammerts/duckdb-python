@@ -62,8 +62,8 @@ nb::object PythonTableArrowArrayStreamFactory::ProduceScanner(nb::object &arrow_
 unique_ptr<ArrowArrayStreamWrapper>
 PythonTableArrowArrayStreamFactory::ProduceStream(ArrowStreamParameters &parameters) {
 	nb::gil_scoped_acquire acquire;
-	D_ASSERT(arrow_object.ptr());
-	nb::handle arrow_obj_handle(arrow_object);
+	D_ASSERT(arrow_object.obj.ptr());
+	nb::handle arrow_obj_handle(arrow_object.obj);
 	auto arrow_object_type = cached_arrow_type;
 
 	if (arrow_object_type == PyArrowObjectType::PolarsLazyFrame) {
@@ -92,13 +92,13 @@ PythonTableArrowArrayStreamFactory::ProduceStream(ArrowStreamParameters &paramet
 		// If no filters were pushed and we have a cached Arrow table, reuse it. This avoids re-reading from source and
 		// re-converting on repeated unfiltered scans.
 		nb::object arrow_table;
-		if (!filters_pushed && cached_arrow_table.ptr() != nullptr) {
-			arrow_table = cached_arrow_table;
+		if (!filters_pushed && cached_arrow_table.obj.ptr() != nullptr) {
+			arrow_table = cached_arrow_table.obj;
 		} else {
 			arrow_table = lf.attr("collect")().attr("to_arrow")();
 			// Cache only unfiltered results (filtered results are partial)
 			if (!filters_pushed) {
-				cached_arrow_table = arrow_table;
+				cached_arrow_table.obj = arrow_table;
 			}
 		}
 
@@ -235,8 +235,8 @@ void PythonTableArrowArrayStreamFactory::GetSchema(ArrowSchema &schema) {
 	}
 
 	nb::gil_scoped_acquire acquire;
-	D_ASSERT(arrow_object.ptr());
-	nb::handle arrow_obj_handle(arrow_object);
+	D_ASSERT(arrow_object.obj.ptr());
+	nb::handle arrow_obj_handle(arrow_object.obj);
 
 	auto type = cached_arrow_type;
 	if (type == PyArrowObjectType::PolarsLazyFrame) {
