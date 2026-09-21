@@ -600,10 +600,17 @@ duckdb::pyarrow::Table DuckDBPyResult::FetchArrowTable(const idx_t rows_per_batc
 	    to_polars);
 }
 
+static void CheckBatchSize(idx_t rows_per_batch) {
+	if (rows_per_batch == 0) {
+		throw std::runtime_error("Approximate Batch Size of Record Batch MUST be higher than 0");
+	}
+}
+
 duckdb::pyarrow::RecordBatchReader DuckDBPyResult::FetchRecordBatchReader(idx_t rows_per_batch) {
 	if (Empty()) {
 		throw InvalidInputException("There is no query result");
 	}
+	CheckBatchSize(rows_per_batch);
 
 	constexpr bool dedup_column_names = false;
 	auto reader = RunWithArrowSchema<duckdb::pyarrow::RecordBatchReader>(
@@ -621,6 +628,7 @@ nb::object DuckDBPyResult::FetchArrowCapsule(const idx_t rows_per_batch) {
 	if (Empty()) {
 		throw InvalidInputException("There is no query result");
 	}
+	CheckBatchSize(rows_per_batch);
 
 	constexpr bool dedup_column_names = false;
 	auto capsule = RunWithArrowSchema<nb::object>(

@@ -53,14 +53,7 @@ static void CreateArrowScan(const string &name, nb::object entry, TableFunctionR
 		auto dependency_item = PythonDependencyItem::Create(stream_messages);
 		external_dependency->AddDependency("replacement_cache", std::move(dependency_item));
 	} else {
-		auto stream_factory = make_uniq<PythonTableArrowArrayStreamFactory>(entry.ptr(), client_properties, type);
-		auto stream_factory_produce = PythonTableArrowArrayStreamFactory::Produce;
-		auto stream_factory_get_schema = PythonTableArrowArrayStreamFactory::GetSchema;
-
-		children.push_back(ConstantExpression::FromValue(Value::POINTER(CastPointerToValue(stream_factory.get()))));
-		children.push_back(ConstantExpression::FromValue(Value::POINTER(CastPointerToValue(stream_factory_produce))));
-		children.push_back(
-		    ConstantExpression::FromValue(Value::POINTER(CastPointerToValue(stream_factory_get_schema))));
+		table_function.bind_info = make_shared_ptr<PythonTableArrowArrayStreamFactory>(entry, client_properties, type);
 
 		if (type == PyArrowObjectType::PyCapsule) {
 			// Disable projection+filter pushdown for bare capsules (single-use, no PyArrow wrapper)
@@ -77,9 +70,7 @@ static void CreateArrowScan(const string &name, nb::object entry, TableFunctionR
 		} else {
 			table_function.function = make_uniq<FunctionExpression>("arrow_scan", std::move(children));
 		}
-		auto dependency_item =
-		    PythonDependencyItem::Create(make_uniq<RegisteredArrow>(std::move(stream_factory), entry));
-		external_dependency->AddDependency("replacement_cache", std::move(dependency_item));
+		external_dependency->AddDependency("replacement_cache", PythonDependencyItem::Create(entry));
 	}
 	table_function.external_dependency = std::move(external_dependency);
 }

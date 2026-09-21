@@ -79,15 +79,12 @@ void AreExtensionsRegistered(const LogicalType &arrow_type, const LogicalType &d
 	}
 }
 static void ConvertArrowTableToVector(const nb::object &table, Vector &out, ClientContext &context, idx_t count) {
-	// Create the stream factory from the Table object
-	auto ptr = table.ptr();
 	D_ASSERT(duckdb::PyUtil::GilCheck());
+	// Declared before the GIL release so the factory's last reference drops with the GIL held
+	TableFunctionRef empty;
+	empty.bind_info = make_shared_ptr<PythonTableArrowArrayStreamFactory>(table, context.GetClientProperties(),
+	                                                                      PyArrowObjectType::Table);
 	nb::gil_scoped_release gil;
-
-	auto stream_factory =
-	    make_uniq<PythonTableArrowArrayStreamFactory>(ptr, context.GetClientProperties(), PyArrowObjectType::Table);
-	auto stream_factory_produce = PythonTableArrowArrayStreamFactory::Produce;
-	auto stream_factory_get_schema = PythonTableArrowArrayStreamFactory::GetSchema;
 
 	// Get the functions we need
 	auto function = ArrowTableFunction::ArrowScanFunction;
@@ -97,15 +94,10 @@ static void ConvertArrowTableToVector(const nb::object &table, Vector &out, Clie
 
 	// Prepare the inputs for the bind
 	vector<Value> children;
-	children.reserve(3);
-	children.push_back(Value::POINTER(CastPointerToValue(stream_factory.get())));
-	children.push_back(Value::POINTER(CastPointerToValue(stream_factory_produce)));
-	children.push_back(Value::POINTER(CastPointerToValue(stream_factory_get_schema)));
 	named_parameter_map_t named_params;
 	vector<LogicalType> input_types;
 	vector<Identifier> input_names;
 
-	TableFunctionRef empty;
 	TableFunction dummy_table_function;
 	dummy_table_function.name = "ConvertArrowTableToVector";
 	TableFunctionBindInput bind_input(children, named_params, input_types, input_names, nullptr, nullptr,

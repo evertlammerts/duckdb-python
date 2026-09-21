@@ -31,14 +31,6 @@ enum class PythonEnvironmentType { NORMAL, INTERACTIVE, JUPYTER };
 
 struct DuckDBPyRelation;
 
-class RegisteredArrow : public RegisteredObject {
-
-public:
-	RegisteredArrow(unique_ptr<PythonTableArrowArrayStreamFactory> arrow_factory_p, nb::object obj_p)
-	    : RegisteredObject(std::move(obj_p)), arrow_factory(std::move(arrow_factory_p)) {};
-	unique_ptr<PythonTableArrowArrayStreamFactory> arrow_factory;
-};
-
 struct DefaultConnectionHolder {
 public:
 	DefaultConnectionHolder() {
