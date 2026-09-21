@@ -17,7 +17,6 @@
   <a href="frame.html">Frames &amp; Plans</a>
   <a class="here" href="udf.html">UDFs</a>
   <a href="extend.html">Macros &amp; Extensions</a>
-  <a href="compat.html">Compat</a>
 </nav>
 
 <div class="page">
@@ -46,10 +45,10 @@
 
 <section id="start">
   <h2>Start here</h2>
-  <pre><code><span class="k">import</span> duckdb
-<span class="k">from</span> duckdb <span class="k">import</span> sql
+  <pre><code><span class="k">from</span> duckdb <span class="k">import</span> frame
+<span class="k">from</span> duckdb.frame <span class="k">import</span> sql
 
-con = duckdb.connect()
+con = frame.connect()
 con.create_function(<span class="s">"plus_one"</span>, <span class="k">lambda</span> x: x + <span class="s">1</span>, [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT"</span>)
 
 sql(<span class="s">"SELECT plus_one(i) FROM range(5) t(i)"</span>).rows(con)   <span class="c"># [(1,), (2,), (3,), (4,), (5,)]</span></code></pre>
@@ -78,7 +77,7 @@ con.create_function(<span class="s">"tag"</span>, <span class="k">lambda</span> 
 sql(<span class="s">"SELECT tag(1)"</span>).rows(con)   <span class="c"># [('state:1',)]</span></code></pre>
   <p>The type texts are parsed by the engine when you register, so a mistake in one is reported here and not at the first call: a type that does not exist raises <code>CatalogError</code> naming it, and <code>ANY</code> is refused with <code>InvalidInputError</code>: <code>ANY parameters are not supported yet</code>, or <code>an ANY return type is not supported yet</code> for <code>returns</code>. An option that is not one of the choices above raises <code>InvalidInputError</code>. A closed connection raises <code>InterfaceError</code>.</p>
   <div class="note">
-    <p><strong>The function belongs to the database, not to the connection.</strong> Every connection to that database sees it, <code>con.duplicate()</code> included, and the engine keeps it until the database closes. There is no way to remove one; register the same name again to replace it. A fresh <code>duckdb.connect()</code> is a different database, and does not have it.</p>
+    <p><strong>The function belongs to the database, not to the connection.</strong> Every connection to that database sees it, <code>con.duplicate()</code> included, and the engine keeps it until the database closes. There is no way to remove one; register the same name again to replace it. A fresh <code>duckdb.frame.connect()</code> is a different database, and does not have it.</p>
   </div>
 </section>
 
@@ -88,7 +87,7 @@ sql(<span class="s">"SELECT tag(1)"</span>).rows(con)   <span class="c"># [('sta
   <pre><code>sql(<span class="s">"SELECT plus_one(i) FROM range(3) t(i)"</span>).rows(con)
 con.run(<span class="s">"CREATE TABLE next_ids AS SELECT plus_one(id) AS id FROM orders"</span>)</code></pre>
   <p>From a plan, through <code>fn</code>, which calls any function by name; a registered function is one:</p>
-  <pre><code><span class="k">from</span> duckdb <span class="k">import</span> col, fn, table
+  <pre><code><span class="k">from</span> duckdb.frame <span class="k">import</span> col, fn, table
 
 table(<span class="s">"orders"</span>).with_columns(next_id=fn(<span class="s">"plus_one"</span>, col(<span class="s">"id"</span>))).rows(con)
 table(<span class="s">"orders"</span>).filter(fn(<span class="s">"plus_one"</span>, col(<span class="s">"id"</span>)) &gt; <span class="s">1</span>).rows(con)
@@ -189,7 +188,6 @@ sql(<span class="s">"SELECT backfill(x) FROM (VALUES (1), (NULL)) t(x)"</span>).
   <p>Returning <code>None</code> makes the result NULL under either setting:</p>
   <pre><code>con.create_function(<span class="s">"odd_only"</span>, <span class="k">lambda</span> x: x <span class="k">if</span> x % <span class="s">2</span> <span class="k">else</span> <span class="k">None</span>, [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT"</span>)
 sql(<span class="s">"SELECT odd_only(i) FROM range(4) t(i)"</span>).rows(con)   <span class="c"># [(None,), (1,), (None,), (3,)]</span></code></pre>
-  <p>So does returning pandas' <code>pd.NA</code>, when pandas is around.</p>
 </section>
 
 <section id="stability">
@@ -269,7 +267,7 @@ sql(<span class="s">"SELECT odd(1)"</span>).rows(con)
 <section id="performance">
   <h2>Performance</h2>
   <p>Every row costs a trip through Python: the arguments are turned into Python objects, the function is called, the result is turned back into a value and cast. Anything expressible as an expression runs orders of magnitude faster as a macro, because a macro is inlined into the query and never leaves the engine.</p>
-  <pre><code><span class="k">from</span> duckdb <span class="k">import</span> col
+  <pre><code><span class="k">from</span> duckdb.frame <span class="k">import</span> col
 
 con.run(<span class="s">"CREATE TABLE big AS SELECT i FROM range(5000000) t(i)"</span>)
 con.create_function(<span class="s">"plus_one"</span>, <span class="k">lambda</span> x: x + <span class="s">1</span>, [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT"</span>)
@@ -313,7 +311,7 @@ sql(<span class="s">"SELECT sum(bump(i)) FROM big"</span>).rows(con)       <span
 
 <section id="changes">
   <h2>Changes from the old client</h2>
-  <p>The old client's <code>create_function</code> had this signature, and <code>duckdb.compat</code> keeps it:</p>
+  <p>The old client's <code>create_function</code> had this signature:</p>
   <pre><code>con.create_function(name, function, parameters=<span class="k">None</span>, return_type=<span class="k">None</span>, *,
                     type=<span class="s">"native"</span>, null_handling=<span class="s">"default"</span>, exception_handling=<span class="s">"default"</span>, side_effects=<span class="k">False</span>)
 duckdb.create_function(...)     <span class="c"># the same, on the implicit default connection</span>
@@ -333,11 +331,11 @@ con.remove_function(name)       <span class="c"># and duckdb.remove_function(nam
         <tr><td>returned the connection, for chaining</td><td>returns <code>None</code></td></tr>
         <tr><td>registering a name twice was refused, "already created"; <code>remove_function</code> first</td><td>registering again replaces; there is no <code>remove_function</code>, the engine keeps a function until the database closes</td></tr>
         <tr><td><code>duckdb.create_function</code> on an implicit default connection</td><td>no module-level function; a connection is always explicit</td></tr>
-        <tr><td><code>InvalidInputException</code></td><td><code>InvalidInputError</code>; the old name is an alias in <code>duckdb.compat</code></td></tr>
+        <tr><td><code>InvalidInputException</code></td><td><code>InvalidInputError</code></td></tr>
       </tbody>
     </table>
   </div>
-  <p>The inference the old client did, and <code>duckdb.compat</code> still does, read <code>bool</code>, <code>int</code>, <code>float</code>, <code>str</code>, <code>bytes</code>, <code>bytearray</code>, <code>datetime</code>, <code>date</code>, <code>time</code>, <code>timedelta</code> and <code>UUID</code> as <code>BOOLEAN</code>, <code>BIGINT</code>, <code>DOUBLE</code>, <code>VARCHAR</code>, <code>BLOB</code>, <code>BLOB</code>, <code>TIMESTAMP</code>, <code>DATE</code>, <code>TIME</code>, <code>INTERVAL</code> and <code>UUID</code>; <code>list[T]</code> as <code>T[]</code>, <code>dict[K, V]</code> as <code>MAP(K, V)</code>, and <code>T | None</code> as <code>T</code>. Write those texts yourself. The rule is simple enough that a helper in your own code can do it, and the registration then says what the engine will see.</p>
+  <p>The inference the old client did read <code>bool</code>, <code>int</code>, <code>float</code>, <code>str</code>, <code>bytes</code>, <code>bytearray</code>, <code>datetime</code>, <code>date</code>, <code>time</code>, <code>timedelta</code> and <code>UUID</code> as <code>BOOLEAN</code>, <code>BIGINT</code>, <code>DOUBLE</code>, <code>VARCHAR</code>, <code>BLOB</code>, <code>BLOB</code>, <code>TIMESTAMP</code>, <code>DATE</code>, <code>TIME</code>, <code>INTERVAL</code> and <code>UUID</code>; <code>list[T]</code> as <code>T[]</code>, <code>dict[K, V]</code> as <code>MAP(K, V)</code>, and <code>T | None</code> as <code>T</code>. Write those texts yourself. The rule is simple enough that a helper in your own code can do it, and the registration then says what the engine will see.</p>
   <div class="pair">
     <div class="bad">
       <div class="tag">old</div>
@@ -363,7 +361,7 @@ con.create_function(<span class="s">"tick"</span>, tick, [], <span class="s">"BI
     </div>
   </div>
   <p>One more difference is recorded in the behaviour notes: a <code>KeyboardInterrupt</code> raised inside the function is now the query's <code>InvalidInputError</code>, like any other exception in it, since the engine owns the call and sees only its failure.</p>
-  <p>Two things the old client had are not here in any form. Arrow functions, <code>type="arrow"</code>: <code>duckdb.compat</code> refuses them with <code>NotSupportedError</code> until they arrive. And <code>ANY</code>-typed parameters, which a registered Python function cannot yet declare. Code that needs the old <code>create_function</code> as it was, the inference, <code>return_null</code>, the chaining, runs unchanged on <a href="compat.html">duckdb.compat</a>.</p>
+  <p>Two things the old client had are not here in any form. Arrow functions, <code>type="arrow"</code>. And <code>ANY</code>-typed parameters, which a registered Python function cannot yet declare.</p>
 </section>
 
 <footer>

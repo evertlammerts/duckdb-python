@@ -1,85 +1,21 @@
-"""The DuckDB Python package."""
+"""The DuckDB Python package: the engine, its errors, and two ways to talk to it.
+
+`duckdb.frame` builds queries as plans and runs them on a connection; `duckdb.dbapi` is PEP 249. They share the
+engine and `duckdb.exceptions`, and nothing else.
+"""
 
 from importlib.metadata import version as _package_version
 
-from . import dbapi, exceptions
+from . import dbapi, exceptions, frame
 from ._duckdb import library_version
-from .connection import Connection, connect
-from .expr import (
-    Expr,
-    Side,
-    coalesce,
-    col,
-    count_all,
-    dense_rank,
-    first_value,
-    fn,
-    lag,
-    last_value,
-    lead,
-    lit,
-    ntile,
-    param,
-    rank,
-    row_number,
-    sql_expr,
-    star,
-    when,
-)
-from .frame import (
-    Bound,
-    Column,
-    Frame,
-    NeedsConnection,
-    Step,
-    read_csv,
-    read_json,
-    read_parquet,
-    sql,
-    table,
-    table_function,
-    values,
-)
 
 __all__ = [
-    "Bound",
-    "Column",
-    "Connection",
-    "Expr",
-    "Frame",
-    "NeedsConnection",
-    "Side",
-    "Step",
     "__version__",
-    "coalesce",
-    "col",
-    "connect",
-    "count_all",
     "dbapi",
-    "dense_rank",
     "duckdb_version",
     "exceptions",
-    "first_value",
-    "fn",
-    "lag",
-    "last_value",
-    "lead",
+    "frame",
     "library_version",
-    "lit",
-    "ntile",
-    "param",
-    "rank",
-    "read_csv",
-    "read_json",
-    "read_parquet",
-    "row_number",
-    "sql",
-    "sql_expr",
-    "star",
-    "table",
-    "table_function",
-    "values",
-    "when",
 ]
 
 #: Version of this package.

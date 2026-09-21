@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 import duckdb
-from duckdb import col, fn, lit, when
+from duckdb.frame import col, fn, lit, when
 
 if TYPE_CHECKING:
     from pytest_codspeed import BenchmarkFixture
@@ -20,15 +20,15 @@ CHAIN_DEPTH = 256
 EXPR_REPEATS = 100
 
 
-def _build_chain() -> duckdb.Frame:
-    plan = duckdb.table("t")
+def _build_chain() -> duckdb.frame.Frame:
+    plan = duckdb.frame.table("t")
     for i in range(CHAIN_DEPTH):
         plan = plan.filter(col("a") > lit(i))
     return plan.select("a", "b")
 
 
-def _build_expressions() -> duckdb.Frame:
-    plan = duckdb.table("t")
+def _build_expressions() -> duckdb.frame.Frame:
+    plan = duckdb.frame.table("t")
     return plan.with_columns(
         total=col("a") + col("b") * lit(2),
         clipped=when(col("a") > lit(100)).then(lit(100)).otherwise(col("a")),

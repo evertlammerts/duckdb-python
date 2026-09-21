@@ -36,9 +36,9 @@ def test_database_accepts_open_time_options() -> None:
 
 def test_connect_accepts_a_path(tmp_path: Path) -> None:
     # A Path used to reach DuckDB unconverted and be refused as the wrong argument type.
-    with duckdb.connect(tmp_path / "by_path.db") as con:
+    with duckdb.frame.connect(tmp_path / "by_path.db") as con:
         con.run("CREATE TABLE t AS SELECT 1 AS v")
-        assert duckdb.sql("SELECT v FROM t").rows(con) == [(1,)]
+        assert duckdb.frame.sql("SELECT v FROM t").rows(con) == [(1,)]
     assert (tmp_path / "by_path.db").exists()
 
 
@@ -117,7 +117,7 @@ class TestPublicInterrupt:
     """`Connection.interrupt()` from another thread, and Ctrl-C in this one."""
 
     def test_interrupt_cancels_from_another_thread(self) -> None:
-        con = duckdb.connect()
+        con = duckdb.frame.connect()
         # One interrupt at a fixed delay can land before the query starts and leave it running, so repeat.
         stop = threading.Event()
 
@@ -130,19 +130,19 @@ class TestPublicInterrupt:
         worker.start()
         try:
             with pytest.raises(exceptions.InterruptError):
-                duckdb.sql("SELECT count(*) FROM range(100_000_000_000)").rows(con)
+                duckdb.frame.sql("SELECT count(*) FROM range(100_000_000_000)").rows(con)
         finally:
             stop.set()
             worker.join()
-        assert duckdb.sql("SELECT 1").rows(con) == [(1,)]
+        assert duckdb.frame.sql("SELECT 1").rows(con) == [(1,)]
 
     def test_interrupting_an_idle_connection_is_a_no_op(self) -> None:
-        con = duckdb.connect()
+        con = duckdb.frame.connect()
         con.interrupt()
-        assert duckdb.sql("SELECT 1").rows(con) == [(1,)]
+        assert duckdb.frame.sql("SELECT 1").rows(con) == [(1,)]
 
     def test_interrupt_on_a_closed_connection_is_refused(self) -> None:
-        con = duckdb.connect()
+        con = duckdb.frame.connect()
         con.close()
         with pytest.raises(exceptions.InterfaceError, match="closed"):
             con.interrupt()
@@ -150,7 +150,7 @@ class TestPublicInterrupt:
     @pytest.mark.skipif(sys.platform == "win32", reason="simulated Ctrl-C delivery differs on Windows")
     def test_a_keyboard_interrupt_stops_a_drain(self) -> None:
         # run() gives the interpreter back a few times a second to check for signals, so Ctrl-C lands promptly.
-        con = duckdb.connect()
+        con = duckdb.frame.connect()
         interrupter = threading.Timer(0.3, _thread.interrupt_main)
         # The rescue bounds a lost Ctrl-C so this test fails promptly instead of hanging the suite.
         rescue = threading.Timer(10, con.interrupt)
@@ -164,12 +164,12 @@ class TestPublicInterrupt:
             interrupter.cancel()
             rescue.cancel()
         assert time.monotonic() - started < 5, "the interrupt did not land between step batches"
-        assert duckdb.sql("SELECT 1").rows(con) == [(1,)]
+        assert duckdb.frame.sql("SELECT 1").rows(con) == [(1,)]
 
     @pytest.mark.skipif(sys.platform == "win32", reason="simulated Ctrl-C delivery differs on Windows")
     def test_a_keyboard_interrupt_stops_a_streaming_fetch(self) -> None:
         # The signal check runs once per batch of rows; a query whose first batch comes only at the end is not covered.
-        con = duckdb.connect()
+        con = duckdb.frame.connect()
         interrupter = threading.Timer(0.3, _thread.interrupt_main)
         # Same rescue as the test above: a lost Ctrl-C fails fast instead of hanging.
         rescue = threading.Timer(10, con.interrupt)
@@ -178,16 +178,16 @@ class TestPublicInterrupt:
         started = time.monotonic()
         try:
             with pytest.raises(KeyboardInterrupt):
-                duckdb.sql("SELECT i, md5(i::VARCHAR) FROM range(8_000_000) t(i)").rows(con)
+                duckdb.frame.sql("SELECT i, md5(i::VARCHAR) FROM range(8_000_000) t(i)").rows(con)
         finally:
             interrupter.cancel()
             rescue.cancel()
         assert time.monotonic() - started < 3, "the interrupt did not land between chunks"
-        assert duckdb.sql("SELECT 1").rows(con) == [(1,)]
+        assert duckdb.frame.sql("SELECT 1").rows(con) == [(1,)]
 
 
 def abort_inside(
-    connection: duckdb.Connection, work: Callable[[], object], error: type[BaseException] = RuntimeError
+    connection: duckdb.frame.Connection, work: Callable[[], object], error: type[BaseException] = RuntimeError
 ) -> None:
     """Run `work` in a transaction and then fail it, so rollback paths can be asserted."""
     with connection.transaction():
@@ -200,60 +200,60 @@ class TestTransaction:
     """`Connection.transaction()`: COMMIT on success, ROLLBACK on any error."""
 
     def test_commit_on_success(self) -> None:
-        con = duckdb.connect()
+        con = duckdb.frame.connect()
         con.run("CREATE TABLE t (v INTEGER)")
         with con.transaction():
             con.run("INSERT INTO t VALUES (1), (2)")
-        assert duckdb.table("t").count(con) == 2
+        assert duckdb.frame.table("t").count(con) == 2
 
     def test_rollback_on_error(self) -> None:
-        con = duckdb.connect()
+        con = duckdb.frame.connect()
         con.run("CREATE TABLE t (v INTEGER)")
         with pytest.raises(RuntimeError, match="abort"):
             abort_inside(con, lambda: con.run("INSERT INTO t VALUES (1)"))
-        assert duckdb.table("t").count(con) == 0
+        assert duckdb.frame.table("t").count(con) == 0
 
     def test_rollback_undoes_ddl(self) -> None:
-        con = duckdb.connect()
+        con = duckdb.frame.connect()
         with pytest.raises(RuntimeError):
             abort_inside(con, lambda: con.run("CREATE TABLE gone (v INTEGER)"))
         with pytest.raises(exceptions.CatalogError):
-            duckdb.table("gone").count(con)
+            duckdb.frame.table("gone").count(con)
 
     def test_a_keyboard_interrupt_rolls_back(self) -> None:
         # BaseException, not Exception: a Ctrl-C mid-block must not leave the transaction open.
-        con = duckdb.connect()
+        con = duckdb.frame.connect()
         con.run("CREATE TABLE t (v INTEGER)")
         with pytest.raises(KeyboardInterrupt):
             abort_inside(con, lambda: con.run("INSERT INTO t VALUES (1)"), error=KeyboardInterrupt)
-        assert duckdb.table("t").count(con) == 0
+        assert duckdb.frame.table("t").count(con) == 0
 
     def test_plans_share_the_transaction(self) -> None:
-        con = duckdb.connect()
+        con = duckdb.frame.connect()
         con.run("CREATE TABLE src AS SELECT 1 AS v")
         with pytest.raises(RuntimeError):
-            abort_inside(con, lambda: duckdb.table("src").create(con, "copy"))
+            abort_inside(con, lambda: duckdb.frame.table("src").create(con, "copy"))
         with pytest.raises(exceptions.CatalogError):
-            duckdb.table("copy").count(con)
+            duckdb.frame.table("copy").count(con)
 
     def test_uncommitted_work_is_invisible_to_a_sibling(self) -> None:
-        con = duckdb.connect()
+        con = duckdb.frame.connect()
         con.run("CREATE TABLE t (v INTEGER)")
         sibling = con.duplicate()
         with con.transaction():
             con.run("INSERT INTO t VALUES (1)")
-            assert duckdb.table("t").count(sibling) == 0
-        assert duckdb.table("t").count(sibling) == 1
+            assert duckdb.frame.table("t").count(sibling) == 0
+        assert duckdb.frame.table("t").count(sibling) == 1
 
     def test_nesting_is_refused_in_the_engines_words(self) -> None:
-        con = duckdb.connect()
+        con = duckdb.frame.connect()
         refused = pytest.raises(exceptions.TransactionError, match="within a transaction")
         with refused, con.transaction(), con.transaction():
             pass
-        assert duckdb.sql("SELECT 1").rows(con) == [(1,)]
+        assert duckdb.frame.sql("SELECT 1").rows(con) == [(1,)]
 
     def test_a_failed_rollback_does_not_hide_the_error(self) -> None:
         # Closing mid-block makes the rollback itself fail; the block's own error must still be the one that surfaces.
-        con = duckdb.connect()
+        con = duckdb.frame.connect()
         with pytest.raises(RuntimeError, match="abort"):
             abort_inside(con, con.close)

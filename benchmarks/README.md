@@ -1,8 +1,7 @@
 # Benchmark suite
 
 CodSpeed micro-benchmarks for the binding hot paths: row fetch, columnar
-egress, plan construction, and the `duckdb.compat` migration face. The harness
-is ported from duckdb-python main's suite; CI is
+egress and plan construction. The harness is ported from duckdb-python main's suite; CI is
 [codspeed.yml](../.github/workflows/codspeed.yml), the comparison script is
 [compare_baseline.py](compare_baseline.py).
 
@@ -39,28 +38,6 @@ Only walltime runs locally (no Valgrind on macOS arm64). Two caveats:
 BENCH_SCALE=10 .venv/bin/python -m pytest benchmarks/ --codspeed \
   --codspeed-mode=walltime -o addopts= -p no:cacheprovider
 ```
-
-## Cross-client A/B: the old client's benchmarks against neo
-
-Main's benchmark files exercise the old API (`con.execute(...).fetchall()`,
-`fetchnumpy`, `df`), which `duckdb.compat` speaks. The one-line plugin in
-[facade_plugin.py](facade_plugin.py) routes them at the migration face:
-
-```bash
-cd ../main   # the old client's checkout
-# neo, through the facade:
-PYTHONPATH=/path/to/neo/benchmarks BENCH_SCALE=10 \
-  /path/to/neo/.venv/bin/python -m pytest benchmarks/test_fetch_perf.py \
-  -p facade_plugin --codspeed --codspeed-mode=walltime -o addopts= -p no:cacheprovider
-# the released old client, same files:
-BENCH_SCALE=10 uv run --no-project --with duckdb --with pytest-codspeed --with pytz \
-  -- python -m pytest benchmarks/test_fetch_perf.py \
-  --codspeed --codspeed-mode=walltime -o addopts= -p no:cacheprovider
-```
-
-Modules that use surfaces the facade does not carry (relational expression
-objects, ingest registration) fail collection or error as missing surface;
-that is measurement, not breakage.
 
 ## Conventions
 

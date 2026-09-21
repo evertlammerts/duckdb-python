@@ -17,7 +17,6 @@
   <a href="frame.html">Frames &amp; Plans</a>
   <a href="udf.html">UDFs</a>
   <a class="here" href="extend.html">Macros &amp; Extensions</a>
-  <a href="compat.html">Compat</a>
 </nav>
 
 <div class="page">
@@ -58,7 +57,7 @@
 
 <section id="macros">
   <h2>Macros</h2>
-  <pre><code><span class="k">from</span> duckdb <span class="k">import</span> col, table, sql
+  <pre><code><span class="k">from</span> duckdb.frame <span class="k">import</span> col, table, sql
 
 con.create_macro(<span class="s">"add_up"</span>, [<span class="s">"a"</span>, (<span class="s">"b"</span>, <span class="s">1</span>)], col(<span class="s">"a"</span>) + col(<span class="s">"b"</span>))
 con.create_macro(<span class="s">"big_orders"</span>, [<span class="s">"floor"</span>], table(<span class="s">"orders"</span>).filter(col(<span class="s">"total"</span>) &gt; col(<span class="s">"floor"</span>)))
@@ -77,7 +76,7 @@ sql(<span class="s">"SELECT id FROM big_orders(1000)"</span>).rows(con)    <span
 
   <p class="lead-in">parameters</p>
   <p>Inside the body, <code>col(name)</code> refers to a parameter of that name. The engine tells a parameter from a column by name alone, and the parameter wins. A default is a plain value, written into the definition: a number, text, a date, <code>None</code>. An expression as a default is refused.</p>
-  <pre><code><span class="k">from</span> duckdb <span class="k">import</span> lit
+  <pre><code><span class="k">from</span> duckdb.frame <span class="k">import</span> lit
 
 con.create_macro(<span class="s">"vat"</span>, [<span class="s">"price"</span>, (<span class="s">"rate"</span>, <span class="s">0.21</span>)], col(<span class="s">"price"</span>) * (<span class="s">1</span> + col(<span class="s">"rate"</span>)))
 con.create_macro(<span class="s">"greet"</span>, [(<span class="s">"who"</span>, <span class="s">"world"</span>)], lit(<span class="s">"hello "</span>).concat(col(<span class="s">"who"</span>)))
@@ -94,7 +93,7 @@ sql(<span class="s">"SELECT count(*) FROM first_rows('orders', 2)"</span>).rows(
 
   <p class="lead-in">the body</p>
   <p>A scalar macro's body is any expression, aggregates and windows included. A plan's <code>.scalar()</code> puts a whole query in it. A table macro's body is any plan.</p>
-  <pre><code><span class="k">from</span> duckdb <span class="k">import</span> count_all, fn
+  <pre><code><span class="k">from</span> duckdb.frame <span class="k">import</span> count_all, fn
 
 con.create_macro(<span class="s">"my_avg"</span>, [<span class="s">"x"</span>], col(<span class="s">"x"</span>).mean())
 con.create_macro(<span class="s">"running"</span>, [<span class="s">"x"</span>, <span class="s">"o"</span>], col(<span class="s">"x"</span>).sum().over(order_by=col(<span class="s">"o"</span>)))
@@ -130,7 +129,7 @@ sql(<span class="s">"SELECT m(1), m(1, 2)"</span>).rows(con)                  <s
 
   <p class="lead-in">calling it</p>
   <p>From SQL, as above. From a plan, a scalar macro is a function and a table macro is a table function; <code>fn</code> and <code>table_function</code> call either by name, and the engine knows the result like any function's.</p>
-  <pre><code><span class="k">from</span> duckdb <span class="k">import</span> fn, table_function
+  <pre><code><span class="k">from</span> duckdb.frame <span class="k">import</span> fn, table_function
 
 table(<span class="s">"orders"</span>).select(fn(<span class="s">"add_up"</span>, col(<span class="s">"total"</span>), <span class="s">10</span>).alias(<span class="s">"x"</span>)).rows(con)
 table_function(<span class="s">"big_orders"</span>, <span class="s">1000</span>).select(<span class="s">"id"</span>).rows(con)             <span class="c"># [(1,), (3,)]</span>
@@ -286,7 +285,7 @@ con.run(<span class="s">"LOAD '/path/to/my.duckdb_extension'"</span>)   <span cl
   <div class="note">
     <p><strong>Downloading needs an engine the repository knows.</strong> An extension is built for one engine version, and the engine looks it up under its own version name. The repository has every release, and every one of DuckDB's nightly builds under the name that build carried, such as <code>v2.0.0-alpha40145</code>, the engine this page was written against: on it, <code>INSTALL httpfs</code>, <code>FORCE INSTALL httpfs</code>, <code>INSTALL excel</code> and <code>INSTALL quack</code> all download and load. An engine built from the same commit without that name calls itself <code>v2.0.0-dev83455</code>, looks under its commit hash instead, and gets <code>IOError: HTTP Error: Failed to download extension "httpfs" at URL "http://extensions.duckdb.org/8a81c84987/osx_arm64/httpfs.duckdb_extension.gz" (HTTP 404)</code>. Community extensions are published for releases only, so <code>INSTALL h3 FROM community</code> fails the same way on any nightly.</p>
   </div>
-  <p>The directory is the <code>extension_directory</code> setting, and can be given when connecting: <code>duckdb.connect(extension_directory="/srv/duckdb/ext")</code>. Loading an extension that is not installed raises <code>IOError</code> naming the file the engine looked for.</p>
+  <p>The directory is the <code>extension_directory</code> setting, and can be given when connecting: <code>duckdb.frame.connect(extension_directory="/srv/duckdb/ext")</code>. Loading an extension that is not installed raises <code>IOError</code> naming the file the engine looked for.</p>
 
   <p class="lead-in">autoloading</p>
   <p>The engine keeps a list of extensions it knows and the functions each one has. With <code>autoload_known_extensions</code> on, a query that names one of those functions loads its extension when the query is planned; with <code>autoinstall_known_extensions</code> on as well, it is downloaded first if it has to be. Both are on by default, so on a release <code>read_xlsx</code> on a fresh connection fetches <code>excel</code> and reads the file.</p>
@@ -295,7 +294,7 @@ con.run(<span class="s">"LOAD '/path/to/my.duckdb_extension'"</span>)   <span cl
 sql(<span class="s">"SELECT current_setting('autoload_known_extensions'), current_setting('autoinstall_known_extensions')"</span>).rows(con)
 <span class="c"># [(True, True)]</span>
 
-con.run(<span class="s">"SET autoload_known_extensions = false"</span>)      <span class="c"># or duckdb.connect(autoload_known_extensions="false")</span></code></pre>
+con.run(<span class="s">"SET autoload_known_extensions = false"</span>)      <span class="c"># or duckdb.frame.connect(autoload_known_extensions="false")</span></code></pre>
   <p>With autoloading off, the engine refuses the query and says which extension has the function:</p>
   <pre><code><span class="c"># CatalogError: Table Function with name "read_xlsx" is not in the catalog, but it exists in the excel extension.</span>
 <span class="c"># Please try installing and loading the excel extension by running:</span>
@@ -304,11 +303,11 @@ con.run(<span class="s">"SET autoload_known_extensions = false"</span>)      <sp
   <p>With loading on and installing off, a function whose extension is not installed raises <code>IOError</code> with the same advice. Not every extension is on the list: on this build <code>read_xlsx</code> tried to fetch <code>excel</code>, while <code>st_point</code> raised the <code>CatalogError</code> above naming <code>spatial</code> without trying, and needs an explicit <code>INSTALL</code> and <code>LOAD</code>.</p>
 
   <p class="lead-in">core and community</p>
-  <p>Core extensions are built and signed by the DuckDB team and come from <code>extensions.duckdb.org</code>, which is where a bare <code>INSTALL name</code> looks. Community extensions are built and signed by the community repository from other people's source, and come from <code>community-extensions.duckdb.org</code> with <code>INSTALL name FROM community</code>. The list of both, with a page per extension, is at <a href="https://duckdb.org/community_extensions/">duckdb.org/community_extensions</a>. The engine checks the signature when it loads; a library that is not signed, one you built yourself, loads only when the database was opened with <code>duckdb.connect(allow_unsigned_extensions="true")</code>. That setting cannot be changed once the database is running.</p>
+  <p>Core extensions are built and signed by the DuckDB team and come from <code>extensions.duckdb.org</code>, which is where a bare <code>INSTALL name</code> looks. Community extensions are built and signed by the community repository from other people's source, and come from <code>community-extensions.duckdb.org</code> with <code>INSTALL name FROM community</code>. The list of both, with a page per extension, is at <a href="https://duckdb.org/community_extensions/">duckdb.org/community_extensions</a>. The engine checks the signature when it loads; a library that is not signed, one you built yourself, loads only when the database was opened with <code>duckdb.frame.connect(allow_unsigned_extensions="true")</code>. That setting cannot be changed once the database is running.</p>
 
   <p class="lead-in">from a plan</p>
   <p>Once loaded, an extension's functions are the engine's. A scalar function is called with <code>fn</code>, or through the namespaces when one covers it; a table function is a plan through <code>table_function</code>, with named arguments spelled the way SQL spells them.</p>
-  <pre><code><span class="k">from</span> duckdb <span class="k">import</span> fn, table_function
+  <pre><code><span class="k">from</span> duckdb.frame <span class="k">import</span> fn, table_function
 
 table_function(<span class="s">"parquet_metadata"</span>, <span class="s">"orders.parquet"</span>).select(<span class="s">"row_group_id"</span>, <span class="s">"path_in_schema"</span>, <span class="s">"num_values"</span>).rows(con)
 <span class="c"># [(0, 'id', 3), (0, 'customer', 3), (0, 'region', 3), (0, 'total', 3)]</span>

@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import duckdb
-from duckdb import exceptions, sql
+from duckdb import exceptions
+from duckdb.frame import sql
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -373,7 +374,7 @@ def run_file(path: Path, tmp: Path, cwd: Path | None = None) -> Outcome:
     except LookupError as directive:
         outcome.skipped = str(directive)
         return outcome
-    con = duckdb.connect()
+    con = duckdb.frame.connect()
     previous = Path.cwd()
     if cwd is not None:
         os.chdir(cwd)

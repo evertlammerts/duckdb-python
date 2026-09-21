@@ -1,4 +1,4 @@
-"""Generate src/duckdb/_keywords.py from `duckdb_keywords()`: which names need quoting is DuckDB's to say."""
+"""Generate src/duckdb/frame/_keywords.py from `duckdb_keywords()`: which names need quoting is DuckDB's to say."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ def keywords(connection: object) -> list[tuple[str, str]]:
         "SELECT lower(keyword_name), string_agg(DISTINCT keyword_category, '/' ORDER BY keyword_category) "
         "FROM duckdb_keywords() GROUP BY 1 ORDER BY 1"
     )
-    return [(str(name), str(category)) for name, category in duckdb.sql(query).rows(connection)]  # type: ignore[arg-type]
+    return [(str(name), str(category)) for name, category in duckdb.frame.sql(query).rows(connection)]  # type: ignore[arg-type]
 
 
 def render(connection: object) -> str:
@@ -49,8 +49,8 @@ def main() -> int:
     args = parser.parse_args()
     import duckdb
 
-    text = render(duckdb.connect())
-    target = Path(__file__).resolve().parent.parent / "src" / "duckdb" / "_keywords.py"
+    text = render(duckdb.frame.connect())
+    target = Path(__file__).resolve().parent.parent / "src" / "duckdb" / "frame" / "_keywords.py"
     if args.check:
         if target.read_text() != text:
             print(f"{target} is stale; run scripts/gen_keywords.py", file=sys.stderr)

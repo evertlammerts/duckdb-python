@@ -61,7 +61,7 @@ public:
 		return static_cast<int>(Type(column).GetDecimalScale());
 	}
 
-	/// An ENUM column's labels in index order, for building a pandas categorical.
+	/// An ENUM column's labels in index order; the data buffer holds only the codes.
 	std::vector<std::string> EnumValues(cxx::idx_t column) const {
 		return duckdb_python::EnumValues(Type(column));
 	}

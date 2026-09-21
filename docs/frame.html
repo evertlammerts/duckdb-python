@@ -17,7 +17,6 @@
   <a class="here" href="frame.html">Frames &amp; Plans</a>
   <a href="udf.html">UDFs</a>
   <a href="extend.html">Macros &amp; Extensions</a>
-  <a href="compat.html">Compat</a>
 </nav>
 
 <div class="page">
@@ -48,10 +47,10 @@
 
 <section id="start">
   <h2>Start here</h2>
-  <pre><code><span class="k">import</span> duckdb
-<span class="k">from</span> duckdb <span class="k">import</span> col, table
+  <pre><code><span class="k">from</span> duckdb <span class="k">import</span> frame
+<span class="k">from</span> duckdb.frame <span class="k">import</span> col, table
 
-con = duckdb.connect(<span class="s">"shop.db"</span>)
+con = frame.connect(<span class="s">"shop.db"</span>)
 orders = table(<span class="s">"orders"</span>)
 
 orders.filter(col(<span class="s">"total"</span>) &gt; <span class="s">1000</span>).select(<span class="s">"customer"</span>, <span class="s">"total"</span>).rows(con)</code></pre>
@@ -80,7 +79,7 @@ orders.on(con).first()</code></pre>
     <dt>sql(text)</dt><dd>Any query, as SQL. Carry on from it with verbs.</dd>
     <dt>values(rows, columns)</dt><dd>Rows given here, in memory. Every value is bound when the plan runs. A column given as <code>(name, type)</code> is cast to that type.</dd>
   </dl>
-  <pre><code><span class="k">from</span> duckdb <span class="k">import</span> table, sql, values
+  <pre><code><span class="k">from</span> duckdb.frame <span class="k">import</span> table, sql, values
 
 orders  = table(<span class="s">"orders"</span>)
 emea    = sql(<span class="s">"SELECT * FROM orders WHERE region = 'emea'"</span>)
@@ -163,7 +162,7 @@ orders.describe()                                            <span class="c"># s
 <section id="exprs">
   <h2>Expressions</h2>
   <p>An expression is a piece of a query: a column, a value, or a computation over them. Build them with <code>col</code> and ordinary Python operators.</p>
-  <pre><code><span class="k">from</span> duckdb <span class="k">import</span> col, lit
+  <pre><code><span class="k">from</span> duckdb.frame <span class="k">import</span> col, lit
 
 col(<span class="s">"age"</span>) &gt;= <span class="s">18</span>
 <span class="s">100</span> - col(<span class="s">"discount"</span>)
@@ -263,10 +262,9 @@ plan.to_dicts(con)      <span class="c"># every row, as a dict keyed by column</
 plan.count(con)             <span class="c"># how many rows, without fetching them</span>
 plan.show(con)              <span class="c"># print the first ten as a table; preview(con) returns the text</span></code></pre>
 
-  <p class="lead-in">arrays and dataframes</p>
-  <pre><code>plan.to_numpy(con)      <span class="c"># {column: ndarray}; columns holding NULLs come back masked</span>
-plan.to_pandas(con)     <span class="c"># a DataFrame</span></code></pre>
-  <p>Columns convert from the engine's own vectors, never through rows. In a frame, a column holding NULLs gets pandas' nullable dtype and <code>pd.NA</code>; one without stays a plain numpy dtype, so a clean result costs nothing extra. ENUM becomes an ordered Categorical, TIMESTAMPTZ comes back UTC&#8209;aware, and <code>to_pandas(con, date_as_object=True)</code> gives dates as <code>datetime.date</code>. DECIMAL and HUGEINT become float64 on this path; when the exact values matter, fetch rows, which keeps <code>Decimal</code> and Python's int. An empty result keeps every column's dtype.</p>
+  <p class="lead-in">arrays</p>
+  <pre><code>plan.to_numpy(con)      <span class="c"># {column: ndarray}; columns holding NULLs come back masked</span></code></pre>
+  <p>Columns convert from the engine's own vectors, never through rows. A column holding NULLs comes back as a masked array; one without is a plain ndarray, so a clean result costs nothing extra. ENUM comes back as strings with <code>None</code> for NULL, and TIMESTAMPTZ as <code>datetime64</code> instants in UTC. DECIMAL and HUGEINT become float64 on this path; when the exact values matter, fetch rows, which keeps <code>Decimal</code> and Python's int. An empty result keeps every column's dtype.</p>
 
   <p class="lead-in">stopping a query</p>
   <p>A Ctrl&#8209;C while a query runs cancels it and raises <code>KeyboardInterrupt</code>. From another thread, <code>con.interrupt()</code> cancels whatever the connection is running; the query fails with <code>InterruptError</code>.</p>
@@ -279,7 +277,7 @@ plan.to_pandas(con)     <span class="c"># a DataFrame</span></code></pre>
 
   <p class="lead-in">values supplied at run time</p>
   <p>Use <code>param(name)</code> where a value goes, and pass it when running:</p>
-  <pre><code><span class="k">from</span> duckdb <span class="k">import</span> param
+  <pre><code><span class="k">from</span> duckdb.frame <span class="k">import</span> param
 
 by_region = orders.filter(col(<span class="s">"region"</span>) == param(<span class="s">"where"</span>))
 
@@ -431,7 +429,7 @@ orders.filter(sql_expr(<span class="s">"region = 'emea' AND total &gt; 1000"</sp
     <dt>values(rows, columns)</dt><dd>Rows given in memory; <code>columns</code> are names or (name, type) pairs, and a type given is a cast.</dd>
     <dt>read_csv / read_parquet / read_json(path, **options)</dt><dd>A file, files or a glob through the engine's reader; options under their SQL names.</dd>
     <dt>table_function(name, *args, **named)</dt><dd>Any table function in a FROM clause.</dd>
-    <dt>duckdb.connect(path, **options)</dt><dd>Open a connection. <code>path</code> is a string or a <code>pathlib.Path</code>; the default is an in-memory database.</dd>
+    <dt>connect(path, **options)</dt><dd>Open a connection. <code>path</code> is a string or a <code>pathlib.Path</code>; the default is an in-memory database.</dd>
     <dt>con.run(sql, params)</dt><dd>Run a statement; returns rows changed.</dd>
     <dt>con.transaction()</dt><dd>The block as one transaction: COMMIT on success, ROLLBACK on any error.</dd>
     <dt>con.interrupt()</dt><dd>Cancel the running query from another thread; it fails with <code>InterruptError</code>. Ctrl&#8209;C in the querying thread does the same and raises <code>KeyboardInterrupt</code>.</dd>
@@ -464,7 +462,7 @@ orders.filter(sql_expr(<span class="s">"region = 'emea' AND total &gt; 1000"</sp
   <h3>With a connection</h3>
   <dl class="ref">
     <dt>.rows(con) / .first(con) / .iter_rows(con) / .to_dicts(con) / .count(con)</dt><dd>Rows out. All take <code>parameters=</code>.</dd>
-    <dt>.to_numpy(con) / .to_pandas(con, date_as_object=False)</dt><dd>Columns out, straight from the engine's vectors. NULLs are masked entries, or <code>pd.NA</code> under pandas' nullable dtypes.</dd>
+    <dt>.to_numpy(con)</dt><dd>Columns out, straight from the engine's vectors. NULLs are masked entries.</dd>
     <dt>.on(con)</dt><dd>The plan on a connection: every method here, with no connection argument.</dd>
     <dt>.show(con, limit) / .preview(con, limit)</dt><dd>Print, or return, a table of the first rows.</dd>
     <dt>.columns(con) / .types(con) / .schema(con)</dt><dd>What it produces.</dd>
@@ -510,10 +508,10 @@ orders.filter(sql_expr(<span class="s">"region = 'emea' AND total &gt; 1000"</sp
 
 <section id="changes">
   <h2>Changes from the old client</h2>
-  <p>What is different for code written against the old <code>duckdb</code> package's relational API. Code that needs the old client as it was runs on <a href="compat.html"><code>duckdb.compat</code></a>.</p>
+  <p>What is different for code written against the old <code>duckdb</code> package's relational API.</p>
   <dl class="ref">
-    <dt>A plan holds no connection</dt><dd><code>duckdb.sql()</code> returns a plan and runs nothing. The old module-level <code>sql</code>, <code>execute</code> and <code>query</code> ran on an implicit default connection. Pass one to <code>rows()</code>, or put the plan on one with <code>on()</code>.</dd>
-    <dt>sql() runs nothing</dt><dd>Whatever the text is, it is a plan until a connection runs it. The old <code>sql()</code> ran a statement without rows on the spot and returned <code>None</code>; here that is <code>con.run()</code>. In <code>duckdb.compat</code>, a row-producing <code>CALL</code> runs once at <code>sql()</code> and its rows are carried; the old relation re-ran it on every fetch.</dd>
+    <dt>A plan holds no connection</dt><dd><code>sql()</code> returns a plan and runs nothing. The old module-level <code>sql</code>, <code>execute</code> and <code>query</code> ran on an implicit default connection. Pass one to <code>rows()</code>, or put the plan on one with <code>on()</code>.</dd>
+    <dt>sql() runs nothing</dt><dd>Whatever the text is, it is a plan until a connection runs it. The old <code>sql()</code> ran a statement without rows on the spot and returned <code>None</code>; here that is <code>con.run()</code>.</dd>
     <dt>A string inside an expression is a value</dt><dd><code>col("state") == "active"</code> compares with the text <code>active</code>. The old client read it as a reference to a column named <code>active</code>. A column is always <code>col(...)</code>.</dd>
     <dt>A string in a verb is a column name</dt><dd><code>select("total * 2")</code> names a column called <code>total * 2</code>, quoted, and the engine refuses it. The old <code>project("total * 2")</code> was a SQL fragment. Write <code>col("total") * 2</code>, or <code>sql_expr("total * 2")</code>.</dd>
     <dt>filter() takes an expression</dt><dd>SQL text goes through <code>sql_expr</code>: <code>filter(sql_expr("total &gt; 1000"))</code>. The old <code>filter("total &gt; 1000")</code> took the text as it was.</dd>
@@ -523,7 +521,7 @@ orders.filter(sql_expr(<span class="s">"region = 'emea' AND total &gt; 1000"</sp
     <dt>types() is text</dt><dd><code>columns()</code>, <code>types()</code> and <code>schema()</code> are methods and take the connection whose catalog answers. Types come back as text, <code>DECIMAL(6,2)</code>, where the old client returned <code>DuckDBPyType</code> objects.</dd>
     <dt>describe() is SUMMARIZE</dt><dd>One row per column, with the engine's statistics. The old <code>describe()</code> gave one row per statistic (count, mean, stddev, min, max, median) and a column per input column.</dd>
     <dt>No len(), shape or iteration</dt><dd>A plan cannot count or iterate itself. <code>count(con)</code> counts; <code>rows(con)</code> and <code>iter_rows(con)</code> iterate; <code>for row in plan</code> raises.</dd>
-    <dt>Fetching and writing</dt><dd><code>fetchall()</code>, <code>fetchone()</code>, <code>fetchnumpy()</code> and <code>fetchdf()</code> are <code>rows(con)</code>, <code>first(con)</code>, <code>to_numpy(con)</code> and <code>to_pandas(con)</code>. <code>sql_query()</code> is <code>render()</code>. <code>write_csv(sep=...)</code> and <code>write_parquet()</code> are <code>to_csv</code> and <code>to_parquet</code>, with <code>COPY</code>'s own option names.</dd>
+    <dt>Fetching and writing</dt><dd><code>fetchall()</code>, <code>fetchone()</code> and <code>fetchnumpy()</code> are <code>rows(con)</code>, <code>first(con)</code> and <code>to_numpy(con)</code>; <code>fetchdf()</code> has no counterpart. <code>sql_query()</code> is <code>render()</code>. <code>write_csv(sep=...)</code> and <code>write_parquet()</code> are <code>to_csv</code> and <code>to_parquet</code>, with <code>COPY</code>'s own option names.</dd>
     <dt>Expression names</dt><dd><code>ColumnExpression</code>, <code>ConstantExpression</code>, <code>FunctionExpression</code>, <code>StarExpression</code>, <code>SQLExpression</code> and <code>CoalesceOperator</code> are <code>col</code>, <code>lit</code>, <code>fn</code>, <code>star</code>, <code>sql_expr</code> and <code>coalesce</code>. <code>CaseExpression(cond, value)</code> is <code>when(cond).then(value)</code>. <code>isnull</code> and <code>isnotnull</code> are <code>is_null</code> and <code>is_not_null</code>; <code>isnotin</code> is <code>~col(...).isin(...)</code>.</dd>
     <dt>No replacement scan</dt><dd>A DataFrame or a plan in scope is not a table: <code>sql("SELECT * FROM df")</code> does not find it. The implicit <code>FROM df</code> scan of local DataFrames and relations is not there yet.</dd>
   </dl>

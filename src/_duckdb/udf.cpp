@@ -32,10 +32,6 @@ struct PyFunctionData {
 	std::shared_ptr<ModuleState> module;
 };
 
-bool IsPandasNA(nb::handle object) {
-	return nb::cast<std::string>(nb::handle(Py_TYPE(object.ptr())).attr("__name__")) == "NAType";
-}
-
 /// Called from DuckDB's own threads, so the GIL is taken here once per batch; the arguments arrive already cast.
 void PyScalarExec(cxx::ScalarFunction::ExecInput &input) {
 	auto &data = input.GetUserData<PyFunctionData>();
@@ -87,11 +83,6 @@ void PyScalarExec(cxx::ScalarFunction::ExecInput &input) {
 				// SetValue casts to the column's type, so the declared return type is enforced here.
 				result.SetValue(r, PythonToValue(context, object, data.module->conversion));
 			} catch (const UnsupportedTypeException &error) {
-				// pandas' NA has no DuckDB value but means NULL, as the previous package treated it.
-				if (IsPandasNA(object)) {
-					result.SetNull(r);
-					continue;
-				}
 				throw cxx::InvalidInputException("the UDF '" + data.name + "' returned a value of type " +
 				                                 error.TypeName() +
 				                                 ", which cannot be converted to a DuckDB value");

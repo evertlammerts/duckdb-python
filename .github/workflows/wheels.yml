@@ -231,12 +231,6 @@ jobs:
           uv run --no-sync python scripts/gen_func_namespaces.py --check
           uv run --no-sync python scripts/gen_keywords.py --check
 
-      # A measurement, never a gate: the previous package's tests run here and the report always exits 0.
-      - name: Compat coverage report
-        run: |
-          uv run --no-sync python scripts/compat_report.py
-          uv run --no-sync python scripts/compat_report.py --facade
-
   coverage:
     name: Seam coverage
     needs: engine

@@ -20,7 +20,6 @@ BINDING_FRACTION_CUTOFF = 0.25  # below this share, a bench is mostly DuckDB and
 _E = "benchmarks/test_engine_control_perf.py"
 FLOOR_MAP = {
     "benchmarks/test_produce_numpy_perf.py::test_to_numpy_numeric": f"{_E}::test_engine_sum_2col_500k",
-    "benchmarks/test_produce_numpy_perf.py::test_to_pandas_numeric": f"{_E}::test_engine_sum_2col_500k",
     "benchmarks/test_produce_numpy_perf.py::test_to_numpy_null_int": f"{_E}::test_engine_sum_1col_200k",
 }
 

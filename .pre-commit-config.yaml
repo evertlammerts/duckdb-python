@@ -1,6 +1,4 @@
 # Fast checks only: anything needing a built extension runs in CI, since a hook that waits on a build gets turned off.
-# compat/suite holds the previous package's tests unchanged, so even a whitespace fixer would drift them.
-exclude: ^compat/suite/
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0

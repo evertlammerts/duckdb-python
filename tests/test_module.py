@@ -12,7 +12,7 @@ import duckdb
 
 from ._support import installed_as_wheel
 
-# Libraries the package can convert to, each imported only inside the function that needs it.
+# Data libraries a user may have installed; importing this package must never load them on its own.
 OPTIONAL_DEPENDENCIES = ("numpy", "pandas", "pyarrow", "polars")
 
 

@@ -21,39 +21,39 @@ N_STR = scaled(100_000)
 N_NEST = scaled(50_000)
 
 
-def _bench_rows(benchmark: BenchmarkFixture, con: duckdb.Connection, query: str) -> None:
-    duckdb.sql(query).rows(con)  # warm the engine before measuring
-    benchmark(lambda: duckdb.sql(query).rows(con))
+def _bench_rows(benchmark: BenchmarkFixture, con: duckdb.frame.Connection, query: str) -> None:
+    duckdb.frame.sql(query).rows(con)  # warm the engine before measuring
+    benchmark(lambda: duckdb.frame.sql(query).rows(con))
 
 
-def test_rows_small_probe(benchmark: BenchmarkFixture, con: duckdb.Connection) -> None:
+def test_rows_small_probe(benchmark: BenchmarkFixture, con: duckdb.frame.Connection) -> None:
     _bench_rows(benchmark, con, "SELECT i::BIGINT AS a FROM range(2048) t(i)")
 
 
-def test_rows_int(benchmark: BenchmarkFixture, con: duckdb.Connection) -> None:
+def test_rows_int(benchmark: BenchmarkFixture, con: duckdb.frame.Connection) -> None:
     _bench_rows(benchmark, con, f"SELECT i::BIGINT AS a FROM range({N_ROW}) t(i)")
 
 
-def test_rows_double(benchmark: BenchmarkFixture, con: duckdb.Connection) -> None:
+def test_rows_double(benchmark: BenchmarkFixture, con: duckdb.frame.Connection) -> None:
     _bench_rows(benchmark, con, f"SELECT (i * 1.5)::DOUBLE AS a FROM range({N_ROW}) t(i)")
 
 
-def test_rows_2int(benchmark: BenchmarkFixture, con: duckdb.Connection) -> None:
+def test_rows_2int(benchmark: BenchmarkFixture, con: duckdb.frame.Connection) -> None:
     _bench_rows(benchmark, con, f"SELECT i::BIGINT AS a, (i + 1)::BIGINT AS b FROM range({N_ROW}) t(i)")
 
 
-def test_rows_null_int(benchmark: BenchmarkFixture, con: duckdb.Connection) -> None:
+def test_rows_null_int(benchmark: BenchmarkFixture, con: duckdb.frame.Connection) -> None:
     # Real NULLs, or the cheap all-valid path is measured instead.
     _bench_rows(
         benchmark, con, f"SELECT CASE WHEN i % 13 = 0 THEN NULL ELSE i END::BIGINT AS a FROM range({N_ROW}) t(i)"
     )
 
 
-def test_rows_str(benchmark: BenchmarkFixture, con: duckdb.Connection) -> None:
+def test_rows_str(benchmark: BenchmarkFixture, con: duckdb.frame.Connection) -> None:
     _bench_rows(benchmark, con, f"SELECT ('str_value_' || i) AS s FROM range({N_STR}) t(i)")
 
 
-def test_rows_mixed(benchmark: BenchmarkFixture, con: duckdb.Connection) -> None:
+def test_rows_mixed(benchmark: BenchmarkFixture, con: duckdb.frame.Connection) -> None:
     query = (
         "SELECT i::BIGINT AS bi, ('str_' || i) AS s, [i, i + 1, i + 2] AS lst, "
         f"{{'a': i, 'b': i + 1}} AS st FROM range({N_NEST}) t(i)"
@@ -61,9 +61,9 @@ def test_rows_mixed(benchmark: BenchmarkFixture, con: duckdb.Connection) -> None
     _bench_rows(benchmark, con, query)
 
 
-def test_iter_rows(benchmark: BenchmarkFixture, con: duckdb.Connection) -> None:
+def test_iter_rows(benchmark: BenchmarkFixture, con: duckdb.frame.Connection) -> None:
     query = f"SELECT i::BIGINT AS a, (i * 1.5)::DOUBLE AS b FROM range({N_STR}) t(i)"
-    plan = duckdb.sql(query)
+    plan = duckdb.frame.sql(query)
     sum(1 for _ in plan.iter_rows(con))  # warm
 
     def drain() -> int:

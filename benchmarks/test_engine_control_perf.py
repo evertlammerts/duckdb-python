@@ -22,18 +22,18 @@ Q_2C_500K = (
 )
 
 
-def _bench(benchmark: BenchmarkFixture, con: duckdb.Connection, query: str) -> None:
-    duckdb.sql(query).rows(con)  # warm the engine before measuring
-    benchmark(lambda: duckdb.sql(query).rows(con))
+def _bench(benchmark: BenchmarkFixture, con: duckdb.frame.Connection, query: str) -> None:
+    duckdb.frame.sql(query).rows(con)  # warm the engine before measuring
+    benchmark(lambda: duckdb.frame.sql(query).rows(con))
 
 
-def test_engine_sum_1col_small(benchmark: BenchmarkFixture, con: duckdb.Connection) -> None:
+def test_engine_sum_1col_small(benchmark: BenchmarkFixture, con: duckdb.frame.Connection) -> None:
     _bench(benchmark, con, Q_1C_SMALL)
 
 
-def test_engine_sum_1col_200k(benchmark: BenchmarkFixture, con: duckdb.Connection) -> None:
+def test_engine_sum_1col_200k(benchmark: BenchmarkFixture, con: duckdb.frame.Connection) -> None:
     _bench(benchmark, con, Q_1C_200K)
 
 
-def test_engine_sum_2col_500k(benchmark: BenchmarkFixture, con: duckdb.Connection) -> None:
+def test_engine_sum_2col_500k(benchmark: BenchmarkFixture, con: duckdb.frame.Connection) -> None:
     _bench(benchmark, con, Q_2C_500K)

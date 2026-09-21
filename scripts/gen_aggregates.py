@@ -1,4 +1,4 @@
-"""Generate src/duckdb/_aggregates.py from func_namespaces.toml, so the aggregate methods type and complete."""
+"""Generate src/duckdb/frame/_aggregates.py from func_namespaces.toml, so the aggregate methods type and complete."""
 
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ def verify(connection: object) -> list[str]:
     import duckdb
 
     query = "SELECT DISTINCT function_name FROM duckdb_functions() WHERE function_type = 'aggregate'"
-    known = {row[0] for row in duckdb.sql(query).rows(connection)}  # type: ignore[arg-type]
+    known = {row[0] for row in duckdb.frame.sql(query).rows(connection)}  # type: ignore[arg-type]
     return sorted({function for function, _ in AGGREGATES.values()} - known)
 
 
@@ -66,11 +66,11 @@ def main() -> int:
     args = parser.parse_args()
     import duckdb
 
-    missing = verify(duckdb.connect())
+    missing = verify(duckdb.frame.connect())
     if missing:
         print(f"no aggregate in this engine's catalog for: {', '.join(missing)}", file=sys.stderr)
         return 1
-    target = Path(__file__).resolve().parent.parent / "src" / "duckdb" / "_aggregates.py"
+    target = Path(__file__).resolve().parent.parent / "src" / "duckdb" / "frame" / "_aggregates.py"
     text = render()
     if args.check:
         if target.read_text() != text:

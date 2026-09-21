@@ -9,7 +9,7 @@ import uuid
 import pytest
 
 from duckdb import _duckdb, exceptions
-from duckdb.expr import (
+from duckdb.frame.expr import (
     Expr,
     ParamSink,
     coalesce,
@@ -407,7 +407,7 @@ class TestEveryAdvertisedFunctionExecutes:
 
     @pytest.mark.parametrize("name", sorted(WINDOW_CALLS))
     def test_window(self, con: _duckdb.Connection, data: str, name: str) -> None:
-        import duckdb.expr as expr_module
+        import duckdb.frame.expr as expr_module
 
         expression = getattr(expr_module, name)(*WINDOW_CALLS[name]).over(order_by=col("v"))
         con.execute(f"SELECT {expression.fragment()} FROM {data}").fetch_all()

@@ -19,8 +19,8 @@ import os
 from collections.abc import Iterable, Sized
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
+from ..exceptions import Error
 from .connection import Connection, LiveResult
-from .exceptions import Error
 from .expr import (
     Col,
     Expr,
@@ -48,8 +48,6 @@ from .expr import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
-
-    import pandas
 
 __all__ = [
     "Bound",
@@ -1169,7 +1167,7 @@ class Frame(PlanBase):
         """The connection a plan runs on; a `dbapi.Connection` is refused because it tracks its cursors' live result."""
         if not isinstance(connection, Connection):
             message = (
-                f"a plan runs on a duckdb.Connection, not {_type_name(connection)}; "
+                f"a plan runs on a duckdb.frame.Connection, not {_type_name(connection)}; "
                 f"to run it through the DB-API, execute plan.render() on a cursor"
             )
             raise TypeError(message)
@@ -1228,25 +1226,6 @@ class Frame(PlanBase):
         sql, values = self._sql_and_values(connection=connection, parameters=parameters)
         with connection._execute(sql, values) as result:
             return fetch_numpy(result.result)
-
-    def to_pandas(
-        self,
-        connection: Connection,
-        *,
-        parameters: Mapping[str, object] | None = None,
-        date_as_object: bool = False,
-    ) -> pandas.DataFrame:
-        """The rows as a pandas DataFrame.
-
-        Columns holding NULLs get pandas nullable dtypes and the rest plain numpy ones, ENUM becomes Categorical,
-        TIMESTAMPTZ comes back UTC-aware, and DATE follows `date_as_object`.
-        """
-        from ._numpy import to_dataframe
-
-        connection = self._on(connection)
-        sql, values = self._sql_and_values(connection=connection, parameters=parameters)
-        with connection._execute(sql, values) as result:
-            return to_dataframe(result.result, date_as_object=date_as_object)
 
     def on(self, connection: Connection) -> Bound:
         """This plan with a connection filled in, so `plan.on(con).rows()` takes no argument; the plan is unchanged."""
@@ -1406,12 +1385,6 @@ class Bound:
     def to_numpy(self, *, parameters: Mapping[str, object] | None = None) -> dict[str, Any]:
         """Every column as a numpy array; columns holding NULLs come back masked."""
         return self.plan.to_numpy(self.connection, parameters=parameters)
-
-    def to_pandas(
-        self, *, parameters: Mapping[str, object] | None = None, date_as_object: bool = False
-    ) -> pandas.DataFrame:
-        """The rows as a pandas DataFrame."""
-        return self.plan.to_pandas(self.connection, parameters=parameters, date_as_object=date_as_object)
 
     def count(self, *, parameters: Mapping[str, object] | None = None) -> int:
         """How many rows the plan produces."""

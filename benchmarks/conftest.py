@@ -25,8 +25,8 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 @pytest.fixture
-def con() -> Iterator[duckdb.Connection]:
+def con() -> Iterator[duckdb.frame.Connection]:
     """A fresh single-threaded connection; `threads=1` keeps counts steady whatever the runner's core count."""
-    connection = duckdb.connect(threads="1")
+    connection = duckdb.frame.connect(threads="1")
     yield connection
     connection.close()

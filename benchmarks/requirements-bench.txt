@@ -6,11 +6,8 @@ markdown-it-py==4.2.0
 mdurl==0.1.2
 numpy==2.5.2
 packaging==26.3
-pandas==3.0.5
 pluggy==1.6.0
 pygments==2.21.0
 pytest==9.1.1
 pytest-codspeed==5.0.3
-python-dateutil==2.9.0.post0
 rich==15.0.0
-six==1.17.0

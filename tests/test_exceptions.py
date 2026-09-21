@@ -58,10 +58,10 @@ def test_unknown_code_degrades_instead_of_raising() -> None:
 def test_a_file_held_open_elsewhere_is_an_operational_error(tmp_path: Path) -> None:
     # A file held elsewhere is a condition of the environment, not a mistake in the statement.
     path = str(tmp_path / "held.db")
-    holder = duckdb.connect(path)
+    holder = duckdb.frame.connect(path)
     try:
         with pytest.raises(exceptions.OperationalError, match=r"^Resource In Use Error") as caught:
-            duckdb.connect(path)
+            duckdb.frame.connect(path)
     finally:
         holder.close()
     assert not isinstance(caught.value, exceptions.ProgrammingError)

@@ -892,35 +892,35 @@ class JsonExpr(StrExpr):
         return self._call("json_array_length", *args)
 
     def contains(self, *args: object) -> Expr:
-        """The `json_contains` function. Arguments: col1. SQL: `json_contains`."""
+        """The `json_contains` function. Arguments: needle. SQL: `json_contains`."""
         return self._call("json_contains", *args)
 
     def deep_merge(self, *args: object) -> JsonExpr:
-        """The `json_deep_merge` function. Arguments: col1. SQL: `json_deep_merge`."""
+        """The `json_deep_merge` function. Arguments: json2. SQL: `json_deep_merge`."""
         return JsonExpr(self._call("json_deep_merge", *args))
 
     def exists(self, *args: object) -> Expr:
-        """The `json_exists` function. Arguments: col1. SQL: `json_exists`."""
+        """The `json_exists` function. Arguments: path. SQL: `json_exists`."""
         return self._call("json_exists", *args)
 
     def extract(self, *args: object) -> JsonExpr:
-        """The `json_extract` function. Arguments: col1. SQL: `json_extract`."""
+        """The `json_extract` function. Arguments: path. SQL: `json_extract`."""
         return JsonExpr(self._call("json_extract", *args))
 
     def extract_path(self, *args: object) -> JsonExpr:
-        """The `json_extract_path` function. Arguments: col1. SQL: `json_extract_path`."""
+        """The `json_extract_path` function. Arguments: path. SQL: `json_extract_path`."""
         return JsonExpr(self._call("json_extract_path", *args))
 
     def extract_path_text(self, *args: object) -> StrExpr:
-        """The `json_extract_path_text` function. Arguments: col1. SQL: `json_extract_path_text`."""
+        """The `json_extract_path_text` function. Arguments: path. SQL: `json_extract_path_text`."""
         return StrExpr(self._call("json_extract_path_text", *args))
 
     def extract_string(self, *args: object) -> StrExpr:
-        """The `json_extract_string` function. Arguments: col1. SQL: `json_extract_string`."""
+        """The `json_extract_string` function. Arguments: path. SQL: `json_extract_string`."""
         return StrExpr(self._call("json_extract_string", *args))
 
     def insert(self, *args: object) -> JsonExpr:
-        """The `json_insert` function. Arguments: col1, col2. SQL: `json_insert`."""
+        """The `json_insert` function. Arguments: path, value. SQL: `json_insert`."""
         return JsonExpr(self._call("json_insert", *args))
 
     def keys(self, *args: object) -> ListExpr:
@@ -928,7 +928,7 @@ class JsonExpr(StrExpr):
         return ListExpr(self._call("json_keys", *args))
 
     def merge_patch_diff(self, *args: object) -> JsonExpr:
-        """The `json_merge_patch_diff` function. Arguments: col1. SQL: `json_merge_patch_diff`."""
+        """The `json_merge_patch_diff` function. Arguments: new. SQL: `json_merge_patch_diff`."""
         return JsonExpr(self._call("json_merge_patch_diff", *args))
 
     def normalize(self, *args: object) -> StrExpr:
@@ -944,15 +944,15 @@ class JsonExpr(StrExpr):
         return StrExpr(self._call("json_pretty", *args))
 
     def remove(self, *args: object) -> JsonExpr:
-        """The `json_remove` function. Arguments: col1. SQL: `json_remove`."""
+        """The `json_remove` function. Arguments: path. SQL: `json_remove`."""
         return JsonExpr(self._call("json_remove", *args))
 
     def replace(self, *args: object) -> JsonExpr:
-        """The `json_replace` function. Arguments: col1, col2. SQL: `json_replace`."""
+        """The `json_replace` function. Arguments: path, value. SQL: `json_replace`."""
         return JsonExpr(self._call("json_replace", *args))
 
     def set(self, *args: object) -> JsonExpr:
-        """The `json_set` function. Arguments: col1, col2. SQL: `json_set`."""
+        """The `json_set` function. Arguments: path, value. SQL: `json_set`."""
         return JsonExpr(self._call("json_set", *args))
 
     def strip_nulls(self, *args: object) -> JsonExpr:
@@ -968,7 +968,7 @@ class JsonExpr(StrExpr):
         return self._call("json_transform", *args)
 
     def transform_strict(self, *args: object) -> Expr:
-        """The `json_transform_strict` function. Arguments: col1. SQL: `json_transform_strict`."""
+        """The `json_transform_strict` function. Arguments: structure. SQL: `json_transform_strict`."""
         return self._call("json_transform_strict", *args)
 
     def type(self, *args: object) -> StrExpr:
@@ -980,5 +980,5 @@ class JsonExpr(StrExpr):
         return self._call("json_valid", *args)
 
     def value(self, *args: object) -> StrExpr:
-        """The `json_value` function. Arguments: col1. SQL: `json_value`."""
+        """The `json_value` function. Arguments: path. SQL: `json_value`."""
         return StrExpr(self._call("json_value", *args))

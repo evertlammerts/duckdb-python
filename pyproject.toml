@@ -25,23 +25,18 @@ build = [
     "scikit-build-core>=0.10",
     "nanobind>=2.13",
 ]
+# numpy is what the egress tests need; the package itself depends on nothing.
 dev = [
     "pytest>=8",
     "pytest-cov>=5",
     "ruff>=0.6",
     "mypy>=1.11",
-]
-# What the copied tests and the type stubs need; the package itself depends on nothing.
-compat = [
     "numpy",
-    "pandas",
-    "pandas-stubs",
 ]
 # The benchmark harness; CI installs the frozen pins in benchmarks/requirements-bench.txt, so keep both in step.
 bench = [
     "pytest-codspeed>=5",
     "numpy",
-    "pandas",
 ]
 
 [tool.pytest.ini_options]
@@ -59,8 +54,6 @@ markers = [
 line-length = 120
 indent-width = 4
 target-version = "py311"
-# compat/suite holds the previous package's tests unchanged, so nothing may rewrite them.
-extend-exclude = ["compat/suite"]
 
 [tool.ruff.lint]
 select = [
@@ -90,9 +83,9 @@ convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
 # Operator methods return NotImplemented for an operand that is not ours, and its type cannot be spelled.
-"src/duckdb/expr.py" = ["ANN401"]
+"src/duckdb/frame/expr.py" = ["ANN401"]
 # Naming these types would mean importing numpy into a package that depends on nothing.
-"src/duckdb/_numpy.py" = ["ANN401"]
+"src/duckdb/frame/_numpy.py" = ["ANN401"]
 # Test names are the documentation; what matters is explained where it applies.
 "tests/*" = ["D100", "D101", "D102", "D103"]
 # Benchmark names are the documentation, same as tests.

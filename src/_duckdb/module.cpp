@@ -69,23 +69,21 @@ public:
 	}
 
 private:
-	static cxx::Database Open(cxx::Environment &environment, const std::string &path,
+	static cxx::Instance Open(cxx::Environment &environment, const std::string &path,
 	                          const std::vector<std::pair<std::string, std::string>> &options) {
-		if (options.empty()) {
-			return environment.Open(path);
-		}
-		std::vector<cxx::DatabaseOption> opts;
-		opts.reserve(options.size());
+		auto instance = environment.CreateInstance();
+		// A startup-only setting such as access_mode is accepted only before the first attach.
 		for (const auto &[name, value] : options) {
-			opts.emplace_back(name, value);
+			instance.SetOption(name, value);
 		}
-		return environment.Open(path, opts);
+		instance.Attach(path, true);
+		return instance;
 	}
 
 	std::shared_ptr<ModuleState> module;
 	// Declared before the database so it is destroyed after it, since DuckDB only borrows these callables.
 	std::vector<nb::object> callables;
-	cxx::Database database;
+	cxx::Instance database;
 };
 
 class Connection {
@@ -182,7 +180,7 @@ public:
 	}
 
 	void SetOption(const std::string &name, const std::string &value) {
-		Live().engine->SetOption(cxx::DatabaseOption(name, value));
+		Live().engine->SetOption(name, value);
 	}
 
 	/// Disconnect now rather than at collection; repeatable, and every other method refuses afterwards.

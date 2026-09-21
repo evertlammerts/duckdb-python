@@ -7,6 +7,8 @@
 blurb = "Text functions, applied to this expression as the string."
 covers = "string"
 ignore = [
+  # Composes a name=value directory component from a column name and a value; neither argument is the string a method would act on.
+  "hive_partition_component",
   "array_extract",
   "bar",
   "chr",

@@ -17,7 +17,6 @@
   <a href="frame.html">Frames &amp; Plans</a>
   <a href="udf.html">UDFs</a>
   <a href="extend.html">Macros &amp; Extensions</a>
-  <a href="compat.html">Compat</a>
 </nav>
 
 <div class="page">
@@ -369,24 +368,24 @@ Error
 
 <section id="changes">
   <h2>Changes from the old client</h2>
-  <p>For someone arriving from the old <code>duckdb</code> package. Each row is a deliberate difference, logged in <code>compat/BEHAVIOR.md</code>. Code that needs the old client as it was runs on <code>duckdb.compat</code>; that is <a href="compat.html">Compat</a>.</p>
+  <p>For someone arriving from the old <code>duckdb</code> package. Each row is a deliberate difference.</p>
   <div class="tablewrap">
     <table>
       <thead><tr><th>Old client</th><th>Now</th></tr></thead>
       <tbody>
-        <tr><td><code>duckdb.connect()</code> returned an object carrying <code>execute</code>, the fetch family, <code>description</code> and <code>rowcount</code>.</td><td><code>duckdb.connect()</code> carries none of that. The DB-API vocabulary lives in <code>duckdb.dbapi</code>, strictly PEP 249, and in <code>duckdb.compat</code>, as the old client had it.</td></tr>
-        <tr><td><code>cursor()</code> handed back an independent duplicate connection with its own transaction, closed along with its parent.</td><td>Cursors share their connection's transaction, as PEP 249 requires. <code>duckdb.compat</code> keeps the old semantics.</td></tr>
+        <tr><td><code>duckdb.connect()</code> returned an object carrying <code>execute</code>, the fetch family, <code>description</code> and <code>rowcount</code>.</td><td><code>duckdb.frame.connect()</code> carries none of that. The DB-API vocabulary lives in <code>duckdb.dbapi</code>, strictly PEP 249.</td></tr>
+        <tr><td><code>cursor()</code> handed back an independent duplicate connection with its own transaction, closed along with its parent.</td><td>Cursors share their connection's transaction, as PEP 249 requires.</td></tr>
         <tr><td><code>execute()</code> ran in autocommit: each statement committed itself, and <code>commit()</code> outside a transaction did nothing.</td><td>A transaction is open from the first statement after <code>connect()</code>, <code>commit()</code> or <code>rollback()</code>, reads included, as PEP 249 requires. <code>connect(autocommit=True)</code> gives the old behaviour.</td></tr>
-        <tr><td><code>rowcount</code> was always <code>-1</code>.</td><td>Real counts for INSERT, UPDATE, DELETE and CREATE TABLE AS; <code>-1</code> only for a row-producing statement. <code>duckdb.compat</code> still reports <code>-1</code>.</td></tr>
-        <tr><td>Exception classes had their own names: <code>CatalogException</code>, <code>ConnectionException</code>, <code>BinderException</code> and so on.</td><td>Classes follow the engine's error codes, rooted in PEP 249, in <code>duckdb.exceptions</code>. The old names exist as aliases in <code>duckdb.compat</code> only; <code>ConnectionException</code> there is <code>InterfaceError</code>.</td></tr>
+        <tr><td><code>rowcount</code> was always <code>-1</code>.</td><td>Real counts for INSERT, UPDATE, DELETE and CREATE TABLE AS; <code>-1</code> only for a row-producing statement.</td></tr>
+        <tr><td>Exception classes had their own names: <code>CatalogException</code>, <code>ConnectionException</code>, <code>BinderException</code> and so on.</td><td>Classes follow the engine's error codes, rooted in PEP 249, in <code>duckdb.exceptions</code>.</td></tr>
         <tr><td>Ctrl&#8209;C during a query was converted to <code>RuntimeError</code>.</td><td>It raises <code>KeyboardInterrupt</code>.</td></tr>
-        <tr><td>A parameter mapping accepted any key and stringified it.</td><td>Keys must be strings; anything else is <code>InvalidInputError</code>. The leniency lives in <code>duckdb.compat</code> alone.</td></tr>
-        <tr><td>Opening one file twice shared a single database instance per path.</td><td>A second open of a file already open is refused with <code>OperationalError</code>. <code>duckdb.compat</code> reproduces the shared instance.</td></tr>
+        <tr><td>A parameter mapping accepted any key and stringified it.</td><td>Keys must be strings; anything else is <code>InvalidInputError</code>.</td></tr>
+        <tr><td>Opening one file twice shared a single database instance per path.</td><td>A second open of a file already open is refused with <code>OperationalError</code>.</td></tr>
         <tr><td><code>execute("a; b; c")</code> ran all three and returned the last result.</td><td>One statement per call; more is <code>InvalidInputError</code>. Multi-statement execute is pending.</td></tr>
         <tr><td>A temporal value beyond Python's <code>datetime</code> range came back silently as text.</td><td>It raises <code>ConversionError</code> naming the value.</td></tr>
         <tr><td>A MAP whose keys Python cannot hash came back as a <code>{'key': [...], 'value': [...]}</code> dict of lists.</td><td>It comes back as a list of <code>(key, value)</code> pairs.</td></tr>
         <tr><td>Aware values carried pytz zones, and TIMESTAMPTZ was converted into the session time zone.</td><td>Aware values carry the standard library's <code>datetime.timezone</code>; TIMESTAMPTZ comes back in UTC.</td></tr>
-        <tr><td>In <code>duckdb.compat</code>, as on <code>duckdb.connect()</code>, a connection closes when its <code>with</code> block ends.</td><td>A dbapi connection's <code>with</code> block is a transaction: commit or roll back, and stay open.</td></tr>
+        <tr><td>A connection closed when its <code>with</code> block ended, as one from <code>duckdb.frame.connect()</code> still does.</td><td>A dbapi connection's <code>with</code> block is a transaction: commit or roll back, and stay open.</td></tr>
       </tbody>
     </table>
   </div>

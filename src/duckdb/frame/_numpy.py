@@ -1,13 +1,11 @@
-"""Results to numpy and pandas; both are imported inside the functions, so importing duckdb never pulls them in."""
+"""Results to numpy, imported inside the functions so that importing duckdb never pulls it in."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
-    import pandas
-
-    from . import _duckdb
+    from .. import _duckdb
 
 #: DuckDB's type-id numbers, copied rather than imported; the round-trip tests check the copy against DuckDB.
 _BOOLEAN = 10
@@ -48,20 +46,6 @@ _NUMERIC_DTYPE = {
 }
 
 _TS_UNIT = {_TS_S: "s", _TS_MS: "ms", _TS: "us", _TS_NS: "ns", _TS_TZ: "us"}
-
-_NULLABLE_PD = {
-    "bool": "boolean",
-    "int8": "Int8",
-    "int16": "Int16",
-    "int32": "Int32",
-    "int64": "Int64",
-    "uint8": "UInt8",
-    "uint16": "UInt16",
-    "uint32": "UInt32",
-    "uint64": "UInt64",
-    "float32": "Float32",
-    "float64": "Float64",
-}
 
 #: DuckDB's infinite date and timestamp markers, and the instants they clamp to, matching what fetching rows gives.
 _DATE_INF = 2147483647
@@ -266,41 +250,3 @@ def fetch_numpy(result: _duckdb.Result) -> dict[str, Any]:
             values = strings
         out[name] = np.ma.masked_array(values, mask) if mask is not None else values
     return out
-
-
-def to_dataframe(result: _duckdb.Result, *, date_as_object: bool = False) -> pandas.DataFrame:
-    """The whole result as a pandas DataFrame; only columns that hold NULLs get pandas nullable dtypes."""
-    return _frame_from_columns(_result_to_columns(result), date_as_object=date_as_object)
-
-
-def _frame_from_columns(converted: list[tuple[str, Any, Any, str, Any]], *, date_as_object: bool) -> pandas.DataFrame:
-    import numpy as np
-    import pandas as pd
-
-    columns: dict[str, Any] = {}
-    for name, values, mask, kind, meta in converted:
-        if kind == "numeric":
-            if mask is not None:
-                series = pd.Series(values).astype(_NULLABLE_PD[values.dtype.name])  # type: ignore[call-overload]
-                series[mask] = pd.NA
-            else:
-                series = pd.Series(values)
-        elif kind in ("date", "datetime", "datetimetz", "timedelta"):
-            if mask is not None:
-                values = values.copy()
-                values[mask] = values.dtype.type("NaT", np.datetime_data(values.dtype)[0])
-            series = pd.Series(values)
-            if kind == "datetimetz":
-                series = series.dt.tz_localize("UTC")
-            elif kind == "date" and date_as_object:
-                series = series.dt.date
-        elif kind == "enum":
-            series = pd.Series(pd.Categorical.from_codes(values, categories=meta, ordered=True))
-        else:
-            if mask is not None:
-                values = values.copy()
-                values[mask] = None
-            # Inference, not dtype=object, so strings get pandas' own string dtype as a hand-built frame would.
-            series = pd.Series(values)
-        columns[name] = series
-    return pd.DataFrame(columns)

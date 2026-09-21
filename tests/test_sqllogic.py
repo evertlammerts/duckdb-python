@@ -37,7 +37,7 @@ FLOORS = {
 def test_the_engine_corpus_rides_the_bridge(directory: str, tmp_path: Path) -> None:
     root = corpus()
     if root is None:
-        pytest.skip("no duckdb checkout: set DUCKDB_SOURCE")
+        pytest.skip("no duckdb checkout at the pinned engine commit: set DUCKDB_SOURCE")
     outcomes = [run_file(path, tmp_path, root.parent.parent) for path in sorted((root / directory).rglob("*.test"))]
     ran = [o for o in outcomes if o.skipped is None]
     assert ran, f"nothing in {directory} could run"
@@ -98,8 +98,8 @@ PRINTED = [
 
 @pytest.mark.parametrize("expression", PRINTED)
 def test_the_runner_prints_a_value_as_the_engine_does(expression: str) -> None:
-    con = duckdb.connect()
-    plan = duckdb.sql(f"SELECT {expression} AS v, ({expression})::VARCHAR AS text")
+    con = duckdb.frame.connect()
+    plan = duckdb.frame.sql(f"SELECT {expression} AS v, ({expression})::VARCHAR AS text")
     ((value, text),) = plan.rows(con)
     assert as_text(value, plan.types(con)[0]) == text
 
@@ -164,14 +164,16 @@ def test_a_crash_in_the_client_during_a_statement_is_recorded_not_raised(
 ) -> None:
     file = tmp_path / "crash.test"
     file.write_text("statement ok\nSELECT 'boom'\n\nquery I\nSELECT 1\n----\n1\n")
-    original = duckdb.Connection.run
+    original = duckdb.frame.Connection.run
 
-    def run(self: duckdb.Connection, text: str, parameters: Sequence[Any] | Mapping[str, Any] | None = None) -> int:
+    def run(
+        self: duckdb.frame.Connection, text: str, parameters: Sequence[Any] | Mapping[str, Any] | None = None
+    ) -> int:
         if "boom" in text:
             message = "a client-side failure"
             raise RuntimeError(message)
         return original(self, text, parameters)
 
-    monkeypatch.setattr(duckdb.Connection, "run", run)
+    monkeypatch.setattr(duckdb.frame.Connection, "run", run)
     outcome = run_file(file, tmp_path)
     assert outcome.not_carried == ["statement CRASHED: \"SELECT 'boom'\" -> RuntimeError: a client-side failure"]

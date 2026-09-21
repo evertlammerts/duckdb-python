@@ -8,8 +8,8 @@ import threading
 import weakref
 from typing import TYPE_CHECKING, Any
 
-from . import _duckdb
-from .exceptions import Error, InterfaceError, InvalidInputError
+from .. import _duckdb
+from ..exceptions import Error, InterfaceError, InvalidInputError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -140,7 +140,7 @@ class Connection:
             temporary: Make the macro last only for this database session.
         """
         from .expr import Expr, identifier, name_parts, quote, refusing_parameters, render_literal, suspended_sinks
-        from .frame import Frame, NeedsConnection
+        from .plan import Frame, NeedsConnection
 
         signature = ", ".join(
             quote(p) if isinstance(p, str) else f"{quote(p[0])} := {render_literal(p[1])}" for p in parameters

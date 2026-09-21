@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -62,6 +63,7 @@ FEATURES: dict[str, tuple[str, str, str | None]] = {
     ),
     "join": (VERB_TESTED, "join() with every kind in _JOIN_KINDS", "test_frame.TestJoins"),
     "json": (VERB_TESTED, "the .json() function namespace", "test_frame.TestFunctionNamespaces"),
+    "multi_file": (BRIDGE, "file lists with per-file open options; the file readers take the list", None),
     "keywords": (ENGINE, "parser keyword handling; identifiers are always quoted here", None),
     "limit": (VERB_TESTED, "limit(), head(), offset()", "test_frame.TestRows"),
     "logging": (ENGINE, "engine logging", None),
@@ -127,13 +129,35 @@ FEATURES: dict[str, tuple[str, str, str | None]] = {
 KINDS = {VERB_TESTED, VERB_UNTESTED, SQL_EXPR, BRIDGE, ENGINE}
 
 
+def pinned_engine() -> str:
+    """The engine commit in engine.pin: the first line that is not a comment."""
+    for line in (Path(__file__).resolve().parents[1] / "engine.pin").read_text().splitlines():
+        if line.strip() and not line.startswith("#"):
+            return line.strip()
+    msg = "engine.pin names no commit"
+    raise AssertionError(msg)
+
+
 def corpus() -> Path | None:
-    """DuckDB's own test/sql directory, if a checkout of its source is at hand."""
-    candidates = [Path(os.environ["DUCKDB_SOURCE"])] if "DUCKDB_SOURCE" in os.environ else []
+    """DuckDB's own test/sql directory, from a checkout at the pinned engine commit, if one is at hand.
+
+    A corpus from another commit tests the engine against expectations it was never built to meet, so an explicit
+    DUCKDB_SOURCE at the wrong commit fails and the fallback checkout is only used when it matches.
+    """
+    explicit = os.environ.get("DUCKDB_SOURCE")
+    candidates = [Path(explicit)] if explicit else []
     candidates.append(Path(__file__).resolve().parents[2] / "main" / "external" / "duckdb")
+    pinned = pinned_engine()
     for root in candidates:
-        if (root / "test" / "sql").is_dir():
+        if not (root / "test" / "sql").is_dir():
+            continue
+        head = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True, check=False
+        ).stdout.strip()
+        if head == pinned:
             return root / "test" / "sql"
+        if explicit and root == Path(explicit):
+            pytest.fail(f"DUCKDB_SOURCE is at {head[:10]} but engine.pin names {pinned[:10]}; the corpus must match")
     return None
 
 
@@ -157,7 +181,7 @@ def test_every_verb_tested_claim_names_a_test_class_that_exists() -> None:
 def test_the_corpus_and_the_table_agree() -> None:
     root = corpus()
     if root is None:
-        pytest.skip("no duckdb checkout: set DUCKDB_SOURCE")
+        pytest.skip("no duckdb checkout at the pinned engine commit: set DUCKDB_SOURCE")
     directories = {p.name for p in root.iterdir() if p.is_dir()}
     unclassified = sorted(directories - set(FEATURES))
     assert not unclassified, f"the engine tests features this table does not classify: {unclassified}"
@@ -166,7 +190,7 @@ def test_the_corpus_and_the_table_agree() -> None:
 
 
 def test_the_shape_of_the_answer() -> None:
-    """A record of how the 73 features split: 25 / 0 / 2 / 24 / 22."""
+    """A record of how the 74 features split: 25 / 0 / 2 / 25 / 22."""
     counts = {kind: sum(1 for k, _, _ in FEATURES.values() if k == kind) for kind in KINDS}
     assert counts[VERB_TESTED] == 25
     assert counts[VERB_UNTESTED] == 0, "a verb reaches a feature nothing proves; write the test"

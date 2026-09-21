@@ -1,4 +1,4 @@
-"""Generate src/duckdb/_func_namespaces.py from func_namespaces.toml, checked against DuckDB's function catalog."""
+"""Generate src/duckdb/frame/_func_namespaces.py from func_namespaces.toml, checked against the function catalog."""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ def load_table() -> dict[str, Any]:
 
 def catalog(connection: object) -> dict[str, list[tuple[Any, ...]]]:
     """Every scalar function and macro by name: (type, parameters, parameter_types, return_type, description)."""
-    from duckdb import sql
+    from duckdb.frame import sql
 
     query = """
         SELECT function_name, function_type, parameters, parameter_types, return_type, description
@@ -66,7 +66,7 @@ def catalog(connection: object) -> dict[str, list[tuple[Any, ...]]]:
 
 def coverage(connection: object, covers: dict[str, str]) -> dict[str, set[str]]:
     """The function names each family claims to cover, per its `covers` rule."""
-    from duckdb import sql
+    from duckdb.frame import sql
 
     named = """
         SELECT DISTINCT function_name AS f, categories, parameter_types
@@ -128,8 +128,8 @@ def _return_class(return_type: str) -> str:
 
 def _reserved() -> set[str]:
     """Every Expr attribute a family method must not shadow; the aggregate shortcuts are the deliberate exception."""
-    from duckdb._aggregates import AggregateMethods
-    from duckdb.expr import Expr, FamilyExpr, FuncNamespaces
+    from duckdb.frame._aggregates import AggregateMethods
+    from duckdb.frame.expr import Expr, FamilyExpr, FuncNamespaces
 
     aggregates = {name for name in vars(AggregateMethods) if not name.startswith("_")}
     names: set[str] = set()
@@ -296,12 +296,12 @@ def main() -> int:
     args = parser.parse_args()
     import duckdb
 
-    resolved, report = build(duckdb.connect())
+    resolved, report = build(duckdb.frame.connect())
     if report["problems"]:
         print("\n".join(report["problems"]), file=sys.stderr)
         return 1
     text = render(resolved)
-    target = Path(__file__).resolve().parent.parent / "src" / "duckdb" / "_func_namespaces.py"
+    target = Path(__file__).resolve().parent.parent / "src" / "duckdb" / "frame" / "_func_namespaces.py"
     if args.check:
         if target.read_text() != text:
             print(f"{target} is stale; run scripts/gen_func_namespaces.py", file=sys.stderr)

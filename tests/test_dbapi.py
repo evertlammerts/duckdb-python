@@ -318,7 +318,7 @@ class TestConnection:
 
 
 class TestInterrupt:
-    """`Connection.interrupt()` from another thread, the same as on duckdb.Connection."""
+    """`Connection.interrupt()` from another thread, the same as on duckdb.frame.Connection."""
 
     def test_interrupt_cancels_from_another_thread(self, con: dbapi.Connection) -> None:
         # One interrupt at a fixed delay can land before the query starts and leave it running, so repeat.

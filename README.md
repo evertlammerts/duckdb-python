@@ -8,13 +8,15 @@ PEP 249 face over the same engine bindings.
 
 ## Layout
 
-- `src/duckdb/` is the Python package. `_aggregates.py`, `_error_codes.py` and
-  `_func_namespaces.py` are generated: edit `scripts/func_namespaces.toml` or
-  bump `engine.pin`, then regenerate with the scripts beside the table.
+- `src/duckdb/` is the Python package: `exceptions`, `dbapi`, and the `frame`
+  package holding the plan, expression and connection modules. `_error_codes.py`
+  and, under `frame/`, `_aggregates.py`, `_func_namespaces.py` and
+  `_keywords.py` are generated: edit `scripts/func_namespaces.toml` or bump
+  `engine.pin`, then regenerate with the scripts beside the table.
 - `src/_duckdb/` is the nanobind extension module over the C++ API.
 - `tests/` is the pytest suite. `pytest -m corpus` additionally runs the
-  engine's own sqllogictest corpus and needs a duckdb checkout
-  (`DUCKDB_SOURCE`).
+  engine's own sqllogictest corpus and needs a duckdb checkout at the commit
+  in `engine.pin` (`DUCKDB_SOURCE`).
 
 ## Building
 

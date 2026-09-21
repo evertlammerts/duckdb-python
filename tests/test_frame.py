@@ -11,8 +11,9 @@ from typing import TYPE_CHECKING, cast
 import pytest
 
 import duckdb
-from duckdb import _duckdb, col, exceptions, fn, lit, param, sql_expr, star
-from duckdb.expr import ParamSink, Star, render_literal, suspended_sinks
+from duckdb import _duckdb, exceptions
+from duckdb.frame import col, fn, lit, param, sql_expr, star
+from duckdb.frame.expr import ParamSink, Star, render_literal, suspended_sinks
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -20,8 +21,8 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture
-def con() -> duckdb.Connection:
-    connection = duckdb.connect()
+def con() -> duckdb.frame.Connection:
+    connection = duckdb.frame.connect()
     connection.run(
         "CREATE TABLE orders AS SELECT * FROM (VALUES "
         "(1, 'nl', 120), (2, 'be', 80), (3, 'nl', 300), (4, 'de', 50), (5, 'nl', NULL)"
@@ -34,8 +35,8 @@ def con() -> duckdb.Connection:
 
 
 @pytest.fixture
-def orders(con: duckdb.Connection) -> duckdb.Frame:
-    return duckdb.table("orders")
+def orders(con: duckdb.frame.Connection) -> duckdb.frame.Frame:
+    return duckdb.frame.table("orders")
 
 
 #: The refusal a macro body meets when it holds a param(); the docs quote it.
@@ -45,15 +46,15 @@ PARAM_IN_MACRO = r"^param\(\) has no value inside a macro body; a macro paramete
 class TestGraph:
     """Steps become CTEs, and a step used twice is still computed once."""
 
-    def test_a_single_step_needs_no_cte(self, orders: duckdb.Frame) -> None:
+    def test_a_single_step_needs_no_cte(self, orders: duckdb.frame.Frame) -> None:
         assert orders.render() == 'SELECT * FROM "orders"'
 
-    def test_each_step_becomes_a_cte(self, orders: duckdb.Frame) -> None:
+    def test_each_step_becomes_a_cte(self, orders: duckdb.frame.Frame) -> None:
         sql = orders.filter(col("amount") > 100).select(col("id")).render()
         assert sql.count(" AS (") == 2
         assert sql.startswith("WITH ")
 
-    def test_a_reused_step_is_rendered_once(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_a_reused_step_is_rendered_once(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         # Walking by identity means DuckDB sees one scan of the shared step, not two copies.
         shared = orders.filter(col("country") == "nl")
         joined = shared.join(shared, on=lambda left, right: left["id"] == right["id"], suffix="_r")
@@ -62,12 +63,14 @@ class TestGraph:
         assert sql.count("WHERE") == 1
         assert len(joined.rows(con)) == 3
 
-    def test_a_self_join_is_unambiguous(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_a_self_join_is_unambiguous(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         # Both sides name the same CTE, so without the l/r aliases the FROM clause would not parse.
         pairs = orders.join(orders, on=lambda left, right: left["id"] == (right["id"] - 1), suffix="_r").rows(con)
         assert len(pairs) == 4
 
-    def test_a_frame_can_be_extended_twice_independently(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_a_frame_can_be_extended_twice_independently(
+        self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame
+    ) -> None:
         base = orders.filter(col("amount").is_not_null())
         assert len(base.filter(col("country") == "nl").rows(con)) == 2
         assert len(base.filter(col("country") == "be").rows(con)) == 1
@@ -76,23 +79,23 @@ class TestGraph:
 class TestLiteralsAreBound:
     """No value a caller supplied is ever written into the SQL text."""
 
-    def test_a_string_filter_binds_rather_than_inlines(self, orders: duckdb.Frame) -> None:
+    def test_a_string_filter_binds_rather_than_inlines(self, orders: duckdb.frame.Frame) -> None:
         sql, values = orders.filter(col("country") == "nl")._sql_and_values()
         assert "'nl'" not in sql
         assert values == ["nl"]
 
-    def test_a_quote_in_a_value_cannot_escape(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_a_quote_in_a_value_cannot_escape(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         hostile = "nl'; DROP TABLE orders; --"
         assert orders.filter(col("country") == hostile).rows(con) == []
-        assert duckdb.table("orders").count(con) == 5
+        assert duckdb.frame.table("orders").count(con) == 5
 
-    def test_literals_inside_a_subquery_are_bound_too(self, orders: duckdb.Frame) -> None:
+    def test_literals_inside_a_subquery_are_bound_too(self, orders: duckdb.frame.Frame) -> None:
         inner = orders.filter(col("country") == "nl").select(col("id"))
         sql, values = orders.filter(col("id").isin(inner))._sql_and_values()
         assert "'nl'" not in sql
         assert values == ["nl"]
 
-    def test_numbers_stay_in_the_text(self, orders: duckdb.Frame) -> None:
+    def test_numbers_stay_in_the_text(self, orders: duckdb.frame.Frame) -> None:
         # Nothing to escape, and inlining lets DuckDB type the literal itself.
         sql, values = orders.filter(col("amount") > 100)._sql_and_values()
         assert "100" in sql
@@ -102,170 +105,188 @@ class TestLiteralsAreBound:
 class TestSchema:
     """Column names and types come from DuckDB, without running the query."""
 
-    def test_columns_and_types_come_from_the_binder(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_columns_and_types_come_from_the_binder(
+        self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame
+    ) -> None:
         assert orders.columns(con) == ["id", "country", "amount"]
         assert orders.types(con) == ["INTEGER", "VARCHAR", "INTEGER"]
 
-    def test_a_derived_column_is_typed_by_the_binder(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_a_derived_column_is_typed_by_the_binder(
+        self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame
+    ) -> None:
         # Nothing here works the type of a computed column out; schema(con) asks DuckDB.
         widened = orders.with_columns(doubled=col("amount") * 2.5)
         assert widened.types(con)[-1] == "DOUBLE"
 
-    def test_the_schema_is_asked_afresh(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_the_schema_is_asked_afresh(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         # Never cached: what a table holds is one catalog's answer at one moment, so it is asked again.
         assert orders.schema(con) == orders.schema(con)
 
-    def test_a_bad_query_reports_the_engine_error(self, con: duckdb.Connection) -> None:
+    def test_a_bad_query_reports_the_engine_error(self, con: duckdb.frame.Connection) -> None:
         with pytest.raises(exceptions.CatalogError):
-            _ = duckdb.sql("SELECT * FROM missing").columns(con)
+            _ = duckdb.frame.sql("SELECT * FROM missing").columns(con)
 
 
 class TestProjection:
-    def test_select_keeps_only_what_is_named(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_select_keeps_only_what_is_named(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         assert orders.select(col("id"), col("country")).columns(con) == ["id", "country"]
 
-    def test_a_bare_string_selects_a_column(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_a_bare_string_selects_a_column(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         # Inside an expression a string is a value; in select() there is nothing else it could mean.
         assert orders.select("id").columns(con) == ["id"]
 
-    def test_select_refuses_anything_else(self, orders: duckdb.Frame) -> None:
+    def test_select_refuses_anything_else(self, orders: duckdb.frame.Frame) -> None:
         with pytest.raises(TypeError, match="column name or expression"):
             orders.select(3.5)
 
-    def test_star_can_exclude(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_star_can_exclude(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         assert orders.select(star(exclude=["amount"])).columns(con) == ["id", "country"]
 
-    def test_with_columns_appends_a_new_name(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_with_columns_appends_a_new_name(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         added = orders.with_columns(big=col("amount") > 100)
         assert added.columns(con) == ["id", "country", "amount", "big"]
 
-    def test_with_columns_replaces_in_place(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_with_columns_replaces_in_place(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         # Replacing keeps the column where it was, so code reading rows by position does not shift.
         replaced = orders.with_columns(amount=col("amount") * 2)
         assert replaced.columns(con) == ["id", "country", "amount"]
         assert replaced.filter(col("id") == 1).rows(con) == [(1, "nl", 240)]
 
-    def test_with_columns_can_add_and_replace_together(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_with_columns_can_add_and_replace_together(
+        self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame
+    ) -> None:
         both = orders.with_columns(amount=col("amount") + 1, note=sql_expr("'x'"))
         assert both.columns(con) == ["id", "country", "amount", "note"]
 
-    def test_drop_and_rename(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_drop_and_rename(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         assert orders.drop("amount").columns(con) == ["id", "country"]
         assert orders.rename(country="iso").columns(con) == ["id", "iso", "amount"]
 
-    def test_getitem_gives_one_column(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_getitem_gives_one_column(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         assert orders["country"].columns(con) == ["country"]
 
 
 class TestRows:
-    def test_filter_accepts_an_expression_or_sql(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_filter_accepts_an_expression_or_sql(
+        self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame
+    ) -> None:
         assert len(orders.filter(col("country") == "nl").rows(con)) == 3
         assert len(orders.filter(sql_expr("country = 'nl'")).rows(con)) == 3
         # Raw text enters a query only where the call says so.
         with pytest.raises(TypeError, match=r"use filter\(sql_expr"):
             orders.filter("country = 'nl'")  # type: ignore[arg-type]
 
-    def test_sort_takes_direction_and_nulls(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_sort_takes_direction_and_nulls(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         ordered = orders.sort(col("amount").desc().nulls_last()).rows(con)
         assert [row[0] for row in ordered] == [3, 1, 2, 4, 5]
 
-    def test_limit_head_and_offset(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_limit_head_and_offset(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         ordered = orders.sort(col("id"))
         assert [r[0] for r in ordered.limit(2).rows(con)] == [1, 2]
         assert [r[0] for r in ordered.head(3).rows(con)] == [1, 2, 3]
         assert [r[0] for r in ordered.offset(3).rows(con)] == [4, 5]
         assert [r[0] for r in ordered.limit(2, offset=1).rows(con)] == [2, 3]
 
-    def test_distinct_over_all_columns_and_over_keys(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_distinct_over_all_columns_and_over_keys(
+        self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame
+    ) -> None:
         assert len(orders.select(col("country")).distinct().rows(con)) == 3
         assert len(orders.distinct(on="country").rows(con)) == 3
 
-    def test_len_counts_without_fetching(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_len_counts_without_fetching(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         assert orders.count(con) == 5
 
-    def test_iteration_crosses_batch_boundaries(self, con: duckdb.Connection) -> None:
+    def test_iteration_crosses_batch_boundaries(self, con: duckdb.frame.Connection) -> None:
         # Rows arrive 1024 at a time, so a shorter run would never reach the loop that refills.
-        many = duckdb.sql("SELECT * FROM range(3000)")
+        many = duckdb.frame.sql("SELECT * FROM range(3000)")
         assert sum(1 for _ in many.iter_rows(con)) == 3000
 
-    def test_iterating_a_plan_without_a_connection_is_refused(self, con: duckdb.Connection) -> None:
+    def test_iterating_a_plan_without_a_connection_is_refused(self, con: duckdb.frame.Connection) -> None:
         # Without __iter__ refusing, Python's old protocol would call __getitem__ with 0, 1, 2 and never stop.
         with pytest.raises(TypeError, match="needs a connection"):
-            list(duckdb.table("orders"))
+            list(duckdb.frame.table("orders"))
         with pytest.raises(TypeError, match="not by int"):
-            _ = duckdb.table("orders")[0]
+            _ = duckdb.frame.table("orders")[0]
 
-    def test_first_on_an_empty_result(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_first_on_an_empty_result(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         assert orders.filter(col("id") < 0).first(con) is None
 
 
 class TestAggregation:
-    def test_aggregate_without_keys(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_aggregate_without_keys(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         assert orders.aggregate(col("amount").sum().alias("total")).rows(con) == [(550,)]
 
-    def test_group_keys_come_first(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_group_keys_come_first(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         grouped = orders.group_by(col("country")).agg(col("amount").sum().alias("total"))
         assert grouped.columns(con) == ["country", "total"]
         assert sorted(grouped.rows(con)) == [("be", 80), ("de", 50), ("nl", 420)]
 
-    def test_aggregate_takes_keys_directly(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_aggregate_takes_keys_directly(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         by_keyword = orders.aggregate(col("amount").sum().alias("total"), group_by="country")
         assert sorted(by_keyword.rows(con)) == [("be", 80), ("de", 50), ("nl", 420)]
 
-    def test_filtering_after_agg_is_having(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_filtering_after_agg_is_having(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         # No `having` verb is needed: every step is its own CTE, so a filter after an aggregate sees groups.
         grouped = orders.group_by(col("country")).agg(col("amount").sum().alias("total"))
         assert grouped.filter(col("total") > 100).rows(con) == [("nl", 420)]
 
-    def test_a_window_does_not_group(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
-        ranked = orders.with_columns(rank=duckdb.row_number().over(order_by=col("id")))
+    def test_a_window_does_not_group(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
+        ranked = orders.with_columns(rank=duckdb.frame.row_number().over(order_by=col("id")))
         assert len(ranked.rows(con)) == 5
 
 
 class TestJoins:
-    def test_join_on_a_shared_name(self, orders: duckdb.Frame, con: duckdb.Connection) -> None:
-        renamed = duckdb.table("countries").rename(code="country")
+    def test_join_on_a_shared_name(self, orders: duckdb.frame.Frame, con: duckdb.frame.Connection) -> None:
+        renamed = duckdb.frame.table("countries").rename(code="country")
         assert len(orders.join(renamed, on="country").rows(con)) == 4
 
-    def test_join_on_an_expression_names_the_sides(self, orders: duckdb.Frame, con: duckdb.Connection) -> None:
-        joined = orders.join(duckdb.table("countries"), on=lambda left, right: left["country"] == right["code"])
+    def test_join_on_an_expression_names_the_sides(
+        self, orders: duckdb.frame.Frame, con: duckdb.frame.Connection
+    ) -> None:
+        joined = orders.join(duckdb.frame.table("countries"), on=lambda left, right: left["country"] == right["code"])
         assert len(joined.rows(con)) == 4
 
-    def test_join_on_several_names(self, con: duckdb.Connection) -> None:
-        left = duckdb.sql("SELECT 1 AS a, 2 AS b, 'x' AS v")
-        right = duckdb.sql("SELECT 1 AS a, 2 AS b, 'y' AS w")
+    def test_join_on_several_names(self, con: duckdb.frame.Connection) -> None:
+        left = duckdb.frame.sql("SELECT 1 AS a, 2 AS b, 'x' AS v")
+        right = duckdb.frame.sql("SELECT 1 AS a, 2 AS b, 'y' AS w")
         assert left.join(right, on=["a", "b"]).rows(con) == [(1, 2, "x", "y")]
 
     @pytest.mark.parametrize(
         ("how", "expected"),
         [("inner", 4), ("left", 5), ("semi", 4), ("anti", 1), ("outer", 5)],
     )
-    def test_join_kinds(self, orders: duckdb.Frame, con: duckdb.Connection, how: str, expected: int) -> None:
+    def test_join_kinds(
+        self, orders: duckdb.frame.Frame, con: duckdb.frame.Connection, how: str, expected: int
+    ) -> None:
         joined = orders.join(
-            duckdb.table("countries"), on=lambda left, right: left["country"] == right["code"], how=how
+            duckdb.frame.table("countries"), on=lambda left, right: left["country"] == right["code"], how=how
         )
         assert len(joined.rows(con)) == expected
 
-    def test_cross_join_needs_no_keys(self, orders: duckdb.Frame, con: duckdb.Connection) -> None:
-        assert len(orders.cross(duckdb.table("countries")).rows(con)) == 10
+    def test_cross_join_needs_no_keys(self, orders: duckdb.frame.Frame, con: duckdb.frame.Connection) -> None:
+        assert len(orders.cross(duckdb.frame.table("countries")).rows(con)) == 10
 
-    def test_a_keyed_join_without_keys_is_refused(self, orders: duckdb.Frame, con: duckdb.Connection) -> None:
+    def test_a_keyed_join_without_keys_is_refused(
+        self, orders: duckdb.frame.Frame, con: duckdb.frame.Connection
+    ) -> None:
         with pytest.raises(TypeError, match="needs `on`"):
-            orders.join(duckdb.table("countries"))
+            orders.join(duckdb.frame.table("countries"))
 
 
 class TestSetOperations:
-    def test_union_keeps_duplicates_unless_asked(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_union_keeps_duplicates_unless_asked(
+        self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame
+    ) -> None:
         nl = orders.filter(col("country") == "nl")
         assert len(nl.union(nl).rows(con)) == 6
         assert len(nl.union(nl, all=False).rows(con)) == 3
 
-    def test_union_by_name_ignores_position(self, con: duckdb.Connection) -> None:
-        left = duckdb.sql("SELECT 1 AS a, 2 AS b")
-        right = duckdb.sql("SELECT 3 AS b, 4 AS a")
+    def test_union_by_name_ignores_position(self, con: duckdb.frame.Connection) -> None:
+        left = duckdb.frame.sql("SELECT 1 AS a, 2 AS b")
+        right = duckdb.frame.sql("SELECT 3 AS b, 4 AS a")
         assert sorted(left.union_by_name(right).rows(con)) == [(1, 2), (4, 3)]
 
-    def test_intersect_and_except(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_intersect_and_except(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         nl = orders.filter(col("country") == "nl")
         low = orders.filter(col("amount") < 200)
         assert [r[0] for r in nl.intersect(low).rows(con)] == [1]
@@ -273,140 +294,144 @@ class TestSetOperations:
 
 
 class TestSample:
-    def test_a_row_count_is_exact(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_a_row_count_is_exact(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         assert len(orders.sample(2, seed=7).rows(con)) == 2
 
-    def test_a_seed_repeats(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_a_seed_repeats(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         assert orders.sample(3, seed=11).rows(con) == orders.sample(3, seed=11).rows(con)
 
-    def test_a_percentage_stays_within_the_table(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_a_percentage_stays_within_the_table(
+        self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame
+    ) -> None:
         assert len(orders.sample(percent=50, seed=3).rows(con)) <= 5
 
-    def test_a_method_can_be_chosen(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_a_method_can_be_chosen(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         assert len(orders.sample(percent=100, method="bernoulli", seed=1).rows(con)) == 5
 
-    def test_a_size_is_required(self, orders: duckdb.Frame) -> None:
+    def test_a_size_is_required(self, orders: duckdb.frame.Frame) -> None:
         with pytest.raises(TypeError, match="either n or percent"):
             orders.sample()
 
-    def test_two_sizes_are_refused(self, orders: duckdb.Frame) -> None:
+    def test_two_sizes_are_refused(self, orders: duckdb.frame.Frame) -> None:
         with pytest.raises(TypeError, match="either n or percent"):
             orders.sample(2, percent=50)
 
-    def test_a_method_name_cannot_be_syntax(self, orders: duckdb.Frame) -> None:
+    def test_a_method_name_cannot_be_syntax(self, orders: duckdb.frame.Frame) -> None:
         # The method is a bare word in the SQL and cannot be quoted, so it is checked instead.
         with pytest.raises(ValueError, match="copy option name"):
             orders.sample(2, method="reservoir); DROP TABLE orders; --")
 
 
 class TestReshaping:
-    def test_unnest_expands_a_list(self, con: duckdb.Connection) -> None:
-        rows = duckdb.sql("SELECT 1 AS k, [10, 20] AS xs").unnest("xs")
+    def test_unnest_expands_a_list(self, con: duckdb.frame.Connection) -> None:
+        rows = duckdb.frame.sql("SELECT 1 AS k, [10, 20] AS xs").unnest("xs")
         assert rows.rows(con) == [(1, 10), (1, 20)]
 
-    def test_unnest_keeps_the_column_where_it_was(self, con: duckdb.Connection) -> None:
-        rows = duckdb.sql("SELECT [1, 2] AS xs, 'tail' AS t").unnest("xs")
+    def test_unnest_keeps_the_column_where_it_was(self, con: duckdb.frame.Connection) -> None:
+        rows = duckdb.frame.sql("SELECT [1, 2] AS xs, 'tail' AS t").unnest("xs")
         assert rows.columns(con) == ["xs", "t"]
 
-    def test_unnesting_two_columns_walks_them_in_step(self, con: duckdb.Connection) -> None:
-        rows = duckdb.sql("SELECT [1, 2] AS xs, ['a', 'b'] AS ys").unnest("xs", "ys")
+    def test_unnesting_two_columns_walks_them_in_step(self, con: duckdb.frame.Connection) -> None:
+        rows = duckdb.frame.sql("SELECT [1, 2] AS xs, ['a', 'b'] AS ys").unnest("xs", "ys")
         assert rows.rows(con) == [(1, "a"), (2, "b")]
 
-    def test_unnest_needs_a_column(self, orders: duckdb.Frame) -> None:
+    def test_unnest_needs_a_column(self, orders: duckdb.frame.Frame) -> None:
         with pytest.raises(TypeError, match="at least one column"):
             orders.unnest()
 
-    def test_unpivot_folds_columns_into_rows(self, con: duckdb.Connection) -> None:
-        wide = duckdb.sql("SELECT 'nl' AS country, 1 AS q1, 2 AS q2")
+    def test_unpivot_folds_columns_into_rows(self, con: duckdb.frame.Connection) -> None:
+        wide = duckdb.frame.sql("SELECT 'nl' AS country, 1 AS q1, 2 AS q2")
         long = wide.unpivot("q1", "q2", name="quarter", value="sales")
         assert long.rows(con) == [("nl", "q1", 1), ("nl", "q2", 2)]
 
-    def test_unpivot_names_are_quoted(self, con: duckdb.Connection) -> None:
-        wide = duckdb.sql("SELECT 1 AS q1")
+    def test_unpivot_names_are_quoted(self, con: duckdb.frame.Connection) -> None:
+        wide = duckdb.frame.sql("SELECT 1 AS q1")
         long = wide.unpivot("q1", name="the name", value="the value")
         assert long.columns(con) == ["the name", "the value"]
 
-    def test_unpivot_needs_a_column(self, orders: duckdb.Frame) -> None:
+    def test_unpivot_needs_a_column(self, orders: duckdb.frame.Frame) -> None:
         with pytest.raises(TypeError, match="at least one column"):
             orders.unpivot()
 
-    def test_reshaping_works_mid_chain(self, con: duckdb.Connection) -> None:
+    def test_reshaping_works_mid_chain(self, con: duckdb.frame.Connection) -> None:
         # SUMMARIZE and UNPIVOT cannot follow a WITH, and every step but the first sits behind one.
-        wide = duckdb.sql("SELECT 'nl' AS country, 1 AS q1, 2 AS q2").filter(col("country") == "nl")
+        wide = duckdb.frame.sql("SELECT 'nl' AS country, 1 AS q1, 2 AS q2").filter(col("country") == "nl")
         assert len(wide.unpivot("q1", "q2").filter(col("value") > 1).rows(con)) == 1
 
 
 class TestInspection:
-    def test_describe_reports_statistics(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_describe_reports_statistics(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         stats = orders.describe()
         assert stats.columns(con)[:2] == ["column_name", "column_type"]
         assert len(stats.rows(con)) == 3
 
-    def test_describe_works_mid_chain(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_describe_works_mid_chain(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         assert len(orders.filter(col("country") == "nl").describe().rows(con)) == 3
 
-    def test_explain_returns_a_plan(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_explain_returns_a_plan(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         assert "Seq Scan" in orders.explain(con) or "SEQ_SCAN" in orders.explain(con)
 
-    def test_explain_analyze_runs_the_query(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_explain_analyze_runs_the_query(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         assert "Total Time" in orders.explain(con, analyze=True)
 
-    def test_preview_draws_a_table(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_preview_draws_a_table(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         drawn = orders.sort(col("id")).preview(con)
         assert "id" in drawn
         assert "INTEGER" in drawn
         assert drawn.startswith("┌")
         assert "NULL" in drawn  # the missing amount, not an empty cell
 
-    def test_preview_says_when_there_are_more_rows(self, con: duckdb.Connection) -> None:
-        drawn = duckdb.sql("SELECT * FROM range(50)").preview(con, 3)
+    def test_preview_says_when_there_are_more_rows(self, con: duckdb.frame.Connection) -> None:
+        drawn = duckdb.frame.sql("SELECT * FROM range(50)").preview(con, 3)
         assert "there are more" in drawn
         assert drawn.count("\n│") == 5  # heading, types, and three rows
 
-    def test_preview_of_an_empty_frame_still_draws(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_preview_of_an_empty_frame_still_draws(
+        self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame
+    ) -> None:
         drawn = orders.filter(col("id") < 0).preview(con)
         assert "id" in drawn
         assert "there are more" not in drawn
 
-    def test_long_values_are_shortened(self, con: duckdb.Connection) -> None:
-        drawn = duckdb.sql("SELECT repeat('x', 200) AS wide").preview(con)
+    def test_long_values_are_shortened(self, con: duckdb.frame.Connection) -> None:
+        drawn = duckdb.frame.sql("SELECT repeat('x', 200) AS wide").preview(con)
         assert "…" in drawn
         assert max(len(line) for line in drawn.splitlines()) < 60
 
     def test_show_prints_the_preview(
-        self, con: duckdb.Connection, orders: duckdb.Frame, capsys: pytest.CaptureFixture[str]
+        self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame, capsys: pytest.CaptureFixture[str]
     ) -> None:
         orders.show(con, 2)
         assert capsys.readouterr().out.strip() == orders.preview(con, 2)
 
-    def test_repr_shows_the_sql(self, con: duckdb.Connection) -> None:
+    def test_repr_shows_the_sql(self, con: duckdb.frame.Connection) -> None:
         # A plan holds no connection, so its repr can only be the query, and cannot fail.
-        assert repr(duckdb.sql("SELECT * FROM missing")) == "<Frame SELECT * FROM missing>"
-        assert "lines" in repr(duckdb.table("orders").filter(col("id") > 1))
+        assert repr(duckdb.frame.sql("SELECT * FROM missing")) == "<Frame SELECT * FROM missing>"
+        assert "lines" in repr(duckdb.frame.table("orders").filter(col("id") > 1))
 
 
 class TestSubqueries:
-    def test_scalar_supplies_a_single_value(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_scalar_supplies_a_single_value(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         average = orders.aggregate(col("amount").mean().alias("m"))
         above = orders.filter(col("amount") > average.scalar())
         assert [row[0] for row in above.rows(con)] == [3]
 
-    def test_isin_accepts_a_query(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_isin_accepts_a_query(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         nl_ids = orders.filter(col("country") == "nl").select(col("id"))
         assert [row[0] for row in orders.filter(col("id").isin(nl_ids)).rows(con)] == [1, 3, 5]
 
-    def test_isin_still_accepts_values(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_isin_still_accepts_values(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         assert [row[0] for row in orders.filter(col("id").isin([1, 2])).rows(con)] == [1, 2]
 
-    def test_isin_accepts_a_list_typed_expression(self, con: duckdb.Connection) -> None:
+    def test_isin_accepts_a_list_typed_expression(self, con: duckdb.frame.Connection) -> None:
         # Iterating the expression as if it were the list used to fail; DuckDB evaluates IN row by row.
         assert col("x").isin(col("xs")).fragment() == '("x" IN "xs")'
-        rows = duckdb.sql("SELECT * FROM (VALUES (2, [1, 2, 3]), (5, [1, NULL]), (NULL, [1, 2])) t(x, xs)")
+        rows = duckdb.frame.sql("SELECT * FROM (VALUES (2, [1, 2, 3]), (5, [1, NULL]), (NULL, [1, 2])) t(x, xs)")
         assert rows.select(col("x").isin(col("xs"))).rows(con) == [(True,), (False,), (None,)]
         assert (~col("x").isin(col("xs"))).fragment() == '(NOT ("x" IN "xs"))'
         assert rows.select(~col("x").isin(col("xs"))).rows(con) == [(False,), (True,), (None,)]
 
-    def test_a_subquery_is_a_step_of_the_plan(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_a_subquery_is_a_step_of_the_plan(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         # A subquery's plan becomes a step like any other, so it is one WITH and a reference to it.
         inner = orders.filter(col("country") == "nl").sort(col("amount")).limit(1).select(col("id"))
         sql = orders.filter(col("id").isin(inner)).render()
@@ -416,95 +441,103 @@ class TestSubqueries:
 
 
 class TestSinks:
-    def test_create_stores_the_rows(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_create_stores_the_rows(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         assert orders.filter(col("country") == "nl").create(con, "nl") == 3
-        assert duckdb.table("nl").count(con) == 3
+        assert duckdb.frame.table("nl").count(con) == 3
 
-    def test_create_refuses_to_clobber_unless_asked(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_create_refuses_to_clobber_unless_asked(
+        self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame
+    ) -> None:
         orders.create(con, "copy")
         with pytest.raises(exceptions.CatalogError):
             orders.create(con, "copy")
         assert orders.filter(col("id") == 1).create(con, "copy", replace=True) == 1
-        assert duckdb.table("copy").count(con) == 1
+        assert duckdb.frame.table("copy").count(con) == 1
 
-    def test_a_temporary_table_is_not_in_the_catalog(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_a_temporary_table_is_not_in_the_catalog(
+        self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame
+    ) -> None:
         orders.create(con, "scratch", temporary=True)
-        assert duckdb.table("scratch").count(con) == 5
-        listed = duckdb.sql("SELECT temporary FROM duckdb_tables() WHERE table_name = 'scratch'").rows(con)
+        assert duckdb.frame.table("scratch").count(con) == 5
+        listed = duckdb.frame.sql("SELECT temporary FROM duckdb_tables() WHERE table_name = 'scratch'").rows(con)
         assert listed == [(True,)]
 
-    def test_insert_into_appends(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_insert_into_appends(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         orders.filter(col("id") == 1).create(con, "some")
         assert orders.filter(col("id") == 2).insert_into(con, "some") == 1
-        assert duckdb.table("some").count(con) == 2
+        assert duckdb.frame.table("some").count(con) == 2
 
-    def test_a_sink_binds_its_literals(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_a_sink_binds_its_literals(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         # Wrapping the query in COPY must not stop the filter's value being bound instead of written in.
         sql, values = orders.filter(col("country") == "nl")._sql_and_values(lambda q: f"CREATE TABLE t AS {q}")
         assert "'nl'" not in sql
         assert values == ["nl"]
 
-    def test_to_parquet_round_trips(self, con: duckdb.Connection, orders: duckdb.Frame, tmp_path: Path) -> None:
+    def test_to_parquet_round_trips(
+        self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame, tmp_path: Path
+    ) -> None:
         path = tmp_path / "orders.parquet"
         assert orders.to_parquet(con, str(path)) == [(5,)]
         assert path.exists()
-        assert duckdb.sql(f"SELECT * FROM read_parquet('{path}')").count(con) == 5
+        assert duckdb.frame.sql(f"SELECT * FROM read_parquet('{path}')").count(con) == 5
 
-    def test_to_csv_round_trips(self, con: duckdb.Connection, orders: duckdb.Frame, tmp_path: Path) -> None:
+    def test_to_csv_round_trips(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame, tmp_path: Path) -> None:
         path = tmp_path / "orders.csv"
         assert orders.to_csv(con, str(path), header=True) == [(5,)]
         assert path.read_text().startswith("id,country,amount")
 
-    def test_copy_options_reach_the_writer(self, con: duckdb.Connection, orders: duckdb.Frame, tmp_path: Path) -> None:
+    def test_copy_options_reach_the_writer(
+        self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame, tmp_path: Path
+    ) -> None:
         path = tmp_path / "orders.csv"
         orders.to_csv(con, str(path), header=False, delimiter="|")
         assert "|" in path.read_text()
         assert not path.read_text().startswith("id")
 
     def test_an_option_name_that_is_not_a_name_is_refused(
-        self, con: duckdb.Connection, orders: duckdb.Frame, tmp_path: Path
+        self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame, tmp_path: Path
     ) -> None:
         # Option names are bare words in the SQL and cannot be quoted, so they are checked instead.
         with pytest.raises(ValueError, match="copy option name"):
             orders.to_csv(con, str(tmp_path / "x.csv"), **{"header, ROW_GROUP_SIZE": 1})  # type: ignore[arg-type]
 
     def test_a_quote_in_a_path_cannot_escape(
-        self, con: duckdb.Connection, orders: duckdb.Frame, tmp_path: Path
+        self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame, tmp_path: Path
     ) -> None:
         path = tmp_path / "od'; DROP TABLE orders; --.csv"
         orders.to_csv(con, str(path))
         assert path.exists()
-        assert duckdb.table("orders").count(con) == 5
+        assert duckdb.frame.table("orders").count(con) == 5
 
 
 class TestTableSource:
-    def test_a_table_is_read_by_name(self, con: duckdb.Connection) -> None:
-        assert duckdb.table("orders").count(con) == 5
+    def test_a_table_is_read_by_name(self, con: duckdb.frame.Connection) -> None:
+        assert duckdb.frame.table("orders").count(con) == 5
 
-    def test_a_name_is_quoted_not_spliced(self, con: duckdb.Connection) -> None:
+    def test_a_name_is_quoted_not_spliced(self, con: duckdb.frame.Connection) -> None:
         # The reason table() exists: an f-string into sql() would run the second statement.
         with pytest.raises(exceptions.CatalogError):
-            duckdb.table("orders; DROP TABLE orders").rows(con)
-        assert duckdb.table("orders").count(con) == 5
+            duckdb.frame.table("orders; DROP TABLE orders").rows(con)
+        assert duckdb.frame.table("orders").count(con) == 5
 
-    def test_a_qualified_name_stays_two_identifiers(self, con: duckdb.Connection) -> None:
-        assert duckdb.table(("main", "orders")).count(con) == 5
+    def test_a_qualified_name_stays_two_identifiers(self, con: duckdb.frame.Connection) -> None:
+        assert duckdb.frame.table(("main", "orders")).count(con) == 5
 
-    def test_an_awkward_name_needs_no_escaping_by_the_caller(self, con: duckdb.Connection) -> None:
+    def test_an_awkward_name_needs_no_escaping_by_the_caller(self, con: duckdb.frame.Connection) -> None:
         con.run('CREATE TABLE "select ""x""" AS SELECT 1 AS v')
-        assert duckdb.table('select "x"').rows(con) == [(1,)]
+        assert duckdb.frame.table('select "x"').rows(con) == [(1,)]
 
 
 class TestDerivedNamesMatchTheEngine:
     """Every column name worked out here is checked against the one DuckDB reports."""
 
-    def frames(self, con: duckdb.Connection) -> dict[str, duckdb.Frame]:
-        orders, countries = duckdb.table("orders"), duckdb.table("countries")
-        lists = duckdb.sql("SELECT 1 AS k, [10, 20] AS xs")
-        wide = duckdb.sql("SELECT 'nl' AS c, 1 AS q1, 2 AS q2")
+    def frames(self, con: duckdb.frame.Connection) -> dict[str, duckdb.frame.Frame]:
+        orders, countries = duckdb.frame.table("orders"), duckdb.frame.table("countries")
+        lists = duckdb.frame.sql("SELECT 1 AS k, [10, 20] AS xs")
+        wide = duckdb.frame.sql("SELECT 'nl' AS c, 1 AS q1, 2 AS q2")
         return {
             "table": orders,
-            "sql": duckdb.sql("SELECT 1 AS a, 'b' AS b"),
+            "sql": duckdb.frame.sql("SELECT 1 AS a, 'b' AS b"),
             "filter": orders.filter(col("amount") > 100),
             "select names": orders.select("id", "country"),
             "select exprs": orders.select(col("id"), col("amount").alias("total")),
@@ -542,7 +575,7 @@ class TestDerivedNamesMatchTheEngine:
             .rename(label="name"),
         }
 
-    def test_every_verb_derives_what_the_engine_reports(self, con: duckdb.Connection) -> None:
+    def test_every_verb_derives_what_the_engine_reports(self, con: duckdb.frame.Connection) -> None:
         wrong = {}
         for label, frame in self.frames(con).items():
             derived = frame.columns(con)
@@ -551,7 +584,7 @@ class TestDerivedNamesMatchTheEngine:
                 wrong[label] = (derived, truth)
         assert not wrong, f"derived shape disagrees with the binder: {wrong}"
 
-    def test_known_types_agree_with_the_engine(self, con: duckdb.Connection) -> None:
+    def test_known_types_agree_with_the_engine(self, con: duckdb.frame.Connection) -> None:
         wrong = {}
         for label, frame in self.frames(con).items():
             truth = dict(whole_bind(frame, con))
@@ -587,14 +620,14 @@ def _argument_for(type_text: str) -> object:
     return sql_expr(f"NULL::{type_text}")
 
 
-def whole_bind(frame: duckdb.Frame, con: duckdb.Connection) -> list[tuple[str, str]]:
+def whole_bind(frame: duckdb.frame.Frame, con: duckdb.frame.Connection) -> list[tuple[str, str]]:
     """DuckDB's own column names and types for the whole query."""
     with suspended_sinks():
         output, _ = con._engine().bind(frame.render(con))
     return list(output)
 
 
-def record_binds(con: duckdb.Connection, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+def record_binds(con: duckdb.frame.Connection, monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Every query sent to DuckDB for column names and types from here on."""
     seen: list[str] = []
     engine = type(con._engine())
@@ -611,52 +644,58 @@ def record_binds(con: duckdb.Connection, monkeypatch: pytest.MonkeyPatch) -> lis
 class TestTheEngineIsAskedSparingly:
     """DuckDB is asked once per source, and otherwise only with a query over no rows (a stub)."""
 
-    def test_building_a_frame_asks_nothing(self, con: duckdb.Connection, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_building_a_frame_asks_nothing(self, con: duckdb.frame.Connection, monkeypatch: pytest.MonkeyPatch) -> None:
         calls = record_binds(con, monkeypatch)
-        duckdb.table("orders").filter(col("amount") > 100).select("id").sort(col("id"))
+        duckdb.frame.table("orders").filter(col("amount") > 100).select("id").sort(col("id"))
         assert calls == [], "building must not reach the engine"
 
-    def test_columns_costs_one_bind_per_source(self, con: duckdb.Connection, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_columns_costs_one_bind_per_source(
+        self, con: duckdb.frame.Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         calls = record_binds(con, monkeypatch)
         joined = (
-            duckdb.table("orders")
+            duckdb.frame.table("orders")
             .filter(col("amount") > 100)
-            .join(duckdb.table("countries"), on=lambda left, right: left["country"] == right["code"])
+            .join(duckdb.frame.table("countries"), on=lambda left, right: left["country"] == right["code"])
             .select("id", "label")
         )
         assert joined.columns(con) == ["id", "label"]
         assert len(calls) == 2, f"one per source, got {len(calls)}: {calls}"
 
-    def test_types_come_along_with_the_source(self, con: duckdb.Connection, monkeypatch: pytest.MonkeyPatch) -> None:
-        frame = duckdb.table("orders").filter(col("amount") > 100).select("id")
+    def test_types_come_along_with_the_source(
+        self, con: duckdb.frame.Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        frame = duckdb.frame.table("orders").filter(col("amount") > 100).select("id")
         calls = record_binds(con, monkeypatch)
         # A column passed through untouched keeps the type its source reported, so types cost no extra.
         assert frame.types(con) == ["INTEGER"]
         assert calls == ['SELECT * FROM "orders"']
 
     def test_a_typed_values_source_is_asked_nothing(
-        self, con: duckdb.Connection, monkeypatch: pytest.MonkeyPatch
+        self, con: duckdb.frame.Connection, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Column types the caller stated need no connection to work out.
-        stated = duckdb.values([], columns=[("id", "INTEGER"), ("amount", "INTEGER")])
+        stated = duckdb.frame.values([], columns=[("id", "INTEGER"), ("amount", "INTEGER")])
         calls = record_binds(con, monkeypatch)
         assert stated.filter(col("amount") > 0).types(con) == ["INTEGER", "INTEGER"]
         assert calls == []
 
     def test_an_engine_named_column_is_bound_on_a_stub(
-        self, con: duckdb.Connection, monkeypatch: pytest.MonkeyPatch
+        self, con: duckdb.frame.Connection, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        duckdb.table("orders").columns(con)  # pay for the source first
+        duckdb.frame.table("orders").columns(con)  # pay for the source first
         calls = record_binds(con, monkeypatch)
         # Nothing here knows what DuckDB will call this column, so it asks, over an empty input.
-        frame = duckdb.table("orders").select(sql_expr("amount * 2"))
+        frame = duckdb.frame.table("orders").select(sql_expr("amount * 2"))
         assert frame.columns(con) == ["(amount * 2)"]
         assert len(calls) == 2, calls  # the fresh source, then the stub
         assert "WHERE FALSE" in calls[-1]
         assert "NULL::INTEGER" in calls[-1]
 
-    def test_a_stub_does_not_grow_with_the_chain(self, con: duckdb.Connection, monkeypatch: pytest.MonkeyPatch) -> None:
-        deep = duckdb.table("orders")
+    def test_a_stub_does_not_grow_with_the_chain(
+        self, con: duckdb.frame.Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        deep = duckdb.frame.table("orders")
         for _ in range(8):
             deep = deep.filter(col("amount") > 0)
         deep.columns(con)
@@ -668,10 +707,10 @@ class TestTheEngineIsAskedSparingly:
         assert "WHERE FALSE" in stub
 
     def test_a_stub_answer_is_remembered_by_its_text(
-        self, con: duckdb.Connection, monkeypatch: pytest.MonkeyPatch
+        self, con: duckdb.frame.Connection, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # A stub carries its input inline, so its answer follows from the text and is worth keeping.
-        plan = duckdb.table("orders").select(sql_expr("amount * 2"))
+        plan = duckdb.frame.table("orders").select(sql_expr("amount * 2"))
         assert plan.columns(con) == ["(amount * 2)"]
         calls = record_binds(con, monkeypatch)
         assert plan.columns(con) == ["(amount * 2)"]
@@ -681,47 +720,51 @@ class TestTheEngineIsAskedSparingly:
 class TestJoinRefusesToDuplicateAName:
     """A join carries both sides through, and DuckDB would quietly resolve a repeated name to the first."""
 
-    def test_a_shared_name_is_refused(self, con: duckdb.Connection) -> None:
+    def test_a_shared_name_is_refused(self, con: duckdb.frame.Connection) -> None:
         # Building asks nothing, so the clash surfaces when columns are worked out, still before running.
-        joined = duckdb.table("orders").join(duckdb.table("orders"), on=lambda left, right: left["id"] == right["id"])
+        joined = duckdb.frame.table("orders").join(
+            duckdb.frame.table("orders"), on=lambda left, right: left["id"] == right["id"]
+        )
         with pytest.raises(ValueError, match="both sides of this join have"):
             joined.columns(con)
 
-    def test_the_message_names_the_columns(self, con: duckdb.Connection) -> None:
-        joined = duckdb.table("orders").join(duckdb.table("orders"), on=lambda left, right: left["id"] == right["id"])
+    def test_the_message_names_the_columns(self, con: duckdb.frame.Connection) -> None:
+        joined = duckdb.frame.table("orders").join(
+            duckdb.frame.table("orders"), on=lambda left, right: left["id"] == right["id"]
+        )
         with pytest.raises(ValueError, match=r"'id'.*'country'.*'amount'"):
             joined.columns(con)
 
-    def test_a_suffix_renames_the_right_side(self, con: duckdb.Connection) -> None:
-        joined = duckdb.table("orders").join(
-            duckdb.table("orders"), on=lambda left, right: left["id"] == right["id"], suffix="_r"
+    def test_a_suffix_renames_the_right_side(self, con: duckdb.frame.Connection) -> None:
+        joined = duckdb.frame.table("orders").join(
+            duckdb.frame.table("orders"), on=lambda left, right: left["id"] == right["id"], suffix="_r"
         )
         assert joined.columns(con) == ["id", "country", "amount", "id_r", "country_r", "amount_r"]
         assert joined.columns(con) == [name for name, _ in whole_bind(joined, con)]
 
-    def test_a_suffixed_column_is_reachable(self, con: duckdb.Connection) -> None:
-        joined = duckdb.table("orders").join(
-            duckdb.table("orders"), on=lambda left, right: left["id"] == (right["id"] - 1), suffix="_next"
+    def test_a_suffixed_column_is_reachable(self, con: duckdb.frame.Connection) -> None:
+        joined = duckdb.frame.table("orders").join(
+            duckdb.frame.table("orders"), on=lambda left, right: left["id"] == (right["id"] - 1), suffix="_next"
         )
         pairs = joined.select("id", "id_next").sort(col("id")).rows(con)
         assert pairs == [(1, 2), (2, 3), (3, 4), (4, 5)]
 
-    def test_a_using_key_is_not_a_clash(self, con: duckdb.Connection) -> None:
+    def test_a_using_key_is_not_a_clash(self, con: duckdb.frame.Connection) -> None:
         # USING folds its key into one column, so it cannot appear twice.
-        left = duckdb.table("orders").select("id", "country")
-        right = duckdb.table("countries").rename(code="country")
+        left = duckdb.frame.table("orders").select("id", "country")
+        right = duckdb.frame.table("countries").rename(code="country")
         assert left.join(right, on="country").columns(con) == ["id", "country", "label"]
 
-    def test_a_semi_join_keeps_only_the_left(self, con: duckdb.Connection) -> None:
+    def test_a_semi_join_keeps_only_the_left(self, con: duckdb.frame.Connection) -> None:
         # Nothing from the right survives, so nothing can collide.
-        joined = duckdb.table("orders").join(
-            duckdb.table("orders"), on=lambda left, right: left["id"] == right["id"], how="semi"
+        joined = duckdb.frame.table("orders").join(
+            duckdb.frame.table("orders"), on=lambda left, right: left["id"] == right["id"], how="semi"
         )
         assert joined.columns(con) == ["id", "country", "amount"]
 
-    def test_disjoint_sides_need_no_suffix(self, con: duckdb.Connection) -> None:
-        joined = duckdb.table("orders").join(
-            duckdb.table("countries"), on=lambda left, right: left["country"] == right["code"]
+    def test_disjoint_sides_need_no_suffix(self, con: duckdb.frame.Connection) -> None:
+        joined = duckdb.frame.table("orders").join(
+            duckdb.frame.table("countries"), on=lambda left, right: left["country"] == right["code"]
         )
         assert joined.columns(con) == ["id", "country", "amount", "code", "label"]
         assert "RENAME" not in joined.render()
@@ -730,78 +773,80 @@ class TestJoinRefusesToDuplicateAName:
 class TestReviewRoundTwo:
     """Bugs found in the first cut; each gave a wrong answer, so each is pinned by its rows."""
 
-    def test_aggregate_binds_its_literals(self, orders: duckdb.Frame) -> None:
+    def test_aggregate_binds_its_literals(self, orders: duckdb.frame.Frame) -> None:
         # aggregate() used to build its SQL at call time and wrote the values into the text.
         sql, values = orders.aggregate((col("country") == "nl").sum().alias("n"))._sql_and_values()
         assert "'nl'" not in sql
         assert values == ["nl"]
 
-    def test_grouped_agg_binds_its_literals(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_grouped_agg_binds_its_literals(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         grouped = orders.group_by(col("country")).agg((col("amount") > 100).sum().alias("big"))
         assert "'nl'" not in grouped.render()
         assert sorted(grouped.rows(con)) == [("be", 0), ("de", 0), ("nl", 2)]
 
-    def test_a_blob_literal_survives_both_paths(self, con: duckdb.Connection) -> None:
+    def test_a_blob_literal_survives_both_paths(self, con: duckdb.frame.Connection) -> None:
         # A blob used to be escaped as one run of hex digits, so the inline and bound forms disagreed.
         con.run("CREATE TABLE blobs AS SELECT unhex('AABBCC') AS v")
-        blobs, needle = duckdb.table("blobs"), bytes([0xAA, 0xBB, 0xCC])
+        blobs, needle = duckdb.frame.table("blobs"), bytes([0xAA, 0xBB, 0xCC])
         assert blobs.filter(col("v") == needle).rows(con) == [(needle,)]
         assert blobs.aggregate((col("v") == needle).sum().alias("n")).rows(con) == [(1,)]
 
     def test_a_blob_literal_is_escaped_per_byte(self) -> None:
         assert render_literal(bytes([0xAA, 0xBB, 0xCC])) == r"'\xaa\xbb\xcc'::BLOB"
 
-    def test_one_plan_runs_on_any_connection(self, con: duckdb.Connection) -> None:
+    def test_one_plan_runs_on_any_connection(self, con: duckdb.frame.Connection) -> None:
         # A plan names no connection, so two plans cannot mix databases; each just runs where it is given.
-        plan = duckdb.table("orders").filter(col("amount") > 100).select("id")
+        plan = duckdb.frame.table("orders").filter(col("amount") > 100).select("id")
         assert plan.rows(con) == [(1,), (3,)]
-        elsewhere = duckdb.connect()
+        elsewhere = duckdb.frame.connect()
         elsewhere.run("CREATE TABLE orders AS SELECT 99 AS id, 'zz' AS country, 900 AS amount")
         assert plan.rows(elsewhere) == [(99,)]
 
-    def test_user_sql_may_contain_braces(self, con: duckdb.Connection) -> None:
+    def test_user_sql_may_contain_braces(self, con: duckdb.frame.Connection) -> None:
         # SQL text was once a format template, so DuckDB's struct syntax was read as a format field.
-        assert duckdb.sql("SELECT {'a': 1, 'b': 2} AS s").rows(con) == [({"a": 1, "b": 2},)]
+        assert duckdb.frame.sql("SELECT {'a': 1, 'b': 2} AS s").rows(con) == [({"a": 1, "b": 2},)]
 
-    def test_a_table_name_may_contain_braces(self, con: duckdb.Connection) -> None:
+    def test_a_table_name_may_contain_braces(self, con: duckdb.frame.Connection) -> None:
         con.run('CREATE TABLE "weird{0}name" AS SELECT 1 AS v')
-        assert duckdb.table("weird{0}name").rows(con) == [(1,)]
+        assert duckdb.frame.table("weird{0}name").rows(con) == [(1,)]
 
-    def test_a_column_name_may_contain_braces(self, con: duckdb.Connection) -> None:
+    def test_a_column_name_may_contain_braces(self, con: duckdb.frame.Connection) -> None:
         con.run('CREATE TABLE braces AS SELECT 1 AS "a{0}b", 2 AS keep')
-        assert duckdb.table("braces").drop("a{0}b").columns(con) == ["keep"]
+        assert duckdb.frame.table("braces").drop("a{0}b").columns(con) == ["keep"]
 
-    def test_closing_releases_the_database(self, con: duckdb.Connection, tmp_path: Path) -> None:
+    def test_closing_releases_the_database(self, con: duckdb.frame.Connection, tmp_path: Path) -> None:
         # A plan holds nothing, so there is nothing to keep the file open.
         path = str(tmp_path / "held.db")
-        con = duckdb.connect(path)
+        con = duckdb.frame.connect(path)
         con.run("CREATE TABLE t AS SELECT 1 AS v")
-        plan = duckdb.table("t")
+        plan = duckdb.frame.table("t")
         con.close()
         with pytest.raises(exceptions.InterfaceError, match="closed"):
             plan.rows(con)
         del con
         gc.collect()
         # The plan is still perfectly good; it just needs a connection.
-        reopened = duckdb.connect(path)
+        reopened = duckdb.frame.connect(path)
         assert plan.rows(reopened) == [(1,)]
 
-    def test_with_columns_refuses_a_list(self, orders: duckdb.Frame) -> None:
+    def test_with_columns_refuses_a_list(self, orders: duckdb.frame.Frame) -> None:
         # A list was read as positional arguments, so only its first element survived.
         with pytest.raises(TypeError, match="wrap a value in lit"):
             orders.with_columns(tags=["id", "country"])
 
-    def test_with_columns_takes_a_list_through_lit(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_with_columns_takes_a_list_through_lit(
+        self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame
+    ) -> None:
         rows = orders.with_columns(tags=lit(["a", "b"])).select("tags").first(con)
         assert rows == (["a", "b"],)
 
-    def test_a_suffix_that_would_still_collide_is_refused(self, con: duckdb.Connection) -> None:
+    def test_a_suffix_that_would_still_collide_is_refused(self, con: duckdb.frame.Connection) -> None:
         # Only the right side's original names were checked, never the suffixed ones.
         con.run("CREATE TABLE lhs AS SELECT 1 AS id, 10 AS amount, 99 AS amount_r")
         con.run("CREATE TABLE rhs AS SELECT 1 AS id, 20 AS amount")
         with pytest.raises(ValueError, match="'amount_r' more than once"):
-            duckdb.table("lhs").join(duckdb.table("rhs"), on="id", suffix="_r").columns(con)
-        assert duckdb.table("lhs").join(duckdb.table("rhs"), on="id", suffix="_b").columns(con) == [
+            duckdb.frame.table("lhs").join(duckdb.frame.table("rhs"), on="id", suffix="_r").columns(con)
+        assert duckdb.frame.table("lhs").join(duckdb.frame.table("rhs"), on="id", suffix="_b").columns(con) == [
             "id",
             "amount",
             "amount_r",
@@ -813,14 +858,14 @@ class TestReviewRoundTwo:
         with pytest.raises(TypeError, match="a list-typed expression; for one value use =="):
             col("code").isin("US")
 
-    def test_isin_still_takes_a_list(self, con: duckdb.Connection) -> None:
-        assert duckdb.table("orders").filter(col("country").isin(["nl", "de"])).columns(con) == [
+    def test_isin_still_takes_a_list(self, con: duckdb.frame.Connection) -> None:
+        assert duckdb.frame.table("orders").filter(col("country").isin(["nl", "de"])).columns(con) == [
             "id",
             "country",
             "amount",
         ]
 
-    def test_an_unsupplied_parameter_is_refused(self, orders: duckdb.Frame) -> None:
+    def test_an_unsupplied_parameter_is_refused(self, orders: duckdb.frame.Frame) -> None:
         # An unsupplied placeholder used to become NULL, so the query matched nothing and said nothing.
         with pytest.raises(ValueError, match="no value for parameter 'needle'"):
             orders.filter(col("country") == param("needle"))._sql_and_values()
@@ -835,7 +880,11 @@ class TestReviewRoundTwo:
         ],
     )
     def test_a_verb_may_not_produce_one_name_twice(
-        self, con: duckdb.Connection, orders: duckdb.Frame, verb: str, call: Callable[[duckdb.Frame], duckdb.Frame]
+        self,
+        con: duckdb.frame.Connection,
+        orders: duckdb.frame.Frame,
+        verb: str,
+        call: Callable[[duckdb.frame.Frame], duckdb.frame.Frame],
     ) -> None:
         # DuckDB will not catch this behind a WITH: it resolves a later reference to whichever came first.
         with pytest.raises(ValueError, match=f"{verb} would produce"):
@@ -855,16 +904,18 @@ class TestReviewRoundTwo:
         second.exclude.append("b")
         assert first.exclude == ["a"]
 
-    def test_run_closes_its_result_when_the_statement_fails(self, con: duckdb.Connection) -> None:
+    def test_run_closes_its_result_when_the_statement_fails(self, con: duckdb.frame.Connection) -> None:
         # A failed statement used to leave its result open, and one open result blocks the next.
         con.run("CREATE TABLE unique_v (v INTEGER PRIMARY KEY)")
         con.run("INSERT INTO unique_v VALUES (1)")
         with pytest.raises(exceptions.Error):
             con.run("INSERT INTO unique_v VALUES (1)")
         assert con.run("INSERT INTO unique_v VALUES (2)") == 1
-        assert duckdb.table("unique_v").count(con) == 2
+        assert duckdb.frame.table("unique_v").count(con) == 2
 
-    def test_a_very_long_chain_does_not_overflow_the_stack(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_a_very_long_chain_does_not_overflow_the_stack(
+        self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame
+    ) -> None:
         # The walk over the steps used to recurse, so a chain built in a loop failed at a few hundred.
         deep = orders
         for _ in range(3000):
@@ -872,10 +923,10 @@ class TestReviewRoundTwo:
         assert deep.columns(con) == ["id", "country", "amount"]
         assert deep.render().count("WITH") == 1
 
-    def test_step_order_is_unchanged_by_the_iterative_walk(self, con: duckdb.Connection) -> None:
+    def test_step_order_is_unchanged_by_the_iterative_walk(self, con: duckdb.frame.Connection) -> None:
         # Step numbering, and therefore the order values are bound in, follows the order steps are visited.
-        left = duckdb.table("orders").filter(col("country") == "nl")
-        right = duckdb.table("countries").filter(col("code") == "be")
+        left = duckdb.frame.table("orders").filter(col("country") == "nl")
+        right = duckdb.frame.table("countries").filter(col("code") == "be")
         _sql, values = left.join(right, on=lambda left, right: left["country"] == right["code"])._sql_and_values()
         assert values == ["nl", "be"], "inputs must still be visited left to right"
 
@@ -884,70 +935,70 @@ class TestAPlanHoldsNothing:
     """A plan names no connection and no database, so the same one can be a macro body or run anywhere."""
 
     def test_a_plan_holds_no_connection(self) -> None:
-        plan = duckdb.table("orders").filter(col("amount") > 100).select("id")
+        plan = duckdb.frame.table("orders").filter(col("amount") > 100).select("id")
         held = {name for name in vars(plan) if not name.startswith("__")}
         assert held == {"_step", "_inputs", "_uses"}
 
     def test_a_plan_renders_with_no_engine(self) -> None:
-        plan = duckdb.table("orders").filter(col("amount") > 100).select("id")
+        plan = duckdb.frame.table("orders").filter(col("amount") > 100).select("id")
         rendered = plan.render()
         assert 'FROM "orders"' in rendered
         assert "SELECT" in rendered
 
     def test_literals_still_bind_with_no_engine(self) -> None:
-        sql, values = duckdb.table("orders").filter(col("country") == "nl")._sql_and_values()
+        sql, values = duckdb.frame.table("orders").filter(col("country") == "nl")._sql_and_values()
         assert "'nl'" not in sql
         assert values == ["nl"]
 
-    def test_one_plan_two_databases(self, con: duckdb.Connection) -> None:
-        plan = duckdb.table("orders").filter(col("amount") > 100).select("id").sort(col("id"))
+    def test_one_plan_two_databases(self, con: duckdb.frame.Connection) -> None:
+        plan = duckdb.frame.table("orders").filter(col("amount") > 100).select("id").sort(col("id"))
         assert plan.rows(con) == [(1,), (3,)]
-        elsewhere = duckdb.connect()
+        elsewhere = duckdb.frame.connect()
         elsewhere.run("CREATE TABLE orders AS SELECT 42 AS id, 'zz' AS country, 900 AS amount")
         assert plan.rows(elsewhere) == [(42,)]
 
     def test_a_typed_values_source_resolves_with_no_engine(self) -> None:
         # State what a source holds and the whole plan works out its columns with no connection.
-        orders = duckdb.values([], columns=[("id", "INTEGER"), ("amount", "INTEGER")])
+        orders = duckdb.frame.values([], columns=[("id", "INTEGER"), ("amount", "INTEGER")])
         plan = orders.filter(col("amount") > 0).with_columns(doubled=col("amount")).select("id", "doubled")
         assert plan.columns() == ["id", "doubled"]
 
-    def test_a_plan_is_a_macro_body(self, con: duckdb.Connection) -> None:
+    def test_a_plan_is_a_macro_body(self, con: duckdb.frame.Connection) -> None:
         # A macro body names parameters that do not exist until it is called, so nothing can resolve them.
-        body = duckdb.sql('SELECT unnest("i") AS uid').filter(col("uid") > 2)
+        body = duckdb.frame.sql('SELECT unnest("i") AS uid').filter(col("uid") > 2)
         con.run("CREATE MACRO big_ids(i) AS TABLE " + body.render())
-        assert duckdb.sql("SELECT * FROM big_ids([1, 3, 9])").rows(con) == [(3,), (9,)]
+        assert duckdb.frame.sql("SELECT * FROM big_ids([1, 3, 9])").rows(con) == [(3,), (9,)]
 
-    def test_the_same_macro_body_on_another_connection(self, con: duckdb.Connection) -> None:
-        body = duckdb.sql('SELECT unnest("i") AS uid').filter(col("uid") > 2)
-        elsewhere = duckdb.connect()
+    def test_the_same_macro_body_on_another_connection(self, con: duckdb.frame.Connection) -> None:
+        body = duckdb.frame.sql('SELECT unnest("i") AS uid').filter(col("uid") > 2)
+        elsewhere = duckdb.frame.connect()
         for connection in (con, elsewhere):
             connection.run("CREATE MACRO big_ids(i) AS TABLE " + body.render())
-        assert duckdb.sql("SELECT * FROM big_ids([5])").rows(elsewhere) == [(5,)]
+        assert duckdb.frame.sql("SELECT * FROM big_ids([5])").rows(elsewhere) == [(5,)]
 
     def test_asking_for_columns_without_a_connection_says_so(self) -> None:
-        plan = duckdb.table("orders").filter(col("amount") > 0)
+        plan = duckdb.frame.table("orders").filter(col("amount") > 0)
         with pytest.raises(ValueError, match="pass a connection"):
             plan.columns()
 
     def test_running_needs_a_connection(self) -> None:
         with pytest.raises(TypeError):
-            duckdb.table("orders").rows()  # type: ignore[call-arg]
+            duckdb.frame.table("orders").rows()  # type: ignore[call-arg]
 
 
 class TestNothingAnEngineSaidIsKept:
     """A plan never remembers what a connection told it, or it would be quietly wrong on the next one."""
 
-    def two_databases(self) -> tuple[duckdb.Connection, duckdb.Connection]:
+    def two_databases(self) -> tuple[duckdb.frame.Connection, duckdb.frame.Connection]:
         """The same table name with different columns, so a remembered answer cannot pass both."""
-        first, second = duckdb.connect(), duckdb.connect()
+        first, second = duckdb.frame.connect(), duckdb.frame.connect()
         first.run("CREATE TABLE orders AS SELECT 1 AS id, 10 AS amount")
         second.run("CREATE TABLE orders AS SELECT 1 AS id, 10 AS amount, 99 AS x")
         return first, second
 
     def test_one_plan_two_schemas_replaces_on_one_appends_on_the_other(self) -> None:
         first, second = self.two_databases()
-        plan = duckdb.table("orders").with_columns(x=col("amount") * 2)
+        plan = duckdb.frame.table("orders").with_columns(x=col("amount") * 2)
         # `x` is absent in the first and present in the second, so it is appended once and replaced once.
         assert plan.columns(first) == ["id", "amount", "x"]
         assert plan.rows(first) == [(1, 10, 20)]
@@ -956,42 +1007,42 @@ class TestNothingAnEngineSaidIsKept:
 
     def test_the_order_of_the_two_does_not_matter(self) -> None:
         first, second = self.two_databases()
-        plan = duckdb.table("orders").with_columns(x=col("amount") * 2)
+        plan = duckdb.frame.table("orders").with_columns(x=col("amount") * 2)
         assert plan.rows(second) == [(1, 10, 20)]
         assert plan.rows(first) == [(1, 10, 20)]
 
     def test_a_plan_read_on_one_connection_is_right_on_another(self) -> None:
         # Ask one connection for the columns, then run on a second whose columns differ.
         first, second = self.two_databases()
-        plan = duckdb.table("orders").with_columns(x=col("amount") * 2)
+        plan = duckdb.frame.table("orders").with_columns(x=col("amount") * 2)
         assert plan.schema(first) == [("id", "INTEGER"), ("amount", "INTEGER"), ("x", "INTEGER")]
         assert plan.rows(second) == [(1, 10, 20)], "the first connection must not decide this"
 
     def test_the_join_guard_runs_on_every_connection(self) -> None:
         # Worked out once and remembered, the check for a repeated name never ran on the second connection.
-        clear, clashing = duckdb.connect(), duckdb.connect()
+        clear, clashing = duckdb.frame.connect(), duckdb.frame.connect()
         for connection, right in ((clear, "SELECT 1 AS id, 20 AS y"), (clashing, "SELECT 1 AS id, 20 AS x")):
             connection.run("CREATE TABLE l AS SELECT 1 AS id, 10 AS x")
             connection.run(f"CREATE TABLE r AS {right}")
-        joined = duckdb.table("l").join(duckdb.table("r"), on="id")
+        joined = duckdb.frame.table("l").join(duckdb.frame.table("r"), on="id")
         assert joined.columns(clear) == ["id", "x", "y"]
         with pytest.raises(ValueError, match="both sides of this join have 'x'"):
             joined.columns(clashing)
         with pytest.raises(ValueError, match="both sides of this join have 'x'"):
             joined.rows(clashing)
 
-    def test_ddl_on_the_same_connection_is_seen(self, con: duckdb.Connection) -> None:
+    def test_ddl_on_the_same_connection_is_seen(self, con: duckdb.frame.Connection) -> None:
         con.run("CREATE TABLE t AS SELECT 1 AS a")
-        plan = duckdb.table("t").with_columns(b=col("a") + 1)
+        plan = duckdb.frame.table("t").with_columns(b=col("a") + 1)
         assert plan.rows(con) == [(1, 2)]
         con.run("ALTER TABLE t ADD COLUMN b INTEGER DEFAULT 7")
         # `b` now exists, so the same plan replaces where it used to append.
         assert plan.columns(con) == ["a", "b"]
         assert plan.rows(con) == [(1, 2)]
 
-    def test_a_dropped_column_is_seen_too(self, con: duckdb.Connection) -> None:
+    def test_a_dropped_column_is_seen_too(self, con: duckdb.frame.Connection) -> None:
         con.run("CREATE TABLE t AS SELECT 1 AS a, 5 AS b")
-        plan = duckdb.table("t").with_columns(b=col("a") + 1)
+        plan = duckdb.frame.table("t").with_columns(b=col("a") + 1)
         assert plan.rows(con) == [(1, 2)]
         con.run("ALTER TABLE t DROP COLUMN b")
         assert plan.rows(con) == [(1, 2)]
@@ -1001,34 +1052,34 @@ class TestRenderIsTotal:
     """Turning a plan into SQL never needs a connection, except for one join form."""
 
     def test_with_columns_renders_blind(self) -> None:
-        plan = duckdb.table("orders").with_columns(doubled=col("amount") * 2)
+        plan = duckdb.frame.table("orders").with_columns(doubled=col("amount") * 2)
         sql = plan.render()
         assert "COLUMNS(lambda c: c NOT IN ('doubled'))" in sql
         assert repr(plan).startswith("<Frame WITH")
 
-    def test_the_blind_form_gives_the_same_rows(self, con: duckdb.Connection) -> None:
+    def test_the_blind_form_gives_the_same_rows(self, con: duckdb.frame.Connection) -> None:
         # Without a connection a replaced column moves to the end; the values are the same either way.
-        plan = duckdb.table("orders").with_columns(country=col("country").str().upper(), big=col("amount") > 100)
+        plan = duckdb.frame.table("orders").with_columns(country=col("country").str().upper(), big=col("amount") > 100)
         resolved = plan.rows(con)
-        blind = duckdb.sql(plan.render()).rows(con)
+        blind = duckdb.frame.sql(plan.render()).rows(con)
         assert plan.columns(con) == ["id", "country", "amount", "big"]
-        assert duckdb.sql(plan.render()).columns(con) == ["id", "amount", "country", "big"]
+        assert duckdb.frame.sql(plan.render()).columns(con) == ["id", "amount", "country", "big"]
         assert sorted(sorted(map(str, row)) for row in blind) == sorted(sorted(map(str, row)) for row in resolved)
 
-    def test_a_computed_column_can_be_a_macro_body(self, con: duckdb.Connection) -> None:
-        body = duckdb.sql('SELECT unnest("i") AS n').with_columns(double=col("n") * 2)
+    def test_a_computed_column_can_be_a_macro_body(self, con: duckdb.frame.Connection) -> None:
+        body = duckdb.frame.sql('SELECT unnest("i") AS n').with_columns(double=col("n") * 2)
         con.run("CREATE MACRO doubled(i) AS TABLE " + body.render())
-        assert duckdb.sql("SELECT * FROM doubled([1, 2])").rows(con) == [(1, 2), (2, 4)]
+        assert duckdb.frame.sql("SELECT * FROM doubled([1, 2])").rows(con) == [(1, 2), (2, 4)]
 
-    def test_a_suffixed_join_is_the_one_step_that_needs_a_connection(self, con: duckdb.Connection) -> None:
-        plan = duckdb.table("orders").join(duckdb.table("orders"), on="id", suffix="_r")
+    def test_a_suffixed_join_is_the_one_step_that_needs_a_connection(self, con: duckdb.frame.Connection) -> None:
+        plan = duckdb.frame.table("orders").join(duckdb.frame.table("orders"), on="id", suffix="_r")
         with pytest.raises(ValueError, match="needs a connection to render"):
             plan.render()
         assert repr(plan).startswith("<Frame, renders with a connection:")
         assert 'AS "country_r"' in plan.render(con)
 
     def test_an_unsuffixed_join_renders_blind(self) -> None:
-        assert "JOIN" in duckdb.table("a").join(duckdb.table("b"), on="id").render()
+        assert "JOIN" in duckdb.frame.table("a").join(duckdb.frame.table("b"), on="id").render()
 
 
 class TestJoinKindIsAClosedSet:
@@ -1036,15 +1087,15 @@ class TestJoinKindIsAClosedSet:
 
     def test_a_typo_is_refused_at_the_call(self) -> None:
         with pytest.raises(ValueError, match="unknown join kind 'innner'"):
-            duckdb.table("a").join(duckdb.table("b"), on="id", how="innner")
+            duckdb.frame.table("a").join(duckdb.frame.table("b"), on="id", how="innner")
 
     def test_text_cannot_ride_in(self) -> None:
         with pytest.raises(ValueError, match="unknown join kind"):
-            duckdb.table("a").join(duckdb.table("b"), on="id", how="inner JOIN evil ON true --")
+            duckdb.frame.table("a").join(duckdb.frame.table("b"), on="id", how="inner JOIN evil ON true --")
 
-    def test_case_does_not_matter(self, con: duckdb.Connection) -> None:
-        plan = duckdb.table("orders").join(
-            duckdb.table("countries"), on=lambda left, right: left["country"] == right["code"], how="LEFT"
+    def test_case_does_not_matter(self, con: duckdb.frame.Connection) -> None:
+        plan = duckdb.frame.table("orders").join(
+            duckdb.frame.table("countries"), on=lambda left, right: left["country"] == right["code"], how="LEFT"
         )
         assert plan.count(con) == 5
 
@@ -1053,9 +1104,9 @@ class TestOnlyAPlanIsASubquery:
     """Having a `render` method is not enough to be used as a subquery."""
 
     def test_a_frame_is_a_plan(self) -> None:
-        from duckdb.expr import PlanBase
+        from duckdb.frame.expr import PlanBase
 
-        assert isinstance(duckdb.table("t"), PlanBase)
+        assert isinstance(duckdb.frame.table("t"), PlanBase)
 
     def test_something_else_with_a_render_method_is_not(self) -> None:
         class Template:
@@ -1071,20 +1122,20 @@ class TestTerminalsTakeARelationalConnection:
 
     def test_a_dbapi_connection_is_refused(self) -> None:
         raw = duckdb.dbapi.connect()
-        with pytest.raises(TypeError, match=r"duckdb\.Connection, not duckdb\.dbapi\.Connection"):
-            duckdb.sql("SELECT 1").rows(raw)  # type: ignore[arg-type]
-        with pytest.raises(TypeError, match=r"duckdb\.Connection"):
-            duckdb.sql("SELECT 1").create(raw, "t")  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match=r"duckdb\.frame\.Connection, not duckdb\.dbapi\.Connection"):
+            duckdb.frame.sql("SELECT 1").rows(raw)  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match=r"duckdb\.frame\.Connection"):
+            duckdb.frame.sql("SELECT 1").create(raw, "t")  # type: ignore[arg-type]
 
 
 class TestASubqueryIsComputedOnce:
     """A plan used through a subquery is a step of the plan it lands in."""
 
-    def test_a_scalar_subquery_is_rendered_once(self, con: duckdb.Connection) -> None:
+    def test_a_scalar_subquery_is_rendered_once(self, con: duckdb.frame.Connection) -> None:
         con.run("CREATE SEQUENCE seq")
         con.run("CREATE TABLE t AS SELECT * FROM (VALUES (1), (2), (3)) v(id)")
-        tagged = duckdb.sql("SELECT nextval('seq') AS tag")
-        combined = duckdb.table("t").filter(col("id") > tagged.scalar()).cross(tagged)
+        tagged = duckdb.frame.sql("SELECT nextval('seq') AS tag")
+        combined = duckdb.frame.table("t").filter(col("id") > tagged.scalar()).cross(tagged)
         sql = combined.render()
         assert sql.count("nextval") == 1
         # One value consumed, so the filter and the column agree.
@@ -1092,19 +1143,19 @@ class TestASubqueryIsComputedOnce:
         assert all(id_ > tag for id_, tag in rows)
         assert {tag for _, tag in rows} == {1}
 
-    def test_a_plan_used_twice_through_isin_is_one_step(self, con: duckdb.Connection) -> None:
-        wanted = duckdb.table("orders").filter(col("country") == "nl").select("id")
-        plan = duckdb.table("orders").filter(col("id").isin(wanted) | ~col("id").isin(wanted))
+    def test_a_plan_used_twice_through_isin_is_one_step(self, con: duckdb.frame.Connection) -> None:
+        wanted = duckdb.frame.table("orders").filter(col("country") == "nl").select("id")
+        plan = duckdb.frame.table("orders").filter(col("id").isin(wanted) | ~col("id").isin(wanted))
         # The step is written once, so its value is bound once however often the expression names it.
         assert plan.render().count("'nl'") == 1
         assert plan._sql_and_values()[1] == ["nl"]
         assert plan.count(con) == 5
 
     def test_a_subquery_keeps_the_stub_free_of_the_catalog(
-        self, con: duckdb.Connection, monkeypatch: pytest.MonkeyPatch
+        self, con: duckdb.frame.Connection, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        wanted = duckdb.table("orders").filter(col("country") == "nl").select("id")
-        plan = duckdb.table("orders").with_columns(flag=col("id").isin(wanted))
+        wanted = duckdb.frame.table("orders").filter(col("country") == "nl").select("id")
+        plan = duckdb.frame.table("orders").with_columns(flag=col("id").isin(wanted))
         calls = record_binds(con, monkeypatch)
         assert plan.types(con)[-1] == "BOOLEAN"
         stub = next(call for call in calls if "WHERE FALSE" in call)
@@ -1116,9 +1167,9 @@ class TestStubsAreOneStepDeep:
     """A step whose input has unknown types asks about that input alone, not the whole chain."""
 
     def test_no_bind_ever_covers_more_than_one_step(
-        self, con: duckdb.Connection, monkeypatch: pytest.MonkeyPatch
+        self, con: duckdb.frame.Connection, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        plan = duckdb.table("orders")
+        plan = duckdb.frame.table("orders")
         for i in range(5):
             plan = plan.with_columns(**{f"c{i}": col("amount") + i})
         plan = plan.select(sql_expr("c4 * 2"))
@@ -1136,9 +1187,9 @@ class TestCloseReachesLiveResults:
 
     def test_a_paused_iterator_stops_at_close(self, tmp_path: Path) -> None:
         path = str(tmp_path / "live.db")
-        con = duckdb.connect(path)
+        con = duckdb.frame.connect(path)
         con.run("CREATE TABLE t AS SELECT * FROM range(5000)")
-        rows = duckdb.table("t").iter_rows(con)
+        rows = duckdb.frame.table("t").iter_rows(con)
         assert next(rows) == (0,)
         con.close()
 
@@ -1152,10 +1203,10 @@ class TestCloseReachesLiveResults:
         # And the file is free while the iterator object is still alive.
         del con
         gc.collect()
-        assert duckdb.sql("SELECT count(*) FROM t").rows(duckdb.connect(path)) == [(5000,)]
+        assert duckdb.frame.sql("SELECT count(*) FROM t").rows(duckdb.frame.connect(path)) == [(5000,)]
 
-    def test_a_consumed_result_is_not_held(self, con: duckdb.Connection) -> None:
-        duckdb.table("orders").rows(con)
+    def test_a_consumed_result_is_not_held(self, con: duckdb.frame.Connection) -> None:
+        duckdb.frame.table("orders").rows(con)
         gc.collect()
         assert len(con._live) == 0
 
@@ -1163,31 +1214,31 @@ class TestCloseReachesLiveResults:
 class TestParametersAreSupplied:
     """`param(name)` takes its value from `parameters=`."""
 
-    def test_a_value_is_supplied_by_name(self, con: duckdb.Connection) -> None:
-        plan = duckdb.table("orders").filter(col("country") == param("where")).select("id")
+    def test_a_value_is_supplied_by_name(self, con: duckdb.frame.Connection) -> None:
+        plan = duckdb.frame.table("orders").filter(col("country") == param("where")).select("id")
         assert plan.rows(con, parameters={"where": "nl"}) == [(1,), (3,), (5,)]
         assert plan.rows(con, parameters={"where": "be"}) == [(2,)]
 
-    def test_names_and_literals_share_one_numbering(self, con: duckdb.Connection) -> None:
-        plan = duckdb.table("orders").filter((col("country") == "nl") & (col("amount") > param("floor")))
+    def test_names_and_literals_share_one_numbering(self, con: duckdb.frame.Connection) -> None:
+        plan = duckdb.frame.table("orders").filter((col("country") == "nl") & (col("amount") > param("floor")))
         sql, values = plan._sql_and_values(parameters={"floor": 200})
         assert "$1" in sql
         assert "$2" in sql
         assert values == ["nl", 200]
         assert plan.select("id").rows(con, parameters={"floor": 200}) == [(3,)]
 
-    def test_a_missing_value_is_refused(self, con: duckdb.Connection) -> None:
-        plan = duckdb.table("orders").filter(col("country") == param("where"))
+    def test_a_missing_value_is_refused(self, con: duckdb.frame.Connection) -> None:
+        plan = duckdb.frame.table("orders").filter(col("country") == param("where"))
         with pytest.raises(ValueError, match="no value for parameter 'where'"):
             plan.rows(con)
 
-    def test_an_unused_value_is_refused(self, con: duckdb.Connection) -> None:
-        plan = duckdb.table("orders").filter(col("country") == param("where"))
+    def test_an_unused_value_is_refused(self, con: duckdb.frame.Connection) -> None:
+        plan = duckdb.frame.table("orders").filter(col("country") == param("where"))
         with pytest.raises(ValueError, match="'wher' are not used"):
             plan.rows(con, parameters={"where": "nl", "wher": "nl"})
 
-    def test_every_terminal_takes_parameters(self, con: duckdb.Connection, tmp_path: Path) -> None:
-        plan = duckdb.table("orders").filter(col("country") == param("where"))
+    def test_every_terminal_takes_parameters(self, con: duckdb.frame.Connection, tmp_path: Path) -> None:
+        plan = duckdb.frame.table("orders").filter(col("country") == param("where"))
         values = {"where": "nl"}
         assert plan.count(con, parameters=values) == 3
         assert plan.first(con, parameters=values) is not None
@@ -1203,18 +1254,18 @@ class TestAggregatesAreRealMethods:
     """Written out one by one, so they type-check and autocomplete."""
 
     def test_methods_are_functions_with_docstrings(self) -> None:
-        assert callable(duckdb.Expr.sum)
-        assert "sum" in (duckdb.Expr.sum.__doc__ or "")
-        assert "quantile_cont" in (duckdb.Expr.quantile.__doc__ or "")
+        assert callable(duckdb.frame.Expr.sum)
+        assert "sum" in (duckdb.frame.Expr.sum.__doc__ or "")
+        assert "quantile_cont" in (duckdb.frame.Expr.quantile.__doc__ or "")
 
     def test_an_unknown_name_is_an_attribute_error(self) -> None:
         with pytest.raises(AttributeError):
             col("v").no_such_aggregate()  # type: ignore[attr-defined]
 
-    def test_count_all_counts_rows(self, con: duckdb.Connection) -> None:
-        from duckdb import count_all
+    def test_count_all_counts_rows(self, con: duckdb.frame.Connection) -> None:
+        from duckdb.frame import count_all
 
-        plan = duckdb.table("orders").aggregate(count_all().alias("rows"), col("amount").count().alias("values"))
+        plan = duckdb.frame.table("orders").aggregate(count_all().alias("rows"), col("amount").count().alias("values"))
         assert plan.rows(con) == [(5, 4)]
 
     def test_the_generated_module_is_current(self) -> None:
@@ -1223,21 +1274,21 @@ class TestAggregatesAreRealMethods:
         sys.path.insert(0, str(pathlib.Path(__file__).parent.parent / "scripts"))
         from gen_aggregates import render
 
-        committed = (pathlib.Path(__file__).parent.parent / "src" / "duckdb" / "_aggregates.py").read_text()
+        committed = (pathlib.Path(__file__).parent.parent / "src" / "duckdb" / "frame" / "_aggregates.py").read_text()
         assert committed == render(), "run scripts/gen_aggregates.py"
 
 
 class TestWindowFrames:
     """Rows and range bounds, and IGNORE NULLS."""
 
-    def test_a_rows_frame(self, con: duckdb.Connection) -> None:
-        plan = duckdb.sql("SELECT unnest([1, 2, 3, 4]) AS v").select(
+    def test_a_rows_frame(self, con: duckdb.frame.Connection) -> None:
+        plan = duckdb.frame.sql("SELECT unnest([1, 2, 3, 4]) AS v").select(
             col("v").sum().over(order_by=col("v"), rows=(-1, 0)).alias("running")
         )
         assert [r[0] for r in plan.rows(con)] == [1, 3, 5, 7]
 
-    def test_a_range_frame(self, con: duckdb.Connection) -> None:
-        plan = duckdb.sql("SELECT unnest([1, 2, 3]) AS v").select(
+    def test_a_range_frame(self, con: duckdb.frame.Connection) -> None:
+        plan = duckdb.frame.sql("SELECT unnest([1, 2, 3]) AS v").select(
             col("v").sum().over(order_by=col("v"), range=(None, 0)).alias("cumulative")
         )
         assert [r[0] for r in plan.rows(con)] == [1, 3, 6]
@@ -1246,12 +1297,14 @@ class TestWindowFrames:
         with pytest.raises(TypeError, match="not both"):
             col("v").sum().over(rows=(-1, 0), range=(-1, 0))
 
-    def test_ignore_nulls_goes_inside_the_call(self, con: duckdb.Connection) -> None:
-        from duckdb import last_value
+    def test_ignore_nulls_goes_inside_the_call(self, con: duckdb.frame.Connection) -> None:
+        from duckdb.frame import last_value
 
         expression = last_value(col("v")).ignore_nulls().over(order_by=col("i"))
         assert 'last_value("v" IGNORE NULLS) OVER' in expression.fragment()
-        plan = duckdb.sql("SELECT unnest([1, 2, 3]) AS i, unnest([1, NULL, 3]) AS v").select(expression.alias("lv"))
+        plan = duckdb.frame.sql("SELECT unnest([1, 2, 3]) AS i, unnest([1, NULL, 3]) AS v").select(
+            expression.alias("lv")
+        )
         assert [r[0] for r in plan.rows(con)] == [1, 1, 3]
 
     def test_ignore_nulls_needs_a_function_call(self) -> None:
@@ -1262,56 +1315,56 @@ class TestWindowFrames:
 class TestFunctionNamespaces:
     """`.str()`, `.dt()`, `.list()` and `.json()` bring a family of DuckDB functions into scope."""
 
-    def test_string_methods(self, con: duckdb.Connection) -> None:
-        plan = duckdb.sql("SELECT 'Hello World' AS s").select(
+    def test_string_methods(self, con: duckdb.frame.Connection) -> None:
+        plan = duckdb.frame.sql("SELECT 'Hello World' AS s").select(
             col("s").str().upper().alias("u"),
             col("s").str().contains("World").alias("c"),
             col("s").str().length().alias("n"),
         )
         assert plan.rows(con) == [("HELLO WORLD", True, 11)]
 
-    def test_date_methods(self, con: duckdb.Connection) -> None:
-        plan = duckdb.sql("SELECT DATE '2026-03-15' AS d").select(
+    def test_date_methods(self, con: duckdb.frame.Connection) -> None:
+        plan = duckdb.frame.sql("SELECT DATE '2026-03-15' AS d").select(
             col("d").dt().year().alias("y"),
             col("d").dt().trunc("month").alias("m"),
             col("d").dt().dayname().alias("n"),
         )
         assert plan.rows(con) == [(2026, datetime.datetime(2026, 3, 1), "Sunday")]
 
-    def test_list_methods(self, con: duckdb.Connection) -> None:
-        plan = duckdb.sql("SELECT [3, 1, 2] AS l").select(
+    def test_list_methods(self, con: duckdb.frame.Connection) -> None:
+        plan = duckdb.frame.sql("SELECT [3, 1, 2] AS l").select(
             col("l").list().sort().alias("s"),
             col("l").list().contains(2).alias("c"),
             col("l").list().unique().alias("u"),
         )
         assert plan.rows(con) == [([1, 2, 3], True, 3)]
 
-    def test_json_methods(self, con: duckdb.Connection) -> None:
-        plan = duckdb.sql("""SELECT '{"a": [1, 2], "b": "x"}' AS j""").select(
+    def test_json_methods(self, con: duckdb.frame.Connection) -> None:
+        plan = duckdb.frame.sql("""SELECT '{"a": [1, 2], "b": "x"}' AS j""").select(
             col("j").json().extract("$.a").alias("a"),
             col("j").json().keys().alias("k"),
             col("j").json().valid().alias("v"),
         )
         assert plan.rows(con) == [("[1,2]", ["a", "b"], True)]
 
-    def test_the_entry_is_an_expression_and_chains_stay_in_family(self, con: duckdb.Connection) -> None:
-        from duckdb._func_namespaces import JsonExpr, ListExpr, StrExpr
+    def test_the_entry_is_an_expression_and_chains_stay_in_family(self, con: duckdb.frame.Connection) -> None:
+        from duckdb.frame._func_namespaces import JsonExpr, ListExpr, StrExpr
 
         # Entering a family changes nothing about the SQL.
         assert col("s").str().fragment() == col("s").fragment()
-        plan = duckdb.sql("SELECT 'x' AS s").select(col("s").str().alias("copy"))
+        plan = duckdb.frame.sql("SELECT 'x' AS s").select(col("s").str().alias("copy"))
         assert plan.rows(con) == [("x",)]
         # The class a method returns follows DuckDB's return type for it.
         assert isinstance(col("s").str().upper().lower(), StrExpr)
         assert isinstance(col("j").json().keys(), ListExpr)  # VARCHAR[] comes back a list
         assert isinstance(col("j").json().extract("$.a"), JsonExpr)
-        assert duckdb.sql("SELECT 'Hi There' AS s").select(
+        assert duckdb.frame.sql("SELECT 'Hi There' AS s").select(
             col("s").str().lower().string_split(" ").contains("hi").alias("hit")
         ).rows(con) == [(True,)]
 
-    def test_json_is_text_underneath(self, con: duckdb.Connection) -> None:
+    def test_json_is_text_underneath(self, con: duckdb.frame.Connection) -> None:
         # JSON values take the string methods because DuckDB casts between JSON and VARCHAR.
-        plan = duckdb.sql("""SELECT '{"a": 1}' AS j""").select(col("j").json().extract("$.a").length().alias("n"))
+        plan = duckdb.frame.sql("""SELECT '{"a": 1}' AS j""").select(col("j").json().extract("$.a").length().alias("n"))
         assert plan.rows(con) == [(1,)]
 
     def test_arguments_are_bound(self) -> None:
@@ -1320,10 +1373,10 @@ class TestFunctionNamespaces:
         assert "DROP" not in sql
         assert sink.entries[0][1] == "x'; DROP TABLE t; --"
 
-    def test_every_generated_function_exists_in_this_engine(self, con: duckdb.Connection) -> None:
-        from duckdb import _func_namespaces
+    def test_every_generated_function_exists_in_this_engine(self, con: duckdb.frame.Connection) -> None:
+        from duckdb.frame import _func_namespaces
 
-        known = {row[0] for row in duckdb.sql("SELECT DISTINCT function_name FROM duckdb_functions()").rows(con)}
+        known = {row[0] for row in duckdb.frame.sql("SELECT DISTINCT function_name FROM duckdb_functions()").rows(con)}
         missing = [
             f"{cls.__name__}.{method} -> {function}"
             for cls in (
@@ -1339,10 +1392,10 @@ class TestFunctionNamespaces:
 
     @pytest.mark.parametrize("namespace", ["str", "dt", "list", "json"])
     def test_every_generated_method_calls_its_function_the_right_way_round(
-        self, con: duckdb.Connection, namespace: str
+        self, con: duckdb.frame.Connection, namespace: str
     ) -> None:
         """Only "no function matches" fails: any other complaint is DuckDB judging the made-up values."""
-        from duckdb import _func_namespaces
+        from duckdb.frame import _func_namespaces
 
         cls = {
             "str": _func_namespaces.StrExpr,
@@ -1356,7 +1409,7 @@ class TestFunctionNamespaces:
             "list": "[1, 2, 3]",
             "json": "'{\"a\": [1, 2]}'",
         }[namespace]
-        source = duckdb.sql(f"SELECT {subject} AS x")
+        source = duckdb.frame.sql(f"SELECT {subject} AS x")
         wrong = []
         for method, (_function, position, types) in cls.SPEC.items():
             if "LAMBDA" in types:
@@ -1372,13 +1425,14 @@ class TestFunctionNamespaces:
                     wrong.append(f"{namespace}.{method}: {str(error).splitlines()[0][:90]}")
         assert not wrong, wrong
 
-    def test_the_generated_module_is_current(self, con: duckdb.Connection) -> None:
+    def test_the_generated_module_is_current(self, con: duckdb.frame.Connection) -> None:
         import sys
 
         sys.path.insert(0, str(pathlib.Path(__file__).parent.parent / "scripts"))
         from gen_func_namespaces import build, render
 
-        committed = (pathlib.Path(__file__).parent.parent / "src" / "duckdb" / "_func_namespaces.py").read_text()
+        generated = pathlib.Path(__file__).parent.parent / "src" / "duckdb" / "frame" / "_func_namespaces.py"
+        committed = generated.read_text()
         resolved, report = build(con)
         assert not report["problems"], report["problems"]
         assert committed == render(resolved), "run scripts/gen_func_namespaces.py"
@@ -1387,19 +1441,19 @@ class TestFunctionNamespaces:
 class TestReviewRoundThree:
     """Bugs found once plans stopped holding connections and the function families were generated."""
 
-    def test_a_using_join_with_a_suffix_folds_the_key(self, con: duckdb.Connection) -> None:
+    def test_a_using_join_with_a_suffix_folds_the_key(self, con: duckdb.frame.Connection) -> None:
         # A single join key used to leave the right side's copy in the rows: three names over four values.
         con.run("CREATE TABLE a AS SELECT 1 AS id, 10 AS amount")
         con.run("CREATE TABLE b AS SELECT 1 AS id, 20 AS amount")
-        joined = duckdb.table("a").join(duckdb.table("b"), on="id", suffix="_r")
+        joined = duckdb.frame.table("a").join(duckdb.frame.table("b"), on="id", suffix="_r")
         assert joined.columns(con) == ["id", "amount", "amount_r"]
         assert joined.rows(con) == [(1, 10, 20)]
         assert "amount_r" in joined.preview(con)
 
-    def test_a_setting_change_forgets_stub_answers(self, con: duckdb.Connection) -> None:
+    def test_a_setting_change_forgets_stub_answers(self, con: duckdb.frame.Connection) -> None:
         # A remembered answer depends on the settings, and a setting changed through run() used to be missed.
         con.run("CREATE TABLE t3 AS SELECT 7 AS x, 2 AS y")
-        plan = duckdb.table("t3").with_columns(ratio=col("x") / col("y"))
+        plan = duckdb.frame.table("t3").with_columns(ratio=col("x") / col("y"))
         assert plan.types(con)[-1] == "DOUBLE"
         con.run("SET integer_division = true")
         try:
@@ -1407,9 +1461,9 @@ class TestReviewRoundThree:
         finally:
             con.run("SET integer_division = false")
 
-    def test_close_closes_every_live_result_even_if_one_refuses(self, con: duckdb.Connection) -> None:
+    def test_close_closes_every_live_result_even_if_one_refuses(self, con: duckdb.frame.Connection) -> None:
         # One result refusing to close used to leave the rest open and the connection looking open.
-        from duckdb.connection import LiveResult
+        from duckdb.frame.connection import LiveResult
 
         class Stubborn(LiveResult):
             def close(self) -> None:
@@ -1433,7 +1487,7 @@ class TestReviewRoundThree:
         # `_live` was a bare WeakSet touched from any thread.
         import threading
 
-        con = duckdb.connect()
+        con = duckdb.frame.connect()
         con.run("CREATE TABLE t AS SELECT * FROM range(100000)")
         stop = threading.Event()
         errors: list[BaseException] = []
@@ -1469,66 +1523,66 @@ class TestReviewRoundThree:
 
     @pytest.mark.parametrize("make", [lambda names: (n for n in names), set, frozenset, lambda names: map(str, names)])
     def test_any_iterable_of_names_is_a_column_list(
-        self, con: duckdb.Connection, make: Callable[[list[str]], object]
+        self, con: duckdb.frame.Connection, make: Callable[[list[str]], object]
     ) -> None:
         # Only lists and tuples counted, so a generator or a set was wrapped whole and refused.
         keys = make(["country"])
-        grouped = duckdb.table("orders").aggregate(col("amount").sum().alias("total"), group_by=keys)
+        grouped = duckdb.frame.table("orders").aggregate(col("amount").sum().alias("total"), group_by=keys)
         assert grouped.columns(con) == ["country", "total"]
-        assert duckdb.table("orders").distinct(on=make(["country"])).count(con) == 3
+        assert duckdb.frame.table("orders").distinct(on=make(["country"])).count(con) == 3
 
 
 class TestReviewRoundFour:
     """Bugs found in the cache of column answers and in the generated function families."""
 
-    def test_a_setting_changed_through_a_plan_forgets_stub_answers(self, con: duckdb.Connection) -> None:
+    def test_a_setting_changed_through_a_plan_forgets_stub_answers(self, con: duckdb.frame.Connection) -> None:
         # Only run() forgot; a SET executed as a plan did not.
         con.run("CREATE TABLE t2 AS SELECT 7 AS x, 2 AS y")
-        plan = duckdb.table("t2").with_columns(ratio=col("x") / col("y"))
+        plan = duckdb.frame.table("t2").with_columns(ratio=col("x") / col("y"))
         assert plan.types(con)[-1] == "DOUBLE"
-        duckdb.sql("SET integer_division = true").rows(con)
+        duckdb.frame.sql("SET integer_division = true").rows(con)
         try:
             assert plan.types(con)[-1] == "INTEGER"
         finally:
             con.run("SET integer_division = false")
 
     def test_a_query_does_not_forget_stub_answers(
-        self, con: duckdb.Connection, monkeypatch: pytest.MonkeyPatch
+        self, con: duckdb.frame.Connection, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # A plain SELECT must leave the cache alone, or it would empty on every fetch.
-        plan = duckdb.table("orders").select(sql_expr("amount * 2"))
+        plan = duckdb.frame.table("orders").select(sql_expr("amount * 2"))
         assert plan.columns(con) == ["(amount * 2)"]
-        duckdb.table("orders").rows(con)
+        duckdb.frame.table("orders").rows(con)
         calls = record_binds(con, monkeypatch)
         assert plan.columns(con) == ["(amount * 2)"]
         assert all("WHERE FALSE" not in call for call in calls), "the stub was asked again"
 
-    def test_list_prepend_puts_the_list_second(self, con: duckdb.Connection) -> None:
+    def test_list_prepend_puts_the_list_second(self, con: duckdb.frame.Connection) -> None:
         # Every list function used to take its subject first, and `list_prepend(element, list)` does not.
-        assert duckdb.sql("SELECT [1, 2] AS l").select(col("l").list().prepend(0).alias("p")).rows(con) == [
+        assert duckdb.frame.sql("SELECT [1, 2] AS l").select(col("l").list().prepend(0).alias("p")).rows(con) == [
             ([0, 1, 2],)
         ]
 
-    def test_timezone_binds_the_family_its_docstring_describes(self, con: duckdb.Connection) -> None:
+    def test_timezone_binds_the_family_its_docstring_describes(self, con: duckdb.frame.Connection) -> None:
         # The two-argument conversion overload used to win, under the one-argument description.
-        from duckdb._func_namespaces import DtExpr
+        from duckdb.frame._func_namespaces import DtExpr
 
         assert DtExpr.SPEC["timezone"][1] == 0
         assert "offset" in (DtExpr.timezone.__doc__ or "")
-        plan = duckdb.sql("SELECT TIMESTAMPTZ '2026-03-15 10:00:00+00' AS ts").select(
+        plan = duckdb.frame.sql("SELECT TIMESTAMPTZ '2026-03-15 10:00:00+00' AS ts").select(
             col("ts").dt().timezone().alias("z")
         )
         assert plan.rows(con)[0][0] is not None
 
     def test_nothing_numeric_is_filed_under_dt(self) -> None:
         # One date overload used to admit a whole function: isfinite(DATE) brought all of isfinite along.
-        from duckdb._func_namespaces import DtExpr
+        from duckdb.frame._func_namespaces import DtExpr
 
         assert not {"isfinite", "isinf", "generate_series", "range"} & set(DtExpr.SPEC)
 
     def test_a_result_tracked_after_close_is_refused_and_closed(self) -> None:
         # A result racing close() used to be tracked into an empty set and outlive the close.
-        con = duckdb.connect()
+        con = duckdb.frame.connect()
         raw = con._engine().execute("SELECT 1")
         con.close()
         with pytest.raises(exceptions.InterfaceError, match="closed"):
@@ -1542,7 +1596,7 @@ class TestReviewRoundFour:
         import threading
 
         path = str(tmp_path / "load.db")
-        con = duckdb.connect(path)
+        con = duckdb.frame.connect(path)
         con.run("CREATE TABLE t AS SELECT 1 AS v")
         stop = threading.Event()
 
@@ -1562,11 +1616,11 @@ class TestReviewRoundFour:
             worker.join()
         assert len(con._live) == 0
         # close() drops the database too, so the file is free without waiting for collection.
-        assert duckdb.sql("SELECT count(*) FROM t").rows(duckdb.connect(path)) == [(1,)]
+        assert duckdb.frame.sql("SELECT count(*) FROM t").rows(duckdb.frame.connect(path)) == [(1,)]
 
-    def test_the_stub_cache_evicts_one_at_a_time(self, con: duckdb.Connection) -> None:
+    def test_the_stub_cache_evicts_one_at_a_time(self, con: duckdb.frame.Connection) -> None:
         # At the limit the whole cache was cleared.
-        from duckdb import frame
+        from duckdb.frame import plan as frame
 
         con._stub_answers.clear()
         for i in range(frame._STUB_LIMIT + 3):
@@ -1581,32 +1635,33 @@ class TestReviewRoundFour:
         # A description ending in a period once produced `..`; a truncation ellipsis is the one exception.
         import inspect
 
-        from duckdb import _func_namespaces
+        from duckdb.frame import _func_namespaces
 
         assert ".." not in inspect.getsource(_func_namespaces).replace("...", "")
 
     @pytest.mark.parametrize("how", sorted(["semi", "anti"]))
-    def test_a_join_kind_row_decides_what_it_keeps(self, con: duckdb.Connection, how: str) -> None:
+    def test_a_join_kind_row_decides_what_it_keeps(self, con: duckdb.frame.Connection, how: str) -> None:
         # Whether a join kind keeps the right side is read from one record per kind.
-        joined = duckdb.table("orders").join(duckdb.table("orders"), on="id", how=how)
+        joined = duckdb.frame.table("orders").join(duckdb.frame.table("orders"), on="id", how=how)
         assert joined.columns(con) == ["id", "country", "amount"]
 
-    def test_a_join_condition_with_a_subquery_registers_the_plan(self, con: duckdb.Connection) -> None:
+    def test_a_join_condition_with_a_subquery_registers_the_plan(self, con: duckdb.frame.Connection) -> None:
         # join() used to work out its subqueries by hand instead of through the helper every verb uses.
-        nl = duckdb.table("orders").filter(col("country") == "nl").select("id")
-        joined = duckdb.table("orders").join(
-            duckdb.table("countries"), on=lambda left, right: (left["country"] == right["code"]) & left["id"].isin(nl)
+        nl = duckdb.frame.table("orders").filter(col("country") == "nl").select("id")
+        joined = duckdb.frame.table("orders").join(
+            duckdb.frame.table("countries"),
+            on=lambda left, right: (left["country"] == right["code"]) & left["id"].isin(nl),
         )
         assert len(joined._uses) == 1
         assert joined.render().count("'nl'") == 1
         assert joined.count(con) == 3
 
-    def test_render_with_a_connection_is_the_executed_text(self, con: duckdb.Connection) -> None:
+    def test_render_with_a_connection_is_the_executed_text(self, con: duckdb.frame.Connection) -> None:
         # With and without a connection a replaced column can land in a different place.
-        plan = duckdb.table("orders").with_columns(country=col("country").str().upper())
+        plan = duckdb.frame.table("orders").with_columns(country=col("country").str().upper())
         assert "COLUMNS(lambda" in plan.render()
         assert "REPLACE" in plan.render(con)
-        assert duckdb.sql(plan.render(con)).columns(con) == plan.columns(con)
+        assert duckdb.frame.sql(plan.render(con)).columns(con) == plan.columns(con)
 
 
 class TestScopeStepOne:
@@ -1624,18 +1679,18 @@ class TestScopeStepOne:
         ],
     )
     def test_group_by_takes_one_expression_or_a_list_or_nothing(
-        self, con: duckdb.Connection, keys: object, expected: list[str]
+        self, con: duckdb.frame.Connection, keys: object, expected: list[str]
     ) -> None:
         # `if group_by` asked an expression for its truth value, which it refuses to give.
-        plan = duckdb.table("orders").aggregate(col("amount").sum().alias("total"), group_by=keys)
+        plan = duckdb.frame.table("orders").aggregate(col("amount").sum().alias("total"), group_by=keys)
         assert plan.columns(con) == expected
 
 
 class TestErrorModel:
     """`TypeError` for the wrong kind of thing, `ValueError` for the wrong content, DuckDB's errors as they are."""
 
-    def test_the_wrong_kind_of_thing_is_a_type_error(self, con: duckdb.Connection) -> None:
-        orders = duckdb.table("orders")
+    def test_the_wrong_kind_of_thing_is_a_type_error(self, con: duckdb.frame.Connection) -> None:
+        orders = duckdb.frame.table("orders")
         with pytest.raises(TypeError):
             bool(col("x") == 1)
         with pytest.raises(TypeError):
@@ -1645,11 +1700,11 @@ class TestErrorModel:
         with pytest.raises(TypeError):
             col("code").isin("US")
         with pytest.raises(TypeError):
-            orders.join(duckdb.table("countries"))
+            orders.join(duckdb.frame.table("countries"))
         with pytest.raises(TypeError):
             col("v").ignore_nulls()
         with pytest.raises(TypeError):
-            duckdb.sql("SELECT 1").rows(duckdb.dbapi.connect())  # type: ignore[arg-type]
+            duckdb.frame.sql("SELECT 1").rows(duckdb.dbapi.connect())  # type: ignore[arg-type]
         with pytest.raises(TypeError):
             col("v").sum().over(rows=(-1, 0), range=(-1, 0))
         with pytest.raises(TypeError):
@@ -1658,12 +1713,12 @@ class TestErrorModel:
     def test_the_wrong_connection_is_named_by_its_module(self) -> None:
         # Both classes are called Connection, so the bare name read as "not Connection".
         with pytest.raises(TypeError, match=r"not duckdb\.dbapi\.Connection;"):
-            duckdb.sql("SELECT 1").rows(duckdb.dbapi.connect())  # type: ignore[arg-type]
+            duckdb.frame.sql("SELECT 1").rows(duckdb.dbapi.connect())  # type: ignore[arg-type]
         with pytest.raises(TypeError, match=r"not str;"):
-            duckdb.sql("SELECT 1").rows(":memory:")  # type: ignore[arg-type]
+            duckdb.frame.sql("SELECT 1").rows(":memory:")  # type: ignore[arg-type]
 
-    def test_the_wrong_content_is_a_value_error(self, con: duckdb.Connection) -> None:
-        orders = duckdb.table("orders")
+    def test_the_wrong_content_is_a_value_error(self, con: duckdb.frame.Connection) -> None:
+        orders = duckdb.frame.table("orders")
         with pytest.raises(ValueError, match="more than once"):
             orders.select(col("id"), col("id")).columns(con)
         with pytest.raises(ValueError, match="unknown join kind"):
@@ -1676,53 +1731,53 @@ class TestErrorModel:
             orders.to_csv(con, "x.csv", **{"bad name": 1})  # type: ignore[arg-type]
 
     def test_needing_a_connection_is_its_own_value_error(self) -> None:
-        from duckdb import NeedsConnection
+        from duckdb.frame import NeedsConnection
 
         assert issubclass(NeedsConnection, ValueError)
         with pytest.raises(NeedsConnection):
-            duckdb.table("orders").columns()
+            duckdb.frame.table("orders").columns()
 
     def test_a_closed_connection_is_an_interface_error(self) -> None:
-        con = duckdb.connect()
+        con = duckdb.frame.connect()
         con.close()
         with pytest.raises(exceptions.InterfaceError):
-            duckdb.sql("SELECT 1").rows(con)
+            duckdb.frame.sql("SELECT 1").rows(con)
 
-    def test_the_engine_speaks_for_itself(self, con: duckdb.Connection) -> None:
+    def test_the_engine_speaks_for_itself(self, con: duckdb.frame.Connection) -> None:
         # A DuckDB error keeps its own class and message, never rewritten into a client-side one.
         with pytest.raises(exceptions.CatalogError, match="Table with name missing does not exist"):
-            duckdb.table("missing").rows(con)
+            duckdb.frame.table("missing").rows(con)
         with pytest.raises(exceptions.ProgrammingError, match="Binder Error"):
-            duckdb.table("orders").select(col("nope")).rows(con)
+            duckdb.frame.table("orders").select(col("nope")).rows(con)
 
 
 class TestScopeStepFour:
     """Dict literals, `values()`, `where()` on aggregates, `try_cast` and macros."""
 
-    def test_a_dict_is_a_struct_literal_bound_whole(self, con: duckdb.Connection) -> None:
+    def test_a_dict_is_a_struct_literal_bound_whole(self, con: duckdb.frame.Connection) -> None:
         # The whole dict binds as one parameter, so the strings in it never enter the SQL.
-        plan = duckdb.sql("SELECT 1").select(lit({"a": 1, "b": "x'; --"}).alias("s"))
+        plan = duckdb.frame.sql("SELECT 1").select(lit({"a": 1, "b": "x'; --"}).alias("s"))
         sql, bound = plan._sql_and_values()
         assert "x'" not in sql
         assert bound == [{"a": 1, "b": "x'; --"}]
         assert plan.first(con) == ({"a": 1, "b": "x'; --"},)
         assert plan.types(con) == ["STRUCT(a INTEGER, b VARCHAR)"]
 
-    def test_a_dict_with_other_keys_is_a_map(self, con: duckdb.Connection) -> None:
-        plan = duckdb.sql("SELECT 1").select(lit({1: "a", 2: "b"}).alias("m"))
+    def test_a_dict_with_other_keys_is_a_map(self, con: duckdb.frame.Connection) -> None:
+        plan = duckdb.frame.sql("SELECT 1").select(lit({1: "a", 2: "b"}).alias("m"))
         assert plan.types(con) == ["MAP(INTEGER, VARCHAR)"]
         assert plan.first(con) == ({1: "a", 2: "b"},)
 
-    def test_a_struct_renders_for_the_oracle_and_nests(self, con: duckdb.Connection) -> None:
+    def test_a_struct_renders_for_the_oracle_and_nests(self, con: duckdb.frame.Connection) -> None:
         # Asking DuckDB for the types writes the value in place, nested values and quoting included.
         assert render_literal({"k": "it's", "n": [1, 2]}) == "{'k': 'it''s', 'n': [1, 2]}"
         assert render_literal({1: "a"}) == "MAP {1: 'a'}"
-        plan = duckdb.sql("SELECT 1").select(lit({"outer": {"inner": [1, 2]}}).alias("s"))
+        plan = duckdb.frame.sql("SELECT 1").select(lit({"outer": {"inner": [1, 2]}}).alias("s"))
         assert plan.first(con) == ({"outer": {"inner": [1, 2]}},)
 
-    def test_values_is_a_source_with_no_database(self, con: duckdb.Connection) -> None:
+    def test_values_is_a_source_with_no_database(self, con: duckdb.frame.Connection) -> None:
         # Rows given here, every value bound, names from the caller.
-        plan = duckdb.values([(1, "nl"), (2, "be")], columns=["id", "country"])
+        plan = duckdb.frame.values([(1, "nl"), (2, "be")], columns=["id", "country"])
         assert plan.columns() == ["id", "country"]
         sql, bound = plan._sql_and_values()
         assert "'nl'" not in sql
@@ -1731,35 +1786,35 @@ class TestScopeStepFour:
         assert plan.types(con) == ["INTEGER", "VARCHAR"]
 
     def test_values_with_types_knows_them_without_asking(self) -> None:
-        plan = duckdb.values([(1, "nl")], columns=[("id", "INTEGER"), ("country", "VARCHAR")])
+        plan = duckdb.frame.values([(1, "nl")], columns=[("id", "INTEGER"), ("country", "VARCHAR")])
         assert plan.types() == ["INTEGER", "VARCHAR"]
 
-    def test_values_with_no_rows(self, con: duckdb.Connection) -> None:
-        typed = duckdb.values([], columns=[("id", "INTEGER")])
+    def test_values_with_no_rows(self, con: duckdb.frame.Connection) -> None:
+        typed = duckdb.frame.values([], columns=[("id", "INTEGER")])
         assert typed.rows(con) == []
         assert typed.types(con) == ["INTEGER"]
         with pytest.raises(ValueError, match="needs a type for every column"):
-            duckdb.values([], columns=["id"])
+            duckdb.frame.values([], columns=["id"])
 
     def test_values_refuses_a_ragged_row_and_no_columns(self) -> None:
         with pytest.raises(ValueError, match="2 values for 1 columns"):
-            duckdb.values([(1, 2)], columns=["a"])
+            duckdb.frame.values([(1, 2)], columns=["a"])
         with pytest.raises(TypeError, match="at least one column"):
-            duckdb.values([(1,)], columns=[])
+            duckdb.frame.values([(1,)], columns=[])
 
-    def test_values_joins_a_table(self, con: duckdb.Connection) -> None:
+    def test_values_joins_a_table(self, con: duckdb.frame.Connection) -> None:
         # The case values() exists for: a fixture without CREATE TABLE.
-        labels = duckdb.values([("nl", "Netherlands"), ("be", "Belgium")], columns=["code", "label"])
+        labels = duckdb.frame.values([("nl", "Netherlands"), ("be", "Belgium")], columns=["code", "label"])
         joined = (
-            duckdb.table("orders")
+            duckdb.frame.table("orders")
             .join(labels, on=lambda left, right: left["country"] == right["code"])
             .select("id", "label")
         )
         assert joined.count(con) == 4
 
-    def test_where_filters_an_aggregate(self, con: duckdb.Connection) -> None:
+    def test_where_filters_an_aggregate(self, con: duckdb.frame.Connection) -> None:
         # FILTER (WHERE ...) on a plain call, on a DISTINCT count, and before OVER on a window.
-        orders = duckdb.table("orders")
+        orders = duckdb.frame.table("orders")
         summed = orders.aggregate(col("amount").sum().where(col("country") == "nl").alias("nl"))
         assert summed.rows(con) == [(420,)]
         distinct = orders.aggregate(col("country").n_unique().where(col("amount") > 100).alias("d"))
@@ -1778,84 +1833,86 @@ class TestScopeStepFour:
         assert "a'" not in sql
         assert sink.entries[0][1] == "a'; --"
 
-    def test_try_cast_gives_null_where_cast_would_fail(self, con: duckdb.Connection) -> None:
+    def test_try_cast_gives_null_where_cast_would_fail(self, con: duckdb.frame.Connection) -> None:
         # TRY_CAST where CAST would raise.
-        plan = duckdb.sql("SELECT 'x' AS s, '12' AS n").select(
+        plan = duckdb.frame.sql("SELECT 'x' AS s, '12' AS n").select(
             col("s").try_cast("INTEGER").alias("bad"), col("n").try_cast("INTEGER").alias("good")
         )
         assert plan.first(con) == (None, 12)
         with pytest.raises(exceptions.ConversionError):
-            duckdb.sql("SELECT 'x' AS s").select(col("s").cast("INTEGER")).first(con)
+            duckdb.frame.sql("SELECT 'x' AS s").select(col("s").cast("INTEGER")).first(con)
         assert "TRY_CAST(" in col("s").try_cast("INTEGER").fragment()
 
-    def test_a_scalar_macro_from_an_expression(self, con: duckdb.Connection) -> None:
+    def test_a_scalar_macro_from_an_expression(self, con: duckdb.frame.Connection) -> None:
         # The body is written out as it stands, and col() names a macro parameter.
         con.create_macro("add_up", ["a", ("b", 1)], col("a") + col("b"))
-        assert duckdb.sql("SELECT add_up(2), add_up(2, 5)").rows(con) == [(3, 7)]
+        assert duckdb.frame.sql("SELECT add_up(2), add_up(2, 5)").rows(con) == [(3, 7)]
 
-    def test_a_table_macro_from_a_plan(self, con: duckdb.Connection) -> None:
-        body = duckdb.table("orders").filter(col("amount") > col("floor")).select("id")
+    def test_a_table_macro_from_a_plan(self, con: duckdb.frame.Connection) -> None:
+        body = duckdb.frame.table("orders").filter(col("amount") > col("floor")).select("id")
         con.create_macro("big_orders", ["floor"], body)
-        assert duckdb.sql("SELECT * FROM big_orders(100)").rows(con) == [(1,), (3,)]
+        assert duckdb.frame.sql("SELECT * FROM big_orders(100)").rows(con) == [(1,), (3,)]
 
-    def test_a_macro_body_writes_its_literals_in(self, con: duckdb.Connection) -> None:
+    def test_a_macro_body_writes_its_literals_in(self, con: duckdb.frame.Connection) -> None:
         # A definition has nothing to bind values to, so they are written into the body, escaped.
         con.create_macro("is_nl", ["c"], col("c") == "nl")
-        assert duckdb.sql("SELECT is_nl('nl'), is_nl('be')").rows(con) == [(True, False)]
+        assert duckdb.frame.sql("SELECT is_nl('nl'), is_nl('be')").rows(con) == [(True, False)]
         con.create_macro("has_quote", ["c"], col("c") == "it's")
-        assert duckdb.sql("SELECT has_quote('it''s')").rows(con) == [(True,)]
+        assert duckdb.frame.sql("SELECT has_quote('it''s')").rows(con) == [(True,)]
 
-    def test_macro_replace_and_temporary(self, con: duckdb.Connection) -> None:
+    def test_macro_replace_and_temporary(self, con: duckdb.frame.Connection) -> None:
         con.create_macro("twice", ["a"], col("a") * 2)
         with pytest.raises(exceptions.CatalogError):
             con.create_macro("twice", ["a"], col("a") * 3)
         con.create_macro("twice", ["a"], col("a") * 3, replace=True)
-        assert duckdb.sql("SELECT twice(2)").rows(con) == [(6,)]
+        assert duckdb.frame.sql("SELECT twice(2)").rows(con) == [(6,)]
         con.create_macro("scratch", ["a"], col("a"), temporary=True)
-        assert duckdb.sql("SELECT scratch(1)").rows(con) == [(1,)]
+        assert duckdb.frame.sql("SELECT scratch(1)").rows(con) == [(1,)]
 
-    def test_a_macro_body_must_be_an_expression_or_a_plan(self, con: duckdb.Connection) -> None:
+    def test_a_macro_body_must_be_an_expression_or_a_plan(self, con: duckdb.frame.Connection) -> None:
         with pytest.raises(TypeError, match="expression or a plan"):
             con.create_macro("bad", ["a"], "a + 1")
 
-    def test_a_param_in_an_expression_body_is_refused_and_nothing_is_created(self, con: duckdb.Connection) -> None:
+    def test_a_param_in_an_expression_body_is_refused_and_nothing_is_created(
+        self, con: duckdb.frame.Connection
+    ) -> None:
         # A placeholder used to stand in as NULL, so the macro answered NULL on every call.
         with pytest.raises(TypeError, match=PARAM_IN_MACRO):
             con.create_macro("p", ["x"], col("x") + param("y"))
-        defined = duckdb.sql("SELECT count(*) FROM duckdb_functions() WHERE function_name = 'p'").rows(con)
+        defined = duckdb.frame.sql("SELECT count(*) FROM duckdb_functions() WHERE function_name = 'p'").rows(con)
         assert defined == [(0,)]
 
-    def test_a_param_in_a_plan_body_is_refused(self, con: duckdb.Connection, orders: duckdb.Frame) -> None:
+    def test_a_param_in_a_plan_body_is_refused(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         with pytest.raises(TypeError, match=PARAM_IN_MACRO):
             con.create_macro("m", ["x"], orders.filter(col("amount") == param("p")))
-        defined = duckdb.sql("SELECT count(*) FROM duckdb_functions() WHERE function_name = 'm'").rows(con)
+        defined = duckdb.frame.sql("SELECT count(*) FROM duckdb_functions() WHERE function_name = 'm'").rows(con)
         assert defined == [(0,)]
 
-    def test_a_param_in_a_body_rendered_with_the_connection_is_refused(self, con: duckdb.Connection) -> None:
+    def test_a_param_in_a_body_rendered_with_the_connection_is_refused(self, con: duckdb.frame.Connection) -> None:
         # A suffixed join needs the connection, so the refusal has to hold on that path too.
-        left = duckdb.sql("SELECT 1 AS id, 10 AS amount")
-        right = duckdb.sql("SELECT 1 AS id, 20 AS amount")
+        left = duckdb.frame.sql("SELECT 1 AS id, 10 AS amount")
+        right = duckdb.frame.sql("SELECT 1 AS id, 20 AS amount")
         body = left.join(right, on="id", suffix="_r").filter(col("amount") > param("floor"))
         assert repr(body).startswith("<Frame, renders with a connection:")
         with pytest.raises(TypeError, match=PARAM_IN_MACRO):
             con.create_macro("j", [], body)
 
     def test_a_param_inside_a_subquery_of_the_body_is_refused(
-        self, con: duckdb.Connection, orders: duckdb.Frame
+        self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame
     ) -> None:
         wanted = orders.filter(col("country") == param("c")).select(col("id"))
         with pytest.raises(TypeError, match=PARAM_IN_MACRO):
             con.create_macro("s", [], orders.filter(col("id").isin(wanted)))
 
     def test_a_body_of_columns_and_literals_is_still_accepted(
-        self, con: duckdb.Connection, orders: duckdb.Frame
+        self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame
     ) -> None:
         con.create_macro("scaled", ["a"], col("a") * 2.5)
         con.create_macro("nl_over", ["floor"], orders.filter((col("country") == "nl") & (col("amount") > col("floor"))))
-        assert duckdb.sql("SELECT scaled(2), count(*) FROM nl_over(100)").rows(con) == [(5.0, 2)]
+        assert duckdb.frame.sql("SELECT scaled(2), count(*) FROM nl_over(100)").rows(con) == [(5.0, 2)]
 
     def test_the_schema_oracle_still_renders_a_param_as_null(
-        self, con: duckdb.Connection, orders: duckdb.Frame
+        self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame
     ) -> None:
         # Only a macro definition refuses; elsewhere NULL still stands in for the placeholder.
         plan = orders.filter(col("amount") > param("floor")).select(
@@ -1868,8 +1925,8 @@ class TestScopeStepFour:
 class TestEgressNames:
     """The names rows come out under, and a plan put on a connection with `on()`."""
 
-    def test_rows_first_iter_rows_and_to_dicts(self, con: duckdb.Connection) -> None:
-        plan = duckdb.table("orders").filter(col("country") == "nl").select("id", "amount").sort("id")
+    def test_rows_first_iter_rows_and_to_dicts(self, con: duckdb.frame.Connection) -> None:
+        plan = duckdb.frame.table("orders").filter(col("country") == "nl").select("id", "amount").sort("id")
         assert plan.rows(con) == [(1, 120), (3, 300), (5, None)]
         assert plan.first(con) == (1, 120)
         assert list(plan.iter_rows(con)) == plan.rows(con)
@@ -1877,11 +1934,11 @@ class TestEgressNames:
 
     def test_the_old_names_are_gone(self) -> None:
         # fetchall and fetchone are PEP 249 vocabulary; they live in dbapi.
-        assert not hasattr(duckdb.Frame, "fetchall")
-        assert not hasattr(duckdb.Frame, "fetchone")
+        assert not hasattr(duckdb.frame.Frame, "fetchall")
+        assert not hasattr(duckdb.frame.Frame, "fetchone")
 
-    def test_a_bound_plan_takes_no_connection(self, con: duckdb.Connection) -> None:
-        bound = duckdb.table("orders").filter(col("country") == "nl").select("id").sort("id").on(con)
+    def test_a_bound_plan_takes_no_connection(self, con: duckdb.frame.Connection) -> None:
+        bound = duckdb.frame.table("orders").filter(col("country") == "nl").select("id").sort("id").on(con)
         assert bound.rows() == [(1,), (3,), (5,)]
         assert bound.first() == (1,)
         assert bound.count() == 3
@@ -1891,25 +1948,25 @@ class TestEgressNames:
         assert bound.explain()
         assert bound.preview().splitlines()[1:3] == ["\u2502 id      \u2502", "\u2502 INTEGER \u2502"]
 
-    def test_binding_changes_nothing_about_the_plan(self, con: duckdb.Connection) -> None:
-        plan = duckdb.table("orders").select("id")
+    def test_binding_changes_nothing_about_the_plan(self, con: duckdb.frame.Connection) -> None:
+        plan = duckdb.frame.table("orders").select("id")
         bound = plan.on(con)
         assert bound.plan is plan
-        elsewhere = duckdb.connect()
+        elsewhere = duckdb.frame.connect()
         elsewhere.run("CREATE TABLE orders AS SELECT 42 AS id")
         assert plan.on(elsewhere).rows() == [(42,)]
         assert bound.rows() != [(42,)]
 
-    def test_bound_sinks_and_parameters(self, con: duckdb.Connection, tmp_path: Path) -> None:
-        plan = duckdb.table("orders").filter(col("country") == param("where"))
+    def test_bound_sinks_and_parameters(self, con: duckdb.frame.Connection, tmp_path: Path) -> None:
+        plan = duckdb.frame.table("orders").filter(col("country") == param("where"))
         bound = plan.on(con)
         assert bound.count(parameters={"where": "nl"}) == 3
         assert bound.create("nl", parameters={"where": "nl"}) == 3
-        assert duckdb.table("orders").on(con).create("copy_of_orders") == 5
-        assert duckdb.table("orders").on(con).to_csv(str(tmp_path / "o.csv"), header=True) == [(5,)]
+        assert duckdb.frame.table("orders").on(con).create("copy_of_orders") == 5
+        assert duckdb.frame.table("orders").on(con).to_csv(str(tmp_path / "o.csv"), header=True) == [(5,)]
 
-    def test_a_bound_plan_shows_itself(self, con: duckdb.Connection) -> None:
-        bound = duckdb.table("orders").sort("id").on(con)
+    def test_a_bound_plan_shows_itself(self, con: duckdb.frame.Connection) -> None:
+        bound = duckdb.frame.table("orders").sort("id").on(con)
         assert repr(bound).startswith("┌")
         page = bound._repr_html_()
         assert page.startswith("<table>")
@@ -1917,30 +1974,30 @@ class TestEgressNames:
         assert page.count("<tr>") == 6  # the header and five rows
 
     def test_a_bound_plan_refuses_a_dbapi_connection(self) -> None:
-        with pytest.raises(TypeError, match=r"duckdb\.Connection"):
-            duckdb.table("orders").on(duckdb.dbapi.connect())  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match=r"duckdb\.frame\.Connection"):
+            duckdb.frame.table("orders").on(duckdb.dbapi.connect())  # type: ignore[arg-type]
 
 
 class TestStepsAsData:
     """A step is a record of its verb and arguments, which is what lets a plan be pickled and compared."""
 
     def test_a_step_is_readable(self) -> None:
-        from duckdb.frame import Filter, Select, Table
+        from duckdb.frame.plan import Filter, Select, Table
 
-        plan = duckdb.table("orders").filter(col("amount") > 100).select("id")
+        plan = duckdb.frame.table("orders").filter(col("amount") > 100).select("id")
         assert isinstance(plan.step, Select)
         assert isinstance(plan.inputs[0].step, Filter)
         assert plan.inputs[0].inputs[0].step == Table(("orders",))
         assert repr(plan.inputs[0].step).startswith("Filter(predicate=")
 
-    def test_a_plan_pickles(self, con: duckdb.Connection) -> None:
+    def test_a_plan_pickles(self, con: duckdb.frame.Connection) -> None:
         import pickle
 
         plan = (
-            duckdb.table("orders")
-            .filter(col("country").isin(duckdb.table("countries").select("code")))
+            duckdb.frame.table("orders")
+            .filter(col("country").isin(duckdb.frame.table("countries").select("code")))
             .with_columns(big=col("amount") > 100)
-            .join(duckdb.table("countries"), on=lambda left, right: left["country"] == right["code"])
+            .join(duckdb.frame.table("countries"), on=lambda left, right: left["country"] == right["code"])
             .group_by("label")
             .agg(col("amount").sum().alias("total"))
             .sort(col("total").desc())
@@ -1950,78 +2007,78 @@ class TestStepsAsData:
         assert copy.rows(con) == plan.rows(con)
 
     def test_two_plans_built_the_same_way_have_equal_steps(self) -> None:
-        a = duckdb.table("orders").filter(col("amount") > 100)
-        b = duckdb.table("orders").filter(col("amount") > 100)
+        a = duckdb.frame.table("orders").filter(col("amount") > 100)
+        b = duckdb.frame.table("orders").filter(col("amount") > 100)
         assert a.step == b.step
         assert a.inputs[0].step == b.inputs[0].step
-        assert a.step != duckdb.table("orders").filter(col("amount") > 101).step
+        assert a.step != duckdb.frame.table("orders").filter(col("amount") > 101).step
 
 
 class TestReviewRoundFive:
     """Bugs found in `values()`, `Bound`, the step records and the tests themselves."""
 
-    def test_a_literal_is_a_snapshot(self, con: duckdb.Connection) -> None:
+    def test_a_literal_is_a_snapshot(self, con: duckdb.frame.Connection) -> None:
         # A plan is a value, so a dict the caller keeps changing is not part of it.
         needle = {"a": 1}
         items = [1, 2]
-        plain = duckdb.sql("SELECT 1 AS x").select(lit(needle), lit(items))
-        aliased = duckdb.sql("SELECT 1 AS x").select(lit(needle).alias("d"), lit(items).alias("l"))
+        plain = duckdb.frame.sql("SELECT 1 AS x").select(lit(needle), lit(items))
+        aliased = duckdb.frame.sql("SELECT 1 AS x").select(lit(needle).alias("d"), lit(items).alias("l"))
         needle["a"] = 999
         items.append(3)
         assert plain.rows(con) == [({"a": 1}, [1, 2])]
         assert aliased.rows(con) == [({"a": 1}, [1, 2])]
 
-    def test_a_values_type_given_is_a_cast(self, con: duckdb.Connection) -> None:
+    def test_a_values_type_given_is_a_cast(self, con: duckdb.frame.Connection) -> None:
         # A type given for a column is made true by a cast, so both answers agree.
-        plan = duckdb.values([(1,)], columns=[("id", "VARCHAR")])
+        plan = duckdb.frame.values([(1,)], columns=[("id", "VARCHAR")])
         assert plan.types() == ["VARCHAR"]
         assert plan.rows(con) == [("1",)]
         assert plan.types(con) == ["VARCHAR"]
-        nulls = duckdb.values([(None,)], columns=[("id", "INTEGER")])
+        nulls = duckdb.frame.values([(None,)], columns=[("id", "INTEGER")])
         assert nulls.types(con) == ["INTEGER"]
 
-    def test_an_empty_map_has_the_shape_of_its_column(self, con: duckdb.Connection) -> None:
+    def test_an_empty_map_has_the_shape_of_its_column(self, con: duckdb.frame.Connection) -> None:
         # The key type decides, so an empty map and a full one in the same column come back alike.
-        unhashable = duckdb.sql(
+        unhashable = duckdb.frame.sql(
             "SELECT MAP([[1, 2]], ['a']) AS m UNION ALL SELECT MAP([]::INTEGER[][], []::VARCHAR[])"
         ).rows(con)
         assert unhashable == [([([1, 2], "a")],), ([],)]
-        hashable = duckdb.sql("SELECT MAP([1], ['a']) AS m UNION ALL SELECT MAP([]::INTEGER[], []::VARCHAR[])").rows(
-            con
-        )
+        hashable = duckdb.frame.sql(
+            "SELECT MAP([1], ['a']) AS m UNION ALL SELECT MAP([]::INTEGER[], []::VARCHAR[])"
+        ).rows(con)
         assert hashable == [({1: "a"},), ({},)]
 
-    def test_where_admits_count_all_and_leaves_scalars_to_the_engine(self, con: duckdb.Connection) -> None:
+    def test_where_admits_count_all_and_leaves_scalars_to_the_engine(self, con: duckdb.frame.Connection) -> None:
         # Extensions add aggregates, so there is no closed list; DuckDB refuses a scalar call in its own words.
-        orders = duckdb.table("orders")
-        assert orders.aggregate(duckdb.count_all().where(col("amount") > 100).alias("n")).rows(con) == [(2,)]
-        assert "count(*) FILTER (WHERE" in duckdb.count_all().where(col("x") > 1).fragment()
-        scalar = orders.select(duckdb.fn("upper", col("country")).where(col("amount") > 1))
+        orders = duckdb.frame.table("orders")
+        assert orders.aggregate(duckdb.frame.count_all().where(col("amount") > 100).alias("n")).rows(con) == [(2,)]
+        assert "count(*) FILTER (WHERE" in duckdb.frame.count_all().where(col("x") > 1).fragment()
+        scalar = orders.select(duckdb.frame.fn("upper", col("country")).where(col("amount") > 1))
         with pytest.raises(exceptions.InvalidInputError, match="Scalar Function"):
             scalar.columns(con)
         with pytest.raises(TypeError, match="aggregate call"):
             col("v").where(col("g") == "a")
 
-    def test_a_bound_repr_never_raises(self, con: duckdb.Connection) -> None:
+    def test_a_bound_repr_never_raises(self, con: duckdb.frame.Connection) -> None:
         # A notebook or a debugger shows this unasked.
-        missing = duckdb.table("does_not_exist").on(con)
+        missing = duckdb.frame.table("does_not_exist").on(con)
         assert "does not run here" in repr(missing)
         assert "does_not_exist" in repr(missing)
         assert missing._repr_html_().startswith("<pre>")
         clash = (
-            duckdb.table("orders")
-            .join(duckdb.table("orders"), on=lambda left, right: left["id"] == right["id"])
+            duckdb.frame.table("orders")
+            .join(duckdb.frame.table("orders"), on=lambda left, right: left["id"] == right["id"])
             .on(con)
         )
         assert "does not run here" in repr(clash)
-        closed = duckdb.connect()
+        closed = duckdb.frame.connect()
         closed.close()
-        assert "does not run here" in repr(duckdb.table("orders").on(closed))
-        assert "\u2502 id" in repr(duckdb.table("orders").select("id").on(con))
+        assert "does not run here" in repr(duckdb.frame.table("orders").on(closed))
+        assert "\u2502 id" in repr(duckdb.frame.table("orders").select("id").on(con))
 
     def test_a_verb_given_nothing_is_refused(self) -> None:
         # The refusal comes from the step record itself, so a hand-built step is checked too.
-        plan = duckdb.sql("SELECT 1 AS a")
+        plan = duckdb.frame.sql("SELECT 1 AS a")
         for verb in (plan.select, plan.sort, plan.drop, plan.rename, plan.with_columns, plan.unnest, plan.unpivot):
             with pytest.raises(TypeError, match="at least one column"):
                 verb()
@@ -2032,35 +2089,35 @@ class TestReviewRoundFive:
         with pytest.raises(TypeError, match="at least one aggregate or group key"):
             plan.group_by().agg()
         with pytest.raises(TypeError, match="needs `on`"):
-            plan.join(duckdb.sql("SELECT 1 AS b"), on=[])
+            plan.join(duckdb.frame.sql("SELECT 1 AS b"), on=[])
         with pytest.raises(ValueError, match="unknown join kind"):
-            plan.join(duckdb.sql("SELECT 1 AS b"), on="a", how="sideways")
-        typed = duckdb.values([], columns=[("a", "INTEGER")])
+            plan.join(duckdb.frame.sql("SELECT 1 AS b"), on="a", how="sideways")
+        typed = duckdb.frame.values([], columns=[("a", "INTEGER")])
         assert typed.aggregate(group_by="a").columns() == ["a"]
         assert typed.distinct().columns() == ["a"]
 
-    def test_create_macro_renders_what_it_can_blind_and_the_rest_here(self, con: duckdb.Connection) -> None:
+    def test_create_macro_renders_what_it_can_blind_and_the_rest_here(self, con: duckdb.frame.Connection) -> None:
         # A suffixed join needs its sides' columns, while a body naming a macro parameter cannot be resolved.
-        left = duckdb.sql("SELECT 1 AS id, 10 AS amount")
-        right = duckdb.sql("SELECT 1 AS id, 20 AS amount")
+        left = duckdb.frame.sql("SELECT 1 AS id, 10 AS amount")
+        right = duckdb.frame.sql("SELECT 1 AS id, 20 AS amount")
         con.create_macro("joined", [], left.join(right, on="id", suffix="_r"))
-        assert duckdb.sql("SELECT * FROM joined()").rows(con) == [(1, 10, 20)]
-        con.create_macro("big", ["threshold"], duckdb.table("orders").filter(col("amount") > col("threshold")))
-        assert duckdb.sql("SELECT count(*) FROM big(100)").rows(con) == [(2,)]
+        assert duckdb.frame.sql("SELECT * FROM joined()").rows(con) == [(1, 10, 20)]
+        con.create_macro("big", ["threshold"], duckdb.frame.table("orders").filter(col("amount") > col("threshold")))
+        assert duckdb.frame.sql("SELECT count(*) FROM big(100)").rows(con) == [(2,)]
 
     def test_frame_repr_promises_a_connection_only_when_one_would_help(self) -> None:
         # A suffixed join is the one plan a connection unblocks; an empty values() is refused when built.
         with pytest.raises(ValueError, match="needs a type for every column"):
-            duckdb.values([], columns=["id"])
-        joined = duckdb.table("l").join(duckdb.table("r"), on="id", suffix="_r")
+            duckdb.frame.values([], columns=["id"])
+        joined = duckdb.frame.table("l").join(duckdb.frame.table("r"), on="id", suffix="_r")
         assert repr(joined).startswith("<Frame, renders with a connection:")
 
-    def test_bound_forwards_every_method_that_takes_a_connection(self, con: duckdb.Connection) -> None:
+    def test_bound_forwards_every_method_that_takes_a_connection(self, con: duckdb.frame.Connection) -> None:
         # Every public Frame method taking a connection must exist on Bound with the same parameters after it.
         import inspect
 
         forwarded = {}
-        for name, method in inspect.getmembers(duckdb.Frame, inspect.isfunction):
+        for name, method in inspect.getmembers(duckdb.frame.Frame, inspect.isfunction):
             if name.startswith("_") or name == "on":
                 continue
             parameters = list(inspect.signature(method).parameters.values())[1:]
@@ -2068,15 +2125,15 @@ class TestReviewRoundFive:
                 forwarded[name] = [(p.name, p.kind, p.default) for p in parameters[1:]]
         assert {"rows", "first", "iter_rows", "to_dicts", "count", "resolve", "explain", "create"} <= set(forwarded)
         for name, rest in forwarded.items():
-            bound = getattr(duckdb.Bound, name, None)
+            bound = getattr(duckdb.frame.Bound, name, None)
             assert bound is not None, f"Bound lacks {name}()"
             actual = [(p.name, p.kind, p.default) for p in list(inspect.signature(bound).parameters.values())[1:]]
             assert actual == rest, f"Bound.{name} differs from Frame.{name}"
-        assert duckdb.sql("SELECT 1 AS x").on(con).resolve() == (duckdb.Column("x", "INTEGER"),)
+        assert duckdb.frame.sql("SELECT 1 AS x").on(con).resolve() == (duckdb.frame.Column("x", "INTEGER"),)
 
     def test_equal_steps_hash_alike(self) -> None:
         # Equal steps must hash alike, or a set of them lies.
-        from duckdb.frame import Filter, Table
+        from duckdb.frame.plan import Filter, Table
 
         a, b = Table(("orders",)), Table(("orders",))
         assert a == b
@@ -2085,11 +2142,13 @@ class TestReviewRoundFive:
         assert Filter(col("v") > 1) in {Filter(col("v") > 1)}
         assert Filter(col("v") > 1) not in {Filter(col("v") > 2)}
 
-    def test_a_subquery_held_in_a_list_is_a_step_of_the_plan(self, con: duckdb.Connection) -> None:
+    def test_a_subquery_held_in_a_list_is_a_step_of_the_plan(self, con: duckdb.frame.Connection) -> None:
         # Case branches and window partitions hold their expressions in lists, which are searched too.
-        orders = duckdb.table("orders")
+        orders = duckdb.frame.table("orders")
         threshold = orders.aggregate(col("amount").mean().alias("m")).scalar()
-        cased = orders.select("id", duckdb.when(col("amount") > threshold).then("big").otherwise("small").alias("size"))
+        cased = orders.select(
+            "id", duckdb.frame.when(col("amount") > threshold).then("big").otherwise("small").alias("size")
+        )
         ranked = orders.select("id", col("amount").sum().over(partition_by=col("amount") > threshold).alias("share"))
         for plan in (cased, ranked):
             assert len(plan._uses) == 1  # the aggregate the scalar was made from, once
@@ -2097,37 +2156,37 @@ class TestReviewRoundFive:
             assert plan.count(con) == 5
         assert cased.filter(col("size") == "big").count(con) == 1
 
-    def test_a_dict_means_the_same_thing_at_every_site(self, con: duckdb.Connection) -> None:
+    def test_a_dict_means_the_same_thing_at_every_site(self, con: duckdb.frame.Connection) -> None:
         # Text keys make a STRUCT and other keys a MAP; a mix has no type and meets DuckDB's own refusal.
-        from duckdb.expr import sql_type_of
+        from duckdb.frame.expr import sql_type_of
 
         assert sql_type_of({}) is None
         assert render_literal({}) == "{}"
-        assert duckdb.sql("SELECT 1").select(lit({})).rows(con) == [({},)]
-        assert duckdb.sql("SELECT 1").select(param("p")).rows(con, parameters={"p": {}}) == [({},)]
+        assert duckdb.frame.sql("SELECT 1").select(lit({})).rows(con) == [({},)]
+        assert duckdb.frame.sql("SELECT 1").select(param("p")).rows(con, parameters={"p": {}}) == [({},)]
         assert sql_type_of({1: "a", 2**40: "b"}) == "MAP(BIGINT, VARCHAR)"
         assert sql_type_of({"k": 1}) == 'STRUCT("k" INTEGER)'
         assert sql_type_of({1: "a", "x": "b"}) is None
         assert sql_type_of([1, "a"]) is None
         with pytest.raises(exceptions.ConversionError) as by_hand:
-            duckdb.sql("SELECT [1, 'a']").rows(con)
+            duckdb.frame.sql("SELECT [1, 'a']").rows(con)
         with pytest.raises(exceptions.ConversionError) as as_literal:
-            duckdb.sql("SELECT 1").select(lit([1, "a"])).rows(con)
+            duckdb.frame.sql("SELECT 1").select(lit([1, "a"])).rows(con)
         assert str(as_literal.value).splitlines()[0] == str(by_hand.value).splitlines()[0]
 
     def test_one_walk_per_render_and_per_execution(
-        self, con: duckdb.Connection, monkeypatch: pytest.MonkeyPatch
+        self, con: duckdb.frame.Connection, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Column names and SQL text come from the same single walk over the steps.
         walks: list[int] = []
-        original = duckdb.Frame._order
+        original = duckdb.frame.Frame._order
 
-        def counted(self: duckdb.Frame) -> list[duckdb.Frame]:
+        def counted(self: duckdb.frame.Frame) -> list[duckdb.frame.Frame]:
             walks.append(1)
             return original(self)
 
-        monkeypatch.setattr(duckdb.Frame, "_order", counted)
-        plan = duckdb.table("orders").filter(col("amount") > 100).select("id")
+        monkeypatch.setattr(duckdb.frame.Frame, "_order", counted)
+        plan = duckdb.frame.table("orders").filter(col("amount") > 100).select("id")
         plan.render(con)
         assert len(walks) == 1
         walks.clear()
@@ -2139,26 +2198,26 @@ class TestReviewRoundSix:
     """Bugs found in the round-five fixes: parameters invisible to equality, macro bodies, and pickles."""
 
     def test_steps_differ_by_parameter_and_by_literal(self) -> None:
-        by_a = duckdb.table("orders").filter(col("c") == param("a")).step
-        by_b = duckdb.table("orders").filter(col("c") == param("b")).step
+        by_a = duckdb.frame.table("orders").filter(col("c") == param("a")).step
+        by_b = duckdb.frame.table("orders").filter(col("c") == param("b")).step
         assert by_a != by_b
         assert hash(by_a) != hash(by_b)
-        assert by_a == duckdb.table("orders").filter(col("c") == param("a")).step
-        one = duckdb.table("orders").filter(col("c") == "x").step
-        two = duckdb.table("orders").filter(col("c") == "y").step
+        assert by_a == duckdb.frame.table("orders").filter(col("c") == param("a")).step
+        one = duckdb.frame.table("orders").filter(col("c") == "x").step
+        two = duckdb.frame.table("orders").filter(col("c") == "y").step
         assert one != two
         assert repr(col("c") == param("a")) == '<Expr ("c" = $a)>'
 
-    def test_a_macro_body_is_resolved_only_as_far_as_rendering_needs(self, con: duckdb.Connection) -> None:
+    def test_a_macro_body_is_resolved_only_as_far_as_rendering_needs(self, con: duckdb.frame.Connection) -> None:
         # The projection names a macro parameter, which exists only once the macro does, so it is not asked about.
         con.run("CREATE TABLE t1 AS SELECT 1 AS id, 10 AS val")
         con.run("CREATE TABLE t2 AS SELECT 1 AS id, 20 AS val")
-        sides = duckdb.table("t1").join(duckdb.table("t2"), on="id", suffix="_r")
+        sides = duckdb.frame.table("t1").join(duckdb.frame.table("t2"), on="id", suffix="_r")
         con.create_macro("plus", ["threshold"], sides.select(col("id"), col("val") + col("threshold")))
-        assert duckdb.sql("SELECT * FROM plus(5)").rows(con) == [(1, 15)]
+        assert duckdb.frame.sql("SELECT * FROM plus(5)").rows(con) == [(1, 15)]
 
     def test_unpickling_runs_the_construction_checks(self) -> None:
-        from duckdb.frame import Column, Values
+        from duckdb.frame.plan import Column, Values
 
         # Restored without __init__, a step used to skip every check.
         ragged = object.__new__(Values)
@@ -2166,7 +2225,7 @@ class TestReviewRoundSix:
         object.__setattr__(ragged, "heading", (Column("x", None),))
         with pytest.raises(ValueError, match="a row has 2 values for 1 columns"):
             pickle.loads(pickle.dumps(ragged))
-        plan = duckdb.values([(1, "a")], columns=["n", "s"]).filter(col("n") > 0)
+        plan = duckdb.frame.values([(1, "a")], columns=["n", "s"]).filter(col("n") > 0)
         assert pickle.loads(pickle.dumps(plan)).render() == plan.render()
 
     def test_a_literal_that_is_not_plain_data_is_refused_in_the_librarys_words(self) -> None:
@@ -2180,10 +2239,10 @@ class TestReviewRoundSeven:
     """Cases the rules glossed over: a shared catalog, a wrapped statement, and a reused `scalar()`."""
 
     def test_a_sibling_connections_ddl_is_seen(self) -> None:
-        first = duckdb.connect()
+        first = duckdb.frame.connect()
         second = first.duplicate()
         first.run("CREATE MACRO dbl(v) AS v * 2")
-        plan = duckdb.sql("SELECT 1 AS v").select(duckdb.fn("dbl", col("v")).alias("d"))
+        plan = duckdb.frame.sql("SELECT 1 AS v").select(duckdb.frame.fn("dbl", col("v")).alias("d"))
         assert plan.types(second) == ["INTEGER"]
         first.run("CREATE OR REPLACE MACRO dbl(v) AS (v * 2)::VARCHAR")
         assert plan.types(second) == ["VARCHAR"]
@@ -2194,10 +2253,10 @@ class TestReviewRoundSeven:
         third.run("CREATE OR REPLACE MACRO dbl(v) AS v * 2")
         assert plan.types(first) == ["INTEGER"]
 
-    def test_a_setting_changed_inside_explain_analyze_is_seen(self, con: duckdb.Connection) -> None:
-        plan = duckdb.sql("SELECT 7 AS x, 2 AS y").select((col("x") / col("y")).alias("r"))
+    def test_a_setting_changed_inside_explain_analyze_is_seen(self, con: duckdb.frame.Connection) -> None:
+        plan = duckdb.frame.sql("SELECT 7 AS x, 2 AS y").select((col("x") / col("y")).alias("r"))
         assert plan.types(con) == ["DOUBLE"]
-        duckdb.sql("EXPLAIN ANALYZE SET integer_division = true").rows(con)
+        duckdb.frame.sql("EXPLAIN ANALYZE SET integer_division = true").rows(con)
         assert plan.types(con) == ["INTEGER"]
         assert plan.rows(con) == [(3,)]
 
@@ -2215,23 +2274,23 @@ class TestReviewRoundSeven:
         ],
     )
     def test_which_statements_are_taken_to_change_binding(self, statement: str, changes: bool) -> None:
-        from duckdb.connection import _may_change_binding
+        from duckdb.frame.connection import _may_change_binding
 
         assert _may_change_binding(statement) is changes
 
-    def test_a_reused_scalar_is_evaluated_once(self, con: duckdb.Connection) -> None:
+    def test_a_reused_scalar_is_evaluated_once(self, con: duckdb.frame.Connection) -> None:
         # A sequence advanced by the subquery moves by one however often the value is used.
         con.run("CREATE SEQUENCE ticks")
-        tick = duckdb.sql("SELECT nextval('ticks') AS n")
-        plan = duckdb.sql("SELECT 1 AS a").select(
+        tick = duckdb.frame.sql("SELECT nextval('ticks') AS n")
+        plan = duckdb.frame.sql("SELECT 1 AS a").select(
             (col("a") + tick.scalar()).alias("x"), (col("a") * tick.scalar()).alias("y")
         )
         assert plan.render().count("nextval") == 1
         assert plan.rows(con) == [(2, 1)]
-        assert duckdb.sql("SELECT currval('ticks')").rows(con) == [(1,)]
+        assert duckdb.frame.sql("SELECT currval('ticks')").rows(con) == [(1,)]
 
     def test_the_error_classes_say_what_they_cover(self) -> None:
-        assert not issubclass(duckdb.NeedsConnection, exceptions.Error)
+        assert not issubclass(duckdb.frame.NeedsConnection, exceptions.Error)
         assert issubclass(exceptions.InterfaceError, exceptions.Error)
         assert "engine" in (exceptions.Error.__doc__ or "")
 
@@ -2239,28 +2298,28 @@ class TestReviewRoundSeven:
 class TestCopyIsSql:
     """Writing out is `COPY (plan) TO path (options)`, with options spelled as SQL spells them."""
 
-    def test_a_list_is_a_column_list(self, con: duckdb.Connection, tmp_path: Path) -> None:
+    def test_a_list_is_a_column_list(self, con: duckdb.frame.Connection, tmp_path: Path) -> None:
         # COPY wants a parenthesised column list; a list literal reads as one column named `[grp]`.
-        rows = duckdb.table("orders").to_parquet(con, str(tmp_path / "p"), partition_by=["country", "id"])
+        rows = duckdb.frame.table("orders").to_parquet(con, str(tmp_path / "p"), partition_by=["country", "id"])
         assert rows == [(5,)]
         assert (tmp_path / "p" / "country=nl" / "id=1").is_dir()
-        duckdb.table("orders").to_csv(con, str(tmp_path / "q.csv"), force_quote=["country"], header=False)
+        duckdb.frame.table("orders").to_csv(con, str(tmp_path / "q.csv"), force_quote=["country"], header=False)
         assert '"nl"' in (tmp_path / "q.csv").read_text().splitlines()[0]
 
-    def test_star_and_an_expression_render_as_themselves(self, con: duckdb.Connection, tmp_path: Path) -> None:
-        duckdb.table("orders").select("id", "country").to_csv(con, str(tmp_path / "s.csv"), force_quote=star())
+    def test_star_and_an_expression_render_as_themselves(self, con: duckdb.frame.Connection, tmp_path: Path) -> None:
+        duckdb.frame.table("orders").select("id", "country").to_csv(con, str(tmp_path / "s.csv"), force_quote=star())
         assert (tmp_path / "s.csv").read_text().splitlines()[1] == '"1","nl"'
-        duckdb.table("orders").to_parquet(con, str(tmp_path / "e"), partition_by=col("country"))
+        duckdb.frame.table("orders").to_parquet(con, str(tmp_path / "e"), partition_by=col("country"))
         assert (tmp_path / "e" / "country=be").is_dir()
 
-    def test_a_dict_is_a_struct(self, con: duckdb.Connection, tmp_path: Path) -> None:
+    def test_a_dict_is_a_struct(self, con: duckdb.frame.Connection, tmp_path: Path) -> None:
         path = tmp_path / "kv.parquet"
-        duckdb.table("orders").to_parquet(con, str(path), kv_metadata={"owner": "evert"})
-        written = duckdb.sql(f"SELECT key, value FROM parquet_kv_metadata('{path}')").rows(con)
+        duckdb.frame.table("orders").to_parquet(con, str(path), kv_metadata={"owner": "evert"})
+        written = duckdb.frame.sql(f"SELECT key, value FROM parquet_kv_metadata('{path}')").rows(con)
         assert (b"owner", b"evert") in written
 
-    def test_the_result_is_what_copy_returns(self, con: duckdb.Connection, tmp_path: Path) -> None:
-        orders = duckdb.table("orders")
+    def test_the_result_is_what_copy_returns(self, con: duckdb.frame.Connection, tmp_path: Path) -> None:
+        orders = duckdb.frame.table("orders")
         ((count, files),) = orders.to_parquet(con, str(tmp_path / "f.parquet"), return_files=True)
         assert count == 5
         assert files == [str(tmp_path / "f.parquet")]
@@ -2269,145 +2328,145 @@ class TestCopyIsSql:
         assert all(row[0].endswith(".parquet") and {"country"} <= set(row[5]) for row in stats)
         assert sorted(row[1] for row in stats) == [1, 1, 3]
 
-    def test_json_and_any_format_by_name(self, con: duckdb.Connection, tmp_path: Path) -> None:
+    def test_json_and_any_format_by_name(self, con: duckdb.frame.Connection, tmp_path: Path) -> None:
         import json
 
-        duckdb.table("orders").select("id").to_json(con, str(tmp_path / "a.json"), array=True)
+        duckdb.frame.table("orders").select("id").to_json(con, str(tmp_path / "a.json"), array=True)
         assert json.loads((tmp_path / "a.json").read_text()) == [{"id": i} for i in range(1, 6)]
-        assert duckdb.table("orders").copy_to(con, str(tmp_path / "c.csv"), format="csv", header=True) == [(5,)]
+        assert duckdb.frame.table("orders").copy_to(con, str(tmp_path / "c.csv"), format="csv", header=True) == [(5,)]
         # A name no file extension could supply, so DuckDB's extension autoloading stays out of it.
         with pytest.raises(exceptions.CatalogError, match="Copy Function with name nope"):
-            duckdb.table("orders").copy_to(con, str(tmp_path / "x.nope"), format="nope")
+            duckdb.frame.table("orders").copy_to(con, str(tmp_path / "x.nope"), format="nope")
 
     def test_with_no_options_the_engine_picks_the_format_from_the_path(
-        self, con: duckdb.Connection, tmp_path: Path
+        self, con: duckdb.frame.Connection, tmp_path: Path
     ) -> None:
         # `COPY ... TO 'x.parquet'` with no option list is valid SQL and the most natural call.
         target = tmp_path / "bare.parquet"
-        assert duckdb.table("orders").copy_to(con, target) == [(5,)]
-        assert duckdb.sql(f"SELECT count(*) FROM read_parquet('{target}')").rows(con) == [(5,)]
-        assert "(" not in duckdb.table("orders")._sql_and_values(lambda q: f"COPY ({q}) TO 'x'")[0].split("TO")[1]
+        assert duckdb.frame.table("orders").copy_to(con, target) == [(5,)]
+        assert duckdb.frame.sql(f"SELECT count(*) FROM read_parquet('{target}')").rows(con) == [(5,)]
+        assert "(" not in duckdb.frame.table("orders")._sql_and_values(lambda q: f"COPY ({q}) TO 'x'")[0].split("TO")[1]
 
-    def test_a_param_in_an_option_is_refused(self, con: duckdb.Connection, tmp_path: Path) -> None:
+    def test_a_param_in_an_option_is_refused(self, con: duckdb.frame.Connection, tmp_path: Path) -> None:
         # COPY takes no parameters, so a placeholder in an option used to surface as a confusing DuckDB error.
         with pytest.raises(TypeError, match="option 'delimiter' holds param\\('x'\\)"):
-            duckdb.table("orders").to_csv(con, tmp_path / "p.csv", delimiter=param("x"), parameters={"x": "|"})
+            duckdb.frame.table("orders").to_csv(con, tmp_path / "p.csv", delimiter=param("x"), parameters={"x": "|"})
         with pytest.raises(TypeError, match="option 'force_quote' holds param"):
-            duckdb.table("orders").to_csv(con, tmp_path / "p.csv", force_quote=[col("id"), param("y")])
+            duckdb.frame.table("orders").to_csv(con, tmp_path / "p.csv", force_quote=[col("id"), param("y")])
 
     def test_a_plan_literal_binds_while_an_option_literal_is_written(
-        self, con: duckdb.Connection, tmp_path: Path
+        self, con: duckdb.frame.Connection, tmp_path: Path
     ) -> None:
         # One statement with both: the filter's value is bound, the option's is written into the text.
         path = tmp_path / "both.csv"
-        plan = duckdb.table("orders").filter(col("country") == "nl")
+        plan = duckdb.frame.table("orders").filter(col("country") == "nl")
         assert plan.to_csv(con, path, delimiter="|", force_quote=[lit("country")], header=False) == [(3,)]
         assert path.read_text().splitlines()[0] == '1|"nl"|120'
         sql, values = plan._sql_and_values(
-            lambda q: f"COPY ({q}) TO 'x'{duckdb.frame._options_clause({'delimiter': '|'})}"
+            lambda q: f"COPY ({q}) TO 'x'{duckdb.frame.plan._options_clause({'delimiter': '|'})}"
         )
         assert values == ["nl"]
         assert sql.endswith("(DELIMITER '|')")
 
-    def test_bound_writes_through_every_sink(self, con: duckdb.Connection, tmp_path: Path) -> None:
-        bound = duckdb.table("orders").select("id").on(con)
+    def test_bound_writes_through_every_sink(self, con: duckdb.frame.Connection, tmp_path: Path) -> None:
+        bound = duckdb.frame.table("orders").select("id").on(con)
         assert bound.copy_to(tmp_path / "b.parquet") == [(5,)]
         assert bound.to_json(tmp_path / "b.json", array=True) == [(5,)]
         assert bound.to_parquet(tmp_path / "c.parquet") == [(5,)]
 
-    def test_the_rest_of_the_family_is_sql(self, con: duckdb.Connection, tmp_path: Path) -> None:
+    def test_the_rest_of_the_family_is_sql(self, con: duckdb.frame.Connection, tmp_path: Path) -> None:
         # EXPORT DATABASE and COPY FROM DATABASE are statements, not plans, so they go through sql() and run().
-        assert duckdb.sql(f"EXPORT DATABASE '{tmp_path / 'exp'}' (FORMAT parquet)").rows(con) == []
+        assert duckdb.frame.sql(f"EXPORT DATABASE '{tmp_path / 'exp'}' (FORMAT parquet)").rows(con) == []
         assert (tmp_path / "exp" / "schema.sql").exists()
         con.run("ATTACH ':memory:' AS other")
         con.run("COPY FROM DATABASE memory TO other")
-        assert duckdb.sql("SELECT count(*) FROM other.orders").rows(con) == [(5,)]
+        assert duckdb.frame.sql("SELECT count(*) FROM other.orders").rows(con) == [(5,)]
 
 
 class TestTableFunctionSources:
     """A table function is a source: `read_csv(path, header=True)` becomes `FROM read_csv('path', header := true)`."""
 
     @pytest.fixture
-    def files(self, con: duckdb.Connection, tmp_path: Path) -> Path:
+    def files(self, con: duckdb.frame.Connection, tmp_path: Path) -> Path:
         con.run(f"COPY orders TO '{tmp_path / 'orders.csv'}' (HEADER)")
         con.run(f"COPY orders TO '{tmp_path / 'orders.parquet'}'")
         con.run(f"COPY orders TO '{tmp_path / 'orders.json'}'")
         con.run(f"COPY (SELECT * FROM orders WHERE id > 3) TO '{tmp_path / 'more.csv'}' (HEADER)")
         return tmp_path
 
-    def test_a_file_is_read_with_its_path_bound(self, con: duckdb.Connection, files: Path) -> None:
-        plan = duckdb.read_csv(files / "orders.csv", header=True)
+    def test_a_file_is_read_with_its_path_bound(self, con: duckdb.frame.Connection, files: Path) -> None:
+        plan = duckdb.frame.read_csv(files / "orders.csv", header=True)
         sql, values = plan._sql_and_values()
         assert sql == 'SELECT * FROM read_csv($1, "header" := TRUE)'
         assert values == [str(files / "orders.csv")]
         assert plan.columns(con) == ["id", "country", "amount"]
         assert plan.types(con) == ["BIGINT", "VARCHAR", "BIGINT"]
         assert plan.count(con) == 5
-        assert duckdb.read_parquet(files / "orders.parquet").filter(col("id") == 2).rows(con) == [(2, "be", 80)]
-        assert duckdb.read_json(files / "orders.json").select("country").count(con) == 5
+        assert duckdb.frame.read_parquet(files / "orders.parquet").filter(col("id") == 2).rows(con) == [(2, "be", 80)]
+        assert duckdb.frame.read_json(files / "orders.json").select("country").count(con) == 5
 
-    def test_lists_dicts_and_globs(self, con: duckdb.Connection, files: Path) -> None:
-        both = duckdb.read_csv([files / "orders.csv", files / "more.csv"], header=True)
+    def test_lists_dicts_and_globs(self, con: duckdb.frame.Connection, files: Path) -> None:
+        both = duckdb.frame.read_csv([files / "orders.csv", files / "more.csv"], header=True)
         assert both.count(con) == 7
         assert both._sql_and_values()[1] == [[str(files / "orders.csv"), str(files / "more.csv")]]
-        typed = duckdb.read_csv(
+        typed = duckdb.frame.read_csv(
             files / "orders.csv", columns={"id": "INTEGER", "country": "VARCHAR", "amount": "INTEGER"}
         )
         assert typed.types(con) == ["INTEGER", "VARCHAR", "INTEGER"]
-        globbed = duckdb.read_csv(str(files / "*.csv"), filename=True)
+        globbed = duckdb.frame.read_csv(str(files / "*.csv"), filename=True)
         assert globbed.columns(con) == ["id", "country", "amount", "filename"]
         assert globbed.count(con) == 7
 
-    def test_any_table_function_by_name(self, con: duckdb.Connection, files: Path) -> None:
-        assert duckdb.table_function("range", 3).rows(con) == [(0,), (1,), (2,)]
-        assert duckdb.table_function("query_table", "orders").count(con) == 5
-        assert duckdb.table_function("glob", str(files / "*.csv")).count(con) == 2
-        assert duckdb.table_function("read_text", files / "orders.csv").columns(con) == [
+    def test_any_table_function_by_name(self, con: duckdb.frame.Connection, files: Path) -> None:
+        assert duckdb.frame.table_function("range", 3).rows(con) == [(0,), (1,), (2,)]
+        assert duckdb.frame.table_function("query_table", "orders").count(con) == 5
+        assert duckdb.frame.table_function("glob", str(files / "*.csv")).count(con) == 2
+        assert duckdb.frame.table_function("read_text", files / "orders.csv").columns(con) == [
             "filename",
             "content",
             "size",
             "last_modified",
         ]
-        assert duckdb.table_function("range", 2, 5).select(sql_expr("range * 10").alias("x")).rows(con) == [
+        assert duckdb.frame.table_function("range", 2, 5).select(sql_expr("range * 10").alias("x")).rows(con) == [
             (20,),
             (30,),
             (40,),
         ]
         with pytest.raises(exceptions.CatalogError, match="nope"):
-            duckdb.table_function("nope", 1).rows(con)
+            duckdb.frame.table_function("nope", 1).rows(con)
 
-    def test_a_derived_plan_resolves_and_runs(self, con: duckdb.Connection, files: Path) -> None:
+    def test_a_derived_plan_resolves_and_runs(self, con: duckdb.frame.Connection, files: Path) -> None:
         # The columns are worked out with the path written in, then the query runs with it bound.
-        read = duckdb.read_csv(files / "orders.csv", header=True)
+        read = duckdb.frame.read_csv(files / "orders.csv", header=True)
         plan = read.with_columns(amount=col("amount") * 2).filter(col("country") == "nl").select("id", "amount")
         assert plan.rows(con) == [(1, 240), (3, 600), (5, None)]
         assert "REPLACE" in plan.render(con)
         assert plan.create(con, "loaded") == 3
-        assert duckdb.table("loaded").columns(con) == ["id", "amount"]
+        assert duckdb.frame.table("loaded").columns(con) == ["id", "amount"]
         assert read.insert_into(con, "orders") == 5
 
     def test_a_param_cannot_be_an_argument(self) -> None:
         # DuckDB works the columns out from the arguments written in, so a placeholder cannot be one.
         with pytest.raises(TypeError, match="read_csv\\(\\) cannot take param\\('p'\\) as argument '0'"):
-            duckdb.read_csv(param("p"))
+            duckdb.frame.read_csv(param("p"))
         with pytest.raises(TypeError, match="as argument 'header'"):
-            duckdb.read_csv("x.csv", header=param("h"))
+            duckdb.frame.read_csv("x.csv", header=param("h"))
 
-    def test_the_file_is_read_fresh_for_every_resolution(self, con: duckdb.Connection, tmp_path: Path) -> None:
+    def test_the_file_is_read_fresh_for_every_resolution(self, con: duckdb.frame.Connection, tmp_path: Path) -> None:
         # A file is not in the catalog, and its answer is never remembered, so a change is seen.
         path = tmp_path / "moving.csv"
         path.write_text("a,b\n1,2\n")
-        plan = duckdb.read_csv(path)
+        plan = duckdb.frame.read_csv(path)
         assert plan.columns(con) == ["a", "b"]
         path.write_text("a,b,c\n1,2,3\n")
         assert plan.columns(con) == ["a", "b", "c"]
 
-    def test_a_file_name_is_a_table(self, con: duckdb.Connection, files: Path) -> None:
-        assert duckdb.table(str(files / "orders.parquet")).count(con) == 5
-        assert duckdb.table(str(files / "*.csv")).count(con) == 7
+    def test_a_file_name_is_a_table(self, con: duckdb.frame.Connection, files: Path) -> None:
+        assert duckdb.frame.table(str(files / "orders.parquet")).count(con) == 5
+        assert duckdb.frame.table(str(files / "*.csv")).count(con) == 7
 
-    def test_an_expression_argument_is_written_as_itself(self, con: duckdb.Connection) -> None:
-        plan = duckdb.table_function("range", sql_expr("2 + 1"))
+    def test_an_expression_argument_is_written_as_itself(self, con: duckdb.frame.Connection) -> None:
+        plan = duckdb.frame.table_function("range", sql_expr("2 + 1"))
         assert plan.render() == 'SELECT * FROM "range"((2 + 1))'
         assert plan.count(con) == 3
 
@@ -2415,8 +2474,8 @@ class TestTableFunctionSources:
 class TestLambdas:
     """A Python lambda stands for a SQL one: it runs once while the query is built, on expressions."""
 
-    def test_filter_transform_and_reduce(self, con: duckdb.Connection) -> None:
-        plan = duckdb.sql("SELECT ['a', 'bb', 'ccc'] AS tags").select(
+    def test_filter_transform_and_reduce(self, con: duckdb.frame.Connection) -> None:
+        plan = duckdb.frame.sql("SELECT ['a', 'bb', 'ccc'] AS tags").select(
             col("tags").list().filter(lambda x: x.str().length() > 1).alias("kept"),
             col("tags").list().transform(lambda x: x.str().upper()).alias("loud"),
             col("tags").list().reduce(lambda acc, x: acc.concat(x)).alias("folded"),
@@ -2427,33 +2486,35 @@ class TestLambdas:
         rendered = col("xs").list().transform(lambda price: price * 2).fragment()
         assert rendered == 'list_transform("xs", lambda "price": ("price" * 2))'
 
-    def test_the_body_may_use_the_rows_own_columns(self, con: duckdb.Connection) -> None:
-        plan = duckdb.sql("SELECT [1, 5, 9] AS l, 4 AS threshold").select(
+    def test_the_body_may_use_the_rows_own_columns(self, con: duckdb.frame.Connection) -> None:
+        plan = duckdb.frame.sql("SELECT [1, 5, 9] AS l, 4 AS threshold").select(
             col("l").list().filter(lambda x: x > col("threshold")).alias("big")
         )
         assert plan.rows(con) == [([5, 9],)]
 
-    def test_values_in_the_body_are_bound(self, con: duckdb.Connection) -> None:
-        plan = duckdb.sql("SELECT ['a'] AS l").select(col("l").list().transform(lambda x: x.concat("!")).alias("s"))
+    def test_values_in_the_body_are_bound(self, con: duckdb.frame.Connection) -> None:
+        plan = duckdb.frame.sql("SELECT ['a'] AS l").select(
+            col("l").list().transform(lambda x: x.concat("!")).alias("s")
+        )
         sql, values = plan._sql_and_values()
         assert "'!'" not in sql
         assert values == ["!"]
         assert plan.rows(con) == [(["a!"],)]
 
-    def test_nested_lambdas_and_shadowing(self, con: duckdb.Connection) -> None:
-        deep = duckdb.sql("SELECT [[1, 2], [3]] AS n").select(
+    def test_nested_lambdas_and_shadowing(self, con: duckdb.frame.Connection) -> None:
+        deep = duckdb.frame.sql("SELECT [[1, 2], [3]] AS n").select(
             col("n").list().transform(lambda xs: xs.list().transform(lambda x: x + 1)).alias("deep")
         )
         assert deep.rows(con) == [([[2, 3], [4]],)]
         # The inner variable wins over the outer, as in SQL; the other way round, list + 1 would fail.
         shadowed = col("n").list().transform(lambda x: x.list().transform(lambda x: x + 1))
         assert shadowed.fragment() == 'list_transform("n", lambda "x": list_transform("x", lambda "x": ("x" + 1)))'
-        plan = duckdb.sql("SELECT [[1, 2], [3]] AS n").select(shadowed.alias("v"))
+        plan = duckdb.frame.sql("SELECT [[1, 2], [3]] AS n").select(shadowed.alias("v"))
         assert plan.rows(con) == [([[2, 3], [4]],)]
 
-    def test_a_constant_body_is_a_constant(self, con: duckdb.Connection) -> None:
+    def test_a_constant_body_is_a_constant(self, con: duckdb.frame.Connection) -> None:
         # `lambda x: 1` is legal SQL; a Python value lifts to a literal body.
-        assert duckdb.sql("SELECT [7, 8] AS l").select(col("l").list().transform(lambda x: 1).alias("ones")).rows(
+        assert duckdb.frame.sql("SELECT [7, 8] AS l").select(col("l").list().transform(lambda x: 1).alias("ones")).rows(
             con
         ) == [([1, 1],)]
 
@@ -2463,16 +2524,16 @@ class TestLambdas:
         # A Python `if` on the element fails while the query is built; the SQL conditional is when().
         with pytest.raises(TypeError, match="no truth value"):
             col("l").list().transform(lambda x: 0 if x > 1 else x)
-        kept = col("l").list().transform(lambda x: duckdb.when(x > 1).then(0).otherwise(x))
+        kept = col("l").list().transform(lambda x: duckdb.frame.when(x > 1).then(0).otherwise(x))
         assert "CASE WHEN" in kept.fragment()
 
-    def test_a_lambda_reaches_any_function_through_fn(self, con: duckdb.Connection) -> None:
-        plan = duckdb.sql("SELECT [1, 5] AS l").select(fn("list_filter", col("l"), lambda x: x > 2).alias("big"))
+    def test_a_lambda_reaches_any_function_through_fn(self, con: duckdb.frame.Connection) -> None:
+        plan = duckdb.frame.sql("SELECT [1, 5] AS l").select(fn("list_filter", col("l"), lambda x: x > 2).alias("big"))
         assert plan.rows(con) == [([5],)]
 
-    def test_a_plan_holding_a_lambda_is_still_a_value(self, con: duckdb.Connection) -> None:
+    def test_a_plan_holding_a_lambda_is_still_a_value(self, con: duckdb.frame.Connection) -> None:
         # The callable is gone after construction: only the tree remains.
-        plan = duckdb.sql("SELECT [1, 5, 9] AS l").select(col("l").list().filter(lambda x: x > 4).alias("big"))
+        plan = duckdb.frame.sql("SELECT [1, 5, 9] AS l").select(col("l").list().filter(lambda x: x > 4).alias("big"))
         again = pickle.loads(pickle.dumps(plan))
         assert again.render() == plan.render()
         assert again.rows(con) == [([5, 9],)]
@@ -2509,63 +2570,63 @@ class TestLambdas:
         with pytest.raises(TypeError, match="while building a SQL lambda from len"):
             col("x") == len  # noqa: B015  # the comparison raising is the point
 
-    def test_a_lambda_operand_is_built_and_left_to_the_engine(self, con: duckdb.Connection) -> None:
+    def test_a_lambda_operand_is_built_and_left_to_the_engine(self, con: duckdb.frame.Connection) -> None:
         # A lambda is valid SQL anywhere an expression goes, so where it cannot be used DuckDB says so.
         expression = col("x") > (lambda y: y + 1)
         assert expression.fragment() == '("x" > lambda "y": ("y" + 1))'
         with pytest.raises(exceptions.Error, match="invalid lambda"):
-            duckdb.sql("SELECT 1 AS x").select(expression.alias("v")).rows(con)
+            duckdb.frame.sql("SELECT 1 AS x").select(expression.alias("v")).rows(con)
 
 
 class TestReviewRoundEight:
     """Bugs found where entering a function family used to lose the alias, the sort direction or a method."""
 
-    def test_a_family_entry_keeps_the_alias_and_order(self, con: duckdb.Connection) -> None:
+    def test_a_family_entry_keeps_the_alias_and_order(self, con: duckdb.frame.Connection) -> None:
         assert col("s").alias("keep").str()._alias == "keep"
         assert col("s").desc().str().as_order() == '"s" DESC'
         plan = (
-            duckdb.sql("SELECT 1 AS s UNION ALL SELECT 2")
+            duckdb.frame.sql("SELECT 1 AS s UNION ALL SELECT 2")
             .sort(col("s").desc().str())
             .select(col("s").str().alias("kept"))
         )
         assert plan.columns(con) == ["kept"]
         assert [r[0] for r in plan.rows(con)] == [2, 1]
 
-    def test_the_filter_builder_works_through_a_family_entry(self, con: duckdb.Connection) -> None:
+    def test_the_filter_builder_works_through_a_family_entry(self, con: duckdb.frame.Connection) -> None:
         expression = col("v").min().str().where(col("v").is_not_null())
         assert 'FILTER (WHERE ("v" IS NOT NULL))' in expression.fragment()
-        plan = duckdb.sql("SELECT unnest(['b', NULL, 'a']) AS v").aggregate(expression.alias("m"))
+        plan = duckdb.frame.sql("SELECT unnest(['b', NULL, 'a']) AS v").aggregate(expression.alias("m"))
         assert plan.rows(con) == [("a",)]
         # And it still refuses where the wrapped thing is no call at all.
         with pytest.raises(TypeError, match="aggregate call"):
             col("v").str().where(col("v").is_not_null())
 
     def test_ignore_nulls_works_through_a_family_entry(self) -> None:
-        from duckdb import last_value
+        from duckdb.frame import last_value
 
         expression = last_value(col("v")).str().ignore_nulls()
         assert 'last_value("v" IGNORE NULLS)' in expression.fragment()
 
     def test_a_family_passthrough_still_resolves_without_a_connection(self) -> None:
-        frame = duckdb.values([("a", 1)], columns=["s", "n"])
+        frame = duckdb.frame.values([("a", 1)], columns=["s", "n"])
         assert frame.select(col("n"), col("s").str()).columns() == ["n", "s"]
         assert frame.select(col("s").str().alias("copy")).columns() == ["copy"]
 
-    def test_concat_ws_joins_with_the_separator_not_the_column(self, con: duckdb.Connection) -> None:
+    def test_concat_ws_joins_with_the_separator_not_the_column(self, con: duckdb.frame.Connection) -> None:
         assert col("s").str().concat_ws(", ", col("t")).fragment() == 'concat_ws(\', \', "s", "t")'
-        plan = duckdb.sql("SELECT 'X' AS s, 'Y' AS t").select(col("s").str().concat_ws(", ", col("t")).alias("j"))
+        plan = duckdb.frame.sql("SELECT 'X' AS s, 'Y' AS t").select(col("s").str().concat_ws(", ", col("t")).alias("j"))
         assert plan.rows(con) == [("X, Y",)]
 
-    def test_mask_is_list_where_and_where_is_never_shadowed(self, con: duckdb.Connection) -> None:
-        plan = duckdb.sql("SELECT [1, 2, 3] AS l").select(col("l").list().mask([True, False, True]).alias("kept"))
+    def test_mask_is_list_where_and_where_is_never_shadowed(self, con: duckdb.frame.Connection) -> None:
+        plan = duckdb.frame.sql("SELECT [1, 2, 3] AS l").select(col("l").list().mask([True, False, True]).alias("kept"))
         assert plan.rows(con) == [([1, 3],)]
         # `.where` after a list chain is the FILTER builder, never list_where.
         chained = col("l").list().sort().where(col("k") == 1)
         assert "FILTER" in chained.fragment()
         assert "list_where" not in chained.fragment()
 
-    def test_a_macro_backed_method_keeps_the_family_in_scope(self, con: duckdb.Connection) -> None:
-        plan = duckdb.sql("SELECT [3, 1] AS l").select(
+    def test_a_macro_backed_method_keeps_the_family_in_scope(self, con: duckdb.frame.Connection) -> None:
+        plan = duckdb.frame.sql("SELECT [3, 1] AS l").select(
             col("l").list().prepend(2).sort().alias("s"),
             col("l").list().append(2).contains(2).alias("c"),
             col("l").list().reverse().first().alias("f"),
@@ -2573,12 +2634,12 @@ class TestReviewRoundEight:
         )
         assert plan.rows(con) == [([1, 2, 3], True, 1, "3,1")]
 
-    def test_json_parse_returns_a_document(self, con: duckdb.Connection) -> None:
-        plan = duckdb.sql("""SELECT '{"a": 1}' AS t""").select(col("t").json().parse().keys().alias("k"))
+    def test_json_parse_returns_a_document(self, con: duckdb.frame.Connection) -> None:
+        plan = duckdb.frame.sql("""SELECT '{"a": 1}' AS t""").select(col("t").json().parse().keys().alias("k"))
         assert plan.rows(con) == [(["a"],)]
 
-    def test_the_new_date_methods(self, con: duckdb.Connection) -> None:
-        plan = duckdb.sql("SELECT DATE '2024-02-10' AS d").select(
+    def test_the_new_date_methods(self, con: duckdb.frame.Connection) -> None:
+        plan = duckdb.frame.sql("SELECT DATE '2024-02-10' AS d").select(
             col("d").dt().part("year").alias("y"),
             col("d").dt().days_in_month().alias("n"),
         )
@@ -2587,7 +2648,7 @@ class TestReviewRoundEight:
     def test_generated_docs_come_from_the_bound_overload(self) -> None:
         import sys
 
-        from duckdb._func_namespaces import StrExpr
+        from duckdb.frame._func_namespaces import StrExpr
 
         # md5 has a BLOB overload whose description used to be picked up.
         assert "string" in (StrExpr.md5.__doc__ or "")
@@ -2600,9 +2661,9 @@ class TestReviewRoundEight:
             "A description written at such length that no single line could ever h..."
         )
 
-    def test_every_inherited_string_method_binds_on_a_json_subject(self, con: duckdb.Connection) -> None:
+    def test_every_inherited_string_method_binds_on_a_json_subject(self, con: duckdb.frame.Connection) -> None:
         """The other checks never try the inherited string methods on a JSON value, so DuckDB is asked."""
-        from duckdb._func_namespaces import JsonExpr, StrExpr
+        from duckdb.frame._func_namespaces import JsonExpr, StrExpr
 
         subject = "'{\"a\": [1, 2]}'::JSON"
         wrong = []
@@ -2612,12 +2673,12 @@ class TestReviewRoundEight:
             arguments = ["NULL" if t == "ANY" else f"NULL::{t}" for t in types]
             arguments[position] = subject
             try:
-                duckdb.sql(f"SELECT {function}({', '.join(arguments)}) AS v").columns(con)
+                duckdb.frame.sql(f"SELECT {function}({', '.join(arguments)}) AS v").columns(con)
             except exceptions.Error as error:
                 wrong.append(f"{method}: {str(error).splitlines()[0][:90]}")
         assert not wrong, wrong
 
-    def test_the_generator_refuses_what_the_table_cannot_mean(self, con: duckdb.Connection) -> None:
+    def test_the_generator_refuses_what_the_table_cannot_mean(self, con: duckdb.frame.Connection) -> None:
         import copy
         import sys
 
@@ -2641,7 +2702,7 @@ class TestReviewRoundEight:
     def test_catalog_parameter_names_are_cleaned_and_renameable(self) -> None:
         import inspect
 
-        from duckdb._func_namespaces import DtExpr, ListExpr
+        from duckdb.frame._func_namespaces import DtExpr, ListExpr
 
         # DuckDB spells list_resize's optional parameter `size[`, where the bracket is notation.
         assert "Arguments: size." in (ListExpr.resize.__doc__ or "")
