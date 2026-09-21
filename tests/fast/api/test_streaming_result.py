@@ -16,9 +16,9 @@ class TestStreamingResult:
             result.append(tpl[0])
         assert result == list(range(5000))
 
-        # fetch one with error
+        # fetch one with error: the bad row sits inside the first chunk
         res = duckdb_cursor.sql(
-            "SELECT CASE WHEN i < 10000 THEN i ELSE concat('hello', i::VARCHAR)::INT END FROM range(100000) t(i)"
+            "SELECT CASE WHEN i < 1000 THEN i ELSE concat('hello', i::VARCHAR)::INT END FROM range(100000) t(i)"
         )
         with pytest.raises(duckdb.ConversionException):
             res.fetchone()
@@ -32,9 +32,9 @@ class TestStreamingResult:
             result += [x[0] for x in tpl]
         assert result == list(range(5000))
 
-        # fetch many with error
+        # fetch many with error: the bad row sits inside the first chunk
         res = duckdb_cursor.sql(
-            "SELECT CASE WHEN i < 10000 THEN i ELSE concat('hello', i::VARCHAR)::INT END FROM range(100000) t(i)"
+            "SELECT CASE WHEN i < 1000 THEN i ELSE concat('hello', i::VARCHAR)::INT END FROM range(100000) t(i)"
         )
         with pytest.raises(duckdb.ConversionException):
             res.fetchmany(10)
@@ -138,6 +138,11 @@ class TestStreamingSemantics:
         res = duckdb_cursor.sql(query)
         assert res.fetchmany(3) == [(0,), (1,), (2,)]
         assert res.df()["i"].tolist() == list(range(3, 10))
+
+        res = duckdb_cursor.sql(query)
+        assert res.fetchone() == (0,)
+        assert len(res.fetch_df_chunk(0)) == 0
+        assert res.fetch_df_chunk()["i"].tolist() == list(range(1, 10))
 
         res = duckdb_cursor.sql(query).execute()
         assert res.fetchone() == (0,)

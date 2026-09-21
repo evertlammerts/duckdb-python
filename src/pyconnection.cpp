@@ -681,8 +681,8 @@ unique_ptr<QueryResult> DuckDBPyConnection::ExecuteInternal(PreparedStatement &p
 	return res;
 }
 
-unique_ptr<QueryResult> DuckDBPyConnection::PrepareAndExecuteInternal(unique_ptr<SQLStatement> statement,
-                                                                      nb::object params) {
+unique_ptr<QueryResult> DuckDBPyConnection::PrepareAndSubmitInternal(unique_ptr<SQLStatement> statement,
+                                                                     nb::object params) {
 	if (params.is_none()) {
 		params = nb::list();
 	}
@@ -697,7 +697,9 @@ unique_ptr<QueryResult> DuckDBPyConnection::PrepareAndExecuteInternal(unique_ptr
 		unique_lock<std::recursive_mutex> lock(py_connection_lock);
 
 		res = con.GetConnection().Submit(std::move(statement), named_values);
-		CompleteQuery(*res);
+		if (res->HasError()) {
+			res->ThrowError();
+		}
 	}
 	return res;
 }
@@ -739,13 +741,19 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::Execute(const nb::object
 	// FIXME: SQLites implementation says to not accept an 'execute' call with multiple statements
 	ExecuteImmediately(std::move(statements));
 
-	auto res = PrepareAndExecuteInternal(std::move(last_statement), std::move(params));
+	auto res = PrepareAndSubmitInternal(std::move(last_statement), std::move(params));
 
-	// Set the internal 'result' object
 	if (res) {
-		// Don't use CreateRelation here — the result is stored inside the connection,
-		// so setting connection_owner would create a ref cycle (connection → result → connection).
-		con.SetResult(std::make_unique<DuckDBPyRelation>(std::make_shared<DuckDBPyResult>(std::move(res))));
+		std::shared_ptr<DuckDBPyResult> py_result;
+		{
+			D_ASSERT(duckdb::PyUtil::GilCheck());
+			nb::gil_scoped_release release;
+			unique_lock<std::recursive_mutex> lock(py_connection_lock);
+			py_result = std::make_shared<DuckDBPyResult>(std::move(res), true);
+		}
+		// Don't use CreateRelation here: the result is stored inside the connection,
+		// so setting connection_owner would create a ref cycle (connection, result, connection).
+		con.SetResult(std::make_unique<DuckDBPyRelation>(std::move(py_result)));
 	}
 	return shared_from_this();
 }
@@ -1659,12 +1667,17 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::RunQuery(const nb::object 
 
 	if (!relation) {
 		// Could not create a relation, resort to direct execution
-		unique_ptr<QueryResult> res;
-
-		res = PrepareAndExecuteInternal(std::move(last_statement), std::move(params));
-
+		// One critical section from submit to completion, so no other statement on the
+		// connection can end the query in between
+		ConnectionLockGuard conn_lock(*this);
+		auto res = PrepareAndSubmitInternal(std::move(last_statement), std::move(params));
 		if (!res) {
 			return nullptr;
+		}
+		{
+			D_ASSERT(duckdb::PyUtil::GilCheck());
+			nb::gil_scoped_release release;
+			CompleteQuery(*res);
 		}
 		if (res->GetStatementProperties().return_type != StatementReturnType::QUERY_RESULT) {
 			return nullptr;

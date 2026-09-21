@@ -261,7 +261,7 @@ void DuckDBPyRelation::AssertRelation() const {
 }
 
 void DuckDBPyRelation::AssertResultOpen() const {
-	if (!result || result->IsClosed()) {
+	if (!result) {
 		throw InvalidInputException("No open result set");
 	}
 }
@@ -806,36 +806,49 @@ duckdb::pyarrow::RecordBatchReader DuckDBPyRelation::FetchRecordBatchReader(idx_
 	return result->FetchRecordBatchReader(rows_per_batch);
 }
 
-static unique_ptr<QueryResult> PyExecuteRelation(const shared_ptr<Relation> &rel, bool stream_result = false) {
-	if (!rel) {
-		return nullptr;
-	}
+//! Submits the relation and returns the undriven handle. Call with the GIL released.
+static unique_ptr<QueryResult> PySubmitRelation(const shared_ptr<Relation> &rel, bool stream_result) {
 	auto context = rel->context->GetContext();
-	D_ASSERT(duckdb::PyUtil::GilCheck());
-	nb::gil_scoped_release release;
 	QueryParameters parameters;
-	parameters.result_eagerness = ResultEagerness::FORCED;
+	// A stream can only be opened on a handle whose retention is still undecided at submission
+	parameters.result_eagerness = stream_result ? ResultEagerness::AUTO : ResultEagerness::FORCED;
 	auto result = context->Submit(rel, parameters);
-	DuckDBPyConnection::CompleteQuery(*result);
+	if (result->HasError()) {
+		result->ThrowError();
+	}
 	return result;
 }
 
-unique_ptr<QueryResult> DuckDBPyRelation::ExecuteInternal(bool stream_result) {
+static unique_ptr<QueryResult> PyExecuteRelation(const shared_ptr<Relation> &rel) {
+	if (!rel) {
+		return nullptr;
+	}
+	D_ASSERT(duckdb::PyUtil::GilCheck());
+	nb::gil_scoped_release release;
+	auto query_result = PySubmitRelation(rel, false);
+	DuckDBPyConnection::CompleteQuery(*query_result);
+	return query_result;
+}
+
+unique_ptr<QueryResult> DuckDBPyRelation::ExecuteInternal() {
 	this->executed = true;
-	return PyExecuteRelation(rel, stream_result);
+	return PyExecuteRelation(rel);
 }
 
 void DuckDBPyRelation::ExecuteOrThrow(bool stream_result) {
 	nb::gil_scoped_acquire gil;
 	result.reset();
-	auto query_result = ExecuteInternal(stream_result);
-	if (!query_result) {
+	if (!rel) {
 		throw InternalException("ExecuteOrThrow - no query available to execute");
 	}
-	if (query_result->HasError()) {
-		query_result->ThrowError();
+	this->executed = true;
+	std::shared_ptr<DuckDBPyResult> py_result;
+	{
+		nb::gil_scoped_release release;
+		auto submitted = PySubmitRelation(rel, stream_result);
+		py_result = std::make_shared<DuckDBPyResult>(std::move(submitted), stream_result);
 	}
-	result = std::make_unique<DuckDBPyResult>(std::move(query_result));
+	result = std::move(py_result);
 }
 
 PandasDataFrame DuckDBPyRelation::FetchDF(bool date_as_object) {
@@ -844,9 +857,6 @@ PandasDataFrame DuckDBPyRelation::FetchDF(bool date_as_object) {
 			return nb::none();
 		}
 		ExecuteOrThrow();
-	}
-	if (result->IsClosed()) {
-		return nb::none();
 	}
 	auto df = result->FetchDF(date_as_object);
 	result = nullptr;
@@ -860,9 +870,6 @@ Optional<nb::tuple> DuckDBPyRelation::FetchOne() {
 		}
 		ExecuteOrThrow(true);
 	}
-	if (result->IsClosed()) {
-		return nb::none();
-	}
 	return result->Fetchone();
 }
 
@@ -874,9 +881,6 @@ nb::list DuckDBPyRelation::FetchMany(idx_t size) {
 		ExecuteOrThrow(true);
 		D_ASSERT(result);
 	}
-	if (result->IsClosed()) {
-		return nb::list();
-	}
 	return result->Fetchmany(size);
 }
 
@@ -886,9 +890,6 @@ nb::list DuckDBPyRelation::FetchAll() {
 			return nb::list();
 		}
 		ExecuteOrThrow();
-	}
-	if (result->IsClosed()) {
-		return nb::list();
 	}
 	auto res = result->Fetchall();
 	result = nullptr;
@@ -902,9 +903,6 @@ nb::dict DuckDBPyRelation::FetchNumpy() {
 		}
 		ExecuteOrThrow();
 	}
-	if (result->IsClosed()) {
-		return nb::borrow<nb::dict>(nb::none());
-	}
 	auto res = result->FetchNumpy();
 	result = nullptr;
 	return res;
@@ -916,9 +914,6 @@ nb::dict DuckDBPyRelation::FetchPyTorch() {
 			return nb::borrow<nb::dict>(nb::none());
 		}
 		ExecuteOrThrow();
-	}
-	if (result->IsClosed()) {
-		return nb::borrow<nb::dict>(nb::none());
 	}
 	auto res = result->FetchPyTorch();
 	result = nullptr;
@@ -932,15 +927,12 @@ nb::dict DuckDBPyRelation::FetchTF() {
 		}
 		ExecuteOrThrow();
 	}
-	if (result->IsClosed()) {
-		return nb::borrow<nb::dict>(nb::none());
-	}
 	auto res = result->FetchTF();
 	result = nullptr;
 	return res;
 }
 
-nb::dict DuckDBPyRelation::FetchNumpyInternal(bool stream, idx_t vectors_per_chunk) {
+nb::dict DuckDBPyRelation::FetchNumpyInternal(bool chunked, idx_t vectors_per_chunk) {
 	if (!result) {
 		if (!rel) {
 			return nb::borrow<nb::dict>(nb::none());
@@ -948,7 +940,7 @@ nb::dict DuckDBPyRelation::FetchNumpyInternal(bool stream, idx_t vectors_per_chu
 		ExecuteOrThrow();
 	}
 	AssertResultOpen();
-	auto res = result->FetchNumpyInternal(stream, vectors_per_chunk);
+	auto res = result->FetchNumpyInternal(chunked, vectors_per_chunk);
 	result = nullptr;
 	return res;
 }

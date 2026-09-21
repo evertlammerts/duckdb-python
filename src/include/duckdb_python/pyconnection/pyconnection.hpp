@@ -185,7 +185,7 @@ public:
 	// Recursive so that the outer lock taken at the top of execute/fetch
 	// methods (while still holding the GIL) does not deadlock against the
 	// inner lock taken by PrepareQuery / ExecuteInternal /
-	// PrepareAndExecuteInternal (after releasing the GIL). Serialises every
+	// PrepareAndSubmitInternal (after releasing the GIL). Serialises every
 	// path that touches `con.result` so concurrent calls on a single
 	// DuckDBPyConnection cannot dereference an already-freed result — see
 	// duckdb-python#435.
@@ -261,8 +261,9 @@ public:
 	void ExecuteImmediately(vector<unique_ptr<SQLStatement>> statements);
 	unique_ptr<PreparedStatement> PrepareQuery(unique_ptr<SQLStatement> statement);
 	unique_ptr<QueryResult> ExecuteInternal(PreparedStatement &prep, nb::object params = nb::list());
-	unique_ptr<QueryResult> PrepareAndExecuteInternal(unique_ptr<SQLStatement> statement,
-	                                                  nb::object params = nb::list());
+	//! Binds the parameters and submits the statement. The handle is returned undriven.
+	unique_ptr<QueryResult> PrepareAndSubmitInternal(unique_ptr<SQLStatement> statement,
+	                                                 nb::object params = nb::list());
 
 	std::shared_ptr<DuckDBPyConnection> Execute(const nb::object &query, nb::object params = nb::list());
 	std::shared_ptr<DuckDBPyConnection> ExecuteFromString(const string &query);

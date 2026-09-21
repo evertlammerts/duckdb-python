@@ -24,14 +24,50 @@ using namespace nanobind::literals;
 
 namespace duckdb {
 
-DuckDBPyResult::DuckDBPyResult(unique_ptr<QueryResult> result_p) : result(std::move(result_p)) {
+DuckDBPyResult::DuckDBPyResult(unique_ptr<QueryResult> completed) : result(std::move(completed)) {
 	if (!result) {
 		throw InternalException("PyResult created without a result object");
 	}
 }
 
+DuckDBPyResult::DuckDBPyResult(unique_ptr<QueryResult> submitted, bool stream_result) {
+	if (!submitted) {
+		throw InternalException("PyResult created without a result object");
+	}
+	if (submitted->HasError()) {
+		submitted->ThrowError();
+	}
+	// A statement the planner settles on retained cannot be drained, and neither can a result a
+	// delegating collector already built, which carries no buffer.
+	const bool can_stream =
+	    submitted->HasBufferedData() && submitted->GetStatementProperties().result_eagerness != ResultEagerness::FORCED;
+	if (stream_result && can_stream) {
+		stream = make_uniq<QueryResultStream>(std::move(submitted));
+		return;
+	}
+	DuckDBPyConnection::CompleteQuery(*submitted);
+	result = std::move(submitted);
+}
+
 const vector<Identifier> &DuckDBPyResult::ResultNames() const {
-	return names_override.empty() ? result->GetNames() : names_override;
+	if (!names_override.empty()) {
+		return names_override;
+	}
+	return stream ? stream->GetNames() : result->GetNames();
+}
+
+void DuckDBPyResult::CloseStream() {
+	if (!stream) {
+		return;
+	}
+	// Ending the query waits for its running tasks, and a task inside a Python UDF cannot finish
+	// until the GIL is free.
+	if (duckdb::PyUtil::GilCheck()) {
+		nb::gil_scoped_release release;
+		stream->Close();
+	} else {
+		stream->Close();
+	}
 }
 
 DuckDBPyResult::~DuckDBPyResult() {
@@ -43,67 +79,142 @@ DuckDBPyResult::~DuckDBPyResult() {
 	// to run without a valid PyThreadState — see duckdb-python#456.
 	try {
 		D_ASSERT(duckdb::PyUtil::GilCheck());
+		CloseStream();
+		stream.reset();
 		result.reset();
 		current_chunk.reset();
 	} catch (...) { // NOLINT
 	}
 }
 
-ClientProperties DuckDBPyResult::GetClientProperties() {
-	return result->client_properties;
+const ClientProperties &DuckDBPyResult::GetClientProperties() const {
+	return stream ? stream->GetClientProperties() : result->client_properties;
 }
 
 vector<string> DuckDBPyResult::GetNames() {
-	if (!result) {
+	if (Empty()) {
 		throw InternalException("Calling GetNames without a result object");
 	}
 	return IdentifiersToStrings(ResultNames());
 }
 
-const vector<LogicalType> &DuckDBPyResult::GetTypes() {
-	if (!result) {
+const vector<LogicalType> &DuckDBPyResult::GetTypes() const {
+	if (Empty()) {
 		throw InternalException("Calling GetTypes without a result object");
 	}
-	return result->GetTypes();
+	return stream ? stream->GetTypes() : result->GetTypes();
 }
 
 unique_ptr<DataChunk> DuckDBPyResult::FetchChunk() {
-	if (!result) {
+	if (Empty()) {
 		throw InternalException("FetchChunk called without a result object");
 	}
-	return FetchNext(*result);
+	return FetchNext();
 }
 
-unique_ptr<DataChunk> DuckDBPyResult::FetchNext(QueryResult &query_result) {
-	auto chunk = query_result.Fetch();
-	if (query_result.HasError()) {
-		query_result.ThrowError();
+unique_ptr<DataChunk> DuckDBPyResult::FetchStreamChunk() {
+	while (true) {
+		unique_ptr<DataChunk> chunk;
+		auto state = stream->TryFetch(chunk);
+		if (chunk) {
+			return chunk;
+		}
+		if (state == QueryResultState::FINISHED) {
+			return nullptr;
+		}
+		if (state == QueryResultState::EXECUTION_ERROR) {
+			stream->GetErrorObject().Throw();
+		}
+		{
+			nb::gil_scoped_acquire gil;
+			if (PyErr_CheckSignals() != 0) {
+				throw std::runtime_error("Query interrupted");
+			}
+		}
+		state = stream->ExecuteTask();
+		if (state == QueryResultState::BLOCKED || state == QueryResultState::NO_TASKS_AVAILABLE) {
+			stream->WaitForTask();
+		}
+	}
+}
+
+unique_ptr<DataChunk> DuckDBPyResult::FetchNext() {
+	if (stream) {
+		auto chunk = FetchStreamChunk();
+		if (chunk) {
+			chunk->Flatten();
+		}
+		return chunk;
+	}
+	auto chunk = result->Fetch();
+	if (result->HasError()) {
+		result->ThrowError();
 	}
 	return chunk;
 }
 
-unique_ptr<DataChunk> DuckDBPyResult::FetchNextRaw(QueryResult &query_result) {
-	auto chunk = query_result.FetchRaw();
-	if (query_result.HasError()) {
-		query_result.ThrowError();
+unique_ptr<DataChunk> DuckDBPyResult::FetchNextRaw() {
+	if (stream) {
+		return FetchStreamChunk();
+	}
+	auto chunk = result->FetchRaw();
+	if (result->HasError()) {
+		result->ThrowError();
 	}
 	return chunk;
+}
+
+unique_ptr<DataChunk> DuckDBPyResult::TakeBufferedRows() {
+	unique_ptr<DataChunk> remainder;
+	if (current_chunk && chunk_offset < current_chunk->size() && !StreamEnded()) {
+		remainder = make_uniq<DataChunk>();
+		remainder->Initialize(Allocator::DefaultAllocator(), current_chunk->GetTypes());
+		current_chunk->Copy(*remainder, chunk_offset);
+	}
+	current_chunk.reset();
+	chunk_offset = 0;
+	return remainder;
+}
+
+void DuckDBPyResult::Retain() {
+	if (!stream) {
+		return;
+	}
+	auto collection = make_uniq<ColumnDataCollection>(Allocator::DefaultAllocator(), stream->GetTypes());
+	{
+		D_ASSERT(duckdb::PyUtil::GilCheck());
+		nb::gil_scoped_release release;
+		if (auto buffered = TakeBufferedRows()) {
+			collection->Append(*buffered);
+		}
+		while (auto chunk = FetchStreamChunk()) {
+			collection->Append(*chunk);
+		}
+	}
+	auto retained = make_uniq<QueryResult>(stream->GetStatementType(), stream->GetStatementProperties(),
+	                                       stream->GetNames(), std::move(collection), stream->GetClientProperties());
+	CloseStream();
+	stream.reset();
+	result = std::move(retained);
 }
 
 Optional<nb::tuple> DuckDBPyResult::Fetchone() {
-	if (!result) {
+	if (Empty()) {
 		throw InvalidInputException("result closed");
 	}
-	if (!current_chunk || chunk_offset >= current_chunk->size()) {
+	{
 		nb::gil_scoped_release release;
-		current_chunk = FetchNext(*result);
-		chunk_offset = 0;
+		if (!current_chunk || chunk_offset >= current_chunk->size() || StreamEnded()) {
+			current_chunk = FetchNext();
+			chunk_offset = 0;
+		}
 	}
 
 	if (!current_chunk || current_chunk->size() == 0) {
 		return nb::none();
 	}
-	auto &types = result->GetTypes();
+	auto &types = GetTypes();
+	auto &client_properties = GetClientProperties();
 	duckdb::PyUtil::TupleBuilder row(types.size());
 	for (idx_t col_idx = 0; col_idx < types.size(); col_idx++) {
 		auto &mask = FlatVector::Validity(current_chunk->data[col_idx]);
@@ -111,7 +222,7 @@ Optional<nb::tuple> DuckDBPyResult::Fetchone() {
 			row.append(nb::none());
 		} else {
 			auto val = current_chunk->data[col_idx].GetValue(chunk_offset);
-			row.append(PythonObject::FromValue(val, types[col_idx], result->client_properties));
+			row.append(PythonObject::FromValue(val, types[col_idx], client_properties));
 		}
 	}
 	chunk_offset++;
@@ -147,7 +258,7 @@ nb::dict DuckDBPyResult::FetchNumpy() {
 }
 
 void DuckDBPyResult::FillNumpy(nb::dict &res, idx_t col_idx, NumpyResultConversion &conversion, const char *name) {
-	if (result->GetTypes()[col_idx].id() == LogicalTypeId::ENUM) {
+	if (GetTypes()[col_idx].id() == LogicalTypeId::ENUM) {
 		auto &import_cache = *DuckDBPyConnection::ImportCache();
 		auto pandas_categorical = import_cache.pandas.Categorical();
 		auto categorical_dtype = import_cache.pandas.CategoricalDtype();
@@ -171,8 +282,7 @@ void DuckDBPyResult::FillNumpy(nb::dict &res, idx_t col_idx, NumpyResultConversi
 	}
 }
 
-void InsertCategory(QueryResult &result, unordered_map<idx_t, nb::list> &categories) {
-	auto &types = result.GetTypes();
+void InsertCategory(const vector<LogicalType> &types, unordered_map<idx_t, nb::list> &categories) {
 	for (idx_t col_idx = 0; col_idx < types.size(); col_idx++) {
 		auto &type = types[col_idx];
 		if (type.id() == LogicalTypeId::ENUM) {
@@ -189,51 +299,59 @@ void InsertCategory(QueryResult &result, unordered_map<idx_t, nb::list> &categor
 }
 
 std::unique_ptr<NumpyResultConversion> DuckDBPyResult::InitializeNumpyConversion(bool pandas) {
-	if (!result) {
+	if (Empty()) {
 		throw InvalidInputException("result closed");
 	}
 
 	idx_t initial_capacity = STANDARD_VECTOR_SIZE * 2ULL;
-	if (result->GetResultType() == QueryResultType::MATERIALIZED_RESULT) {
+	if (result && result->GetResultType() == QueryResultType::MATERIALIZED_RESULT) {
 		initial_capacity = result->RowCount();
 	}
 
-	auto conversion = std::make_unique<NumpyResultConversion>(result->GetTypes(), initial_capacity,
-	                                                          result->client_properties, pandas);
+	auto conversion =
+	    std::make_unique<NumpyResultConversion>(GetTypes(), initial_capacity, GetClientProperties(), pandas);
 	return conversion;
 }
 
-nb::dict DuckDBPyResult::FetchNumpyInternal(bool stream, idx_t vectors_per_chunk,
+nb::dict DuckDBPyResult::FetchNumpyInternal(bool chunked, idx_t vectors_per_chunk,
                                             std::unique_ptr<NumpyResultConversion> conversion_p) {
-	if (!result) {
+	if (Empty()) {
 		throw InvalidInputException("result closed");
 	}
 	if (!conversion_p) {
 		conversion_p = InitializeNumpyConversion();
 	}
 	auto &conversion = *conversion_p;
+	if (!chunked) {
+		vectors_per_chunk = NumericLimits<idx_t>::Maximum();
+	}
 
-	if (!stream) {
-		for (auto &chunk : result->Collection().Chunks()) {
-			conversion.Append(chunk);
+	idx_t count_vec = 0;
+	if (vectors_per_chunk > 0) {
+		unique_ptr<DataChunk> buffered;
+		{
+			D_ASSERT(duckdb::PyUtil::GilCheck());
+			nb::gil_scoped_release release;
+			buffered = TakeBufferedRows();
 		}
-		InsertCategory(*result, categories);
-		result->Collection().Reset();
-	} else {
-		for (idx_t count_vec = 0; count_vec < vectors_per_chunk; count_vec++) {
-			unique_ptr<DataChunk> chunk;
-			{
-				D_ASSERT(duckdb::PyUtil::GilCheck());
-				nb::gil_scoped_release release;
-				chunk = FetchNextRaw(*result);
-			}
-			if (!chunk || chunk->size() == 0) {
-				break;
-			}
-			conversion.Append(*chunk);
-			InsertCategory(*result, categories);
+		if (buffered) {
+			conversion.Append(*buffered);
+			count_vec++;
 		}
 	}
+	for (; count_vec < vectors_per_chunk; count_vec++) {
+		unique_ptr<DataChunk> chunk;
+		{
+			D_ASSERT(duckdb::PyUtil::GilCheck());
+			nb::gil_scoped_release release;
+			chunk = FetchNextRaw();
+		}
+		if (!chunk || chunk->size() == 0) {
+			break;
+		}
+		conversion.Append(*chunk);
+	}
+	InsertCategory(GetTypes(), categories);
 
 	// now that we have materialized the result in contiguous arrays, construct the actual NumPy arrays or categorical
 	// types
@@ -256,14 +374,15 @@ static void ReplaceDFColumn(PandasDataFrame &df, const char *col_name, idx_t idx
 void DuckDBPyResult::ConvertDateTimeTypes(PandasDataFrame &df, bool date_as_object) const {
 	auto names = nb::cast<vector<string>>(df.attr("columns"));
 
-	for (idx_t i = 0; i < result->ColumnCount(); i++) {
-		if (result->GetTypes()[i] == LogicalType::TIMESTAMP_TZ) {
+	auto &types = GetTypes();
+	for (idx_t i = 0; i < types.size(); i++) {
+		if (types[i] == LogicalType::TIMESTAMP_TZ) {
 			// first localize to UTC then convert to timezone_config
 			auto utc_local = df[names[i].c_str()].attr("dt").attr("tz_localize")("UTC");
-			auto new_value = utc_local.attr("dt").attr("tz_convert")(result->client_properties.time_zone);
+			auto new_value = utc_local.attr("dt").attr("tz_convert")(GetClientProperties().time_zone);
 			// We need to create the column anew because the exact dt changed to a new timezone
 			ReplaceDFColumn(df, names[i].c_str(), i, new_value);
-		} else if (date_as_object && result->GetTypes()[i] == LogicalType::DATE) {
+		} else if (date_as_object && types[i] == LogicalType::DATE) {
 			nb::object new_value = df[names[i].c_str()].attr("dt").attr("date");
 			ReplaceDFColumn(df, names[i].c_str(), i, new_value);
 		}
@@ -345,7 +464,7 @@ PandasDataFrame DuckDBPyResult::FrameFromNumpy(bool date_as_object, const nb::ha
 	ConvertDateTimeTypes(df, date_as_object);
 
 	auto names = nb::cast<vector<string>>(df.attr("columns"));
-	D_ASSERT(result->ColumnCount() == names.size());
+	D_ASSERT(GetTypes().size() == names.size());
 	return df;
 }
 
@@ -427,11 +546,12 @@ void DuckDBPyResult::PromoteMaterializedToArrow(idx_t batch_size) {
 
 template <typename T>
 T DuckDBPyResult::RunWithArrowSchema(const std::function<T(const ArrowSchema &)> &fun, bool dedup_col_names) {
-	D_ASSERT(result);
-	if (!result->client_properties.client_context) {
+	D_ASSERT(!Empty());
+	auto client_properties = GetClientProperties();
+	if (!client_properties.client_context) {
 		throw ConnectionException("Cannot fetch arrow schema without a valid connection");
 	}
-	auto ctx = result->client_properties.client_context->shared_from_this();
+	auto ctx = client_properties.client_context->shared_from_this();
 
 	auto identifiers = ResultNames();
 	if (dedup_col_names) {
@@ -441,13 +561,14 @@ T DuckDBPyResult::RunWithArrowSchema(const std::function<T(const ArrowSchema &)>
 
 	ArrowSchema arrow_schema;
 	ctx->RunFunctionInTransaction(
-	    [&] { ArrowConverter::ToArrowSchema(&arrow_schema, result->GetTypes(), names, result->client_properties); });
+	    [&] { ArrowConverter::ToArrowSchema(&arrow_schema, GetTypes(), names, client_properties); });
 
 	return fun(arrow_schema);
 }
 
 duckdb::pyarrow::Table DuckDBPyResult::MaterializedResultToArrowTable(const ArrowSchema &arrow_schema,
                                                                       const idx_t rows_per_batch) {
+	Retain();
 	D_ASSERT(result);
 	D_ASSERT(result->GetResultType() == QueryResultType::MATERIALIZED_RESULT ||
 	         result->GetResultType() == QueryResultType::ARROW_RESULT);
@@ -468,7 +589,7 @@ duckdb::pyarrow::Table DuckDBPyResult::MaterializedResultToArrowTable(const Arro
 }
 
 duckdb::pyarrow::Table DuckDBPyResult::FetchArrowTable(const idx_t rows_per_batch, const bool to_polars) {
-	if (!result) {
+	if (Empty()) {
 		throw InvalidInputException("There is no query result");
 	}
 
@@ -480,7 +601,7 @@ duckdb::pyarrow::Table DuckDBPyResult::FetchArrowTable(const idx_t rows_per_batc
 }
 
 duckdb::pyarrow::RecordBatchReader DuckDBPyResult::FetchRecordBatchReader(idx_t rows_per_batch) {
-	if (!result) {
+	if (Empty()) {
 		throw InvalidInputException("There is no query result");
 	}
 
@@ -497,7 +618,7 @@ duckdb::pyarrow::RecordBatchReader DuckDBPyResult::FetchRecordBatchReader(idx_t 
 }
 
 nb::object DuckDBPyResult::FetchArrowCapsule(const idx_t rows_per_batch) {
-	if (!result) {
+	if (Empty()) {
 		throw InvalidInputException("There is no query result");
 	}
 
@@ -524,11 +645,11 @@ nb::list DuckDBPyResult::GetDescription(const vector<string> &names, const vecto
 }
 
 void DuckDBPyResult::Close() {
-	result = nullptr;
-}
-
-bool DuckDBPyResult::IsClosed() const {
-	return result_closed;
+	CloseStream();
+	stream.reset();
+	result.reset();
+	current_chunk.reset();
+	chunk_offset = 0;
 }
 
 } // namespace duckdb
