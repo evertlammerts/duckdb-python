@@ -6,20 +6,15 @@
 
 #include "duckdb_python/arrow/arrow_array_stream.hpp"
 #include "duckdb/common/arrow/arrow.hpp"
-#include "duckdb/common/arrow/arrow_util.hpp"
 #include "duckdb/common/arrow/arrow_converter.hpp"
 #include "duckdb/common/arrow/arrow_wrapper.hpp"
-#include "duckdb/common/arrow/result_arrow_wrapper.hpp"
 #include "duckdb/common/types/uuid.hpp"
 #include "duckdb/common/exception.hpp"
-#include "duckdb/common/enums/stream_execution_result.hpp"
 #include "duckdb_python/arrow/arrow_export_utils.hpp"
 #include "duckdb/common/arrow/arrow_query_result.hpp"
 #include "duckdb/common/arrow/physical_arrow_collector.hpp"
-#include "duckdb/main/chunk_scan_state/query_result.hpp"
 #include "duckdb/main/client_config.hpp"
-#include "duckdb/main/materialized_query_result.hpp"
-#include "duckdb/main/stream_query_result.hpp"
+#include "duckdb/main/query_result.hpp"
 #include "duckdb/parser/expression/star_expression.hpp"
 #include "duckdb/parser/query_node/select_node.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
@@ -80,33 +75,6 @@ unique_ptr<DataChunk> DuckDBPyResult::FetchChunk() {
 }
 
 unique_ptr<DataChunk> DuckDBPyResult::FetchNext(QueryResult &query_result) {
-	if (!result_closed && query_result.GetResultType() == QueryResultType::STREAM_RESULT &&
-	    !query_result.Cast<StreamQueryResult>().IsOpen()) {
-		result_closed = true;
-		return nullptr;
-	}
-	if (query_result.GetResultType() == QueryResultType::STREAM_RESULT) {
-		auto &stream_result = query_result.Cast<StreamQueryResult>();
-		StreamExecutionResult execution_result;
-		while (!StreamQueryResult::IsChunkReady(execution_result = stream_result.ExecuteTask())) {
-			{
-				nb::gil_scoped_acquire gil;
-				if (PyErr_CheckSignals() != 0) {
-					throw std::runtime_error("Query interrupted");
-				}
-			}
-			if (execution_result == StreamExecutionResult::BLOCKED) {
-				stream_result.WaitForTask();
-			}
-		}
-		if (execution_result == StreamExecutionResult::EXECUTION_CANCELLED) {
-			throw InvalidInputException("The execution of the query was cancelled before it could finish, likely "
-			                            "caused by executing a different query");
-		}
-		if (execution_result == StreamExecutionResult::EXECUTION_ERROR) {
-			stream_result.ThrowError();
-		}
-	}
 	auto chunk = query_result.Fetch();
 	if (query_result.HasError()) {
 		query_result.ThrowError();
@@ -115,11 +83,6 @@ unique_ptr<DataChunk> DuckDBPyResult::FetchNext(QueryResult &query_result) {
 }
 
 unique_ptr<DataChunk> DuckDBPyResult::FetchNextRaw(QueryResult &query_result) {
-	if (!result_closed && query_result.GetResultType() == QueryResultType::STREAM_RESULT &&
-	    !query_result.Cast<StreamQueryResult>().IsOpen()) {
-		result_closed = true;
-		return nullptr;
-	}
 	auto chunk = query_result.FetchRaw();
 	if (query_result.HasError()) {
 		query_result.ThrowError();
@@ -232,9 +195,7 @@ std::unique_ptr<NumpyResultConversion> DuckDBPyResult::InitializeNumpyConversion
 
 	idx_t initial_capacity = STANDARD_VECTOR_SIZE * 2ULL;
 	if (result->GetResultType() == QueryResultType::MATERIALIZED_RESULT) {
-		// materialized query result: we know exactly how much space we need
-		auto &materialized = result->Cast<MaterializedQueryResult>();
-		initial_capacity = materialized.RowCount();
+		initial_capacity = result->RowCount();
 	}
 
 	auto conversion = std::make_unique<NumpyResultConversion>(result->GetTypes(), initial_capacity,
@@ -252,35 +213,25 @@ nb::dict DuckDBPyResult::FetchNumpyInternal(bool stream, idx_t vectors_per_chunk
 	}
 	auto &conversion = *conversion_p;
 
-	if (result->GetResultType() == QueryResultType::MATERIALIZED_RESULT) {
-		auto &materialized = result->Cast<MaterializedQueryResult>();
-		for (auto &chunk : materialized.Collection().Chunks()) {
+	if (!stream) {
+		for (auto &chunk : result->Collection().Chunks()) {
 			conversion.Append(chunk);
 		}
-		InsertCategory(materialized, categories);
-		materialized.Collection().Reset();
+		InsertCategory(*result, categories);
+		result->Collection().Reset();
 	} else {
-		D_ASSERT(result->GetResultType() == QueryResultType::STREAM_RESULT);
-		if (!stream) {
-			vectors_per_chunk = NumericLimits<idx_t>::Maximum();
-		}
-		auto &stream_result = result->Cast<StreamQueryResult>();
 		for (idx_t count_vec = 0; count_vec < vectors_per_chunk; count_vec++) {
-			if (!stream_result.IsOpen()) {
-				break;
-			}
 			unique_ptr<DataChunk> chunk;
 			{
 				D_ASSERT(duckdb::PyUtil::GilCheck());
 				nb::gil_scoped_release release;
-				chunk = FetchNextRaw(stream_result);
+				chunk = FetchNextRaw(*result);
 			}
 			if (!chunk || chunk->size() == 0) {
-				//! finished
 				break;
 			}
 			conversion.Append(*chunk);
-			InsertCategory(stream_result, categories);
+			InsertCategory(*result, categories);
 		}
 	}
 
@@ -426,10 +377,8 @@ nb::dict DuckDBPyResult::FetchTF() {
 	return result_dict;
 }
 
-// `SELECT * FROM <column data>` over `collection`, executed as a SelectStatement rather
-// than via PendingQuery(relation) - the latter's RelationStatement stringifies the whole
-// collection (O(rows)). The ColumnDataRef owns the collection, so it outlives the result
-// (needed by the lazy stream path).
+// A SelectStatement over a ColumnDataRef rather than a relation: a RelationStatement would
+// stringify the whole collection when the query is submitted.
 static unique_ptr<SelectStatement> MakeColumnDataScanStatement(unique_ptr<ColumnDataCollection> collection,
                                                                const vector<Identifier> &names) {
 	// The binder rejects duplicate column names; callers restore the originals afterwards.
@@ -445,8 +394,6 @@ static unique_ptr<SelectStatement> MakeColumnDataScanStatement(unique_ptr<Column
 	return select;
 }
 
-// Re-feed a materialized result through a PhysicalArrowCollector on the user's own context
-// (parallel conversion, correct Arrow settings) -> ArrowQueryResult.
 void DuckDBPyResult::PromoteMaterializedToArrow(idx_t batch_size) {
 	D_ASSERT(result->GetResultType() == QueryResultType::MATERIALIZED_RESULT);
 	auto client_context = result->client_properties.client_context;
@@ -454,9 +401,8 @@ void DuckDBPyResult::PromoteMaterializedToArrow(idx_t batch_size) {
 		throw InternalException("Cannot promote result to Arrow: the originating client context is gone");
 	}
 	auto context = client_context->shared_from_this();
-	auto &materialized = result->Cast<MaterializedQueryResult>();
 	auto names = ResultNames();
-	auto select = MakeColumnDataScanStatement(materialized.TakeCollection(), names);
+	auto select = MakeColumnDataScanStatement(result->TakeCollection(), names);
 
 	auto &config = ClientConfig::GetConfig(*context);
 	ScopedConfigSetting scoped_setting(
@@ -472,11 +418,8 @@ void DuckDBPyResult::PromoteMaterializedToArrow(idx_t batch_size) {
 	{
 		D_ASSERT(duckdb::PyUtil::GilCheck());
 		nb::gil_scoped_release release;
-		auto pending_query = context->PendingQuery(std::move(select), QueryParameters(false));
-		new_result = DuckDBPyConnection::CompletePendingQuery(*pending_query);
-	}
-	if (new_result->HasError()) {
-		new_result->ThrowError();
+		new_result = context->Submit(std::move(select), QueryParameters());
+		DuckDBPyConnection::CompleteQuery(*new_result);
 	}
 	names_override = std::move(names); // restore names de-duplicated by re-binding
 	result = std::move(new_result);
@@ -531,48 +474,9 @@ duckdb::pyarrow::Table DuckDBPyResult::FetchArrowTable(const idx_t rows_per_batc
 
 	return RunWithArrowSchema<duckdb::pyarrow::Table>(
 	    [&](const ArrowSchema &schema) -> duckdb::pyarrow::Table {
-		    if (result->GetResultType() == QueryResultType::MATERIALIZED_RESULT ||
-		        result->GetResultType() == QueryResultType::ARROW_RESULT) {
-			    return MaterializedResultToArrowTable(schema, rows_per_batch);
-		    }
-		    if (result->GetResultType() != QueryResultType::STREAM_RESULT) {
-			    throw InternalException("FetchArrowTable called with unsupported query result: %d",
-			                            result->GetResultType());
-		    }
-		    auto pyarrow_schema = pyarrow::ToPyArrowSchema(schema);
-		    nb::list batches;
-		    QueryResultChunkScanState scan_state(*result);
-		    while (true) {
-			    ArrowArray data;
-			    idx_t count;
-			    {
-				    D_ASSERT(duckdb::PyUtil::GilCheck());
-				    nb::gil_scoped_release release;
-				    count = ArrowUtil::FetchChunk(scan_state, result->client_properties, rows_per_batch, &data,
-				                                  ArrowTypeExtensionData::GetExtensionTypes(
-				                                      *result->client_properties.client_context, result->GetTypes()));
-			    }
-			    if (count == 0) {
-				    break;
-			    }
-			    TransformDuckToArrowChunk(pyarrow_schema, data, batches);
-		    }
-		    return pyarrow::ToArrowTable(std::move(batches), pyarrow_schema);
+		    return MaterializedResultToArrowTable(schema, rows_per_batch);
 	    },
 	    to_polars);
-}
-
-ArrowArrayStream DuckDBPyResult::FetchArrowArrayStream(idx_t rows_per_batch) {
-	if (!result) {
-		throw InvalidInputException("There is no query result");
-	}
-	if (result->GetResultType() != QueryResultType::STREAM_RESULT) {
-		throw InternalException("FetchArrowArrayStream called with unsupported query result: %d",
-		                        result->GetResultType());
-	}
-	// The wrapper is owned by the ArrowArrayStream's private_data (released with the stream).
-	const auto result_stream = new ResultArrowArrayStreamWrapper(std::move(result), rows_per_batch);
-	return result_stream->stream;
 }
 
 duckdb::pyarrow::RecordBatchReader DuckDBPyResult::FetchRecordBatchReader(idx_t rows_per_batch) {
@@ -580,39 +484,16 @@ duckdb::pyarrow::RecordBatchReader DuckDBPyResult::FetchRecordBatchReader(idx_t 
 		throw InvalidInputException("There is no query result");
 	}
 
-	if (result->GetResultType() == QueryResultType::MATERIALIZED_RESULT ||
-	    result->GetResultType() == QueryResultType::ARROW_RESULT) {
-		constexpr bool dedup_column_names = false;
-		return RunWithArrowSchema<duckdb::pyarrow::RecordBatchReader>(
-		    [&](const ArrowSchema &schema) -> duckdb::pyarrow::RecordBatchReader {
-			    const auto table = MaterializedResultToArrowTable(schema, rows_per_batch);
-			    return nb::cast<duckdb::pyarrow::RecordBatchReader>(
-			        table.attr("to_reader")(nb::arg("max_chunksize") = rows_per_batch));
-		    },
-		    dedup_column_names);
-	}
-	if (result->GetResultType() != QueryResultType::STREAM_RESULT) {
-		throw InternalException("FetchRecordBatchReader called with unsupported query result: %d",
-		                        result->GetResultType());
-	}
-	nb::gil_scoped_acquire acquire;
-	auto pyarrow_lib_module = nb::module_::import_("pyarrow").attr("lib");
-	auto record_batch_reader_func = pyarrow_lib_module.attr("RecordBatchReader").attr("_import_from_c");
-	auto stream = FetchArrowArrayStream(rows_per_batch);
-	nb::object record_batch_reader = record_batch_reader_func((uint64_t)&stream); // NOLINT
-	return nb::cast<duckdb::pyarrow::RecordBatchReader>(record_batch_reader);
-}
-
-static void ArrowArrayStreamPyCapsuleDestructor(void *data) noexcept {
-	// nanobind capsule cleanup receives the raw pointer (via PyCapsule_GetPointer using the capsule's name)
-	if (!data) {
-		return;
-	}
-	auto stream = reinterpret_cast<ArrowArrayStream *>(data);
-	if (stream->release) {
-		stream->release(stream);
-	}
-	delete stream;
+	constexpr bool dedup_column_names = false;
+	auto reader = RunWithArrowSchema<duckdb::pyarrow::RecordBatchReader>(
+	    [&](const ArrowSchema &schema) -> duckdb::pyarrow::RecordBatchReader {
+		    const auto table = MaterializedResultToArrowTable(schema, rows_per_batch);
+		    return nb::cast<duckdb::pyarrow::RecordBatchReader>(
+		        table.attr("to_reader")(nb::arg("max_chunksize") = rows_per_batch));
+	    },
+	    dedup_column_names);
+	result.reset();
+	return reader;
 }
 
 nb::object DuckDBPyResult::FetchArrowCapsule(const idx_t rows_per_batch) {
@@ -621,22 +502,14 @@ nb::object DuckDBPyResult::FetchArrowCapsule(const idx_t rows_per_batch) {
 	}
 
 	constexpr bool dedup_column_names = false;
-	if (result->GetResultType() == QueryResultType::MATERIALIZED_RESULT ||
-	    result->GetResultType() == QueryResultType::ARROW_RESULT) {
-		return RunWithArrowSchema<nb::object>(
-		    [&](const ArrowSchema &schema) -> nb::object {
-			    const auto table = MaterializedResultToArrowTable(schema, rows_per_batch);
-			    return table.attr("__arrow_c_stream__")();
-		    },
-		    dedup_column_names);
-	}
-	if (result->GetResultType() != QueryResultType::STREAM_RESULT) {
-		throw InternalException("FetchArrowCapsule called with unsupported query result: %d", result->GetResultType());
-	}
-	auto inner_stream = FetchArrowArrayStream(rows_per_batch);
-	auto stream = new ArrowArrayStream();
-	*stream = inner_stream;
-	return nb::capsule(stream, "arrow_array_stream", ArrowArrayStreamPyCapsuleDestructor);
+	auto capsule = RunWithArrowSchema<nb::object>(
+	    [&](const ArrowSchema &schema) -> nb::object {
+		    const auto table = MaterializedResultToArrowTable(schema, rows_per_batch);
+		    return table.attr("__arrow_c_stream__")();
+	    },
+	    dedup_column_names);
+	result.reset();
+	return capsule;
 }
 
 nb::list DuckDBPyResult::GetDescription(const vector<string> &names, const vector<LogicalType> &types) {

@@ -12,7 +12,6 @@
 #include "duckdb/parser/statement/pragma_statement.hpp"
 #include "duckdb/common/box_renderer.hpp"
 #include "duckdb/main/query_result.hpp"
-#include "duckdb/main/materialized_query_result.hpp"
 #include "duckdb/parser/statement/explain_statement.hpp"
 #include "duckdb/catalog/default/default_types.hpp"
 #include "duckdb/main/relation/value_relation.hpp"
@@ -814,8 +813,11 @@ static unique_ptr<QueryResult> PyExecuteRelation(const shared_ptr<Relation> &rel
 	auto context = rel->context->GetContext();
 	D_ASSERT(duckdb::PyUtil::GilCheck());
 	nb::gil_scoped_release release;
-	auto pending_query = context->PendingQuery(rel, stream_result);
-	return DuckDBPyConnection::CompletePendingQuery(*pending_query);
+	QueryParameters parameters;
+	parameters.result_eagerness = ResultEagerness::FORCED;
+	auto result = context->Submit(rel, parameters);
+	DuckDBPyConnection::CompleteQuery(*result);
+	return result;
 }
 
 unique_ptr<QueryResult> DuckDBPyRelation::ExecuteInternal(bool stream_result) {
@@ -951,7 +953,6 @@ nb::dict DuckDBPyRelation::FetchNumpyInternal(bool stream, idx_t vectors_per_chu
 	return res;
 }
 
-//! Should this also keep track of when the result is empty and set result->result_closed accordingly?
 PandasDataFrame DuckDBPyRelation::FetchDFChunk(idx_t vectors_per_chunk, bool date_as_object) {
 	if (!result) {
 		if (!rel) {
@@ -994,8 +995,6 @@ nb::object DuckDBPyRelation::ToArrowCapsule(const nb::object &requested_schema) 
 		if (!rel) {
 			return nb::none();
 		}
-		// Fresh relation: stream lazily on the user's context (capsule survives `del conn`,
-		// but shares the single active-stream slot - consume before reusing the connection).
 		ExecuteOrThrow(true);
 	}
 	AssertResultOpen();
@@ -1042,7 +1041,6 @@ duckdb::pyarrow::RecordBatchReader DuckDBPyRelation::ToRecordBatch(idx_t batch_s
 		if (!rel) {
 			return nb::none();
 		}
-		// Fresh relation: stream lazily on the user's own context (survives `del conn`).
 		ExecuteOrThrow(true);
 	}
 	AssertResultOpen();
@@ -1562,7 +1560,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Query(const string &view_nam
 	{
 		D_ASSERT(duckdb::PyUtil::GilCheck());
 		nb::gil_scoped_release release;
-		auto query_result = rel->context->GetContext()->Query(std::move(parser.statements[0]), false);
+		auto query_result = rel->context->GetContext()->Query(std::move(parser.statements[0]), QueryParameters());
 		// Execute it anyways, for creation/altering statements
 		// We only care that it succeeds, we can't store the result
 		D_ASSERT(query_result);
@@ -1748,9 +1746,10 @@ string DuckDBPyRelation::Explain(ExplainType type, const string &format) {
 	const bool auto_format = format.empty();
 	auto explain_format = auto_format ? GetExplainFormat(type) : ProfilerPrintFormat(format);
 	auto res = rel->Explain(type, explain_format);
-	D_ASSERT(res->GetResultType() == duckdb::QueryResultType::MATERIALIZED_RESULT);
-	auto &materialized = res->Cast<MaterializedQueryResult>();
-	auto &coll = materialized.Collection();
+	if (res->HasError()) {
+		res->ThrowError();
+	}
+	auto &coll = res->Collection();
 	// Only the implicit Jupyter path renders HTML inline; an explicitly requested format always returns a string.
 	const bool jupyter_html =
 	    auto_format && explain_format == ProfilerPrintFormat::HTML() && DuckDBPyConnection::IsJupyter();
@@ -1770,7 +1769,7 @@ string DuckDBPyRelation::Explain(ExplainType type, const string &format) {
 		return result_;
 	}
 
-	auto chunk = materialized.Fetch();
+	auto chunk = res->Fetch();
 	for (idx_t i = 0; i < chunk->size(); i++) {
 		auto plan = chunk->GetValue(1, i);
 		auto plan_string = plan.GetValue<string>();

@@ -367,7 +367,9 @@ public:
 	static bool IsAcceptedArrowObject(const nb::object &object);
 	static NumpyObjectType IsAcceptedNumpyObject(const nb::object &object);
 
-	static unique_ptr<QueryResult> CompletePendingQuery(PendingQueryResult &pending_query);
+	//! Runs a submitted query to a retained, ended result on the calling thread, checking for Python
+	//! signals between tasks. Throws the query's error, and leaves the handle holding its collection.
+	static void CompleteQuery(QueryResult &result);
 
 private:
 	std::unique_ptr<DuckDBPyRelation> CreateRelation(shared_ptr<Relation> rel);
