@@ -54,6 +54,13 @@ class TestClassification:
         assert kind_of(reader_over(numbers)) == STREAM
         assert kind_of(numbers.__arrow_c_stream__()) == STREAM
 
+    def test_a_class_named_like_a_capsule_is_not_one(self, numbers: pa.Table) -> None:
+        class PyCapsule:
+            def __arrow_c_stream__(self, requested_schema: object = None) -> object:
+                return numbers.__arrow_c_stream__()
+
+        assert kind_of(PyCapsule()) == OBJECT
+
     def test_anything_else_is_refused(self) -> None:
         with pytest.raises(TypeError, match=r"__arrow_c_stream__.*list does neither"):
             kind_of([1, 2, 3])
@@ -292,6 +299,12 @@ class TestStreams:
         assert rendered.count('FROM "r"') + rendered.count('FROM "R"') == 1
         assert plan.on(con).rows() == [(i,) for i in range(10)]
 
+    def test_a_macro_body_shares_one_cte_per_stream(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
+        con.register("r", reader_over(numbers))
+        body = table("r").select(col("n")).union(table("R").select(col("n")))
+        con.create_macro("twice", [], body)
+        assert rows(con, "SELECT count(*) FROM twice()") == [(20,)]
+
     def test_two_steps_naming_a_table_stay_separate(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
         con.register("t", numbers)
         plan = table("t").join(table("t"), on="n", suffix="_r").select(col("n"))
@@ -488,6 +501,15 @@ class TestNamesAndShadowing:
         con.run("DROP VIEW numbers")
         assert rows(con, "SELECT count(*) FROM numbers") == [(10,)]
 
+    def test_a_non_ascii_name_folds_only_its_ascii_letters(
+        self, con: duckdb.frame.Connection, numbers: pa.Table
+    ) -> None:
+        con.register("Ärger", numbers)
+        assert rows(con, 'SELECT count(*) FROM "Ärger"') == [(10,)]
+        assert rows(con, "SELECT count(*) FROM Ärger") == [(10,)]
+        with pytest.raises(exceptions.CatalogError):
+            rows(con, 'SELECT count(*) FROM "ärger"')
+
     def test_a_name_with_quotes_dots_and_spaces(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
         name = 'test with .s and "s and  s'
         con.register(name, numbers)
@@ -667,9 +689,10 @@ class TestTemporalAndBinaryTypes:
         con.register(
             "far", pa.table({"s": pa.array([2**62], pa.timestamp("s")), "ms": pa.array([2**62], pa.timestamp("ms"))})
         )
-        with pytest.raises(exceptions.ConversionError, match="Could not convert Timestamp to higher precision"):
+        message = r"timestamp 4611686018427387904 seconds since the epoch is outside the range Python's datetime"
+        with pytest.raises(exceptions.ConversionError, match=message):
             rows(con, "SELECT s FROM far")
-        with pytest.raises(exceptions.ConversionError, match="Could not convert Timestamp to higher precision"):
+        with pytest.raises(exceptions.ConversionError, match="4611686018427387904 milliseconds since the epoch"):
             rows(con, "SELECT ms FROM far")
 
     def test_durations_and_intervals(self, con: duckdb.frame.Connection) -> None:

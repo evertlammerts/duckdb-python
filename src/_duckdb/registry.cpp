@@ -8,8 +8,6 @@
 
 #include "registry.hpp"
 
-#include <algorithm>
-#include <cctype>
 #include <utility>
 
 // The Arrow C data and stream interface structs, under their standard guards.
@@ -24,10 +22,15 @@ const char *const kSchemaCapsule = "arrow_schema";
 /// The engine's standard vector size, which is what the output chunk handed to the exec callback is allocated for.
 constexpr cxx::idx_t kBatchRows = 2048;
 
+/// ASCII letters only, as the engine and the Python side fold identifiers; a locale-aware fold would rewrite the
+/// bytes of a non-ASCII name.
 std::string Fold(const std::string &name) {
 	std::string folded = name;
-	std::transform(folded.begin(), folded.end(), folded.begin(),
-	               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	for (auto &c : folded) {
+		if (c >= 'A' && c <= 'Z') {
+			c = static_cast<char>(c - 'A' + 'a');
+		}
+	}
 	return folded;
 }
 
@@ -106,8 +109,20 @@ struct ScanUserData {
 	std::shared_ptr<Registry> registry;
 };
 
+/// The entry a query bound over and its schema as read then, which the scan's importer is built from.
 struct ScanBind {
+	ScanBind(std::shared_ptr<Registered> entry, ArrowSchema schema) : entry(std::move(entry)), schema(schema) {
+	}
+	ScanBind(const ScanBind &) = delete;
+	ScanBind &operator=(const ScanBind &) = delete;
+	~ScanBind() {
+		if (schema.release != nullptr) {
+			schema.release(&schema);
+		}
+	}
+
 	std::shared_ptr<Registered> entry;
+	ArrowSchema schema;
 };
 
 /// One scan's stream and the importer turning its arrays into chunks.
@@ -164,36 +179,27 @@ void PyScanBind(cxx::TableFunction::BindInput &input) {
 		schema.release(&schema);
 		throw;
 	}
-	schema.release(&schema);
-	input.SetBindData<ScanBind>(ScanBind {std::move(entry)});
+	// The bind data owns the schema from here on.
+	input.SetBindData<ScanBind>(std::move(entry), schema);
 }
 
-/// Exports the stream and builds the importer over it, releasing the schema whatever happens.
-void OpenStream(Registered &entry, cxx::TableFunction::InitGlobalInput &input) {
+/// Exports the stream and builds the importer over the schema read at bind; an array of another shape is
+/// refused by the importer when it is appended.
+void OpenStream(const ScanBind &bound, cxx::TableFunction::InitGlobalInput &input) {
+	auto &entry = *bound.entry;
 	nb::gil_scoped_acquire gil;
 	nb::object capsule = ExportStream(entry);
 	auto &stream = StreamOf(capsule, entry.name);
-	ArrowSchema schema {};
-	if (stream.get_schema(&stream, &schema) != 0) {
-		throw cxx::InvalidInputException("reading the schema of the stream registered as '" + entry.name +
-		                                 "' failed: " + StreamError(stream));
-	}
-	try {
-		cxx::ArrowImporter importer(input.GetContext(), schema, kBatchRows);
-		schema.release(&schema);
-		input.SetGlobalState<ScanState>(std::move(capsule), stream, std::move(importer));
-	} catch (...) {
-		if (schema.release != nullptr) {
-			schema.release(&schema);
-		}
-		throw;
-	}
+	// The importer reads the schema without consuming it, so the bind data keeps ownership.
+	cxx::ArrowImporter importer(input.GetContext(), const_cast<ArrowSchema &>(bound.schema), kBatchRows);
+	input.SetGlobalState<ScanState>(std::move(capsule), stream, std::move(importer));
 }
 
 void PyScanInitGlobal(cxx::TableFunction::InitGlobalInput &input) {
-	auto &entry = *input.GetBindData<ScanBind>().entry;
+	const auto &bound = input.GetBindData<ScanBind>();
+	auto &entry = *bound.entry;
 	if (!entry.one_shot) {
-		OpenStream(entry, input);
+		OpenStream(bound, input);
 		return;
 	}
 	// Claimed before the export so two scans cannot both take the one stream, and given back when opening fails
@@ -206,7 +212,7 @@ void PyScanInitGlobal(cxx::TableFunction::InitGlobalInput &input) {
 		entry.read = true;
 	}
 	try {
-		OpenStream(entry, input);
+		OpenStream(bound, input);
 	} catch (...) {
 		std::lock_guard<std::mutex> guard(entry.read_lock);
 		entry.read = false;

@@ -141,7 +141,7 @@ class Connection:
             temporary: Make the macro last only for this database session.
         """
         from .expr import Expr, identifier, name_parts, quote, refusing_parameters, render_literal, suspended_sinks
-        from .plan import Frame, NeedsConnection
+        from .plan import Frame
 
         signature = ", ".join(
             quote(p) if isinstance(p, str) else f"{quote(p[0])} := {render_literal(p[1])}" for p in parameters
@@ -151,11 +151,9 @@ class Connection:
             if isinstance(body, Expr):
                 definition = body.fragment()
             elif isinstance(body, Frame):
-                # Written out without asking DuckDB first, since a parameter only exists once the macro does.
-                try:
-                    definition = "TABLE " + body.render()
-                except NeedsConnection:
-                    definition = "TABLE " + body._definition(self)
+                # Asks DuckDB only for the steps that need their input's columns, since a parameter only exists
+                # once the macro does.
+                definition = "TABLE " + body._definition(self)
             else:
                 message = f"a macro body is an expression or a plan, not {type(body).__name__}"
                 raise TypeError(message)
