@@ -25,7 +25,8 @@ build = [
     "scikit-build-core>=0.10",
     "nanobind>=2.13",
 ]
-# numpy is what the egress tests need and pyarrow what the registry tests need; the package itself depends on nothing.
+# numpy is what the egress tests need; pyarrow, polars and pandas are what the registry tests need. The package itself
+# depends on nothing: it imports pyarrow only when a pandas DataFrame is registered, and polars and pandas never.
 dev = [
     "pytest>=8",
     "pytest-cov>=5",
@@ -33,6 +34,8 @@ dev = [
     "mypy>=1.11",
     "numpy",
     "pyarrow",
+    "polars",
+    "pandas",
 ]
 # The benchmark harness; CI installs the frozen pins in benchmarks/requirements-bench.txt, so keep both in step.
 bench = [
@@ -101,6 +104,6 @@ pretty = true
 python_version = "3.12"
 
 [[tool.mypy.overrides]]
-# pyarrow ships no stubs; only the registry tests import it.
-module = "pyarrow.*"
+# pyarrow and pandas ship no stubs; the tests import them, and the source adapters reach pyarrow through a lazy import.
+module = ["pyarrow.*", "pandas.*"]
 ignore_missing_imports = true

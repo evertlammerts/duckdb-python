@@ -18,7 +18,7 @@ import pytest
 
 import duckdb
 from duckdb import dbapi, exceptions
-from duckdb._sources import OBJECT, STREAM, kind_of
+from duckdb._sources import OBJECT, STREAM, adapt
 from duckdb.frame import col, sql, table
 
 if TYPE_CHECKING:
@@ -47,23 +47,26 @@ def reader_over(t: pa.Table) -> pa.RecordBatchReader:
 
 class TestClassification:
     def test_tables_and_batches_are_read_repeatedly(self, numbers: pa.Table) -> None:
-        assert kind_of(numbers) == OBJECT
-        assert kind_of(numbers.to_batches()[0]) == OBJECT
+        assert adapt(numbers) == (numbers, OBJECT)
+        batch = numbers.to_batches()[0]
+        assert adapt(batch) == (batch, OBJECT)
 
     def test_readers_and_capsules_are_streams(self, numbers: pa.Table) -> None:
-        assert kind_of(reader_over(numbers)) == STREAM
-        assert kind_of(numbers.__arrow_c_stream__()) == STREAM
+        reader = reader_over(numbers)
+        assert adapt(reader) == (reader, STREAM)
+        capsule = numbers.__arrow_c_stream__()
+        assert adapt(capsule) == (capsule, STREAM)
 
     def test_a_class_named_like_a_capsule_is_not_one(self, numbers: pa.Table) -> None:
         class PyCapsule:
             def __arrow_c_stream__(self, requested_schema: object = None) -> object:
                 return numbers.__arrow_c_stream__()
 
-        assert kind_of(PyCapsule()) == OBJECT
+        assert adapt(PyCapsule())[1] == OBJECT
 
     def test_anything_else_is_refused(self) -> None:
-        with pytest.raises(TypeError, match=r"__arrow_c_stream__.*list does neither"):
-            kind_of([1, 2, 3])
+        with pytest.raises(TypeError, match=r"__arrow_c_stream__.*list is none of these"):
+            adapt([1, 2, 3])
 
 
 class TestResolution:

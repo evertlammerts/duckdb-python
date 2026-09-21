@@ -94,18 +94,8 @@ void PyScalarExec(cxx::ScalarFunction::ExecInput &input) {
 		throw cxx::InvalidInputException(body.empty() ? error.what() : body);
 	} catch (nb::python_error &error) {
 		// Rendered while the GIL is still held, and worded as the previous duckdb package did; tests match it.
-		std::string summary;
-		try {
-			summary = nb::cast<std::string>(nb::handle(error.type()).attr("__name__"));
-			const auto text = nb::cast<std::string>(nb::str(nb::handle(error.value())));
-			if (!text.empty()) {
-				summary += ": " + text;
-			}
-		} catch (...) {
-			summary.clear();
-		}
 		throw cxx::InvalidInputException("Python exception occurred while executing the UDF '" + data.name +
-		                                 "': " + summary + "\n" + error.what());
+		                                 "': " + DescribePythonError(error));
 	}
 }
 

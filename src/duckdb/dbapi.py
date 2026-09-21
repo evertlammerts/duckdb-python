@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from . import _duckdb
-from ._sources import STREAM, kind_of
+from ._sources import STREAM, adapt
 from .exceptions import (
     DatabaseError,
     DataError,
@@ -364,14 +364,17 @@ class Connection:
     def register(self, name: str, obj: object) -> None:
         """Make a Python object readable as the table `name`, on every connection to this database.
 
-        Anything that exports an Arrow stream is accepted: a pyarrow Table or RecordBatch, a RecordBatchReader, or
-        an Arrow stream capsule. A reader or a capsule is a stream, read once; register it again to read it again.
-        Registering a name again replaces the earlier object, and a real table of that name takes precedence.
+        Accepted: anything exporting an Arrow stream (a pyarrow Table or RecordBatch, a polars DataFrame), a pyarrow
+        Dataset or Scanner, a polars LazyFrame, a pandas DataFrame (its index left out), a RecordBatchReader, or an
+        Arrow stream capsule. A reader or a capsule is a stream, read once; register it again to read it again.
+        Everything else is read as often as it is queried, a LazyFrame by collecting it per query. Registering a name
+        again replaces the earlier object, and a real table of that name takes precedence.
         """
         if not isinstance(name, str):
             message = f"a registered name is a string, not {name!r}"  # type: ignore[unreachable]
             raise TypeError(message)
-        self._engine().register_object(name, obj, kind_of(obj) == STREAM)
+        source, kind = adapt(obj)
+        self._engine().register_object(name, source, kind == STREAM)
 
     def unregister(self, name: str) -> None:
         """Forget the object registered as `name`."""

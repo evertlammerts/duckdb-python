@@ -152,6 +152,20 @@ bool KeysHashable(const LogicalType &type) {
 
 } // namespace
 
+std::string DescribePythonError(nb::python_error &error) {
+	std::string summary;
+	try {
+		summary = nb::cast<std::string>(nb::handle(error.type()).attr("__name__"));
+		const auto text = nb::cast<std::string>(nb::str(nb::handle(error.value())));
+		if (!text.empty()) {
+			summary += ": " + text;
+		}
+	} catch (...) {
+		summary.clear();
+	}
+	return summary + "\n" + error.what();
+}
+
 nb::object ValueToPython(const Value &value, ConversionContext &ctx) {
 	if (value.IsNull()) {
 		return nb::none();

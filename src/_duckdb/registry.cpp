@@ -167,7 +167,12 @@ void PyScanBind(cxx::TableFunction::BindInput &input) {
 	ArrowSchema schema {};
 	{
 		nb::gil_scoped_acquire gil;
-		SchemaOf(*entry, schema);
+		try {
+			SchemaOf(*entry, schema);
+		} catch (nb::python_error &error) {
+			throw cxx::InvalidInputException("reading the schema of the object registered as '" + entry->name +
+			                                 "' failed: " + DescribePythonError(error));
+		}
 	}
 	try {
 		cxx::ArrowImporter importer(input.GetContext(), schema, kBatchRows);
@@ -188,7 +193,13 @@ void PyScanBind(cxx::TableFunction::BindInput &input) {
 void OpenStream(const ScanBind &bound, cxx::TableFunction::InitGlobalInput &input) {
 	auto &entry = *bound.entry;
 	nb::gil_scoped_acquire gil;
-	nb::object capsule = ExportStream(entry);
+	nb::object capsule;
+	try {
+		capsule = ExportStream(entry);
+	} catch (nb::python_error &error) {
+		throw cxx::InvalidInputException("exporting a stream from the object registered as '" + entry.name +
+		                                 "' failed: " + DescribePythonError(error));
+	}
 	auto &stream = StreamOf(capsule, entry.name);
 	// The importer reads the schema without consuming it, so the bind data keeps ownership.
 	cxx::ArrowImporter importer(input.GetContext(), const_cast<ArrowSchema &>(bound.schema), kBatchRows);

@@ -50,6 +50,9 @@ struct ConversionContext {
 /// One DuckDB value as a Python object. NULL becomes None.
 nb::object ValueToPython(const duckdb::cxx::Value &value, ConversionContext &ctx);
 
+/// "ExceptionType: message" followed by the traceback; rendered while the GIL is held.
+std::string DescribePythonError(nb::python_error &error);
+
 /// Rows [start, end) of a batch appended to `out` as tuples; `types` comes from the schema, not the data.
 void AppendChunkRows(const duckdb::cxx::DataChunk &chunk, const std::vector<duckdb::cxx::LogicalType> &types,
                      duckdb::cxx::idx_t start, duckdb::cxx::idx_t end, ConversionContext &ctx, nb::list &out);
