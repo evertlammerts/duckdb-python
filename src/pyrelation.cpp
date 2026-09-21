@@ -15,6 +15,8 @@
 #include "duckdb/parser/statement/explain_statement.hpp"
 #include "duckdb/catalog/default/default_types.hpp"
 #include "duckdb/main/relation/value_relation.hpp"
+#include "duckdb/main/relation/table_function_relation.hpp"
+#include "duckdb_python/map.hpp"
 #include "duckdb_python/expression/pyexpression.hpp"
 #include "duckdb/common/arrow/physical_arrow_collector.hpp"
 #include "duckdb_python/arrow/arrow_export_utils.hpp"
@@ -1639,15 +1641,10 @@ void DuckDBPyRelation::Create(const string &table) {
 
 std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Map(nb::callable fun, Optional<nb::object> schema) {
 	AssertRelation();
-	vector<Value> params;
-	params.emplace_back(Value::POINTER(CastPointerToValue(fun.ptr())));
-	params.emplace_back(Value::POINTER(CastPointerToValue(schema.ptr())));
-	auto relation = DeriveRelation(rel->TableFunction("python_map_function", params));
-	auto rel_dependency = make_uniq<ExternalDependency>();
-	rel_dependency->AddDependency("map", PythonDependencyItem::Create(std::move(fun)));
-	rel_dependency->AddDependency("schema", PythonDependencyItem::Create(std::move(schema)));
-	relation->rel->AddExternalDependency(std::move(rel_dependency));
-	return relation;
+	auto info = make_shared_ptr<MapFunctionInfo>(std::move(fun), std::move(schema));
+	return DeriveRelation(make_shared_ptr<TableFunctionRelation>(rel->context->GetContext(), "python_map_function",
+	                                                             vector<Value>(), named_parameter_map_t(), rel, true,
+	                                                             std::move(info)));
 }
 
 string DuckDBPyRelation::ToStringInternal(const BoxRendererConfig &config, bool invalidate_cache) {

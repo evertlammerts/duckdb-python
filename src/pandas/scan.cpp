@@ -27,8 +27,14 @@ struct PandasScanFunctionData : public TableFunctionData {
 
 	~PandasScanFunctionData() override {
 		try {
-			nb::gil_scoped_acquire acquire;
-			pandas_bind_data.clear();
+			if (nb::detail::cleanup_guard guard {}) {
+				pandas_bind_data.clear();
+			} else {
+				// Leaked on purpose: the Python references can no longer be dropped, and a static owner
+				// keeps a leak checker from reporting them
+				static auto *parked = new vector<vector<PandasColumnBindData>>();
+				parked->push_back(std::move(pandas_bind_data));
+			}
 		} catch (...) { // NOLINT
 		}
 	}
