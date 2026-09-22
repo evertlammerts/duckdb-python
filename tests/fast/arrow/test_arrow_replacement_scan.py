@@ -1,3 +1,5 @@
+import gc
+import weakref
 from pathlib import Path
 
 import pytest
@@ -70,3 +72,102 @@ class TestArrowReplacementScan:
 
         con = duckdb.connect()
         assert con.execute("select count(*) from userdata_parquet_dataset").fetchone() == (1000,)
+
+
+def _make_table():
+    return pa.table({"a": [1, 2, 3, 4, 5]})
+
+
+def _make_dataset():
+    return ds.dataset(_make_table())
+
+
+def _make_scanner():
+    return ds.dataset(_make_table()).scanner()
+
+
+def _make_record_batch_reader():
+    table = _make_table()
+    return pa.RecordBatchReader.from_batches(table.schema, table.to_batches())
+
+
+def _make_polars_frame():
+    pl = pytest.importorskip("polars")
+    return pl.DataFrame({"a": [1, 2, 3, 4, 5]})
+
+
+def _make_polars_lazy_frame():
+    pl = pytest.importorskip("polars")
+    return pl.DataFrame({"a": [1, 2, 3, 4, 5]}).lazy()
+
+
+FACTORIES = [
+    ("table", _make_table),
+    ("dataset", _make_dataset),
+    ("scanner", _make_scanner),
+    ("record_batch_reader", _make_record_batch_reader),
+    ("polars_frame", _make_polars_frame),
+    ("polars_lazy_frame", _make_polars_lazy_frame),
+]
+
+# An eager polars DataFrame is materialized through .to_arrow() before the scan is built, so the
+# scan retains that conversion and not the frame itself.
+RETAINED_FACTORIES = [entry for entry in FACTORIES if entry[0] != "polars_frame"]
+
+
+class TestArrowScanFactoryOwnership:
+    """The scan factory owns the Arrow object for as long as the engine holds the scan."""
+
+    @pytest.mark.parametrize(("label", "make"), FACTORIES, ids=[label for label, _ in FACTORIES])
+    def test_scanned_object_survives_its_python_variable(self, label, make):
+        con = duckdb.connect()
+        scanned = make()
+        rel = con.sql("select sum(a) as s from scanned")
+
+        del scanned
+        gc.collect()
+
+        assert rel.fetchall() == [(15,)]
+
+    @pytest.mark.parametrize(("label", "make"), RETAINED_FACTORIES, ids=[label for label, _ in RETAINED_FACTORIES])
+    def test_scanned_object_is_released_with_the_relation(self, label, make):
+        con = duckdb.connect()
+
+        # The scan reads the caller's frame locals, and before Python 3.13 that read caches a dict on
+        # the frame which keeps the object alive until the frame returns, so the scan gets its own frame.
+        def scan(con):
+            scanned = make()
+            rel = con.sql("select sum(a) as s from scanned")
+            return weakref.ref(scanned), rel
+
+        ref, rel = scan(con)
+        gc.collect()
+        assert ref() is not None
+
+        assert rel.fetchall() == [(15,)]
+
+        del rel
+        con.close()
+        del con
+        gc.collect()
+        assert ref() is None
+
+    @pytest.mark.parametrize(("label", "make"), FACTORIES, ids=[label for label, _ in FACTORIES])
+    def test_scan_through_execute_outlives_the_bind(self, label, make):
+        # Without a relation there is no dependency to keep the scan alive past binding: the bind
+        # data alone must hold the factory until the scan runs.
+        con = duckdb.connect()
+        scanned = make()
+        assert con.execute("select sum(a) as s from scanned").fetchall() == [(15,)]
+        del scanned
+
+    def test_repeated_scans_of_one_object(self):
+        con = duckdb.connect()
+        scanned = _make_table()
+        rel = con.sql("select sum(a) as s from scanned")
+
+        del scanned
+        gc.collect()
+
+        assert rel.fetchall() == [(15,)]
+        assert rel.fetchall() == [(15,)]

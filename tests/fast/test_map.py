@@ -1,3 +1,4 @@
+import gc
 import re
 from datetime import date, timedelta
 from typing import NoReturn
@@ -48,6 +49,23 @@ class TestMap:
         assert len(refs) >= 2, f"expected multiple chunks, got {len(refs)}"
         alive = sum(1 for r in refs if r() is not None)
         assert alive == 0, f"{alive}/{len(refs)} per-chunk input DataFrames leaked (pinned by arg tuple)"
+
+    def test_map_function_takes_no_sql_arguments(self, duckdb_cursor):
+        # The callable travels through the bind input, never through a value SQL text can forge
+        with pytest.raises(duckdb.BinderException, match="No function matches"):
+            duckdb_cursor.sql("select * from python_map_function(1, 2, 3)")
+        with pytest.raises(duckdb.BinderException, match="requires a callable bind input"):
+            duckdb_cursor.sql("select * from python_map_function((select 1))")
+
+    def test_mapped_view_outlives_the_relation(self, duckdb_cursor):
+        def double(df):
+            return df.assign(i=df["i"] * 2)
+
+        rel = duckdb_cursor.sql("select 21 as i").map(double)
+        rel.create_view("mapped")
+        del rel
+        gc.collect()
+        assert duckdb_cursor.sql("select i from mapped").fetchall() == [(42,)]
 
     def test_evil_map(self, duckdb_cursor):
         testrel = duckdb.values([1, 2])

@@ -677,6 +677,34 @@ class TestRelation:
         res = con.sql("select * from vw").fetchall()
         assert res == expected
 
+    @pytest.mark.parametrize(
+        "make_relation",
+        [
+            lambda con: con.from_df(pd.DataFrame({"a": [1, 2, 3]})),
+            lambda con: con.from_arrow(pytest.importorskip("pyarrow").table({"a": [1, 2, 3]})),
+            lambda con: con.sql("select range as a from range(3)").map(lambda df: df),
+        ],
+        ids=["pandas", "arrow", "map"],
+    )
+    def test_persistent_view_over_python_object(self, tmp_path, make_relation):
+        # A persistent view is written to the database file, and a scan over a Python object has no
+        # representation there, so the catalog change must be refused rather than stored dangling.
+        con = duckdb.connect(str(tmp_path / "db.duckdb"))
+        rel = make_relation(con)
+        with pytest.raises(duckdb.TransactionException, match="Cannot serialize a table function"):
+            rel.create_view("vw")
+        assert con.sql("select view_name from duckdb_views() where not internal").fetchall() == []
+
+        con.execute("begin")
+        rel.create_view("vw")
+        with pytest.raises(duckdb.TransactionException, match="Cannot serialize a table function"):
+            con.execute("commit")
+        assert con.sql("select view_name from duckdb_views() where not internal").fetchall() == []
+
+        # Temporary views never reach the file, so they keep working on the same database
+        assert rel.query("tmp_vw", "select count(*) from tmp_vw").fetchall() == [(3,)]
+        con.close()
+
     def test_relation_select_dtypes_quotes_identifiers_with_spaces(self, duckdb_cursor):
         df = pd.DataFrame({"na me": ["alice", "bob"], "x": [1, 2]})
         rel = duckdb_cursor.from_df(df)

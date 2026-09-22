@@ -186,7 +186,7 @@ public:
 
 	nb::dict FetchTF();
 
-	nb::dict FetchNumpyInternal(bool stream = false, idx_t vectors_per_chunk = 1);
+	nb::dict FetchNumpyInternal(bool chunked = false, idx_t vectors_per_chunk = 1);
 
 	PandasDataFrame FetchDFChunk(const idx_t vectors_per_chunk = 1, bool date_as_object = false);
 
@@ -287,7 +287,8 @@ private:
 	void AssertResultOpen() const;
 	void AssertRelation() const;
 	void ExecuteOrThrow(bool stream_result = false);
-	unique_ptr<QueryResult> ExecuteInternal(bool stream_result = false);
+	//! Runs the relation to a completed, retained result
+	unique_ptr<QueryResult> ExecuteInternal();
 
 private:
 	//! Prevents GC of the parent DuckDBPyConnection.

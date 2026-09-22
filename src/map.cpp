@@ -1,4 +1,5 @@
 #include "duckdb_python/map.hpp"
+#include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "duckdb_python/numpy/numpy_scan.hpp"
 #include "duckdb_python/pandas/pandas_bind.hpp"
 #include "duckdb_python/numpy/numpy_result_conversion.hpp"
@@ -12,16 +13,14 @@
 
 namespace duckdb {
 
-MapFunction::MapFunction()
-    : TableFunction("python_map_function", {LogicalType::TABLE, LogicalType::POINTER, LogicalType::POINTER}, nullptr,
-                    MapFunctionBind) {
+MapFunction::MapFunction() : TableFunction("python_map_function", {LogicalType::TABLE}, nullptr, MapFunctionBind) {
 	in_out_function = MapFunctionExec;
 }
 
 struct MapFunctionData : public TableFunctionData {
-	MapFunctionData() : function(nullptr) {
+	explicit MapFunctionData(shared_ptr<MapFunctionInfo> info_p) : info(std::move(info_p)) {
 	}
-	PyObject *function;
+	shared_ptr<MapFunctionInfo> info;
 	vector<LogicalType> in_types, out_types;
 	vector<Identifier> in_names, out_names;
 };
@@ -146,12 +145,17 @@ unique_ptr<FunctionData> BindExplicitSchema(unique_ptr<MapFunctionData> function
 // they better not change in the actual execution ^^
 unique_ptr<FunctionData> MapFunction::MapFunctionBind(ClientContext &context, TableFunctionBindInput &input,
                                                       vector<LogicalType> &return_types, vector<Identifier> &names) {
+	if (!input.ref.bind_info) {
+		throw BinderException("python_map_function requires a callable bind input");
+	}
+	DynamicCastCheck<MapFunctionInfo>(input.ref.bind_info.get());
+	auto info = shared_ptr_cast<TableFunctionInfo, MapFunctionInfo>(input.ref.bind_info);
 	nb::gil_scoped_acquire acquire;
 
-	auto data_uptr = make_uniq<MapFunctionData>();
+	auto data_uptr = make_uniq<MapFunctionData>(std::move(info));
 	auto &data = *data_uptr;
-	data.function = reinterpret_cast<PyObject *>(input.inputs[1].GetPointer());
-	auto explicit_schema = reinterpret_cast<PyObject *>(input.inputs[2].GetPointer());
+	auto function = data.info->function.obj.ptr();
+	auto explicit_schema = data.info->schema.obj.ptr();
 
 	data.in_names = input.input_table_names;
 	data.in_types = input.input_table_types;
@@ -160,7 +164,7 @@ unique_ptr<FunctionData> MapFunction::MapFunctionBind(ClientContext &context, Ta
 		return BindExplicitSchema(std::move(data_uptr), explicit_schema, return_types, names);
 	}
 	NumpyResultConversion conversion(data.in_types, 0, context.GetClientProperties());
-	auto df = FunctionCall(conversion, data.in_names, data.function);
+	auto df = FunctionCall(conversion, data.in_names, function);
 	vector<PandasColumnBindData> pandas_bind_data; // unused
 	Pandas::Bind(context, df, pandas_bind_data, return_types, names);
 
@@ -190,7 +194,7 @@ OperatorResultType MapFunction::MapFunctionExec(ExecutionContext &context, Table
 	NumpyResultConversion conversion(data.in_types, input.size(), context.client.GetClientProperties());
 	conversion.Append(input);
 
-	auto df = FunctionCall(conversion, data.in_names, data.function);
+	auto df = FunctionCall(conversion, data.in_names, data.info->function.obj.ptr());
 
 	vector<PandasColumnBindData> pandas_bind_data;
 	vector<LogicalType> pandas_return_types;

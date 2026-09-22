@@ -13,8 +13,16 @@
 #include "duckdb_python/pandas/pandas_bind.hpp"
 
 #include "duckdb_python/nb/casters.hpp"
+#include "duckdb_python/registered_py_object.hpp"
 
 namespace duckdb {
+
+//! Carried through the bind input so that SQL text can never name the dataframe
+struct PandasScanInfo : public TableFunctionInfo {
+	explicit PandasScanInfo(nb::object df_p) : df(std::move(df_p)) {
+	}
+	PyObjectHolder df;
+};
 
 struct PandasScanFunction : public TableFunction {
 public:

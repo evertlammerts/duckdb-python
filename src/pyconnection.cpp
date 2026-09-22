@@ -36,11 +36,9 @@
 #include "duckdb/function/function.hpp"
 #include "duckdb_python/nb/conversions/exception_handling_enum.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
-#include "duckdb/main/pending_query_result.hpp"
+#include "duckdb/main/query_result.hpp"
 #include "duckdb_python/python_replacement_scan.hpp"
 #include "duckdb/common/shared_ptr.hpp"
-#include "duckdb/main/materialized_query_result.hpp"
-#include "duckdb/main/stream_query_result.hpp"
 #include "duckdb/main/relation/materialized_relation.hpp"
 #include "duckdb/parser/statement/load_statement.hpp"
 #include "duckdb_python/expression/pyexpression.hpp"
@@ -554,26 +552,33 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::ExecuteMany(const nb::ob
 	return shared_from_this();
 }
 
-unique_ptr<QueryResult> DuckDBPyConnection::CompletePendingQuery(PendingQueryResult &pending_query) {
-	PendingExecutionResult execution_result;
-	if (pending_query.HasError()) {
-		pending_query.ThrowError();
+void DuckDBPyConnection::CompleteQuery(QueryResult &result) {
+	if (result.HasError()) {
+		result.ThrowError();
 	}
-	while (!PendingQueryResult::IsResultReady(execution_result = pending_query.ExecuteTask())) {
+	result.Materialize();
+	// A result built by a delegating collector arrives finished and without a context; Poll reports
+	// that without touching the context, where ExecuteTask would throw.
+	auto state = result.Poll();
+	while (!IsTerminal(state)) {
 		{
 			nb::gil_scoped_acquire gil;
 			if (PyErr_CheckSignals() != 0) {
 				throw std::runtime_error("Query interrupted");
 			}
 		}
-		if (execution_result == PendingExecutionResult::BLOCKED) {
-			pending_query.WaitForTask();
+		if (state == QueryResultState::BLOCKED || state == QueryResultState::READY ||
+		    state == QueryResultState::NO_TASKS_AVAILABLE) {
+			result.WaitForTask();
 		}
+		state = result.ExecuteTask();
 	}
-	if (execution_result == PendingExecutionResult::EXECUTION_ERROR) {
-		pending_query.ThrowError();
+	// FINISHED only means the executor is done: the collection is taken and the query ended, with
+	// its transaction step, by Complete. Left open, the next statement would roll it back.
+	result.Complete();
+	if (result.HasError()) {
+		result.ThrowError();
 	}
-	return pending_query.Execute();
 }
 
 nb::list TransformNamedParameters(const case_insensitive_map_t<idx_t> &named_param_map, const nb::dict &params) {
@@ -670,21 +675,14 @@ unique_ptr<QueryResult> DuckDBPyConnection::ExecuteInternal(PreparedStatement &p
 		nb::gil_scoped_release release;
 		unique_lock<std::recursive_mutex> lock(py_connection_lock);
 
-		auto pending_query = prep.PendingQuery(named_values);
-		if (pending_query->HasError()) {
-			pending_query->ThrowError();
-		}
-		res = CompletePendingQuery(*pending_query);
-
-		if (res->HasError()) {
-			res->ThrowError();
-		}
+		res = prep.Submit(named_values);
+		CompleteQuery(*res);
 	}
 	return res;
 }
 
-unique_ptr<QueryResult> DuckDBPyConnection::PrepareAndExecuteInternal(unique_ptr<SQLStatement> statement,
-                                                                      nb::object params) {
+unique_ptr<QueryResult> DuckDBPyConnection::PrepareAndSubmitInternal(unique_ptr<SQLStatement> statement,
+                                                                     nb::object params) {
 	if (params.is_none()) {
 		params = nb::list();
 	}
@@ -698,14 +696,7 @@ unique_ptr<QueryResult> DuckDBPyConnection::PrepareAndExecuteInternal(unique_ptr
 		nb::gil_scoped_release release;
 		unique_lock<std::recursive_mutex> lock(py_connection_lock);
 
-		auto pending_query = con.GetConnection().PendingQuery(std::move(statement), named_values, true);
-
-		if (pending_query->HasError()) {
-			pending_query->ThrowError();
-		}
-
-		res = CompletePendingQuery(*pending_query);
-
+		res = con.GetConnection().Submit(std::move(statement), named_values);
 		if (res->HasError()) {
 			res->ThrowError();
 		}
@@ -750,13 +741,19 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::Execute(const nb::object
 	// FIXME: SQLites implementation says to not accept an 'execute' call with multiple statements
 	ExecuteImmediately(std::move(statements));
 
-	auto res = PrepareAndExecuteInternal(std::move(last_statement), std::move(params));
+	auto res = PrepareAndSubmitInternal(std::move(last_statement), std::move(params));
 
-	// Set the internal 'result' object
 	if (res) {
-		// Don't use CreateRelation here — the result is stored inside the connection,
-		// so setting connection_owner would create a ref cycle (connection → result → connection).
-		con.SetResult(std::make_unique<DuckDBPyRelation>(std::make_shared<DuckDBPyResult>(std::move(res))));
+		std::shared_ptr<DuckDBPyResult> py_result;
+		{
+			D_ASSERT(duckdb::PyUtil::GilCheck());
+			nb::gil_scoped_release release;
+			unique_lock<std::recursive_mutex> lock(py_connection_lock);
+			py_result = std::make_shared<DuckDBPyResult>(std::move(res), true);
+		}
+		// Don't use CreateRelation here: the result is stored inside the connection,
+		// so setting connection_owner would create a ref cycle (connection, result, connection).
+		con.SetResult(std::make_unique<DuckDBPyRelation>(std::move(py_result)));
 	}
 	return shared_from_this();
 }
@@ -1624,15 +1621,8 @@ void DuckDBPyConnection::ExecuteImmediately(vector<unique_ptr<SQLStatement>> sta
 			    "Prepared parameters are only supported for the last statement, please split your query up into "
 			    "separate 'execute' calls if you want to use prepared parameters");
 		}
-		auto pending_query = connection.PendingQuery(std::move(stmt), false);
-		if (pending_query->HasError()) {
-			pending_query->ThrowError();
-		}
-		auto res = CompletePendingQuery(*pending_query);
-
-		if (res->HasError()) {
-			res->ThrowError();
-		}
+		auto res = connection.Submit(std::move(stmt));
+		CompleteQuery(*res);
 	}
 }
 
@@ -1677,23 +1667,23 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::RunQuery(const nb::object 
 
 	if (!relation) {
 		// Could not create a relation, resort to direct execution
-		unique_ptr<QueryResult> res;
-
-		res = PrepareAndExecuteInternal(std::move(last_statement), std::move(params));
-
+		// One critical section from submit to completion, so no other statement on the
+		// connection can end the query in between
+		ConnectionLockGuard conn_lock(*this);
+		auto res = PrepareAndSubmitInternal(std::move(last_statement), std::move(params));
 		if (!res) {
 			return nullptr;
+		}
+		{
+			D_ASSERT(duckdb::PyUtil::GilCheck());
+			nb::gil_scoped_release release;
+			CompleteQuery(*res);
 		}
 		if (res->GetStatementProperties().return_type != StatementReturnType::QUERY_RESULT) {
 			return nullptr;
 		}
-		if (res->GetResultType() == QueryResultType::STREAM_RESULT) {
-			auto &stream_result = res->Cast<StreamQueryResult>();
-			res = stream_result.Materialize();
-		}
-		auto &materialized_result = res->Cast<MaterializedQueryResult>();
-		relation = make_shared_ptr<MaterializedRelation>(connection.context, materialized_result.TakeCollection(),
-		                                                 res->GetNames(), Identifier(alias));
+		relation = make_shared_ptr<MaterializedRelation>(connection.context, res->TakeCollection(), res->GetNames(),
+		                                                 Identifier(alias));
 	}
 	return CreateRelation(std::move(relation));
 }

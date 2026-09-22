@@ -311,7 +311,9 @@ class TestScalarUDF:
 
         con.create_function("func", func)
 
-        rel.fetchall()
+        # Registering the function ended the open query, and the connection is usable afterwards
+        with pytest.raises(duckdb.InterruptException, match="cancelled"):
+            rel.fetchall()
 
         res = con.sql("select func(5)").fetchall()
         assert res == [(5,)]

@@ -16,6 +16,7 @@
 #include "duckdb/main/client_config.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb_python/nb/casters.hpp"
+#include "duckdb_python/registered_py_object.hpp"
 
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/vector.hpp"
@@ -66,44 +67,43 @@ void TransformDuckToArrowChunk(nb::object pyarrow_schema, ArrowArray &data, nb::
 
 PyArrowObjectType GetArrowType(const nb::handle &obj);
 
-class PythonTableArrowArrayStreamFactory {
+class PythonTableArrowArrayStreamFactory : public ArrowScanFactory {
 public:
-	explicit PythonTableArrowArrayStreamFactory(PyObject *arrow_table, const ClientProperties &client_properties_p,
-	                                            PyArrowObjectType arrow_type_p)
-	    : arrow_object(arrow_table), client_properties(client_properties_p), cached_arrow_type(arrow_type_p) {
+	//! Must be constructed while holding the GIL.
+	PythonTableArrowArrayStreamFactory(nb::object arrow_object_p, const ClientProperties &client_properties_p,
+	                                   PyArrowObjectType arrow_type_p)
+	    : arrow_object(std::move(arrow_object_p)), client_properties(client_properties_p),
+	      cached_arrow_type(arrow_type_p) {
 		cached_schema.release = nullptr;
 	}
 
-	~PythonTableArrowArrayStreamFactory() {
-		if (cached_arrow_table.ptr() != nullptr) {
-			nb::gil_scoped_acquire acquire;
-			cached_arrow_table = nb::object();
-		}
+	~PythonTableArrowArrayStreamFactory() override {
+		// The release callback of a schema taken from a Python producer may itself be Python.
 		if (cached_schema.release) {
-			cached_schema.release(&cached_schema);
+			if (nb::detail::cleanup_guard guard {}) {
+				cached_schema.release(&cached_schema);
+			}
 		}
 	}
 
-	//! Produces an Arrow Scanner, should be only called once when initializing Scan States
-	static unique_ptr<ArrowArrayStreamWrapper> Produce(uintptr_t factory, ArrowStreamParameters &parameters);
+	void GetSchema(ArrowSchema &schema) override;
+	unique_ptr<ArrowArrayStreamWrapper> ProduceStream(ArrowStreamParameters &parameters) override;
 
-	//! Get the schema of the arrow object
-	static void GetSchemaInternal(nb::handle arrow_object, ArrowSchemaWrapper &schema);
-	static void GetSchema(uintptr_t factory_ptr, ArrowSchemaWrapper &schema);
+	static void GetSchemaInternal(nb::handle arrow_object, ArrowSchema &schema);
 
 	//! Arrow Object (i.e., Scanner, Record Batch Reader, Table, Dataset)
-	PyObject *arrow_object;
+	PyObjectHolder arrow_object;
 
 	const ClientProperties client_properties;
 	const PyArrowObjectType cached_arrow_type;
 
 	//! Cached Arrow table from an unfiltered .collect().to_arrow() on a LazyFrame.
 	//! Avoids re-reading from source and re-converting on repeated scans without filters.
-	nb::object cached_arrow_table;
+	PyObjectHolder cached_arrow_table;
 
 private:
 	ArrowSchema cached_schema;
-	bool schema_cached = false;
+	atomic<bool> schema_cached {false};
 
 	static nb::object ProduceScanner(nb::object &arrow_scanner, nb::handle &arrow_obj_handle,
 	                                 ArrowStreamParameters &parameters, const ClientProperties &client_properties);

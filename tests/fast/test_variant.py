@@ -143,16 +143,17 @@ class TestVariantFetchDF:
 class TestVariantArrow:
     """Tests for Arrow/Polars — blocked on DuckDB core Arrow support."""
 
-    @pytest.mark.xfail(strict=True, reason="Arrow export for VARIANT not yet supported in DuckDB core")
     def test_to_arrow_table(self):
+        pytest.importorskip("pyarrow")
         duckdb.sql("SELECT 42::VARIANT AS v").arrow()
 
     @pytest.mark.xfail(strict=True, reason="Arrow export for VARIANT not yet supported in DuckDB core")
     def test_fetch_arrow_reader(self):
         duckdb.sql("SELECT 42::VARIANT AS v").fetch_arrow_reader()
 
-    @pytest.mark.xfail(strict=True, reason="Polars uses Arrow, which doesn't support VARIANT yet")
     def test_polars(self):
+        pytest.importorskip("pyarrow")
+        pytest.importorskip("polars")
         duckdb.sql("SELECT 42::VARIANT AS v").pl()
 
 
