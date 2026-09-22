@@ -132,11 +132,15 @@ class TestArrowScanFactoryOwnership:
     @pytest.mark.parametrize(("label", "make"), RETAINED_FACTORIES, ids=[label for label, _ in RETAINED_FACTORIES])
     def test_scanned_object_is_released_with_the_relation(self, label, make):
         con = duckdb.connect()
-        scanned = make()
-        ref = weakref.ref(scanned)
-        rel = con.sql("select sum(a) as s from scanned")
 
-        del scanned
+        # The scan reads the caller's frame locals, and before Python 3.13 that read caches a dict on
+        # the frame which keeps the object alive until the frame returns, so the scan gets its own frame.
+        def scan(con):
+            scanned = make()
+            rel = con.sql("select sum(a) as s from scanned")
+            return weakref.ref(scanned), rel
+
+        ref, rel = scan(con)
         gc.collect()
         assert ref() is not None
 
