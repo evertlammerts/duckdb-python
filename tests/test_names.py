@@ -219,9 +219,9 @@ class TestBracketsReachIntoValues:
             col("x")[True]
 
     def test_an_expression_is_not_a_sequence(self) -> None:
-        with pytest.raises(TypeError, match="not iterable"):
+        with pytest.raises(TypeError, match=r"not iterable|not a container or iterable"):
             list(col("x"))
-        with pytest.raises(TypeError, match="not iterable"):
+        with pytest.raises(TypeError, match=r"not iterable|not a container or iterable"):
             assert "a" in col("x")
 
     def test_a_plan_bracket_still_narrows_the_plan(

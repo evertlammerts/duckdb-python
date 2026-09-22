@@ -124,3 +124,6 @@ class Database:
 
 def library_version() -> str:
     """The DuckDB version this extension module is linked against."""
+
+def capsule_name(object: object) -> str | None:
+    """The name a capsule carries, which for Arrow data says what it holds; None for anything else."""

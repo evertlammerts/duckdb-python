@@ -17,12 +17,12 @@ import pyarrow.compute as pc
 import pytest
 
 import duckdb
-from duckdb import dbapi, exceptions
-from duckdb._sources import OBJECT, STREAM, adapt
+from duckdb import _duckdb, dbapi, exceptions
+from duckdb._sources import CapsuleSource, Source, StreamSource, TableSource, adapt
 from duckdb.frame import col, sql, table
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Sequence
     from pathlib import Path
 
 
@@ -47,26 +47,44 @@ def reader_over(t: pa.Table) -> pa.RecordBatchReader:
 
 class TestClassification:
     def test_tables_and_batches_are_read_repeatedly(self, numbers: pa.Table) -> None:
-        assert adapt(numbers) == (numbers, OBJECT)
-        batch = numbers.to_batches()[0]
-        assert adapt(batch) == (batch, OBJECT)
+        for obj in (numbers, numbers.to_batches()[0]):
+            source = adapt(obj)
+            assert isinstance(source, TableSource)
+            assert source.obj is obj
+            assert not source.one_shot
 
     def test_readers_and_capsules_are_streams(self, numbers: pa.Table) -> None:
-        reader = reader_over(numbers)
-        assert adapt(reader) == (reader, STREAM)
-        capsule = numbers.__arrow_c_stream__()
-        assert adapt(capsule) == (capsule, STREAM)
+        for obj, kind in ((reader_over(numbers), StreamSource), (numbers.__arrow_c_stream__(), CapsuleSource)):
+            source = adapt(obj)
+            assert isinstance(source, kind)
+            assert source.obj is obj
+            assert source.one_shot
 
     def test_a_class_named_like_a_capsule_is_not_one(self, numbers: pa.Table) -> None:
         class PyCapsule:
             def __arrow_c_stream__(self, requested_schema: object = None) -> object:
                 return numbers.__arrow_c_stream__()
 
-        assert adapt(PyCapsule())[1] == OBJECT
+        assert not adapt(PyCapsule()).one_shot
+
+    def test_only_a_stream_capsule_is_a_stream(self, numbers: pa.Table) -> None:
+        assert adapt(numbers.__arrow_c_stream__()).one_shot
+        assert _duckdb.capsule_name(numbers.__arrow_c_stream__()) == "arrow_array_stream"
+        assert _duckdb.capsule_name(numbers.schema.__arrow_c_schema__()) == "arrow_schema"
+        assert _duckdb.capsule_name(numbers) is None
 
     def test_anything_else_is_refused(self) -> None:
         with pytest.raises(TypeError, match=r"__arrow_c_stream__.*list is none of these"):
             adapt([1, 2, 3])
+        with pytest.raises(TypeError, match="object is none of these"):
+            adapt(object())
+
+    def test_a_schema_alone_is_not_a_dataset(self) -> None:
+        class OnlySchema:
+            schema = pa.schema([("a", pa.int64())])
+
+        with pytest.raises(TypeError, match="OnlySchema is none of these"):
+            adapt(OnlySchema())
 
 
 class TestResolution:
@@ -262,6 +280,13 @@ class TestDbapi:
         with pytest.raises(exceptions.InterfaceError):
             con.register("numbers", numbers)
 
+    def test_an_object_without_a_stream_is_refused_at_register(self) -> None:
+        con = dbapi.connect()
+        with pytest.raises(TypeError, match="dict is none of these"):
+            con.register("t", {"a": [1]})
+        with pytest.raises(exceptions.CatalogError):
+            con.cursor().execute("SELECT * FROM t")
+
 
 class TestStreams:
     def test_a_reader_is_read_once(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
@@ -343,6 +368,178 @@ class TestStreams:
         con.register("s", capsule)
         with pytest.raises(exceptions.InvalidInputError, match="registered as 's' is released already"):
             rows(con, "SELECT * FROM s")
+
+
+class Recording(Source):
+    """A source over a pyarrow table that remembers which columns each scan asked for."""
+
+    def __init__(self, table_: pa.Table, *, narrows: bool = True) -> None:
+        super().__init__(table_)
+        self.narrows = narrows
+        self.asked: list[list[int] | None] = []
+
+    def __arrow_c_schema__(self) -> object:
+        return self.obj.schema.__arrow_c_schema__()
+
+    def stream(self, columns: Sequence[int] | None) -> tuple[object, bool]:
+        self.asked.append(None if columns is None else list(columns))
+        if columns is None or not self.narrows:
+            return self.obj.__arrow_c_stream__(), False
+        return self.obj.select(list(columns)).__arrow_c_stream__(), True
+
+
+class TestProjection:
+    def test_only_the_columns_a_query_uses_are_asked_for(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
+        source = Recording(numbers)
+        con.register("t", source)
+        assert rows(con, "SELECT s FROM t WHERE n = 3") == [("3",)]
+        assert rows(con, "SELECT * FROM t LIMIT 1") == [(0, "0")]
+        assert rows(con, "SELECT n FROM t WHERE n = 9") == [(9,)]
+        assert rows(con, "SELECT s FROM t LIMIT 1") == [("0",)]
+        # Every declared column, in order, is asked for as None; a narrower need names the columns.
+        assert source.asked == [None, None, [0], [1]]
+
+    def test_the_requested_order_is_the_output_order(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
+        source = Recording(numbers)
+        con.register("t", source)
+        assert rows(con, "SELECT s, n FROM t WHERE n = 4") == [("4", 4)]
+        assert rows(con, "SELECT s, n FROM t WHERE s = '5'") == [("5", 5)]
+        # The engine may ask for the columns in any order; the source answers in that order and the rows are right.
+        assert all(asked is None or sorted(asked) == [0, 1] for asked in source.asked)
+
+    def test_a_count_needs_no_columns_but_still_scans(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
+        source = Recording(numbers)
+        con.register("t", source)
+        assert rows(con, "SELECT count(*) FROM t") == [(10,)]
+        assert len(source.asked) == 1
+
+    def test_a_source_that_cannot_narrow_is_picked_from(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
+        source = Recording(numbers, narrows=False)
+        con.register("t", source)
+        assert rows(con, "SELECT s FROM t WHERE n = 3") == [("3",)]
+        assert rows(con, "SELECT s FROM t LIMIT 1") == [("0",)]
+        assert rows(con, "SELECT n FROM t WHERE n = 9") == [(9,)]
+        assert source.asked == [None, [1], [0]]
+
+    def test_a_permuted_request_is_picked_from_a_full_stream(
+        self, con: duckdb.frame.Connection, numbers: pa.Table
+    ) -> None:
+        source = Recording(numbers, narrows=False)
+        con.register("t", source)
+        assert rows(con, "SELECT s, n FROM t WHERE s = '5'") == [("5", 5)]
+        assert rows(con, "SELECT n, s FROM t WHERE n = 6") == [(6, "6")]
+        assert all(asked is None or sorted(asked) == [0, 1] for asked in source.asked)
+
+    def test_the_plan_shows_the_projection(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
+        con.register("t", numbers)
+        assert "Projections: n" in table("t").select(col("n")).on(con).explain()
+        assert "Projections: s" in sql("SELECT s FROM t WHERE s = '1'").on(con).explain()
+
+    def test_a_source_that_raises_while_exporting(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
+        class Broken(Recording):
+            def stream(self, columns: Sequence[int] | None) -> tuple[object, bool]:
+                message = "no stream today"
+                raise ValueError(message)
+
+        con.register("t", Broken(numbers))
+        expected = "exporting a stream from the object registered as 't' failed: ValueError: no stream today"
+        with pytest.raises(exceptions.InvalidInputError, match=expected):
+            rows(con, "SELECT * FROM t")
+
+    def test_a_source_must_answer_with_a_pair(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
+        class Odd(Recording):
+            def stream(self, columns: Sequence[int] | None) -> object:  # type: ignore[override]
+                return object.__getattribute__(self.obj, "__arrow_c_stream__")()
+
+        con.register("t", Odd(numbers))
+        with pytest.raises(
+            exceptions.InvalidInputError, match=r"did not answer stream\(\) with a \(capsule, projected\)"
+        ):
+            rows(con, "SELECT * FROM t")
+
+    def test_a_source_answering_the_wrong_width_is_refused(
+        self, con: duckdb.frame.Connection, numbers: pa.Table
+    ) -> None:
+        class Lying(Recording):
+            def stream(self, columns: Sequence[int] | None) -> tuple[object, bool]:
+                return self.obj.select([0]).__arrow_c_stream__(), False
+
+        con.register("t", Lying(numbers))
+        with pytest.raises(exceptions.InvalidInputError, match="answered with 1 columns where it declared 2"):
+            rows(con, "SELECT s FROM t")
+
+        class Short(Recording):
+            def stream(self, columns: Sequence[int] | None) -> tuple[object, bool]:
+                return self.obj.__arrow_c_stream__(), True
+
+        con.register("t", Short(numbers))
+        with pytest.raises(exceptions.InvalidInputError, match="answered with 2 columns where 1 were requested"):
+            rows(con, "SELECT s FROM t")
+
+    def test_a_source_answering_in_another_order_is_refused(self, con: duckdb.frame.Connection) -> None:
+        wide = pa.table({"n": [100], "s": ["zero"], "x": [0]})
+
+        class Sorting(Recording):
+            def stream(self, columns: Sequence[int] | None) -> tuple[object, bool]:
+                if columns is None:
+                    return self.obj.__arrow_c_stream__(), False
+                return self.obj.select(sorted(columns)).__arrow_c_stream__(), True
+
+        con.register("t", Sorting(wide))
+        with pytest.raises(exceptions.InvalidInputError, match="answered with column 'n' at position 0 where 'x'"):
+            rows(con, "SELECT x, s, n FROM t WHERE x = 0")
+
+        class Swapping(Recording):
+            def stream(self, columns: Sequence[int] | None) -> tuple[object, bool]:
+                return self.obj.select([2, 1, 0]).__arrow_c_stream__(), False
+
+        con.register("t", Swapping(wide))
+        with pytest.raises(exceptions.InvalidInputError, match="answered with column 'x' at position 0 where 'n'"):
+            rows(con, "SELECT * FROM t")
+
+    def test_duplicate_names_project_by_position(self, con: duckdb.frame.Connection) -> None:
+        columns = [pa.array([1]), pa.array([2]), pa.array([3]), pa.array([4])]
+        source = Recording(pa.table(columns, names=["a_1", "a", "a", "a_2"]))
+        con.register("dup", source)
+        assert rows(con, "SELECT a_2 FROM dup") == [(3,)]
+        assert source.asked == [[2]]
+
+    def test_a_stream_source_yields_every_column(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
+        con.register("r", reader_over(numbers))
+        assert rows(con, "SELECT s FROM r WHERE n = 2") == [("2",)]
+
+
+class TestArrays:
+    """An object exporting one array is one batch; a plain array or a stream of them is a single column."""
+
+    def test_a_plain_array_is_one_column_named_value(self, con: duckdb.frame.Connection) -> None:
+        con.register("a", pa.array([1, 2, None]))
+        assert table("a").schema(con) == [("value", "BIGINT")]
+        assert rows(con, "SELECT value FROM a") == [(1,), (2,), (None,)]
+        assert rows(con, "SELECT sum(value) FROM a") == [(3,)]
+
+    def test_a_struct_array_is_a_table_of_its_fields(self, con: duckdb.frame.Connection) -> None:
+        array = pa.StructArray.from_arrays([pa.array([1, 2]), pa.array(["a", "b"])], names=["n", "s"])
+        con.register("st", array)
+        assert table("st").schema(con) == [("n", "BIGINT"), ("s", "VARCHAR")]
+        assert rows(con, "SELECT s FROM st WHERE n = 2") == [("b",)]
+        assert rows(con, "SELECT n, s FROM st ORDER BY n") == [(1, "a"), (2, "b")]
+
+    def test_a_chunked_array_is_a_stream_of_plain_arrays(self, con: duckdb.frame.Connection) -> None:
+        con.register("c", pa.chunked_array([list(range(3000)), list(range(3000, 5000))]))
+        assert table("c").schema(con) == [("value", "BIGINT")]
+        assert rows(con, "SELECT count(*), sum(value), max(value) FROM c") == [(5000, 12_497_500, 4999)]
+
+    def test_an_array_with_nulls_and_offsets(self, con: duckdb.frame.Connection) -> None:
+        sliced = pa.array(["x", None, "y", "z"]).slice(1, 2)
+        con.register("s", sliced)
+        assert rows(con, "SELECT value FROM s") == [(None,), ("y",)]
+
+    def test_a_struct_array_projects_by_position(self, con: duckdb.frame.Connection) -> None:
+        array = pa.StructArray.from_arrays([pa.array([1]), pa.array(["a"]), pa.array([2.5])], names=["n", "s", "f"])
+        con.register("st", array)
+        assert rows(con, "SELECT f, n FROM st") == [(2.5, 1)]
+        assert "Projections: f, n" in sql("SELECT f, n FROM st").on(con).explain()
 
 
 class TestRowsAndTypes:
@@ -533,7 +730,17 @@ class TestNamesAndShadowing:
         assert table("dup").columns(con) == ["A", "a_1"]
 
     def test_a_schema_capsule_is_not_a_stream(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
-        con.register("wrong", numbers.schema.__arrow_c_schema__())
+        with pytest.raises(TypeError, match="a bare 'arrow_schema' capsule is not an Arrow stream"):
+            con.register("wrong", numbers.schema.__arrow_c_schema__())
+
+    def test_a_source_handing_back_the_wrong_capsule_is_refused(
+        self, con: duckdb.frame.Connection, numbers: pa.Table
+    ) -> None:
+        class WrongKind(Recording):
+            def stream(self, columns: Sequence[int] | None) -> tuple[object, bool]:
+                return self.obj.schema.__arrow_c_schema__(), False
+
+        con.register("wrong", WrongKind(numbers))
         with pytest.raises(exceptions.InvalidInputError, match="did not export an 'arrow_array_stream' capsule but"):
             rows(con, "SELECT * FROM wrong")
 

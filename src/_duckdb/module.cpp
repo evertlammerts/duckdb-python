@@ -366,4 +366,14 @@ NB_MODULE(_duckdb, m) {
 
 	m.def("library_version", []() { return cxx::LibraryVersion(); },
 	      "The DuckDB version this extension module is linked against.");
+	m.def(
+	    "capsule_name",
+	    [](nb::handle object) -> std::optional<std::string> {
+		    if (!PyCapsule_CheckExact(object.ptr())) {
+			    return std::nullopt;
+		    }
+		    const char *name = PyCapsule_GetName(object.ptr());
+		    return std::string(name ? name : "");
+	    },
+	    nb::arg("object"), "The name a capsule carries, which for Arrow data says what it holds; None for anything else.");
 }

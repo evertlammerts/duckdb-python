@@ -15,8 +15,17 @@ import pytest
 
 import duckdb
 from duckdb import exceptions
-from duckdb._sources import OBJECT, DatasetSource, LazyFrameSource, PandasSource, ScannerSource, adapt
-from duckdb.frame import col, table
+from duckdb._sources import (
+    ArraySource,
+    DatasetSource,
+    ExportingSource,
+    LazyFrameSource,
+    PandasSource,
+    PolarsFrameSource,
+    ScannerSource,
+    adapt,
+)
+from duckdb.frame import col, sql, table
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -45,10 +54,10 @@ def rows(con: duckdb.frame.Connection, query: str) -> list[tuple[object, ...]]:
 class TestClassification:
     def test_each_family_gets_its_adapter(self, parquet_dir: Path) -> None:
         dataset = ds.dataset(parquet_dir)
-        assert isinstance(adapt(dataset)[0], DatasetSource)
-        assert isinstance(adapt(dataset.scanner())[0], ScannerSource)
-        assert isinstance(adapt(pl.DataFrame({"a": [1]}).lazy())[0], LazyFrameSource)
-        assert isinstance(adapt(pd.DataFrame({"a": [1]}))[0], PandasSource)
+        assert isinstance(adapt(dataset), DatasetSource)
+        assert isinstance(adapt(dataset.scanner()), ScannerSource)
+        assert isinstance(adapt(pl.DataFrame({"a": [1]}).lazy()), LazyFrameSource)
+        assert isinstance(adapt(pd.DataFrame({"a": [1]})), PandasSource)
 
     def test_every_family_is_read_as_often_as_asked(self, parquet_dir: Path) -> None:
         frame = pl.DataFrame({"a": [1]})
@@ -59,11 +68,15 @@ class TestClassification:
             frame.lazy(),
             pd.DataFrame({"a": [1]}),
         ):
-            assert adapt(obj)[1] == OBJECT
+            assert not adapt(obj).one_shot
 
-    def test_a_polars_frame_needs_no_adapter(self) -> None:
-        frame = pl.DataFrame({"a": [1]})
-        assert adapt(frame) == (frame, OBJECT)
+    def test_a_polars_frame_narrows_by_name(self) -> None:
+        frame = pl.DataFrame({"a": [1], "b": ["x"]})
+        source = adapt(frame)
+        assert isinstance(source, PolarsFrameSource)
+        capsule, projected = source.stream([1])
+        assert projected
+        assert pa.RecordBatchReader._import_from_c_capsule(capsule).read_all().column_names == ["b"]
 
     def test_a_duck_typed_scanner_is_a_scanner(self, parquet_dir: Path) -> None:
         class Mine:
@@ -77,7 +90,7 @@ class TestClassification:
             def to_reader(self) -> pa.RecordBatchReader:
                 return self.inner.to_reader()
 
-        assert isinstance(adapt(Mine(ds.dataset(parquet_dir).scanner()))[0], ScannerSource)
+        assert isinstance(adapt(Mine(ds.dataset(parquet_dir).scanner())), ScannerSource)
 
     def test_a_class_named_like_a_reader_still_needs_the_export(self) -> None:
         class RecordBatchReader:
@@ -87,9 +100,11 @@ class TestClassification:
             adapt(RecordBatchReader())
 
     def test_series_and_fragments_are_not_datasets(self, parquet_dir: Path) -> None:
-        pandas_series, polars_series = pd.Series([1]), pl.Series([1])
-        assert adapt(pandas_series) == (pandas_series, OBJECT)
-        assert adapt(polars_series) == (polars_series, OBJECT)
+        for series in (pd.Series([1]), pl.Series([1])):
+            source = adapt(series)
+            assert isinstance(source, ExportingSource)
+            assert not source.one_shot
+        assert isinstance(adapt(pa.array([1])), ArraySource)
         fragment = next(iter(ds.dataset(parquet_dir).get_fragments()))
         with pytest.raises(TypeError, match="none of these"):
             adapt(fragment)
@@ -106,7 +121,7 @@ class TestClassification:
             def scanner(self) -> ds.Scanner:
                 return self.inner.scanner()
 
-        assert isinstance(adapt(Mine(ds.dataset(parquet_dir)))[0], DatasetSource)
+        assert isinstance(adapt(Mine(ds.dataset(parquet_dir))), DatasetSource)
 
 
 class TestDatasets:
@@ -134,11 +149,81 @@ class TestDatasets:
         con.register("years", ds.dataset(tmp_path, partitioning="hive"))
         assert table("years").schema(con) == [("n", "BIGINT"), ("year", "INTEGER")]
         assert rows(con, "SELECT year, n FROM years ORDER BY year") == [(2020, 20), (2021, 21)]
+        assert rows(con, "SELECT year FROM years ORDER BY year") == [(2020,), (2021,)]
+        capsule, projected = adapt(ds.dataset(tmp_path, partitioning="hive")).stream([1])
+        assert projected
+        assert columns_of(capsule) == ["year"]
 
     def test_a_dataset_is_scanned_per_query(self, con: duckdb.frame.Connection, parquet_dir: Path) -> None:
         con.register("files", ds.dataset(parquet_dir))
         assert rows(con, "SELECT count(*) FROM files") == [(10,)]
         assert rows(con, "SELECT max(n) FROM files") == [(9,)]
+
+
+def columns_of(capsule: object) -> list[str]:
+    return list(pa.RecordBatchReader._import_from_c_capsule(capsule).read_all().column_names)
+
+
+class TestProjection:
+    def test_a_dataset_scanner_is_asked_for_the_columns(self, con: duckdb.frame.Connection, parquet_dir: Path) -> None:
+        asked: list[object] = []
+        inner = ds.dataset(parquet_dir)
+
+        class Mine:
+            schema = inner.schema
+
+            def scanner(self, **kwargs: object) -> ds.Scanner:
+                asked.append(kwargs.get("columns"))
+                return inner.scanner(**kwargs)
+
+        con.register("files", Mine())
+        assert rows(con, "SELECT s FROM files ORDER BY s LIMIT 1") == [("0",)]
+        assert rows(con, "SELECT count(*) FROM files") == [(10,)]
+        assert asked[0] == ["s"]
+        assert len(asked) == 2
+
+    def test_a_lazy_frame_is_narrowed_before_it_is_collected(self, con: duckdb.frame.Connection) -> None:
+        seen: list[list[str]] = []
+
+        def peek(frame: pl.DataFrame) -> pl.DataFrame:
+            seen.append(frame.columns)
+            return frame
+
+        lazy = pl.DataFrame({"i": range(5), "s": ["a", "b", "c", "d", "e"], "unused": [0] * 5}).lazy()
+        con.register("lf", lazy.map_batches(peek))
+        assert rows(con, "SELECT s FROM lf WHERE i = 2") == [("c",)]
+        capsule, projected = adapt(lazy).stream([1])
+        assert projected
+        assert columns_of(capsule) == ["s"]
+
+    def test_pandas_converts_only_the_requested_columns(self) -> None:
+        frame = pd.DataFrame({"i": [1, 2], "s": ["a", "b"], "o": pd.Series([object(), object()], dtype=object)})
+        source = adapt(frame)
+        capsule, projected = source.stream([1, 0])
+        assert projected
+        assert columns_of(capsule) == ["s", "i"]
+
+    def test_tables_and_scanners(self, parquet_dir: Path) -> None:
+        table_ = pa.table({"a": [1], "b": [2], "c": [3]})
+        capsule, projected = adapt(table_).stream([2, 0])
+        assert projected
+        assert columns_of(capsule) == ["c", "a"]
+        scanner = ds.dataset(parquet_dir).scanner(columns=["s", "n"])
+        capsule, projected = adapt(scanner).stream([1])
+        assert not projected
+        assert columns_of(capsule) == ["s", "n"]
+
+
+class TestSeries:
+    def test_a_pandas_series_is_one_column(self, con: duckdb.frame.Connection) -> None:
+        con.register("s", pd.Series([1.5, None], name="f"))
+        assert table("s").schema(con) == [("value", "DOUBLE")]
+        assert rows(con, "SELECT value FROM s") == [(1.5,), (None,)]
+
+    def test_a_polars_series_keeps_its_name(self, con: duckdb.frame.Connection) -> None:
+        con.register("s", pl.Series("p", ["x", None]))
+        assert table("s").schema(con) == [("p", "VARCHAR")]
+        assert rows(con, "SELECT p FROM s") == [("x",), (None,)]
 
 
 class TestPolars:
@@ -203,6 +288,11 @@ class TestPolars:
             1,
         )
         assert second == (None,) * 16
+
+    def test_a_query_over_a_subset_is_narrowed_at_the_frame(self, con: duckdb.frame.Connection) -> None:
+        con.register("pf", pl.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"], "c": [0.5] * 3}))
+        assert rows(con, "SELECT b FROM pf WHERE a = 2") == [("y",)]
+        assert "Projections: a, b" in sql("SELECT b FROM pf WHERE a = 2").on(con).explain()
 
     def test_a_frame_is_read_repeatedly_and_in_order(self, con: duckdb.frame.Connection) -> None:
         con.register("pf", pl.DataFrame({"i": range(10_000)}))
@@ -324,9 +414,10 @@ class TestPandas:
     ) -> None:
         monkeypatch.setattr(PandasSource, "SLICE_ROWS", 1000)
         frame = pd.DataFrame({"i": range(10_500), "s": [str(i) for i in range(10_500)]})
-        source = adapt(frame)[0]
+        source = adapt(frame)
         assert isinstance(source, PandasSource)
-        assert [batch.num_rows for batch in source._batches(source._schema())] == [1000] * 10 + [500]
+        schema = source._schema(frame)
+        assert [batch.num_rows for batch in source._batches(frame, schema)] == [1000] * 10 + [500]
         con.register("df", frame)
         assert rows(con, "SELECT count(*), sum(i), max(s) FROM df") == [(10_500, 55_119_750, "9999")]
 

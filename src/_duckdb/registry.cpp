@@ -8,6 +8,7 @@
 
 #include "registry.hpp"
 
+#include <cstring>
 #include <utility>
 
 // The Arrow C data and stream interface structs, under their standard guards.
@@ -19,6 +20,9 @@ namespace {
 const char *const kScanFunction = "python_object_scan";
 const char *const kStreamCapsule = "arrow_array_stream";
 const char *const kSchemaCapsule = "arrow_schema";
+const char *const kArrayCapsule = "arrow_array";
+/// A struct array with no validity buffer still declares one buffer slot, holding null.
+const void *kNoBuffers[1] = {nullptr};
 /// The engine's standard vector size, which is what the output chunk handed to the exec callback is allocated for.
 constexpr cxx::idx_t kBatchRows = 2048;
 
@@ -54,29 +58,121 @@ ArrowArrayStream &StreamOf(nb::handle capsule, const std::string &name) {
 	return *stream;
 }
 
-/// Export a fresh stream from the registered object, or the capsule itself when that is what was registered.
-nb::object ExportStream(Registered &entry) {
-	if (PyCapsule_CheckExact(entry.object.ptr())) {
-		return entry.object;
-	}
-	return entry.object.attr("__arrow_c_stream__")();
+bool IsBatch(const ArrowSchema &schema) {
+	return schema.format != nullptr && std::strcmp(schema.format, "+s") == 0;
 }
 
-/// Reads the registered object's schema into `out` without consuming a stream: from `__arrow_c_schema__`, from a
-/// `schema` attribute that has it, or from the stream itself, which for a capsule is a peek and for any other object
-/// is a fresh export.
+/// The moved-in child a wrapper owns, released and freed with the wrapper.
+template <class T>
+struct Wrapped {
+	T *child;
+	T **children;
+};
+
+template <class T>
+void ReleaseWrapped(T *wrapper) {
+	auto *owned = static_cast<Wrapped<T> *>(wrapper->private_data);
+	if (owned->child->release != nullptr) {
+		owned->child->release(owned->child);
+	}
+	delete owned->child;
+	delete[] owned->children;
+	delete owned;
+	wrapper->release = nullptr;
+}
+
+/// Turns a schema that is not a batch into a batch of one column: a struct with the schema as its only child.
+void WrapAsBatch(ArrowSchema &schema) {
+	auto *child = new ArrowSchema(schema);
+	auto **children = new ArrowSchema *[1] {child};
+	schema = ArrowSchema {};
+	schema.format = "+s";
+	schema.name = "";
+	schema.n_children = 1;
+	schema.children = children;
+	schema.release = &ReleaseWrapped<ArrowSchema>;
+	schema.private_data = new Wrapped<ArrowSchema> {child, children};
+}
+
+/// The array counterpart: a struct array with no validity buffer whose only child is the array.
+void WrapAsBatch(ArrowArray &array) {
+	auto *child = new ArrowArray(array);
+	auto **children = new ArrowArray *[1] {child};
+	array = ArrowArray {};
+	array.length = child->length;
+	array.null_count = 0;
+	array.offset = 0;
+	array.n_buffers = 1;
+	array.buffers = kNoBuffers;
+	array.n_children = 1;
+	array.children = children;
+	array.release = &ReleaseWrapped<ArrowArray>;
+	array.private_data = new Wrapped<ArrowArray> {child, children};
+}
+
+/// Moves the struct out of a capsule, leaving the capsule nothing to release.
+template <class T>
+T TakeFromCapsule(nb::handle capsule, const char *kind, const std::string &name) {
+	if (!PyCapsule_IsValid(capsule.ptr(), kind)) {
+		throw cxx::InvalidInputException("the object registered as '" + name + "' did not hand out an '" + kind +
+		                                 "' capsule");
+	}
+	auto *held = static_cast<T *>(PyCapsule_GetPointer(capsule.ptr(), kind));
+	if (held == nullptr || held->release == nullptr) {
+		throw cxx::InvalidInputException("the object registered as '" + name + "' handed out a released '" + kind +
+		                                 "' capsule");
+	}
+	T taken = *held;
+	held->release = nullptr;
+	return taken;
+}
+
+/// What a source answered: a stream capsule, or the schema and array capsules of one array, which is one batch.
+struct Exported {
+	nb::object stream;
+	nb::object schema;
+	nb::object array;
+	bool projected = false;
+
+	bool IsArray() const {
+		return array.is_valid();
+	}
+};
+
+Exported ExportStream(Registered &entry, const std::vector<cxx::idx_t> *columns) {
+	nb::object request = nb::none();
+	if (columns != nullptr) {
+		nb::list wanted;
+		for (const auto column : *columns) {
+			wanted.append(nb::int_(static_cast<uint64_t>(column)));
+		}
+		request = std::move(wanted);
+	}
+	nb::object answer = entry.object.attr("stream")(request);
+	if (!nb::isinstance<nb::tuple>(answer) || nb::len(answer) != 2) {
+		throw cxx::InvalidInputException("the source registered as '" + entry.name +
+		                                 "' did not answer stream() with a (capsule, projected) pair");
+	}
+	auto pair = nb::cast<nb::tuple>(answer);
+	Exported exported;
+	exported.projected = nb::cast<bool>(pair[1]);
+	nb::object data = nb::borrow(pair[0]);
+	if (nb::isinstance<nb::tuple>(data) && nb::len(data) == 2) {
+		auto both = nb::cast<nb::tuple>(data);
+		exported.schema = nb::borrow(both[0]);
+		exported.array = nb::borrow(both[1]);
+	} else {
+		exported.stream = std::move(data);
+	}
+	return exported;
+}
+
+/// Reads the source's schema into `out` without consuming data: from `__arrow_c_schema__` when the source has
+/// it, else by peeking the schema of a full stream, which a raw capsule answers without being read.
 void SchemaOf(Registered &entry, ArrowSchema &out) {
 	nb::object object = entry.object;
-	nb::object exporter;
-	if (!PyCapsule_CheckExact(object.ptr())) {
-		if (nb::hasattr(object, "__arrow_c_schema__")) {
-			exporter = object;
-		} else if (nb::hasattr(object, "schema") && nb::hasattr(object.attr("schema"), "__arrow_c_schema__")) {
-			exporter = object.attr("schema");
-		}
-	}
-	if (exporter.is_valid()) {
-		nb::object capsule = exporter.attr("__arrow_c_schema__")();
+	if (nb::hasattr(object, "__arrow_c_schema__")) {
+		nb::object capsule = object.attr("__arrow_c_schema__")();
 		if (!PyCapsule_IsValid(capsule.ptr(), kSchemaCapsule)) {
 			throw cxx::InvalidInputException("the object registered as '" + entry.name +
 			                                 "' did not export an Arrow schema capsule");
@@ -91,8 +187,13 @@ void SchemaOf(Registered &entry, ArrowSchema &out) {
 		schema->release = nullptr;
 		return;
 	}
-	nb::object capsule = ExportStream(entry);
-	auto &stream = StreamOf(capsule, entry.name);
+	auto exported = ExportStream(entry, nullptr);
+	if (exported.IsArray()) {
+		// The array capsule is dropped unread, which releases it.
+		out = TakeFromCapsule<ArrowSchema>(exported.schema, kSchemaCapsule, entry.name);
+		return;
+	}
+	auto &stream = StreamOf(exported.stream, entry.name);
 	if (stream.get_schema(&stream, &out) != 0) {
 		throw cxx::InvalidInputException("reading the schema of the stream registered as '" + entry.name +
 		                                 "' failed: " + StreamError(stream));
@@ -109,41 +210,48 @@ struct ScanUserData {
 	std::shared_ptr<Registry> registry;
 };
 
-/// The entry a query bound over and its schema as read then, which the scan's importer is built from.
+/// The entry a query bound over and the Arrow names of the columns it declared, in order.
 struct ScanBind {
-	ScanBind(std::shared_ptr<Registered> entry, ArrowSchema schema) : entry(std::move(entry)), schema(schema) {
-	}
-	ScanBind(const ScanBind &) = delete;
-	ScanBind &operator=(const ScanBind &) = delete;
-	~ScanBind() {
-		if (schema.release != nullptr) {
-			schema.release(&schema);
-		}
-	}
-
 	std::shared_ptr<Registered> entry;
-	ArrowSchema schema;
+	std::vector<std::string> names;
 };
+
+std::string NameOf(const ArrowSchema &schema, cxx::idx_t index) {
+	const auto *child = schema.children[index];
+	return child->name ? child->name : "";
+}
 
 /// One scan's stream and the importer turning its arrays into chunks.
 struct ScanState {
-	ScanState(nb::object capsule, ArrowArrayStream &stream, cxx::ArrowImporter importer)
-	    : capsule(std::move(capsule)), stream(stream), importer(std::move(importer)) {
+	ScanState(nb::object capsule, ArrowArrayStream *stream, ArrowArray single, bool wrap, cxx::ArrowImporter importer,
+	          std::vector<cxx::idx_t> picks)
+	    : capsule(std::move(capsule)), stream(stream), single(single), wrap(wrap), importer(std::move(importer)),
+	      picks(std::move(picks)) {
 	}
 
 	/// Torn down from an engine thread, so the stream is released and the capsule dropped under the GIL.
 	~ScanState() {
 		nb::gil_scoped_acquire gil;
-		if (stream.release != nullptr) {
-			stream.release(&stream);
+		if (stream != nullptr && stream->release != nullptr) {
+			stream->release(stream);
+		}
+		if (single.release != nullptr) {
+			single.release(&single);
 		}
 		current.reset();
 		capsule.reset();
 	}
 
 	nb::object capsule;
-	ArrowArrayStream &stream;
+	/// The stream the arrays come from, or null when the source handed over one array.
+	ArrowArrayStream *stream;
+	/// The one array, until it is appended.
+	ArrowArray single;
+	/// Whether the source's arrays are plain values rather than batches, to be wrapped as a one-column batch.
+	bool wrap;
 	cxx::ArrowImporter importer;
+	/// Which of the stream's columns each output vector takes; empty when the stream holds exactly the output.
+	std::vector<cxx::idx_t> picks;
 	/// The chunk the output vectors reference, kept until the next batch replaces it.
 	std::optional<cxx::DataChunk> current;
 	bool exhausted = false;
@@ -174,36 +282,113 @@ void PyScanBind(cxx::TableFunction::BindInput &input) {
 			                                 "' failed: " + DescribePythonError(error));
 		}
 	}
+	if (!IsBatch(schema)) {
+		WrapAsBatch(schema);
+	}
+	std::vector<std::string> names;
 	try {
 		cxx::ArrowImporter importer(input.GetContext(), schema, kBatchRows);
 		auto resolved = importer.GetSchema();
 		for (cxx::idx_t i = 0; i < resolved.GetFieldCount(); i++) {
-			input.AddResultColumn(std::string(resolved.GetFieldName(i)), resolved.GetFieldType(i));
+			// A plain array has no column name of its own; the importer would call it v0.
+			const auto raw = NameOf(schema, i);
+			input.AddResultColumn(raw.empty() ? std::string("value") : std::string(resolved.GetFieldName(i)),
+			                      resolved.GetFieldType(i));
+			names.push_back(raw);
 		}
 	} catch (...) {
 		schema.release(&schema);
 		throw;
 	}
-	// The bind data owns the schema from here on.
-	input.SetBindData<ScanBind>(std::move(entry), schema);
+	schema.release(&schema);
+	input.SetBindData<ScanBind>(ScanBind {std::move(entry), std::move(names)});
 }
 
-/// Exports the stream and builds the importer over the schema read at bind; an array of another shape is
-/// refused by the importer when it is appended.
+/// Exports the stream, narrowed to the columns the query uses when the source can, and builds the importer over
+/// the stream's own schema. The scan takes columns by position, so a source that answers with other columns
+/// than it said, in width or in order as far as the names tell, is refused rather than read wrongly.
 void OpenStream(const ScanBind &bound, cxx::TableFunction::InitGlobalInput &input) {
 	auto &entry = *bound.entry;
+	const auto declared = static_cast<cxx::idx_t>(bound.names.size());
+	std::vector<cxx::idx_t> requested;
+	bool identity = input.GetColumnCount() == declared;
+	for (cxx::idx_t i = 0; i < input.GetColumnCount(); i++) {
+		requested.push_back(input.GetColumnIndex(i));
+		identity = identity && requested.back() == i;
+	}
 	nb::gil_scoped_acquire gil;
-	nb::object capsule;
+	Exported exported;
 	try {
-		capsule = ExportStream(entry);
+		exported = ExportStream(entry, identity ? nullptr : &requested);
 	} catch (nb::python_error &error) {
 		throw cxx::InvalidInputException("exporting a stream from the object registered as '" + entry.name +
 		                                 "' failed: " + DescribePythonError(error));
 	}
-	auto &stream = StreamOf(capsule, entry.name);
-	// The importer reads the schema without consuming it, so the bind data keeps ownership.
-	cxx::ArrowImporter importer(input.GetContext(), const_cast<ArrowSchema &>(bound.schema), kBatchRows);
-	input.SetGlobalState<ScanState>(std::move(capsule), stream, std::move(importer));
+	ArrowArrayStream *stream = nullptr;
+	ArrowArray single {};
+	ArrowSchema schema {};
+	if (exported.IsArray()) {
+		schema = TakeFromCapsule<ArrowSchema>(exported.schema, kSchemaCapsule, entry.name);
+		try {
+			single = TakeFromCapsule<ArrowArray>(exported.array, kArrayCapsule, entry.name);
+		} catch (...) {
+			schema.release(&schema);
+			throw;
+		}
+	} else {
+		stream = &StreamOf(exported.stream, entry.name);
+		if (stream->get_schema(stream, &schema) != 0) {
+			throw cxx::InvalidInputException("reading the schema of the stream registered as '" + entry.name +
+			                                 "' failed: " + StreamError(*stream));
+		}
+	}
+	const bool wrap = !IsBatch(schema);
+	if (wrap) {
+		WrapAsBatch(schema);
+		if (exported.IsArray()) {
+			WrapAsBatch(single);
+		}
+	}
+	try {
+		const auto fields = static_cast<cxx::idx_t>(schema.n_children);
+		std::vector<cxx::idx_t> picks;
+		if (exported.projected) {
+			if (fields != requested.size()) {
+				throw cxx::InvalidInputException("the source registered as '" + entry.name + "' answered with " +
+				                                 std::to_string(fields) + " columns where " +
+				                                 std::to_string(requested.size()) + " were requested");
+			}
+		} else {
+			if (fields != declared) {
+				throw cxx::InvalidInputException("the source registered as '" + entry.name + "' answered with " +
+				                                 std::to_string(fields) + " columns where it declared " +
+				                                 std::to_string(declared));
+			}
+			if (!identity) {
+				picks = requested;
+			}
+		}
+		for (cxx::idx_t i = 0; i < fields; i++) {
+			const auto expected = exported.projected ? requested[i] : i;
+			if (NameOf(schema, i) != bound.names[expected]) {
+				throw cxx::InvalidInputException("the source registered as '" + entry.name + "' answered with column '" +
+				                                 NameOf(schema, i) + "' at position " + std::to_string(i) + " where '" +
+				                                 bound.names[expected] + "' was expected");
+			}
+		}
+		cxx::ArrowImporter importer(input.GetContext(), schema, kBatchRows);
+		schema.release(&schema);
+		nb::object keep = exported.IsArray() ? std::move(exported.array) : std::move(exported.stream);
+		input.SetGlobalState<ScanState>(std::move(keep), stream, single, wrap, std::move(importer), std::move(picks));
+	} catch (...) {
+		if (schema.release != nullptr) {
+			schema.release(&schema);
+		}
+		if (single.release != nullptr) {
+			single.release(&single);
+		}
+		throw;
+	}
 }
 
 void PyScanInitGlobal(cxx::TableFunction::InitGlobalInput &input) {
@@ -235,12 +420,19 @@ void PyScanInitGlobal(cxx::TableFunction::InitGlobalInput &input) {
 void HandOver(ScanState &state, cxx::DataChunk chunk, cxx::TableFunction::ExecInput &input) {
 	auto output = input.GetOutputChunk();
 	const auto columns = output.GetVectorCount();
-	if (chunk.GetVectorCount() != columns) {
+	// The engine sizes a batch from its first output vector, so it never asks for zero columns; a count over the
+	// scan still asks for one. Should that change, an empty output would need another way to carry the row count.
+	if (columns == 0) {
+		throw cxx::InvalidInputException("the scan of '" + input.GetBindData<ScanBind>().entry->name +
+		                                 "' was asked for no columns, which it cannot report rows through");
+	}
+	const auto needed = state.picks.empty() ? columns : state.picks.size();
+	if (chunk.GetVectorCount() < needed) {
 		throw cxx::InvalidInputException("an Arrow batch carried " + std::to_string(chunk.GetVectorCount()) +
-		                                 " columns where the schema declared " + std::to_string(columns));
+		                                 " columns where " + std::to_string(needed) + " were expected");
 	}
 	for (cxx::idx_t i = 0; i < columns; i++) {
-		output.GetVector(i).Reference(chunk.GetVector(i));
+		output.GetVector(i).Reference(chunk.GetVector(state.picks.empty() ? i : state.picks[i]));
 	}
 	output.GetVector(0).SetSize(chunk.GetRowCount());
 	state.current = std::move(chunk);
@@ -259,12 +451,18 @@ void PyScanExec(cxx::TableFunction::ExecInput &input) {
 			return;
 		}
 		ArrowArray array {};
-		{
+		if (state.stream == nullptr) {
+			array = state.single;
+			state.single.release = nullptr;
+		} else {
 			// A stream backed by Python code runs Python in get_next, so the GIL is held for every pull.
 			nb::gil_scoped_acquire gil;
-			if (state.stream.get_next(&state.stream, &array) != 0) {
+			if (state.stream->get_next(state.stream, &array) != 0) {
 				throw cxx::InvalidInputException("reading the stream registered as '" + entry.name +
-				                                 "' failed: " + StreamError(state.stream));
+				                                 "' failed: " + StreamError(*state.stream));
+			}
+			if (array.release != nullptr && state.wrap) {
+				WrapAsBatch(array);
 			}
 		}
 		if (array.release == nullptr) {
@@ -373,6 +571,7 @@ void InstallRegistryScan(cxx::Instance &instance, std::shared_ptr<Registry> regi
 	function.SetBindCallback(&PyScanBind);
 	function.SetInitGlobalCallback(&PyScanInitGlobal);
 	function.SetExecCallback(&PyScanExec);
+	function.SetProjectionPushdown(true);
 	function.Register();
 
 	auto scan = cxx::ReplacementScan::Create(instance);

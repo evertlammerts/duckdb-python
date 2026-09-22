@@ -9,7 +9,7 @@ import weakref
 from typing import TYPE_CHECKING, Any
 
 from .. import _duckdb
-from .._sources import STREAM, adapt
+from .._sources import adapt
 from ..exceptions import Error, InterfaceError, InvalidInputError
 
 if TYPE_CHECKING:
@@ -219,8 +219,8 @@ class Connection:
         if not isinstance(name, str):
             message = f"a registered name is a string, not {name!r}"  # type: ignore[unreachable]
             raise TypeError(message)
-        source, kind = adapt(obj)
-        self._engine().register_object(name, source, kind == STREAM)
+        source = adapt(obj)
+        self._engine().register_object(name, source, source.one_shot)
         # A new name changes what a later query resolves it to.
         self._catalog.changed()
 
