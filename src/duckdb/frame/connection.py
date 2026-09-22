@@ -140,7 +140,15 @@ class Connection:
             replace: Redefine a macro of that name if one exists.
             temporary: Make the macro last only for this database session.
         """
-        from .expr import Expr, identifier, name_parts, quote, refusing_parameters, render_literal, suspended_sinks
+        from .._expressions.expr import (
+            Expr,
+            identifier,
+            name_parts,
+            quote,
+            refusing_parameters,
+            render_literal,
+            suspended_sinks,
+        )
         from .plan import Frame
 
         signature = ", ".join(

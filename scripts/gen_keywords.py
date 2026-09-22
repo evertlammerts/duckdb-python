@@ -1,4 +1,4 @@
-"""Generate src/duckdb/frame/_keywords.py from `duckdb_keywords()`: which names need quoting is DuckDB's to say."""
+"""Generate src/duckdb/_expressions/keywords.py from `duckdb_keywords()`: which names need quoting is DuckDB's call."""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ def main() -> int:
     import duckdb
 
     text = render(duckdb.frame.connect())
-    target = Path(__file__).resolve().parent.parent / "src" / "duckdb" / "frame" / "_keywords.py"
+    target = Path(__file__).resolve().parent.parent / "src" / "duckdb" / "_expressions" / "keywords.py"
     if args.check:
         if target.read_text() != text:
             print(f"{target} is stale; run scripts/gen_keywords.py", file=sys.stderr)

@@ -196,7 +196,9 @@ class TestQualifiedNamesAreTuples:
         sys.path.insert(0, str(pathlib.Path(__file__).parent.parent / "scripts"))
         from gen_keywords import render
 
-        committed = (pathlib.Path(__file__).parent.parent / "src" / "duckdb" / "frame" / "_keywords.py").read_text()
+        committed = (
+            pathlib.Path(__file__).parent.parent / "src" / "duckdb" / "_expressions" / "keywords.py"
+        ).read_text()
         assert committed == render(con), "run scripts/gen_keywords.py"
 
     def test_a_function_registered_from_python_has_a_bare_name(self, con: duckdb.frame.Connection) -> None:
@@ -331,7 +333,7 @@ class TestNamesCompareAsTheEngineDoes:
         assert left.join(right, on="id", suffix="_r").columns(con) == ["id", "Total", "total_r"]
 
     def test_only_ascii_case_folds(self) -> None:
-        from duckdb.frame.expr import fold_name
+        from duckdb._expressions.expr import fold_name
 
         assert fold_name("PRICE.USD") == "price.usd"
         assert fold_name("STRASSE") == "strasse"

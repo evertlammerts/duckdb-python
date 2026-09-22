@@ -7,8 +7,7 @@ con = frame.connect("shop.db")
 table("orders").filter(col("total") > 1000).rows(con)
 """
 
-from .connection import Connection, connect
-from .expr import (
+from .._expressions import (
     Expr,
     Side,
     coalesce,
@@ -29,6 +28,7 @@ from .expr import (
     star,
     when,
 )
+from .connection import Connection, connect
 from .plan import (
     Bound,
     Column,

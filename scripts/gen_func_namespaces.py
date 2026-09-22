@@ -1,4 +1,4 @@
-"""Generate src/duckdb/frame/_func_namespaces.py from func_namespaces.toml, checked against the function catalog."""
+"""Generate src/duckdb/_expressions/func_namespaces.py from func_namespaces.toml, checked against the catalog."""
 
 from __future__ import annotations
 
@@ -128,8 +128,8 @@ def _return_class(return_type: str) -> str:
 
 def _reserved() -> set[str]:
     """Every Expr attribute a family method must not shadow; the aggregate shortcuts are the deliberate exception."""
-    from duckdb.frame._aggregates import AggregateMethods
-    from duckdb.frame.expr import Expr, FamilyExpr, FuncNamespaces
+    from duckdb._expressions.aggregates import AggregateMethods
+    from duckdb._expressions.expr import Expr, FamilyExpr, FuncNamespaces
 
     aggregates = {name for name in vars(AggregateMethods) if not name.startswith("_")}
     names: set[str] = set()
@@ -301,7 +301,7 @@ def main() -> int:
         print("\n".join(report["problems"]), file=sys.stderr)
         return 1
     text = render(resolved)
-    target = Path(__file__).resolve().parent.parent / "src" / "duckdb" / "frame" / "_func_namespaces.py"
+    target = Path(__file__).resolve().parent.parent / "src" / "duckdb" / "_expressions" / "func_namespaces.py"
     if args.check:
         if target.read_text() != text:
             print(f"{target} is stale; run scripts/gen_func_namespaces.py", file=sys.stderr)

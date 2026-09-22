@@ -12,8 +12,8 @@ import pytest
 
 import duckdb
 from duckdb import _duckdb, exceptions
+from duckdb._expressions.expr import ParamSink, Star, render_literal, suspended_sinks
 from duckdb.frame import col, fn, lit, param, sql_expr, star
-from duckdb.frame.expr import ParamSink, Star, render_literal, suspended_sinks
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1104,7 +1104,7 @@ class TestOnlyAPlanIsASubquery:
     """Having a `render` method is not enough to be used as a subquery."""
 
     def test_a_frame_is_a_plan(self) -> None:
-        from duckdb.frame.expr import PlanBase
+        from duckdb._expressions.expr import PlanBase
 
         assert isinstance(duckdb.frame.table("t"), PlanBase)
 
@@ -1274,7 +1274,9 @@ class TestAggregatesAreRealMethods:
         sys.path.insert(0, str(pathlib.Path(__file__).parent.parent / "scripts"))
         from gen_aggregates import render
 
-        committed = (pathlib.Path(__file__).parent.parent / "src" / "duckdb" / "frame" / "_aggregates.py").read_text()
+        committed = (
+            pathlib.Path(__file__).parent.parent / "src" / "duckdb" / "_expressions" / "aggregates.py"
+        ).read_text()
         assert committed == render(), "run scripts/gen_aggregates.py"
 
 
@@ -1348,7 +1350,7 @@ class TestFunctionNamespaces:
         assert plan.rows(con) == [("[1,2]", ["a", "b"], True)]
 
     def test_the_entry_is_an_expression_and_chains_stay_in_family(self, con: duckdb.frame.Connection) -> None:
-        from duckdb.frame._func_namespaces import JsonExpr, ListExpr, StrExpr
+        from duckdb._expressions.func_namespaces import JsonExpr, ListExpr, StrExpr
 
         # Entering a family changes nothing about the SQL.
         assert col("s").str().fragment() == col("s").fragment()
@@ -1374,16 +1376,16 @@ class TestFunctionNamespaces:
         assert sink.entries[0][1] == "x'; DROP TABLE t; --"
 
     def test_every_generated_function_exists_in_this_engine(self, con: duckdb.frame.Connection) -> None:
-        from duckdb.frame import _func_namespaces
+        from duckdb._expressions import func_namespaces
 
         known = {row[0] for row in duckdb.frame.sql("SELECT DISTINCT function_name FROM duckdb_functions()").rows(con)}
         missing = [
             f"{cls.__name__}.{method} -> {function}"
             for cls in (
-                _func_namespaces.StrExpr,
-                _func_namespaces.DtExpr,
-                _func_namespaces.ListExpr,
-                _func_namespaces.JsonExpr,
+                func_namespaces.StrExpr,
+                func_namespaces.DtExpr,
+                func_namespaces.ListExpr,
+                func_namespaces.JsonExpr,
             )
             for method, (function, _, _) in cls.SPEC.items()
             if function not in known
@@ -1395,13 +1397,13 @@ class TestFunctionNamespaces:
         self, con: duckdb.frame.Connection, namespace: str
     ) -> None:
         """Only "no function matches" fails: any other complaint is DuckDB judging the made-up values."""
-        from duckdb.frame import _func_namespaces
+        from duckdb._expressions import func_namespaces
 
         cls = {
-            "str": _func_namespaces.StrExpr,
-            "dt": _func_namespaces.DtExpr,
-            "list": _func_namespaces.ListExpr,
-            "json": _func_namespaces.JsonExpr,
+            "str": func_namespaces.StrExpr,
+            "dt": func_namespaces.DtExpr,
+            "list": func_namespaces.ListExpr,
+            "json": func_namespaces.JsonExpr,
         }[namespace]
         subject = {
             "str": "'abc'",
@@ -1431,7 +1433,7 @@ class TestFunctionNamespaces:
         sys.path.insert(0, str(pathlib.Path(__file__).parent.parent / "scripts"))
         from gen_func_namespaces import build, render
 
-        generated = pathlib.Path(__file__).parent.parent / "src" / "duckdb" / "frame" / "_func_namespaces.py"
+        generated = pathlib.Path(__file__).parent.parent / "src" / "duckdb" / "_expressions" / "func_namespaces.py"
         committed = generated.read_text()
         resolved, report = build(con)
         assert not report["problems"], report["problems"]
@@ -1565,7 +1567,7 @@ class TestReviewRoundFour:
 
     def test_timezone_binds_the_family_its_docstring_describes(self, con: duckdb.frame.Connection) -> None:
         # The two-argument conversion overload used to win, under the one-argument description.
-        from duckdb.frame._func_namespaces import DtExpr
+        from duckdb._expressions.func_namespaces import DtExpr
 
         assert DtExpr.SPEC["timezone"][1] == 0
         assert "offset" in (DtExpr.timezone.__doc__ or "")
@@ -1576,7 +1578,7 @@ class TestReviewRoundFour:
 
     def test_nothing_numeric_is_filed_under_dt(self) -> None:
         # One date overload used to admit a whole function: isfinite(DATE) brought all of isfinite along.
-        from duckdb.frame._func_namespaces import DtExpr
+        from duckdb._expressions.func_namespaces import DtExpr
 
         assert not {"isfinite", "isinf", "generate_series", "range"} & set(DtExpr.SPEC)
 
@@ -1635,9 +1637,9 @@ class TestReviewRoundFour:
         # A description ending in a period once produced `..`; a truncation ellipsis is the one exception.
         import inspect
 
-        from duckdb.frame import _func_namespaces
+        from duckdb._expressions import func_namespaces
 
-        assert ".." not in inspect.getsource(_func_namespaces).replace("...", "")
+        assert ".." not in inspect.getsource(func_namespaces).replace("...", "")
 
     @pytest.mark.parametrize("how", sorted(["semi", "anti"]))
     def test_a_join_kind_row_decides_what_it_keeps(self, con: duckdb.frame.Connection, how: str) -> None:
@@ -2158,7 +2160,7 @@ class TestReviewRoundFive:
 
     def test_a_dict_means_the_same_thing_at_every_site(self, con: duckdb.frame.Connection) -> None:
         # Text keys make a STRUCT and other keys a MAP; a mix has no type and meets DuckDB's own refusal.
-        from duckdb.frame.expr import sql_type_of
+        from duckdb._expressions.expr import sql_type_of
 
         assert sql_type_of({}) is None
         assert render_literal({}) == "{}"
@@ -2648,7 +2650,7 @@ class TestReviewRoundEight:
     def test_generated_docs_come_from_the_bound_overload(self) -> None:
         import sys
 
-        from duckdb.frame._func_namespaces import StrExpr
+        from duckdb._expressions.func_namespaces import StrExpr
 
         # md5 has a BLOB overload whose description used to be picked up.
         assert "string" in (StrExpr.md5.__doc__ or "")
@@ -2663,7 +2665,7 @@ class TestReviewRoundEight:
 
     def test_every_inherited_string_method_binds_on_a_json_subject(self, con: duckdb.frame.Connection) -> None:
         """The other checks never try the inherited string methods on a JSON value, so DuckDB is asked."""
-        from duckdb.frame._func_namespaces import JsonExpr, StrExpr
+        from duckdb._expressions.func_namespaces import JsonExpr, StrExpr
 
         subject = "'{\"a\": [1, 2]}'::JSON"
         wrong = []
@@ -2702,7 +2704,7 @@ class TestReviewRoundEight:
     def test_catalog_parameter_names_are_cleaned_and_renameable(self) -> None:
         import inspect
 
-        from duckdb.frame._func_namespaces import DtExpr, ListExpr
+        from duckdb._expressions.func_namespaces import DtExpr, ListExpr
 
         # DuckDB spells list_resize's optional parameter `size[`, where the bracket is notation.
         assert "Arguments: size." in (ListExpr.resize.__doc__ or "")

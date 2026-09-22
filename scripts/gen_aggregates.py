@@ -1,4 +1,4 @@
-"""Generate src/duckdb/frame/_aggregates.py from func_namespaces.toml, so the aggregate methods type and complete."""
+"""Generate src/duckdb/_expressions/aggregates.py from func_namespaces.toml; the aggregate methods type and complete."""
 
 from __future__ import annotations
 
@@ -70,7 +70,7 @@ def main() -> int:
     if missing:
         print(f"no aggregate in this engine's catalog for: {', '.join(missing)}", file=sys.stderr)
         return 1
-    target = Path(__file__).resolve().parent.parent / "src" / "duckdb" / "frame" / "_aggregates.py"
+    target = Path(__file__).resolve().parent.parent / "src" / "duckdb" / "_expressions" / "aggregates.py"
     text = render()
     if args.check:
         if target.read_text() != text:

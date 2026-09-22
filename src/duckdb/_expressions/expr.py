@@ -18,13 +18,13 @@ import string
 import uuid
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
-from ._aggregates import AggregateMethods
-from ._keywords import KEYWORDS
+from .aggregates import AggregateMethods
+from .keywords import KEYWORDS
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator
 
-    from ._func_namespaces import DtExpr, JsonExpr, ListExpr, StrExpr
+    from .func_namespaces import DtExpr, JsonExpr, ListExpr, StrExpr
 
 __all__ = [
     "Expr",
@@ -430,25 +430,25 @@ class FuncNamespaces:
 
     def str(self) -> StrExpr:
         """This expression with the string functions in scope, `col("s").str().upper()`; nothing is checked or cast."""
-        from ._func_namespaces import StrExpr
+        from .func_namespaces import StrExpr
 
         return StrExpr(cast("Expr", self))
 
     def dt(self) -> DtExpr:
         """This expression as a date, time or timestamp: `col("placed").dt().year()`."""
-        from ._func_namespaces import DtExpr
+        from .func_namespaces import DtExpr
 
         return DtExpr(cast("Expr", self))
 
     def list(self) -> ListExpr:
         """This expression as a list: `col("tags").list().contains("vip")`."""
-        from ._func_namespaces import ListExpr
+        from .func_namespaces import ListExpr
 
         return ListExpr(cast("Expr", self))
 
     def json(self) -> JsonExpr:
         """This expression as JSON, with the string functions in scope too: `col("p").json().extract("$.id")`."""
-        from ._func_namespaces import JsonExpr
+        from .func_namespaces import JsonExpr
 
         return JsonExpr(cast("Expr", self))
 

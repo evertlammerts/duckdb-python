@@ -19,9 +19,7 @@ import os
 from collections.abc import Iterable, Sized
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
-from ..exceptions import Error
-from .connection import Connection, LiveResult
-from .expr import (
+from .._expressions.expr import (
     Col,
     Expr,
     FamilyExpr,
@@ -45,6 +43,8 @@ from .expr import (
     subqueries,
     suspended_sinks,
 )
+from ..exceptions import Error
+from .connection import Connection, LiveResult
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping

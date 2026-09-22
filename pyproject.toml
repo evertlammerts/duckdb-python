@@ -87,7 +87,7 @@ convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
 # Operator methods return NotImplemented for an operand that is not ours, and its type cannot be spelled.
-"src/duckdb/frame/expr.py" = ["ANN401"]
+"src/duckdb/_expressions/expr.py" = ["ANN401"]
 # Naming these types would mean importing numpy into a package that depends on nothing.
 "src/duckdb/frame/_numpy.py" = ["ANN401"]
 # Test names are the documentation; what matters is explained where it applies.
