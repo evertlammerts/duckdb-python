@@ -561,6 +561,10 @@ KEPT = [
     "flag",
     "ts_ns >= TIMESTAMP '2021-01-01 00:00:00'",
     "f = 'nan'::DOUBLE",
+    "d >= DATE 'infinity'",
+    "d = DATE '-infinity'",
+    "ts < TIMESTAMP 'infinity'",
+    "ts IN (TIMESTAMP '-infinity', TIMESTAMP '2021-01-01 09:00:00')",
     "n IS DISTINCT FROM 3",
     "coalesce(n, 0) > 6",
     "CASE WHEN n > 6 THEN true ELSE false END",
@@ -639,6 +643,181 @@ class TestDatasetPushdown:
         assert adapt(scanner).accepts(col("n") > 8) is False
         con.register("part", scanner)
         assert rows(con, "SELECT n FROM part WHERE n > 8") == [(9,)]
+
+
+class PushingLazily(LazyFrameSource):
+    """A lazy frame source that remembers what each scan applied."""
+
+    def __init__(self, plan: pl.LazyFrame) -> None:
+        super().__init__(plan)
+        self.applied: list[list[str]] = []
+
+    def stream(self, columns: Sequence[int] | None, filters: Sequence[Expr]) -> tuple[object, bool]:
+        self.applied.append([predicate.fragment() for predicate in filters])
+        return super().stream(columns, filters)
+
+
+class TestLazyFramePushdown:
+    def register_both(self, con: duckdb.frame.Connection, typed_dir: Path) -> PushingLazily:
+        source = PushingLazily(pl.scan_parquet(typed_dir, hive_partitioning=True))
+        con.register("pushed", source)
+        con.register("plain", ExportingSource(pl.scan_parquet(typed_dir, hive_partitioning=True).collect()))
+        return source
+
+    @pytest.mark.parametrize("where", PUSHED)
+    def test_a_pushed_predicate_selects_what_the_engine_selects(
+        self, con: duckdb.frame.Connection, typed_dir: Path, where: str
+    ) -> None:
+        source = self.register_both(con, typed_dir)
+        expected = rows(con, f"SELECT n, s, f, flag, d, ts, year FROM plain WHERE {where} ORDER BY year, n")
+        pushed = rows(con, f"SELECT n, s, f, flag, d, ts, year FROM pushed WHERE {where} ORDER BY year, n")
+        assert without_nan(pushed) == without_nan(expected)
+        assert expected
+        assert source.applied
+        assert all(source.applied), where
+        assert "Filter" not in sql(f"SELECT n FROM pushed WHERE {where}").on(con).explain()
+
+    @pytest.mark.parametrize("where", KEPT)
+    def test_a_predicate_outside_the_set_stays_with_the_engine(
+        self, con: duckdb.frame.Connection, typed_dir: Path, where: str
+    ) -> None:
+        source = self.register_both(con, typed_dir)
+        expected = rows(con, f"SELECT n, year FROM plain WHERE {where} ORDER BY year, n")
+        assert rows(con, f"SELECT n, year FROM pushed WHERE {where} ORDER BY year, n") == expected
+        assert source.applied == [[]], where
+
+    def test_the_filter_lands_in_the_polars_plan(self, con: duckdb.frame.Connection, typed_dir: Path) -> None:
+        source = self.register_both(con, typed_dir)
+        capsule, projected = source.stream([1], (col("n") > 6,))
+        assert projected
+        assert columns_of(capsule) == ["s"]
+        filtered = source.obj.filter(pl.col("n") > 6).select("s")
+        assert "FILTER" in filtered.explain() or "SELECTION" in filtered.explain()
+        assert rows(con, "SELECT s FROM pushed WHERE n > 6 ORDER BY s") == [("8",), ("9",)]
+
+    def test_a_decimal_pushes_and_a_nanosecond_time_stays(self, con: duckdb.frame.Connection) -> None:
+        frame = pl.DataFrame(
+            {
+                "money": pl.Series([decimal.Decimal("1.50"), decimal.Decimal("2.25"), None], dtype=pl.Decimal(10, 2)),
+                "clock": [datetime.time(1, 2, 3), datetime.time(4, 5, 6), None],
+            }
+        )
+        source = PushingLazily(frame.lazy())
+        con.register("late", source)
+        con.register("now", frame)
+        assert table("late").schema(con) == [("money", "DECIMAL(10,2)"), ("clock", "TIME_NS")]
+        for where, pushed in (
+            ("money > 1.50", True),
+            ("money IN (1.50, 9.99)", True),
+            ("money IS NULL", True),
+            ("clock < '04:00:00'::TIME_NS", False),
+            ("clock IS NULL", True),
+        ):
+            expected = rows(con, f"SELECT money FROM now WHERE {where}")
+            assert rows(con, f"SELECT money FROM late WHERE {where}") == expected
+            assert bool(source.applied[-1]) is pushed, where
+
+    def test_a_float32_column_compares_in_its_own_width(self, con: duckdb.frame.Connection) -> None:
+        frame = pl.DataFrame({"f": pl.Series([0.1, 0.2, None], dtype=pl.Float32)})
+        source = PushingLazily(frame.lazy())
+        con.register("late", source)
+        con.register("now", frame)
+        for where in ("f > 0.1", "f = 0.1", "f >= 0.1", "f < 0.2", "f IN (0.1, 0.3)"):
+            expected = rows(con, f"SELECT f FROM now WHERE {where}")
+            assert rows(con, f"SELECT f FROM late WHERE {where}") == expected, where
+            assert source.applied[-1], where
+        assert rows(con, "SELECT count(*) FROM late WHERE f > 0.1") == [(1,)]
+
+    def test_a_decimal_literal_beyond_the_scale_stays_with_the_engine(self, con: duckdb.frame.Connection) -> None:
+        frame = pl.DataFrame(
+            {"money": pl.Series([decimal.Decimal("1.50"), decimal.Decimal("-1.51")], dtype=pl.Decimal(10, 2))}
+        )
+        source = PushingLazily(frame.lazy())
+        con.register("late", source)
+        con.register("now", frame)
+        for where, pushed in (
+            ("money > 1.5", True),
+            ("money = -1.51", True),
+            ("money = 1.505", False),
+            ("money > 1.499", False),
+        ):
+            expected = rows(con, f"SELECT money FROM now WHERE {where}")
+            assert rows(con, f"SELECT money FROM late WHERE {where}") == expected, where
+            assert bool(source.applied[-1]) is pushed, where
+
+    def test_an_eager_frame_keeps_refusing(self, con: duckdb.frame.Connection) -> None:
+        frame = pl.DataFrame({"n": [1, 2, 3]})
+        assert adapt(frame).accepts(col("n") > 1) is False
+        con.register("eager", frame)
+        assert rows(con, "SELECT n FROM eager WHERE n > 1 ORDER BY n") == [(2,), (3,)]
+
+
+class TestPolarsTranslation:
+    schema = pl.Schema(
+        {
+            "n": pl.Int32(),
+            "big": pl.Int64(),
+            "small": pl.UInt8(),
+            "f": pl.Float64(),
+            "s": pl.String(),
+            "d": pl.Date(),
+            "ts": pl.Datetime("ms"),
+            "zoned": pl.Datetime("us", "UTC"),
+            "money": pl.Decimal(10, 2),
+            "clock": pl.Time(),
+            "tags": pl.List(pl.String()),
+        }
+    )
+
+    def translate(self, predicate: Expr) -> str:
+        from duckdb._expressions.polars import to_polars
+
+        return str(to_polars(predicate, self.schema))
+
+    def test_each_form_has_a_polars_reading(self) -> None:
+        assert self.translate(col("n") > 5) == '[(col("n")) > (5)]'
+        assert (
+            self.translate((col("n") >= 5) & (col("s") != "x")) == '[([(col("n")) >= (5)]) & ([(col("s")) != ("x")])]'
+        )
+        assert (
+            self.translate(~(col("n") < 5) | col("d").is_null())
+            == '[([(col("n")) < (5)].not()) | (col("d").is_null())]'
+        )
+        assert self.translate(col("n").isin([1, 2])) == 'col("n").is_in([Series])'
+        assert self.translate(col("n").between(1, 2)) == '[([(col("n")) >= (1)]) & ([(col("n")) <= (2)])]'
+        assert self.translate(col("f") > 1.0) == '[(col("f")) > (1.0)]'
+        assert "1.5" in self.translate(col("money") > decimal.Decimal("1.5"))
+        assert "2020-01-01" in self.translate(col("ts") > datetime.datetime(2020, 1, 1))
+
+    @pytest.mark.parametrize(
+        "predicate",
+        [
+            col("n") > 5.5,
+            col("n") > "5",
+            col("s") > 5,
+            col("big") > True,
+            col("f") == float("nan"),
+            col("n") > 5_000_000_000,
+            col("small") > 256,
+            col("small") > -1,
+            col("zoned") > datetime.datetime(2020, 1, 1),
+            col("ts") > datetime.datetime(2020, 1, 1, tzinfo=datetime.UTC),
+            col("money") > 1.5,
+            col("money") > decimal.Decimal("NaN"),
+            col("tags").is_null(),
+            col("missing") > 1,
+            col("n") > col("big"),
+            col("n").isin([1, None]),
+            col("n").cast("BIGINT") > 5,
+            col("s").like("%x%"),
+            col("n") + 1 > 5,
+        ],
+    )
+    def test_the_rest_is_refused(self, predicate: Expr) -> None:
+        from duckdb._expressions import Untranslatable
+
+        with pytest.raises(Untranslatable):
+            self.translate(predicate)
 
 
 class TestArrowTranslation:

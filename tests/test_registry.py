@@ -1283,6 +1283,32 @@ class TestFilters:
             "zoned": datetime.datetime(2024, 5, 6, tzinfo=datetime.UTC),
         }
 
+    def test_an_infinite_date_is_never_offered(self, con: duckdb.frame.Connection) -> None:
+        class Noting(Recording):
+            def __init__(self, table_: pa.Table) -> None:
+                super().__init__(table_)
+                self.offered: list[str] = []
+
+            def accepts(self, predicate: Expr) -> bool:
+                self.offered.append(predicate.fragment())
+                return False
+
+        edge = pa.table(
+            {
+                "d": [datetime.date(1, 1, 1), datetime.date(9999, 12, 31)],
+                "ts": pa.array([datetime.datetime.min, datetime.datetime.max], pa.timestamp("us")),
+            }
+        )
+        source = Noting(edge)
+        con.register("edge", source)
+        assert rows(con, "SELECT count(*) FROM edge WHERE d >= DATE 'infinity' OR ts <= TIMESTAMP '-infinity'") == [
+            (0,)
+        ]
+        assert rows(con, "SELECT count(*) FROM edge WHERE d < DATE 'infinity' AND ts > TIMESTAMP '-infinity'") == [(2,)]
+        assert source.offered == []
+        assert rows(con, "SELECT count(*) FROM edge WHERE d >= DATE '9999-12-31'") == [(1,)]
+        assert source.offered == ["(\"d\" >= DATE '9999-12-31')"]
+
     def test_a_stream_is_never_asked(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
         source = adapt(reader_over(numbers))
         assert isinstance(source, StreamSource)

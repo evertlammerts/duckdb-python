@@ -132,20 +132,37 @@ class PolarsFrameSource(ExportingSource):
 
 
 class LazyFrameSource(Source):
-    """A polars LazyFrame: a plan, narrowed to the requested columns and collected once per scan, never held.
+    """A polars LazyFrame: a plan, filtered and narrowed as the query asks and collected once per scan, never held.
 
     The schema is the plan's prediction; a step whose declared output differs from what it produces, such as a
     `map_batches` without a return type, is refused by polars when the plan runs, and the query fails with that.
+    A predicate the polars translator models becomes a `filter` step, which polars pushes into its own scan.
     """
 
     def __arrow_c_schema__(self) -> object:
         return self.obj.collect_schema().__arrow_c_schema__()
 
+    def accepts(self, predicate: Expr) -> bool:
+        from ._expressions import Untranslatable
+        from ._expressions.polars import to_polars
+
+        try:
+            to_polars(predicate, self.obj.collect_schema())
+        except Untranslatable:
+            return False
+        return True
+
     def stream(self, columns: Sequence[int] | None, filters: Sequence[Expr]) -> tuple[object, bool]:
-        if columns is None:
-            return self.obj.collect().__arrow_c_stream__(), False
-        names = self.obj.collect_schema().names()
-        return self.obj.select([names[i] for i in columns]).collect().__arrow_c_stream__(), True
+        from ._expressions.polars import to_polars
+
+        schema = self.obj.collect_schema()
+        plan = self.obj
+        for predicate in filters:
+            plan = plan.filter(to_polars(predicate, schema))
+        if columns is not None:
+            names = schema.names()
+            plan = plan.select([names[i] for i in columns])
+        return plan.collect().__arrow_c_stream__(), columns is not None
 
 
 class PandasSource(Source):

@@ -11,6 +11,19 @@
 namespace duckdb_python {
 namespace {
 
+bool Temporal(cxx::LogicalTypeId type) {
+	switch (type) {
+	case cxx::LogicalTypeId::DATE:
+	case cxx::LogicalTypeId::TIMESTAMP:
+	case cxx::LogicalTypeId::TIMESTAMP_SEC:
+	case cxx::LogicalTypeId::TIMESTAMP_MS:
+	case cxx::LogicalTypeId::TIMESTAMP_TZ:
+		return true;
+	default:
+		return false;
+	}
+}
+
 /// The comparison's operator as the frame spells it.
 const char *Operator(cxx::ExpressionType comparison) {
 	switch (comparison) {
@@ -117,9 +130,6 @@ private:
 			throw Refused {};
 		}
 		const auto column = resolve(node.GetColumnIndex());
-		if (!ConvertsLossless(column.type)) {
-			throw Refused {};
-		}
 		nb::str name(column.name.c_str(), column.name.size());
 		return Resolved {nodes.attr("Col")(nb::make_tuple(name)), column.type};
 	}
@@ -129,13 +139,20 @@ private:
 			throw Refused {};
 		}
 		auto value = node.GetConstantValue();
-		if (value.IsNull() || value.GetLogicalType().GetTypeId() != type) {
+		if (value.IsNull() || value.GetLogicalType().GetTypeId() != type || !ConvertsLossless(type)) {
 			throw Refused {};
 		}
 		if (type == cxx::LogicalTypeId::FLOAT || type == cxx::LogicalTypeId::DOUBLE) {
 			// NaN orders differently in every library; a predicate naming it stays with the engine.
 			const double number = type == cxx::LogicalTypeId::FLOAT ? value.Get<float>() : value.Get<double>();
 			if (number != number) {
+				throw Refused {};
+			}
+		}
+		if (Temporal(type)) {
+			// An infinite date or timestamp converts to Python's largest or smallest value, which a real row can hold.
+			const auto text = value.ToText();
+			if (text == "infinity" || text == "-infinity") {
 				throw Refused {};
 			}
 		}

@@ -18,8 +18,9 @@ namespace duckdb_python {
 inline constexpr const char *kScanFunction = "python_object_scan";
 
 /// Registers the table function on the connection's database: bind resolves the name against `registry`, and the
-/// scan reads the object's Arrow export with projection and filter pushdown.
+/// scan reads the object's Arrow export with projection and filter pushdown, in batches of at most `batch_rows`,
+/// the engine's standard vector size.
 void RegisterObjectScan(cxx::Connection &connection, std::shared_ptr<Registry> registry,
-                        std::shared_ptr<ModuleState> module);
+                        std::shared_ptr<ModuleState> module, cxx::idx_t batch_rows);
 
 } // namespace duckdb_python

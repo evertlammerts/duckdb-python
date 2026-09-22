@@ -10,6 +10,7 @@
 
 #include "scan.hpp"
 
+#include <string>
 #include <utility>
 
 namespace duckdb_python {
@@ -113,8 +114,10 @@ void Registry::Clear() {
 
 void InstallRegistryScan(cxx::Instance &instance, std::shared_ptr<Registry> registry,
                          std::shared_ptr<ModuleState> module) {
+	const auto batch_rows =
+	    static_cast<cxx::idx_t>(std::stoull(std::string(instance.GetOption("standard_vector_size").GetValue())));
 	auto connection = instance.Connect();
-	RegisterObjectScan(connection, registry, std::move(module));
+	RegisterObjectScan(connection, registry, std::move(module), batch_rows);
 
 	auto scan = cxx::ReplacementScan::Create(instance);
 	scan.SetUserData<ReplacementUserData>(ReplacementUserData {std::move(registry)});

@@ -16,9 +16,6 @@
 namespace duckdb_python {
 namespace {
 
-/// The engine's standard vector size, which is what the output chunk handed to the exec callback is allocated for.
-constexpr cxx::idx_t kBatchRows = 2048;
-
 /// What a source answered: a stream capsule, or the schema and array capsules of one array, which is one batch.
 struct Exported {
 	nb::object stream;
@@ -106,6 +103,9 @@ std::string ReadAlready(const Registered &entry) {
 struct ScanUserData {
 	std::shared_ptr<Registry> registry;
 	std::shared_ptr<ModuleState> module;
+	/// The engine's standard vector size, which is what the output chunk handed to the exec callback is allocated
+	/// for, so the importer produces chunks of at most that many rows.
+	cxx::idx_t batch_rows;
 };
 
 /// The entry a query bound over, the Arrow names and types of the columns it declared, in order, and the predicates
@@ -195,7 +195,7 @@ void PyScanBind(cxx::TableFunction::BindInput &input) {
 	std::vector<std::string> names;
 	std::vector<cxx::LogicalTypeId> types;
 	try {
-		cxx::ArrowImporter importer(input.GetContext(), schema, kBatchRows);
+		cxx::ArrowImporter importer(input.GetContext(), schema, input.GetUserData<ScanUserData>().batch_rows);
 		auto resolved = importer.GetSchema();
 		for (cxx::idx_t i = 0; i < resolved.GetFieldCount(); i++) {
 			// A plain array has no column name of its own; the importer would call it v0.
@@ -339,7 +339,7 @@ void OpenStream(const ScanBind &bound, cxx::TableFunction::InitGlobalInput &inpu
 				                                 bound.names[expected] + "' was expected");
 			}
 		}
-		cxx::ArrowImporter importer(input.GetContext(), schema, kBatchRows);
+		cxx::ArrowImporter importer(input.GetContext(), schema, input.GetUserData<ScanUserData>().batch_rows);
 		schema.release(&schema);
 		nb::object keep = exported.IsArray() ? std::move(exported.array) : std::move(exported.stream);
 		input.SetGlobalState<ScanState>(std::move(keep), stream, single, wrap, std::move(importer), std::move(picks));
@@ -447,12 +447,12 @@ void PyScanExec(cxx::TableFunction::ExecInput &input) {
 } // namespace
 
 void RegisterObjectScan(cxx::Connection &connection, std::shared_ptr<Registry> registry,
-                        std::shared_ptr<ModuleState> module) {
+                        std::shared_ptr<ModuleState> module, cxx::idx_t batch_rows) {
 	auto function = cxx::TableFunction::Create(connection);
 	function.SetName(kScanFunction);
 	function.WithSignature(
 	    [&](cxx::FunctionSignature &signature) { signature.AddParameter("name", connection.ParseType("VARCHAR")); });
-	function.SetUserData<ScanUserData>(ScanUserData {std::move(registry), std::move(module)});
+	function.SetUserData<ScanUserData>(ScanUserData {std::move(registry), std::move(module), batch_rows});
 	function.SetBindCallback(&PyScanBind);
 	function.SetInitGlobalCallback(&PyScanInitGlobal);
 	function.SetExecCallback(&PyScanExec);
