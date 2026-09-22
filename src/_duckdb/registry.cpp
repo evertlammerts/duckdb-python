@@ -301,6 +301,25 @@ void PyScanBind(cxx::TableFunction::BindInput &input) {
 		throw;
 	}
 	schema.release(&schema);
+	{
+		nb::gil_scoped_acquire gil;
+		try {
+			nb::object rows = entry->object.attr("rows")();
+			// A bool is an int to Python, and a truth value is never a row count.
+			if (nb::isinstance<nb::bool_>(rows)) {
+				throw nb::cast_error();
+			}
+			if (!rows.is_none()) {
+				input.SetCardinality(nb::cast<cxx::idx_t>(rows), true);
+			}
+		} catch (nb::python_error &error) {
+			throw cxx::InvalidInputException("counting the rows of the object registered as '" + entry->name +
+			                                 "' failed: " + DescribePythonError(error));
+		} catch (const nb::cast_error &) {
+			throw cxx::InvalidInputException("the source registered as '" + entry->name +
+			                                 "' answered rows() with something other than a count or None");
+		}
+	}
 	input.SetBindData<ScanBind>(ScanBind {std::move(entry), std::move(names)});
 }
 

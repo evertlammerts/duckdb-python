@@ -32,6 +32,10 @@ class Source:
     def __init__(self, obj: object) -> None:
         self.obj: Any = obj
 
+    def rows(self) -> int | None:
+        """How many rows a scan will produce, when the object knows without reading itself; None otherwise."""
+        return None
+
     def stream(self, columns: Sequence[int] | None) -> tuple[object, bool]:
         """An Arrow stream capsule over the object and whether it holds only `columns`, in that order.
 
@@ -52,11 +56,18 @@ class ExportingSource(Source):
         if hasattr(exporter, "__arrow_c_schema__"):
             self.__dict__["__arrow_c_schema__"] = exporter.__arrow_c_schema__
 
+    def rows(self) -> int | None:
+        """The length of a pyarrow, polars or pandas object is its row count; anything else's may mean anything."""
+        return _known_length(self.obj)
+
 
 class StreamSource(ExportingSource):
-    """A RecordBatchReader: the same, read once."""
+    """A RecordBatchReader: the same, read once, its length unknown."""
 
     one_shot = True
+
+    def rows(self) -> int | None:
+        return None
 
 
 class ArraySource(Source):
@@ -70,6 +81,9 @@ class ArraySource(Source):
         kind: Any = getattr(obj, "type", None)
         if hasattr(kind, "__arrow_c_schema__"):
             self.__dict__["__arrow_c_schema__"] = kind.__arrow_c_schema__
+
+    def rows(self) -> int | None:
+        return _known_length(self.obj)
 
     def stream(self, columns: Sequence[int] | None) -> tuple[object, bool]:
         return self.obj.__arrow_c_array__(), False
@@ -156,6 +170,9 @@ class PandasSource(Source):
     def __arrow_c_schema__(self) -> object:
         return self._schema(self.obj).__arrow_c_schema__()
 
+    def rows(self) -> int | None:
+        return len(self.obj)
+
     def stream(self, columns: Sequence[int] | None) -> tuple[object, bool]:
         frame = self.obj if columns is None else self.obj.iloc[:, list(columns)]
         schema = self._schema(frame)
@@ -168,6 +185,13 @@ class DatasetSource(Source):
 
     def __arrow_c_schema__(self) -> object:
         return self.obj.schema.__arrow_c_schema__()
+
+    def rows(self) -> int | None:
+        """A parquet dataset counts its rows from file metadata; any other format would read the files to count."""
+        layout = getattr(self.obj, "format", None)
+        if not _is(layout, "pyarrow", "ParquetFileFormat") or not callable(getattr(self.obj, "count_rows", None)):
+            return None
+        return int(self.obj.count_rows())
 
     def stream(self, columns: Sequence[int] | None) -> tuple[object, bool]:
         if columns is None:
@@ -186,9 +210,23 @@ class ScannerSource(Source):
         return self.obj.to_reader().__arrow_c_stream__(), False
 
 
+def _from(obj: object, library: str) -> bool:
+    module = type(obj).__module__
+    return module == library or module.startswith(library + ".")
+
+
 def _is(obj: object, library: str, *names: str) -> bool:
-    cls = type(obj)
-    return cls.__name__ in names and (cls.__module__ == library or cls.__module__.startswith(library + "."))
+    return type(obj).__name__ in names and _from(obj, library)
+
+
+def _known_length(obj: object) -> int | None:
+    """`len()` when the object comes from a library where a length is a row count, and it has one."""
+    if not any(_from(obj, library) for library in ("pyarrow", "polars", "pandas")):
+        return None
+    try:
+        return len(obj)  # type: ignore[arg-type]
+    except TypeError:
+        return None
 
 
 def adapt(obj: object) -> Source:

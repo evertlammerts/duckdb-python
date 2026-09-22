@@ -509,6 +509,81 @@ class TestProjection:
         assert rows(con, "SELECT s FROM r WHERE n = 2") == [("2",)]
 
 
+class TestCardinality:
+    """An object that knows its length tells the planner, exactly; one that does not leaves the planner guessing."""
+
+    def test_an_exact_count_reaches_the_plan(self, con: duckdb.frame.Connection) -> None:
+        con.register("t", pa.table({"k": list(range(100_000))}))
+        assert "~100,000 rows" in table("t").on(con).explain()
+        con.register("r", reader_over(pa.table({"k": [1, 2, 3]})))
+        assert "~1 row" in table("r").on(con).explain()
+
+    def test_the_smaller_side_builds_the_hash_whichever_is_written_first(self, con: duckdb.frame.Connection) -> None:
+        con.register("big", pa.table({"k": list(range(100_000)), "v": ["x"] * 100_000}))
+        con.register("small", pa.table({"k": [1, 2, 3], "w": ["a", "b", "c"]}))
+        for query in ("SELECT * FROM big JOIN small USING (k)", "SELECT * FROM small JOIN big USING (k)"):
+            plan = sql(query).on(con).explain()
+            # The right child is the build side; the plan renders it right of the probe side.
+            assert plan.index("~100,000 rows") < plan.index("~3 rows"), plan
+            assert len(rows(con, query)) == 3
+
+    def test_a_source_answering_none_leaves_the_estimate_alone(
+        self, con: duckdb.frame.Connection, numbers: pa.Table
+    ) -> None:
+        class Unknown(Recording):
+            def rows(self) -> int | None:
+                return None
+
+        con.register("t", Unknown(numbers))
+        assert "~1 row" in table("t").on(con).explain()
+        assert rows(con, "SELECT count(*) FROM t") == [(10,)]
+
+    def test_a_source_whose_count_fails_or_lies(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
+        class Failing(Recording):
+            def rows(self) -> int | None:
+                message = "no idea"
+                raise RuntimeError(message)
+
+        con.register("t", Failing(numbers))
+        with pytest.raises(
+            exceptions.InvalidInputError, match="counting the rows of the object registered as 't' failed"
+        ):
+            rows(con, "SELECT * FROM t")
+
+        class Wrong(Recording):
+            answer: object = None
+
+            def rows(self) -> int | None:
+                return self.answer  # type: ignore[return-value]
+
+        for answer in ("many", True, -1):
+            wrong = Wrong(numbers)
+            wrong.answer = answer
+            con.register("t", wrong)
+            with pytest.raises(
+                exceptions.InvalidInputError, match=r"answered rows\(\) with something other than a count"
+            ):
+                rows(con, "SELECT * FROM t")
+
+    def test_a_length_that_is_not_a_row_count_is_not_trusted(
+        self, con: duckdb.frame.Connection, numbers: pa.Table
+    ) -> None:
+        class Mapping:
+            def __init__(self) -> None:
+                self.columns = {"n": numbers["n"], "s": numbers["s"]}
+
+            def __len__(self) -> int:
+                return len(self.columns)
+
+            def __arrow_c_stream__(self, requested_schema: object = None) -> object:
+                return numbers.__arrow_c_stream__()
+
+        assert adapt(Mapping()).rows() is None
+        con.register("m", Mapping())
+        assert "~1 row" in table("m").on(con).explain()
+        assert rows(con, "SELECT count(*) FROM m") == [(10,)]
+
+
 class TestArrays:
     """An object exporting one array is one batch; a plain array or a stream of them is a single column."""
 

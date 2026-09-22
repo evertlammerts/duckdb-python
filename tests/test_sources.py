@@ -214,6 +214,36 @@ class TestProjection:
         assert columns_of(capsule) == ["s", "n"]
 
 
+class TestCardinality:
+    def test_frames_and_datasets_know_their_length(self, con: duckdb.frame.Connection, parquet_dir: Path) -> None:
+        assert adapt(pl.DataFrame({"a": range(50)})).rows() == 50
+        assert adapt(pd.DataFrame({"a": range(77)})).rows() == 77
+        assert adapt(ds.dataset(parquet_dir)).rows() == 10
+        assert adapt(pa.array([1, 2, 3, 4])).rows() == 4
+        assert adapt(pa.chunked_array([[1, 2], [3]])).rows() == 3
+        con.register("pdf", pd.DataFrame({"a": range(77)}))
+        assert "~77 rows" in table("pdf").on(con).explain()
+        con.register("files", ds.dataset(parquet_dir))
+        assert "~10 rows" in table("files").on(con).explain()
+
+    def test_plans_and_scanners_do_not(self, parquet_dir: Path) -> None:
+        assert adapt(pl.DataFrame({"a": range(50)}).lazy()).rows() is None
+        assert adapt(ds.dataset(parquet_dir).scanner(filter=ds.field("n") > 3)).rows() is None
+
+    def test_a_filtered_parquet_dataset_counts_what_it_will_scan(
+        self, con: duckdb.frame.Connection, parquet_dir: Path
+    ) -> None:
+        filtered = ds.dataset(parquet_dir).filter(ds.field("n") >= 7)
+        assert adapt(filtered).rows() == 3
+        con.register("late", filtered)
+        assert "~3 rows" in table("late").on(con).explain()
+        assert rows(con, "SELECT count(*) FROM late") == [(3,)]
+
+    def test_a_csv_dataset_does_not_count_by_reading(self, tmp_path: Path) -> None:
+        (tmp_path / "rows.csv").write_text("n\n1\n2\n3\n")
+        assert adapt(ds.dataset(tmp_path / "rows.csv", format="csv")).rows() is None
+
+
 class TestSeries:
     def test_a_pandas_series_is_one_column(self, con: duckdb.frame.Connection) -> None:
         con.register("s", pd.Series([1.5, None], name="f"))
