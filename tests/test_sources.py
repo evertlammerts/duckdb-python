@@ -28,7 +28,10 @@ from duckdb._sources import (
 from duckdb.frame import col, sql, table
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
+
+    from duckdb._expressions import Expr
 
 
 @pytest.fixture
@@ -74,7 +77,7 @@ class TestClassification:
         frame = pl.DataFrame({"a": [1], "b": ["x"]})
         source = adapt(frame)
         assert isinstance(source, PolarsFrameSource)
-        capsule, projected = source.stream([1])
+        capsule, projected = source.stream([1], ())
         assert projected
         assert pa.RecordBatchReader._import_from_c_capsule(capsule).read_all().column_names == ["b"]
 
@@ -150,7 +153,7 @@ class TestDatasets:
         assert table("years").schema(con) == [("n", "BIGINT"), ("year", "INTEGER")]
         assert rows(con, "SELECT year, n FROM years ORDER BY year") == [(2020, 20), (2021, 21)]
         assert rows(con, "SELECT year FROM years ORDER BY year") == [(2020,), (2021,)]
-        capsule, projected = adapt(ds.dataset(tmp_path, partitioning="hive")).stream([1])
+        capsule, projected = adapt(ds.dataset(tmp_path, partitioning="hive")).stream([1], ())
         assert projected
         assert columns_of(capsule) == ["year"]
 
@@ -192,24 +195,24 @@ class TestProjection:
         lazy = pl.DataFrame({"i": range(5), "s": ["a", "b", "c", "d", "e"], "unused": [0] * 5}).lazy()
         con.register("lf", lazy.map_batches(peek))
         assert rows(con, "SELECT s FROM lf WHERE i = 2") == [("c",)]
-        capsule, projected = adapt(lazy).stream([1])
+        capsule, projected = adapt(lazy).stream([1], ())
         assert projected
         assert columns_of(capsule) == ["s"]
 
     def test_pandas_converts_only_the_requested_columns(self) -> None:
         frame = pd.DataFrame({"i": [1, 2], "s": ["a", "b"], "o": pd.Series([object(), object()], dtype=object)})
         source = adapt(frame)
-        capsule, projected = source.stream([1, 0])
+        capsule, projected = source.stream([1, 0], ())
         assert projected
         assert columns_of(capsule) == ["s", "i"]
 
     def test_tables_and_scanners(self, parquet_dir: Path) -> None:
         table_ = pa.table({"a": [1], "b": [2], "c": [3]})
-        capsule, projected = adapt(table_).stream([2, 0])
+        capsule, projected = adapt(table_).stream([2, 0], ())
         assert projected
         assert columns_of(capsule) == ["c", "a"]
         scanner = ds.dataset(parquet_dir).scanner(columns=["s", "n"])
-        capsule, projected = adapt(scanner).stream([1])
+        capsule, projected = adapt(scanner).stream([1], ())
         assert not projected
         assert columns_of(capsule) == ["s", "n"]
 
@@ -467,3 +470,242 @@ class TestPandas:
         monkeypatch.setitem(sys.modules, "pyarrow", None)
         with pytest.raises(TypeError, match="needs pyarrow"):
             adapt(pd.DataFrame({"a": [1]}))
+
+
+@pytest.fixture
+def typed_dir(tmp_path: Path) -> Path:
+    """Two parquet files under hive partitions, with a NULL and a NaN in every column that can hold one."""
+    for year, start in ((2020, 0), (2021, 5)):
+        (tmp_path / f"year={year}").mkdir()
+        ns = [start, start + 1, None, start + 3, start + 4]
+        pq.write_table(
+            pa.table(
+                {
+                    "n": pa.array(ns, pa.int32()),
+                    "s": [None if n is None else str(n) for n in ns],
+                    "f": [float("nan") if n == start + 3 else (None if n is None else float(n)) for n in ns],
+                    "flag": [None if n is None else n % 2 == 0 for n in ns],
+                    "d": [None if n is None else datetime.date(year, 1, n + 1) for n in ns],
+                    "ts": pa.array(
+                        [None if n is None else datetime.datetime(year, 1, 1, n) for n in ns], pa.timestamp("us")
+                    ),
+                    "ts_ns": pa.array(
+                        [None if n is None else datetime.datetime(year, 1, 1, n) for n in ns], pa.timestamp("ns")
+                    ),
+                }
+            ),
+            tmp_path / f"year={year}" / "part.parquet",
+        )
+    return tmp_path
+
+
+class Pushing(DatasetSource):
+    """A dataset source that remembers what it was offered and what each scan applied."""
+
+    def __init__(self, dataset: ds.Dataset) -> None:
+        super().__init__(dataset)
+        self.offered: list[str] = []
+        self.applied: list[list[str]] = []
+
+    def accepts(self, predicate: Expr) -> bool:
+        self.offered.append(predicate.fragment())
+        return super().accepts(predicate)
+
+    def stream(self, columns: Sequence[int] | None, filters: Sequence[Expr]) -> tuple[object, bool]:
+        self.applied.append([predicate.fragment() for predicate in filters])
+        return super().stream(columns, filters)
+
+
+PUSHED = [
+    "n > 6",
+    "6 < n",
+    "n >= 6",
+    "n < 3",
+    "n <= 3",
+    "n = 3",
+    "n <> 3",
+    "n IN (1, 3, 5)",
+    "NOT (n > 6)",
+    "n > 1 AND s <> '4'",
+    "n < 2 OR n > 7",
+    "n IS NULL",
+    "s IS NOT NULL",
+    "s = '5'",
+    "s > '5'",
+    "s IN ('1', '9')",
+    "flag = true",
+    "flag <> false",
+    "f > 6.0",
+    "f >= 8.0",
+    "f < 3.0",
+    "f <= 3.0",
+    "f = 1.0",
+    "f <> 1.0",
+    "NOT (f > 6.0)",
+    "d >= DATE '2021-01-02'",
+    "d = DATE '2020-01-05'",
+    "ts > TIMESTAMP '2021-01-01 04:00:00'",
+    "ts IN (TIMESTAMP '2020-01-01 00:00:00', TIMESTAMP '2021-01-01 09:00:00')",
+    "year = 2021",
+    "year = 2021 AND n > 6",
+]
+
+KEPT = [
+    "n BETWEEN 3 AND 6",
+    "n > 1 AND n < 8",
+    "n > 1.5",
+    "lower(s) = '4'",
+    "s = n",
+    "n IN (1, NULL)",
+    "n IN (1, 3.5)",
+    "flag",
+    "ts_ns >= TIMESTAMP '2021-01-01 00:00:00'",
+    "f = 'nan'::DOUBLE",
+    "n IS DISTINCT FROM 3",
+    "coalesce(n, 0) > 6",
+    "CASE WHEN n > 6 THEN true ELSE false END",
+    "s LIKE '%5%'",
+]
+
+
+def without_nan(result: list[tuple[object, ...]]) -> list[tuple[object, ...]]:
+    """NaN compares unequal to itself, so rows are compared with it spelled out."""
+    return [tuple("nan" if isinstance(v, float) and v != v else v for v in row) for row in result]
+
+
+class TestDatasetPushdown:
+    def register_both(self, con: duckdb.frame.Connection, typed_dir: Path) -> Pushing:
+        source = Pushing(ds.dataset(typed_dir, partitioning="hive"))
+        con.register("pushed", source)
+        con.register("plain", ExportingSource(ds.dataset(typed_dir, partitioning="hive").to_table()))
+        return source
+
+    @pytest.mark.parametrize("where", PUSHED)
+    def test_a_pushed_predicate_selects_what_the_engine_selects(
+        self, con: duckdb.frame.Connection, typed_dir: Path, where: str
+    ) -> None:
+        source = self.register_both(con, typed_dir)
+        expected = rows(con, f"SELECT n, s, f, flag, d, ts, year FROM plain WHERE {where} ORDER BY year, n")
+        pushed = rows(con, f"SELECT n, s, f, flag, d, ts, year FROM pushed WHERE {where} ORDER BY year, n")
+        assert without_nan(pushed) == without_nan(expected)
+        assert expected
+        assert source.applied
+        assert all(source.applied), where
+        assert "Filter" not in sql(f"SELECT n FROM pushed WHERE {where}").on(con).explain()
+
+    @pytest.mark.parametrize("where", KEPT)
+    def test_a_predicate_outside_the_set_stays_with_the_engine(
+        self, con: duckdb.frame.Connection, typed_dir: Path, where: str
+    ) -> None:
+        source = self.register_both(con, typed_dir)
+        expected = rows(con, f"SELECT n, year FROM plain WHERE {where} ORDER BY year, n")
+        assert rows(con, f"SELECT n, year FROM pushed WHERE {where} ORDER BY year, n") == expected
+        assert source.applied == [[]], where
+
+    def test_a_predicate_nothing_satisfies_yields_no_rows(self, con: duckdb.frame.Connection, typed_dir: Path) -> None:
+        source = self.register_both(con, typed_dir)
+        assert rows(con, "SELECT n FROM pushed WHERE n > 100") == []
+        assert rows(con, "SELECT count(*) FROM pushed WHERE s = 'none'") == [(0,)]
+        assert source.applied == [['("n" > 100)'], ["(\"s\" = 'none')"]]
+
+    def test_a_conjunction_is_pushed_conjunct_by_conjunct(self, con: duckdb.frame.Connection, typed_dir: Path) -> None:
+        source = self.register_both(con, typed_dir)
+        where = "n > 1 AND n < 8 AND s <> '4'"
+        expected = rows(con, f"SELECT n FROM plain WHERE {where} ORDER BY n")
+        assert rows(con, f"SELECT n FROM pushed WHERE {where} ORDER BY n") == expected
+        assert expected == [(3,), (5,), (6,)]
+        assert source.offered == ["(\"s\" != '4')"]
+        assert source.applied == [["(\"s\" != '4')"]]
+        plan = sql(f"SELECT n FROM pushed WHERE {where}").on(con).explain()
+        assert "Filter" in plan
+        assert "'4'" not in plan
+
+    def test_a_partition_filter_prunes_before_reading(self, con: duckdb.frame.Connection, typed_dir: Path) -> None:
+        source = self.register_both(con, typed_dir)
+        assert rows(con, "SELECT count(*) FROM pushed WHERE year = 2021 AND n IS NOT NULL") == [(4,)]
+        assert sorted(source.applied[0]) == ['("n" IS NOT NULL)', '("year" = 2021)']
+        fragments = ds.dataset(typed_dir, partitioning="hive").get_fragments(filter=ds.field("year") == 2021)
+        assert len(list(fragments)) == 1
+
+    def test_only_the_columns_read_are_returned(self, con: duckdb.frame.Connection, typed_dir: Path) -> None:
+        source = self.register_both(con, typed_dir)
+        capsule, projected = source.stream([1], (col("n") > 6,))
+        assert projected
+        assert columns_of(capsule) == ["s"]
+        assert rows(con, "SELECT s FROM pushed WHERE n > 6 ORDER BY s") == [("8",), ("9",)]
+
+    def test_a_scanner_keeps_refusing(self, con: duckdb.frame.Connection, typed_dir: Path) -> None:
+        scanner = ds.dataset(typed_dir, partitioning="hive").scanner(columns=["n"], filter=ds.field("n") >= 7)
+        assert adapt(scanner).accepts(col("n") > 8) is False
+        con.register("part", scanner)
+        assert rows(con, "SELECT n FROM part WHERE n > 8") == [(9,)]
+
+
+class TestArrowTranslation:
+    schema = pa.schema(
+        [
+            ("n", pa.int32()),
+            ("big", pa.int64()),
+            ("f", pa.float64()),
+            ("s", pa.large_string()),
+            ("d", pa.date32()),
+            ("ts", pa.timestamp("us")),
+            ("zoned", pa.timestamp("us", tz="UTC")),
+            ("money", pa.decimal128(10, 2)),
+            ("tags", pa.list_(pa.string())),
+        ]
+    )
+
+    def translate(self, predicate: Expr) -> str:
+        from duckdb._expressions.arrow import to_arrow
+
+        return str(to_arrow(predicate, self.schema))
+
+    def test_each_form_has_a_pyarrow_reading(self) -> None:
+        assert self.translate(col("n") > 5) == "(n > 5)"
+        assert self.translate((col("n") >= 5) & (col("s") != "x")) == '((n >= 5) and (s != "x"))'
+        assert (
+            self.translate(~(col("n") < 5) | col("d").is_null())
+            == "(invert((n < 5)) or is_null(d, {nan_is_null=false}))"
+        )
+        assert (
+            self.translate(col("n").isin([1, 2]))
+            == "is_in(n, {value_set=int32:[\n  1,\n  2\n], null_matching_behavior=MATCH})"
+        )
+        assert self.translate(col("n").between(1, 2)) == "((n >= 1) and (n <= 2))"
+        assert self.translate(col("ts") > datetime.datetime(2020, 1, 1)) == "(ts > 2020-01-01 00:00:00.000000)"
+
+    def test_a_floating_point_greater_than_admits_nan(self) -> None:
+        assert self.translate(col("f") > 1.0) == "((f > 1) or is_nan(f))"
+        assert self.translate(col("f") >= 1.0) == "((f >= 1) or is_nan(f))"
+        assert self.translate(col("f") < 1.0) == "(f < 1)"
+        assert self.translate(col("f") == 1.0) == "(f == 1)"
+
+    @pytest.mark.parametrize(
+        "predicate",
+        [
+            col("n") > 5.5,
+            col("n") > "5",
+            col("s") > 5,
+            col("big") > True,
+            col("f") == float("nan"),
+            col("n") > 5_000_000_000,
+            col("zoned") > datetime.datetime(2020, 1, 1),
+            col("ts") > datetime.datetime(2020, 1, 1, tzinfo=datetime.UTC),
+            col("money") > decimal.Decimal("1.5"),
+            col("tags").is_null(),
+            col("missing") > 1,
+            col("n") > col("big"),
+            col("n").isin([1, None]),
+            col("n").isin([1, col("big")]),
+            col("n").cast("BIGINT") > 5,
+            col("s").like("%x%"),
+            col("n") + 1 > 5,
+            col("n").is_null().is_null(),
+        ],
+    )
+    def test_the_rest_is_refused(self, predicate: Expr) -> None:
+        from duckdb._expressions import Untranslatable
+
+        with pytest.raises(Untranslatable):
+            self.translate(predicate)

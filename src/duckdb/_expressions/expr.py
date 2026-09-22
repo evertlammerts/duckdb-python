@@ -983,6 +983,10 @@ class SubQuery(Expr):
         return f"({self.query.render()})"
 
 
+class Untranslatable(ValueError):
+    """Raised by a translator for a node it does not model, or would not answer as the engine does."""
+
+
 class Between(Expr):
     """An inclusive range test."""
 
@@ -1208,6 +1212,7 @@ first_value = _window("first_value")
 last_value = _window("last_value")
 
 __all__ += [
+    "Untranslatable",
     "dense_rank",
     "first_value",
     "fold_name",

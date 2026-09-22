@@ -1,0 +1,25 @@
+//===----------------------------------------------------------------------===//
+//                         DuckDB
+//
+// src/_duckdb/scan.hpp
+//
+//
+//===----------------------------------------------------------------------===//
+
+#pragma once
+
+#include <memory>
+
+#include "registry.hpp"
+
+namespace duckdb_python {
+
+/// The table function that reads a registered object, named by the replacement scan that resolves a name to it.
+inline constexpr const char *kScanFunction = "python_object_scan";
+
+/// Registers the table function on the connection's database: bind resolves the name against `registry`, and the
+/// scan reads the object's Arrow export with projection and filter pushdown.
+void RegisterObjectScan(cxx::Connection &connection, std::shared_ptr<Registry> registry,
+                        std::shared_ptr<ModuleState> module);
+
+} // namespace duckdb_python

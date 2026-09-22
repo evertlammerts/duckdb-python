@@ -166,6 +166,39 @@ std::string DescribePythonError(nb::python_error &error) {
 	return summary + "\n" + error.what();
 }
 
+bool ConvertsLossless(LogicalTypeId type) {
+	switch (type) {
+	case LogicalTypeId::BOOLEAN:
+	case LogicalTypeId::TINYINT:
+	case LogicalTypeId::SMALLINT:
+	case LogicalTypeId::INTEGER:
+	case LogicalTypeId::BIGINT:
+	case LogicalTypeId::HUGEINT:
+	case LogicalTypeId::UTINYINT:
+	case LogicalTypeId::USMALLINT:
+	case LogicalTypeId::UINTEGER:
+	case LogicalTypeId::UBIGINT:
+	case LogicalTypeId::UHUGEINT:
+	case LogicalTypeId::FLOAT:
+	case LogicalTypeId::DOUBLE:
+	case LogicalTypeId::DECIMAL:
+	case LogicalTypeId::VARCHAR:
+	case LogicalTypeId::BLOB:
+	case LogicalTypeId::UUID:
+	case LogicalTypeId::ENUM:
+	case LogicalTypeId::DATE:
+	case LogicalTypeId::TIME:
+	case LogicalTypeId::TIME_TZ:
+	case LogicalTypeId::TIMESTAMP:
+	case LogicalTypeId::TIMESTAMP_SEC:
+	case LogicalTypeId::TIMESTAMP_MS:
+	case LogicalTypeId::TIMESTAMP_TZ:
+		return true;
+	default:
+		return false;
+	}
+}
+
 nb::object ValueToPython(const Value &value, ConversionContext &ctx) {
 	if (value.IsNull()) {
 		return nb::none();

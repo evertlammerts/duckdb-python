@@ -1,10 +1,10 @@
 """The Python objects that register as tables, each behind a source that exports Arrow for the scan.
 
-A source exposes `__arrow_c_schema__`, when the object can say its schema without producing data, and
-`stream(columns)`, which exports an Arrow stream capsule holding either exactly the requested columns, in that
-order, or every column; it says which. Nothing here imports pyarrow, polars or pandas at module level: a family is
-recognised by its class's module and name, or by the methods it carries, and its library is imported only inside the
-source that needs it.
+A source exposes `__arrow_c_schema__`, when the object can say its schema without producing data, `accepts`, which
+says whether a scan will apply a predicate itself, and `stream(columns, filters)`, which exports an Arrow stream
+capsule holding either exactly the requested columns, in that order, or every column; it says which. Nothing here
+imports pyarrow, polars or pandas at module level: a family is recognised by its class's module and name, or by the
+methods it carries, and its library is imported only inside the source that needs it.
 """
 
 from __future__ import annotations
@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 
     from pandas import DataFrame
     from pyarrow import RecordBatch, Schema
+
+    from ._expressions import Expr
 
 #: The capsule names the Arrow PyCapsule interface reserves, by which a bare capsule says what it holds.
 STREAM_CAPSULE = "arrow_array_stream"
@@ -36,13 +38,25 @@ class Source:
         """How many rows a scan will produce, when the object knows without reading itself; None otherwise."""
         return None
 
-    def stream(self, columns: Sequence[int] | None) -> tuple[object, bool]:
+    def accepts(self, predicate: Expr) -> bool:
+        """Whether every scan will apply `predicate`, a frame expression over the object's own column names, itself.
+
+        The engine offers each predicate a query applies to the rows, and stops applying one that is accepted, so
+        True is a promise: the stream must then hold only rows satisfying it, with the engine's meaning of the
+        comparison. Anything else answers False and the engine filters as usual. A column is named as the Arrow
+        schema names it, so the one column of a nameless array, `value` in SQL, is named by the empty string.
+        """
+        return False
+
+    def stream(self, columns: Sequence[int] | None, filters: Sequence[Expr]) -> tuple[object, bool]:
         """An Arrow stream capsule over the object and whether it holds only `columns`, in that order.
 
         `None` asks for every column. A source that cannot narrow the stream returns every column and False, in
         the order its schema declared them: the scan picks columns by position, so that order must not change
-        between calls. In place of a stream capsule, the pair of schema and array capsules that `__arrow_c_array__`
-        returns stands for one batch. A stream or array whose top level is not a struct is read as one column.
+        between calls. `filters` holds the predicates `accepts` promised, to apply over every column before the
+        stream is narrowed, since a predicate may name a column the query does not read. In place of a stream
+        capsule, the pair of schema and array capsules that `__arrow_c_array__` returns stands for one batch. A
+        stream or array whose top level is not a struct is read as one column.
         """
         return self.obj.__arrow_c_stream__(), False
 
@@ -85,7 +99,7 @@ class ArraySource(Source):
     def rows(self) -> int | None:
         return _known_length(self.obj)
 
-    def stream(self, columns: Sequence[int] | None) -> tuple[object, bool]:
+    def stream(self, columns: Sequence[int] | None, filters: Sequence[Expr]) -> tuple[object, bool]:
         return self.obj.__arrow_c_array__(), False
 
 
@@ -94,14 +108,14 @@ class CapsuleSource(Source):
 
     one_shot = True
 
-    def stream(self, columns: Sequence[int] | None) -> tuple[object, bool]:
+    def stream(self, columns: Sequence[int] | None, filters: Sequence[Expr]) -> tuple[object, bool]:
         return self.obj, False
 
 
 class TableSource(ExportingSource):
     """A pyarrow Table or RecordBatch: `select` by position narrows it without copying."""
 
-    def stream(self, columns: Sequence[int] | None) -> tuple[object, bool]:
+    def stream(self, columns: Sequence[int] | None, filters: Sequence[Expr]) -> tuple[object, bool]:
         if columns is None:
             return self.obj.__arrow_c_stream__(), False
         return self.obj.select(list(columns)).__arrow_c_stream__(), True
@@ -110,7 +124,7 @@ class TableSource(ExportingSource):
 class PolarsFrameSource(ExportingSource):
     """A polars DataFrame: `select` by name narrows it without copying."""
 
-    def stream(self, columns: Sequence[int] | None) -> tuple[object, bool]:
+    def stream(self, columns: Sequence[int] | None, filters: Sequence[Expr]) -> tuple[object, bool]:
         if columns is None:
             return self.obj.__arrow_c_stream__(), False
         names = self.obj.columns
@@ -127,7 +141,7 @@ class LazyFrameSource(Source):
     def __arrow_c_schema__(self) -> object:
         return self.obj.collect_schema().__arrow_c_schema__()
 
-    def stream(self, columns: Sequence[int] | None) -> tuple[object, bool]:
+    def stream(self, columns: Sequence[int] | None, filters: Sequence[Expr]) -> tuple[object, bool]:
         if columns is None:
             return self.obj.collect().__arrow_c_stream__(), False
         names = self.obj.collect_schema().names()
@@ -173,7 +187,7 @@ class PandasSource(Source):
     def rows(self) -> int | None:
         return len(self.obj)
 
-    def stream(self, columns: Sequence[int] | None) -> tuple[object, bool]:
+    def stream(self, columns: Sequence[int] | None, filters: Sequence[Expr]) -> tuple[object, bool]:
         frame = self.obj if columns is None else self.obj.iloc[:, list(columns)]
         schema = self._schema(frame)
         reader = self.pyarrow.RecordBatchReader.from_batches(schema, self._batches(frame, schema))
@@ -181,10 +195,24 @@ class PandasSource(Source):
 
 
 class DatasetSource(Source):
-    """A pyarrow Dataset, or anything with its `scanner()` and `schema`: scanned afresh per read, narrowed by name."""
+    """A pyarrow Dataset, or anything with its `scanner()` and `schema`: scanned afresh per read, narrowed by name.
+
+    A predicate the pyarrow translator models is applied by the scanner, which prunes partitions and row groups by
+    it before reading.
+    """
 
     def __arrow_c_schema__(self) -> object:
         return self.obj.schema.__arrow_c_schema__()
+
+    def accepts(self, predicate: Expr) -> bool:
+        from ._expressions import Untranslatable
+        from ._expressions.arrow import to_arrow
+
+        try:
+            to_arrow(predicate, self.obj.schema)
+        except Untranslatable:
+            return False
+        return True
 
     def rows(self) -> int | None:
         """A parquet dataset counts its rows from file metadata; any other format would read the files to count."""
@@ -193,11 +221,17 @@ class DatasetSource(Source):
             return None
         return int(self.obj.count_rows())
 
-    def stream(self, columns: Sequence[int] | None) -> tuple[object, bool]:
-        if columns is None:
-            return self.obj.scanner().to_reader().__arrow_c_stream__(), False
+    def stream(self, columns: Sequence[int] | None, filters: Sequence[Expr]) -> tuple[object, bool]:
+        from ._expressions.arrow import to_arrow
+
+        mask = None
+        for predicate in filters:
+            term = to_arrow(predicate, self.obj.schema)
+            mask = term if mask is None else mask & term
         names = self.obj.schema.names
-        return self.obj.scanner(columns=[names[i] for i in columns]).to_reader().__arrow_c_stream__(), True
+        chosen = None if columns is None else [names[i] for i in columns]
+        reader = self.obj.scanner(columns=chosen, filter=mask).to_reader()
+        return reader.__arrow_c_stream__(), columns is not None
 
 
 class ScannerSource(Source):
@@ -206,7 +240,7 @@ class ScannerSource(Source):
     def __arrow_c_schema__(self) -> object:
         return self.obj.projected_schema.__arrow_c_schema__()
 
-    def stream(self, columns: Sequence[int] | None) -> tuple[object, bool]:
+    def stream(self, columns: Sequence[int] | None, filters: Sequence[Expr]) -> tuple[object, bool]:
         return self.obj.to_reader().__arrow_c_stream__(), False
 
 

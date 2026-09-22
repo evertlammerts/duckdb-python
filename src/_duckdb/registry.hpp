@@ -58,6 +58,7 @@ private:
 
 /// Add the scan function and the replacement scan that resolves registered names to the database; called once,
 /// before any other connection exists, since an instance-wide replacement scan may not be added while queries bind.
-void InstallRegistryScan(cxx::Instance &instance, std::shared_ptr<Registry> registry);
+void InstallRegistryScan(cxx::Instance &instance, std::shared_ptr<Registry> registry,
+                         std::shared_ptr<ModuleState> module);
 
 } // namespace duckdb_python

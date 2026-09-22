@@ -57,7 +57,7 @@ public:
 	         const std::vector<std::pair<std::string, std::string>> &options)
 	    : module(std::move(module)), registry(std::make_shared<Registry>()),
 	      database(Open(this->module->environment, path, options)) {
-		WithoutGil([&] { InstallRegistryScan(database, registry); });
+		WithoutGil([&] { InstallRegistryScan(database, registry, this->module); });
 	}
 
 	std::unique_ptr<Connection> Connect();

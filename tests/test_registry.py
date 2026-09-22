@@ -18,12 +18,15 @@ import pytest
 
 import duckdb
 from duckdb import _duckdb, dbapi, exceptions
+from duckdb._expressions import Binary, Col
 from duckdb._sources import CapsuleSource, Source, StreamSource, TableSource, adapt
 from duckdb.frame import col, sql, table
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
     from pathlib import Path
+
+    from duckdb._expressions import Expr
 
 
 @pytest.fixture
@@ -381,7 +384,7 @@ class Recording(Source):
     def __arrow_c_schema__(self) -> object:
         return self.obj.schema.__arrow_c_schema__()
 
-    def stream(self, columns: Sequence[int] | None) -> tuple[object, bool]:
+    def stream(self, columns: Sequence[int] | None, filters: Sequence[object]) -> tuple[object, bool]:
         self.asked.append(None if columns is None else list(columns))
         if columns is None or not self.narrows:
             return self.obj.__arrow_c_stream__(), False
@@ -437,7 +440,7 @@ class TestProjection:
 
     def test_a_source_that_raises_while_exporting(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
         class Broken(Recording):
-            def stream(self, columns: Sequence[int] | None) -> tuple[object, bool]:
+            def stream(self, columns: Sequence[int] | None, filters: Sequence[object]) -> tuple[object, bool]:
                 message = "no stream today"
                 raise ValueError(message)
 
@@ -448,7 +451,7 @@ class TestProjection:
 
     def test_a_source_must_answer_with_a_pair(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
         class Odd(Recording):
-            def stream(self, columns: Sequence[int] | None) -> object:  # type: ignore[override]
+            def stream(self, columns: Sequence[int] | None, filters: Sequence[object]) -> object:  # type: ignore[override]
                 return object.__getattribute__(self.obj, "__arrow_c_stream__")()
 
         con.register("t", Odd(numbers))
@@ -461,7 +464,7 @@ class TestProjection:
         self, con: duckdb.frame.Connection, numbers: pa.Table
     ) -> None:
         class Lying(Recording):
-            def stream(self, columns: Sequence[int] | None) -> tuple[object, bool]:
+            def stream(self, columns: Sequence[int] | None, filters: Sequence[object]) -> tuple[object, bool]:
                 return self.obj.select([0]).__arrow_c_stream__(), False
 
         con.register("t", Lying(numbers))
@@ -469,7 +472,7 @@ class TestProjection:
             rows(con, "SELECT s FROM t")
 
         class Short(Recording):
-            def stream(self, columns: Sequence[int] | None) -> tuple[object, bool]:
+            def stream(self, columns: Sequence[int] | None, filters: Sequence[object]) -> tuple[object, bool]:
                 return self.obj.__arrow_c_stream__(), True
 
         con.register("t", Short(numbers))
@@ -480,7 +483,7 @@ class TestProjection:
         wide = pa.table({"n": [100], "s": ["zero"], "x": [0]})
 
         class Sorting(Recording):
-            def stream(self, columns: Sequence[int] | None) -> tuple[object, bool]:
+            def stream(self, columns: Sequence[int] | None, filters: Sequence[object]) -> tuple[object, bool]:
                 if columns is None:
                     return self.obj.__arrow_c_stream__(), False
                 return self.obj.select(sorted(columns)).__arrow_c_stream__(), True
@@ -490,7 +493,7 @@ class TestProjection:
             rows(con, "SELECT x, s, n FROM t WHERE x = 0")
 
         class Swapping(Recording):
-            def stream(self, columns: Sequence[int] | None) -> tuple[object, bool]:
+            def stream(self, columns: Sequence[int] | None, filters: Sequence[object]) -> tuple[object, bool]:
                 return self.obj.select([2, 1, 0]).__arrow_c_stream__(), False
 
         con.register("t", Swapping(wide))
@@ -812,7 +815,7 @@ class TestNamesAndShadowing:
         self, con: duckdb.frame.Connection, numbers: pa.Table
     ) -> None:
         class WrongKind(Recording):
-            def stream(self, columns: Sequence[int] | None) -> tuple[object, bool]:
+            def stream(self, columns: Sequence[int] | None, filters: Sequence[object]) -> tuple[object, bool]:
                 return self.obj.schema.__arrow_c_schema__(), False
 
         con.register("wrong", WrongKind(numbers))
@@ -1097,3 +1100,192 @@ class TestEncodedLayouts:
         assert rows(con, "SELECT s.l[1] FROM deep") == [(n - 3,), (n - 2,), (n - 1,)]
         con.register("part", pa.table({"i": list(range(10))}).slice(4, 3))
         assert rows(con, "SELECT i FROM part") == [(4,), (5,), (6,)]
+
+
+class Filtering(Source):
+    """A source over a pyarrow table that applies through pyarrow every predicate the translator models."""
+
+    def __init__(self, table_: pa.Table) -> None:
+        super().__init__(table_)
+        self.offered: list[str] = []
+        self.applied: list[list[str]] = []
+
+    def __arrow_c_schema__(self) -> object:
+        return self.obj.schema.__arrow_c_schema__()
+
+    def accepts(self, predicate: Expr) -> bool:
+        from duckdb._expressions import Untranslatable
+        from duckdb._expressions.arrow import to_arrow
+
+        self.offered.append(predicate.fragment())
+        try:
+            to_arrow(predicate, self.obj.schema)
+        except Untranslatable:
+            return False
+        return True
+
+    def stream(self, columns: Sequence[int] | None, filters: Sequence[Expr]) -> tuple[object, bool]:
+        from duckdb._expressions.arrow import to_arrow
+
+        self.applied.append([predicate.fragment() for predicate in filters])
+        held = self.obj
+        for predicate in filters:
+            held = held.filter(to_arrow(predicate, self.obj.schema))
+        if columns is None:
+            return held.__arrow_c_stream__(), False
+        return held.select(list(columns)).__arrow_c_stream__(), True
+
+
+class TestFilters:
+    def test_a_source_refuses_by_default_and_the_engine_filters(
+        self, con: duckdb.frame.Connection, numbers: pa.Table
+    ) -> None:
+        source = Recording(numbers)
+        con.register("t", source)
+        assert rows(con, "SELECT s FROM t WHERE n > 7 ORDER BY n") == [("8",), ("9",)]
+        assert "Filter" in table("t").filter(col("n") > 7).on(con).explain()
+
+    def test_an_accepted_predicate_leaves_the_plan_and_reaches_the_stream(
+        self, con: duckdb.frame.Connection, numbers: pa.Table
+    ) -> None:
+        source = Filtering(numbers)
+        con.register("t", source)
+        assert rows(con, "SELECT s FROM t WHERE n > 7 AND s <> '9'") == [("8",)]
+        assert source.offered == ['("n" > 7)', "(\"s\" != '9')"]
+        assert source.applied == [['("n" > 7)', "(\"s\" != '9')"]]
+        assert "Filter" not in table("t").filter((col("n") > 7) & (col("s") != "9")).on(con).explain()
+
+    def test_a_predicate_names_columns_the_query_does_not_read(
+        self, con: duckdb.frame.Connection, numbers: pa.Table
+    ) -> None:
+        source = Filtering(numbers)
+        con.register("t", source)
+        assert rows(con, "SELECT s FROM t WHERE n = 4") == [("4",)]
+        assert source.applied == [['("n" = 4)']]
+        assert rows(con, "SELECT count(*) FROM t WHERE n > 4") == [(5,)]
+
+    def test_each_reference_carries_its_own_predicates(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
+        source = Filtering(numbers)
+        con.register("t", source)
+        query = "SELECT a.n, b.n FROM t a JOIN t b ON a.n = b.n - 1 WHERE a.n < 2 AND b.n > 1 ORDER BY a.n"
+        assert rows(con, query) == [(1, 2)]
+        assert sorted(source.applied) == [['("n" < 2)'], ['("n" > 1)']]
+
+    def test_a_prepared_parameter_is_offered_with_each_value(
+        self, con: duckdb.frame.Connection, numbers: pa.Table
+    ) -> None:
+        source = Filtering(numbers)
+        con.register("t", source)
+        with con._execute("SELECT count(*) FROM t WHERE n > $1", [7]) as result:
+            assert result.fetch_all() == [(2,)]
+        with con._execute("SELECT count(*) FROM t WHERE n > $1", [3]) as result:
+            assert result.fetch_all() == [(6,)]
+        assert source.applied == [['("n" > 7)'], ['("n" > 3)']]
+
+    def test_the_engine_does_not_filter_again_after_a_promise(
+        self, con: duckdb.frame.Connection, numbers: pa.Table
+    ) -> None:
+        class Lying(Recording):
+            def accepts(self, predicate: Expr) -> bool:
+                return True
+
+        con.register("t", Lying(numbers))
+        assert rows(con, "SELECT count(*) FROM t WHERE n > 7") == [(10,)]
+
+    def test_a_failing_answer_fails_the_query(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
+        class Broken(Recording):
+            def accepts(self, predicate: Expr) -> bool:
+                message = "no opinion"
+                raise RuntimeError(message)
+
+        con.register("t", Broken(numbers))
+        with pytest.raises(exceptions.InvalidInputError, match="offering a filter to the source registered as 't'"):
+            rows(con, "SELECT s FROM t WHERE n > 7")
+        assert rows(con, "SELECT count(*) FROM t") == [(10,)]
+
+    def test_an_answer_that_is_not_a_bool_is_refused(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
+        class Vague(Recording):
+            def accepts(self, predicate: Expr) -> bool:
+                return "yes"  # type: ignore[return-value]
+
+        con.register("t", Vague(numbers))
+        with pytest.raises(exceptions.InvalidInputError, match="something other than True or False"):
+            rows(con, "SELECT s FROM t WHERE n > 7")
+
+    def test_the_dbapi_face_pushes_too(self, numbers: pa.Table) -> None:
+        source = Filtering(numbers)
+        with dbapi.connect() as connection:
+            connection.register("t", source)
+            cursor = connection.cursor()
+            cursor.execute("SELECT s FROM t WHERE n IN (3, 4) ORDER BY n")
+            assert cursor.fetchall() == [("3",), ("4",)]
+        assert source.applied == [['("n" IN (3, 4))']]
+
+    def test_a_nameless_column_is_offered_by_its_arrow_name(self, con: duckdb.frame.Connection) -> None:
+        class Noting(Source):
+            def __init__(self, array: pa.Array) -> None:
+                super().__init__(array)
+                self.offered: list[Expr] = []
+
+            def accepts(self, predicate: Expr) -> bool:
+                self.offered.append(predicate)
+                return False
+
+            def stream(self, columns: Sequence[int] | None, filters: Sequence[object]) -> tuple[object, bool]:
+                return self.obj.__arrow_c_array__(), False
+
+        source = Noting(pa.array([1, 2, 3]))
+        con.register("bare", source)
+        assert rows(con, "SELECT value FROM bare WHERE value > 1 ORDER BY value") == [(2,), (3,)]
+        [offered] = source.offered
+        assert isinstance(offered, Binary)
+        assert isinstance(offered.left, Col)
+        assert offered.left.parts == ("",)
+        assert offered.fragment() == '("" > 1)'
+
+    def test_a_constant_is_offered_when_a_python_value_holds_it_exactly(self, con: duckdb.frame.Connection) -> None:
+        class Noting(Recording):
+            def __init__(self, table_: pa.Table) -> None:
+                super().__init__(table_)
+                self.offered: list[Expr] = []
+
+            def accepts(self, predicate: Expr) -> bool:
+                self.offered.append(predicate)
+                return False
+
+        moment = datetime.datetime(2024, 5, 6, 7, 8, 9, 123456)
+        source = Noting(
+            pa.table(
+                {
+                    "money": pa.array([decimal.Decimal("1.50"), decimal.Decimal("2.25")], pa.decimal128(10, 2)),
+                    "raw": pa.array([b"a", b"b"], pa.binary()),
+                    "clock": pa.array([datetime.time(1, 2, 3), datetime.time(4, 5, 6)], pa.time64("us")),
+                    "coarse": pa.array([moment, moment], pa.timestamp("ms")),
+                    "fine": pa.array([moment, moment], pa.timestamp("ns")),
+                    "zoned": pa.array([moment, moment], pa.timestamp("us", tz="UTC")),
+                    "tags": pa.array([["a"], ["b"]], pa.list_(pa.string())),
+                }
+            )
+        )
+        con.register("t", source)
+        rows(
+            con,
+            "SELECT count(*) FROM t WHERE money > 1.50 AND raw = '\\x61'::BLOB AND clock < TIME '04:00:00' "
+            "AND coarse >= '2024-05-06 07:08:09.123'::TIMESTAMP_MS AND zoned > TIMESTAMPTZ '2024-05-06 00:00:00+00' "
+            "AND fine > TIMESTAMP '2024-05-06' AND tags = ['a']",
+        )
+        carried = {predicate.left.parts[0]: predicate.right.value for predicate in source.offered}  # type: ignore[attr-defined]
+        assert carried == {
+            "money": decimal.Decimal("1.50"),
+            "raw": b"a",
+            "clock": datetime.time(4, 0),
+            "coarse": datetime.datetime(2024, 5, 6, 7, 8, 9, 123000),
+            "zoned": datetime.datetime(2024, 5, 6, tzinfo=datetime.UTC),
+        }
+
+    def test_a_stream_is_never_asked(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
+        source = adapt(reader_over(numbers))
+        assert isinstance(source, StreamSource)
+        assert source.accepts(col("n") > 7) is False
+        con.register("once", source)
+        assert rows(con, "SELECT count(*) FROM once WHERE n > 7") == [(2,)]

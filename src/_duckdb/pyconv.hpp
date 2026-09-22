@@ -50,6 +50,11 @@ struct ConversionContext {
 /// One DuckDB value as a Python object. NULL becomes None.
 nb::object ValueToPython(const duckdb::cxx::Value &value, ConversionContext &ctx);
 
+/// Whether `ValueToPython` keeps every value of the type exactly, so the Python object stands for the engine's
+/// value and not an approximation. Nanosecond timestamps and times floor to microseconds, an interval folds its
+/// months, and a list or dict carries no element type, so those answer false.
+bool ConvertsLossless(duckdb::cxx::LogicalTypeId type);
+
 /// "ExceptionType: message" followed by the traceback; rendered while the GIL is held.
 std::string DescribePythonError(nb::python_error &error);
 
