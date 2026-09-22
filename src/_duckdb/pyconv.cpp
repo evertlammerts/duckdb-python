@@ -36,10 +36,11 @@ constexpr int64_t TIMESTAMP_POSITIVE_INFINITY = 9223372036854775807LL;
 constexpr int64_t TIMESTAMP_NEGATIVE_INFINITY = -9223372036854775807LL;
 
 // DuckDB dates reach far past Python's year 9999, so name the offending value; OverflowError names a day count.
-[[noreturn]] void ThrowUnrepresentable(const std::string &what, const std::string &rendered) {
+[[noreturn]] void ThrowUnrepresentable(const std::string &what, const std::string &rendered,
+                                       const char *python_type = "datetime") {
 	throw duckdb::cxx::Exception(4001 /* TYPE_CONVERSION */,
-	                             "Conversion Error: " + what + " " + rendered +
-	                                 " is outside the range Python's datetime can represent");
+	                             "Conversion Error: " + what + " " + rendered + " is outside the range Python's " +
+	                                 python_type + " can represent");
 }
 
 // Scaling the infinity markers would overflow and destroy them, so they pass through in their own unit. A coarse
@@ -261,8 +262,12 @@ nb::object ValueToPython(const Value &value, ConversionContext &ctx) {
 	case LogicalTypeId::INTERVAL: {
 		const auto interval = value.Get<duckdb::cxx::interval_t>();
 		// A month has no fixed length, so months fold at 30 days as the previous package did. Lossy on purpose.
-		return ctx.timedelta_cls(static_cast<int64_t>(interval.months) * 30 + interval.days, 0,
-		                         interval.micros);
+		try {
+			return ctx.timedelta_cls(static_cast<int64_t>(interval.months) * 30 + interval.days, 0,
+			                         interval.micros);
+		} catch (const nb::python_error &) {
+			ThrowUnrepresentable("interval", value.ToText(), "timedelta");
+		}
 	}
 	case LogicalTypeId::HUGEINT:
 	case LogicalTypeId::UHUGEINT:

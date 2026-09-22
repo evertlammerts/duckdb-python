@@ -74,7 +74,7 @@ def to_polars(node: Expr, schema: pl.Schema) -> pl.Expr:
                 raise Untranslatable(node)
             if not candidates:
                 return pl.lit(False)
-            return pl.col(name).is_in(pl.Series(candidates, dtype=kind))
+            return pl.col(name).is_in(pl.Series(candidates, dtype=kind).implode())
     raise Untranslatable(node)
 
 

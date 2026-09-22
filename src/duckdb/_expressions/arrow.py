@@ -35,8 +35,10 @@ def to_arrow(node: Expr, schema: pa.Schema) -> pc.Expression:
     declared to the engine, since the value is typed as the column is and a unit or width that differs would
     compare differently.
     """
+    import pyarrow as pa
     import pyarrow.compute as pc
 
+    _filterable(schema)
     match node:
         case Binary(op="AND", left=left, right=right):
             return to_arrow(left, schema) & to_arrow(right, schema)
@@ -66,8 +68,19 @@ def to_arrow(node: Expr, schema: pa.Schema) -> pc.Expression:
                 raise Untranslatable(node)
             if not candidates:
                 return pc.scalar(False)
-            return pc.field(name).isin(candidates)
+            # `is_in` answers false for a NULL, where the engine answers NULL; the difference shows under NOT.
+            member = pc.field(name).isin(candidates)
+            return pc.if_else(pc.field(name).is_valid(), member, pa.scalar(None, pa.bool_()))
     raise Untranslatable(node)
+
+
+def _filterable(schema: pa.Schema) -> None:
+    """Refuses a schema with a view column, whose rows pyarrow 25 cannot take by mask, so no predicate applies."""
+    import pyarrow as pa
+
+    for field in schema:
+        if pa.types.is_string_view(field.type) or pa.types.is_binary_view(field.type):
+            raise Untranslatable(field)
 
 
 def _column(schema: pa.Schema, name: str) -> pa.DataType:
@@ -98,7 +111,7 @@ def _floating(kind: pa.DataType) -> bool:
 def _string(kind: pa.DataType) -> bool:
     import pyarrow as pa
 
-    return bool(pa.types.is_string(kind) or pa.types.is_large_string(kind) or pa.types.is_string_view(kind))
+    return bool(pa.types.is_string(kind) or pa.types.is_large_string(kind))
 
 
 def _fits(value: object, kind: pa.DataType) -> bool:

@@ -1315,3 +1315,69 @@ class TestFilters:
         assert source.accepts(col("n") > 7) is False
         con.register("once", source)
         assert rows(con, "SELECT count(*) FROM once WHERE n > 7") == [(2,)]
+
+
+class TestLayoutsAndLimits:
+    def test_a_list_view_with_overlapping_offsets(self, con: duckdb.frame.Connection) -> None:
+        values = pa.array([1, 2, 3, 4, 5])
+        offsets = pa.array([2, 0, 1], pa.int32())
+        sizes = pa.array([3, 2, 3], pa.int32())
+        views = pa.ListViewArray.from_arrays(offsets, sizes, values)
+        con.register("views", pa.table({"l": views}))
+        assert rows(con, "SELECT l FROM views") == [([3, 4, 5],), ([1, 2],), ([2, 3, 4],)]
+
+    def test_narrow_decimals(self, con: duckdb.frame.Connection) -> None:
+        con.register(
+            "money",
+            pa.table(
+                {
+                    "d32": pa.array([decimal.Decimal("123.45")], pa.decimal32(5, 2)),
+                    "d64": pa.array([decimal.Decimal("-1234567890123.456")], pa.decimal64(16, 3)),
+                }
+            ),
+        )
+        assert table("money").schema(con) == [("d32", "DECIMAL(5,2)"), ("d64", "DECIMAL(16,3)")]
+        assert rows(con, "SELECT d32 + 1, d64 FROM money") == [
+            (decimal.Decimal("124.45"), decimal.Decimal("-1234567890123.456"))
+        ]
+
+    @pytest.mark.parametrize(
+        "index", [pa.int8(), pa.uint8(), pa.int16(), pa.uint16(), pa.int32(), pa.uint32(), pa.int64(), pa.uint64()]
+    )
+    def test_dictionary_index_widths_and_a_null_code(self, con: duckdb.frame.Connection, index: pa.DataType) -> None:
+        codes = pa.array([0, None, 1, 0], index)
+        column = pa.DictionaryArray.from_arrays(codes, pa.array(["x", "y"]))
+        con.register("coded", pa.table({"c": column}))
+        assert table("coded").schema(con) == [("c", "VARCHAR")]
+        assert rows(con, "SELECT c FROM coded") == [("x",), (None,), ("y",), ("x",)]
+
+    def test_an_unknown_extension_with_unreadable_metadata_reads_as_its_storage(
+        self, con: duckdb.frame.Connection
+    ) -> None:
+        schema = pa.schema(
+            [
+                pa.field(
+                    "e",
+                    pa.int32(),
+                    metadata={"ARROW:extension:name": "vendor.thing", "ARROW:extension:metadata": "{not json"},
+                )
+            ]
+        )
+        con.register("ext", pa.table({"e": pa.array([1, 2], pa.int32())}, schema=schema))
+        assert table("ext").schema(con) == [("e", "INTEGER")]
+        assert rows(con, "SELECT sum(e) FROM ext") == [(3,)]
+
+    def test_the_largest_date32_is_the_engines_infinity(self, con: duckdb.frame.Connection) -> None:
+        con.register("edge", pa.table({"d": pa.array([2**31 - 1, 0], pa.date32())}))
+        assert rows(con, "SELECT d::VARCHAR, d FROM edge") == [
+            ("infinity", datetime.date(9999, 12, 31)),
+            ("1970-01-01", datetime.date(1970, 1, 1)),
+        ]
+
+    def test_an_interval_beyond_a_timedelta_is_a_conversion_error(self, con: duckdb.frame.Connection) -> None:
+        wide = pa.MonthDayNano([2**31 - 1, 0, 0])
+        con.register("spans", pa.table({"i": pa.array([wide], pa.month_day_nano_interval())}))
+        with pytest.raises(exceptions.ConversionError, match=r"interval .* is outside the range Python's timedelta"):
+            rows(con, "SELECT i FROM spans")
+        with pytest.raises(exceptions.ConversionError, match="timedelta"):
+            rows(con, "SELECT INTERVAL '2147483647' MONTHS")

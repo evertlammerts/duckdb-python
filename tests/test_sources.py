@@ -525,6 +525,8 @@ PUSHED = [
     "n = 3",
     "n <> 3",
     "n IN (1, 3, 5)",
+    "n NOT IN (1, 3, 5)",
+    "NOT (n IN (0, 5) OR s = '4')",
     "NOT (n > 6)",
     "n > 1 AND s <> '4'",
     "n < 2 OR n > 7",
@@ -847,10 +849,8 @@ class TestArrowTranslation:
             self.translate(~(col("n") < 5) | col("d").is_null())
             == "(invert((n < 5)) or is_null(d, {nan_is_null=false}))"
         )
-        assert (
-            self.translate(col("n").isin([1, 2]))
-            == "is_in(n, {value_set=int32:[\n  1,\n  2\n], null_matching_behavior=MATCH})"
-        )
+        inner = "is_in(n, {value_set=int32:[\n  1,\n  2\n], null_matching_behavior=MATCH})"
+        assert self.translate(col("n").isin([1, 2])) == f"if_else(is_valid(n), {inner}, null[bool])"
         assert self.translate(col("n").between(1, 2)) == "((n >= 1) and (n <= 2))"
         assert self.translate(col("ts") > datetime.datetime(2020, 1, 1)) == "(ts > 2020-01-01 00:00:00.000000)"
 
@@ -888,3 +888,141 @@ class TestArrowTranslation:
 
         with pytest.raises(Untranslatable):
             self.translate(predicate)
+
+
+class TestPandasShapes:
+    def test_a_later_value_the_type_cannot_hold_fails_instead_of_truncating(self, con: duckdb.frame.Connection) -> None:
+        values: list[object] = list(range(100_000))
+        values[1001] = 3.7
+        con.register("df", pd.DataFrame({"a": pd.Series(values, dtype=object)}))
+        assert table("df").schema(con) == [("a", "BIGINT")]
+        with pytest.raises(exceptions.InvalidInputError, match="cannot hold exactly"):
+            rows(con, "SELECT a FROM df WHERE a = 3")
+        later: list[object] = list(range(PandasSource.SLICE_ROWS + 10))
+        later[PandasSource.SLICE_ROWS + 1] = 4.2
+        con.register("late", pd.DataFrame({"a": pd.Series(later, dtype=object)}))
+        with pytest.raises(exceptions.InvalidInputError, match=f"after row {PandasSource.SLICE_ROWS}"):
+            rows(con, "SELECT a FROM late WHERE a = 4")
+
+    def test_a_later_slice_typed_differently_on_its_own_fails_too(self, con: duckdb.frame.Connection) -> None:
+        many = PandasSource.SLICE_ROWS + 4
+        words: list[object] = ["a"] * many
+        words[-4:] = [111, 222, 333, 444]
+        con.register("words", pd.DataFrame({"s": pd.Series(words, dtype=object)}))
+        assert table("words").schema(con) == [("s", "VARCHAR")]
+        with pytest.raises(exceptions.InvalidInputError, match="registered as 'words' failed"):
+            rows(con, "SELECT count(*) FROM words")
+        moments: list[object] = [datetime.datetime(2024, 1, 1, 12)] * many
+        moments[-2:] = [datetime.date(2024, 1, 2), datetime.datetime(2024, 1, 3, 9, 15)]
+        con.register("moments", pd.DataFrame({"t": pd.Series(moments, dtype=object)}))
+        assert table("moments").schema(con) == [("t", "TIMESTAMP")]
+        with pytest.raises(exceptions.InvalidInputError, match="registered as 'moments' failed"):
+            rows(con, "SELECT max(t) FROM moments")
+
+    def test_a_later_value_the_type_holds_exactly_is_kept(self, con: duckdb.frame.Connection) -> None:
+        values: list[object] = [float(i) for i in range(5000)]
+        values[4999] = 99999
+        con.register("df", pd.DataFrame({"a": pd.Series(values, dtype=object)}))
+        assert table("df").schema(con) == [("a", "DOUBLE")]
+        assert rows(con, "SELECT a FROM df WHERE a > 5000") == [(99999.0,)]
+
+    def test_labels_that_are_not_strings_become_their_text(self, con: duckdb.frame.Connection) -> None:
+        con.register("matrix", pd.DataFrame([[1, "a", 2.5], [3, "b", 4.5]]))
+        assert table("matrix").columns(con) == ["0", "1", "2"]
+        assert rows(con, 'SELECT "2", "0" FROM matrix ORDER BY "0"') == [(2.5, 1), (4.5, 3)]
+        levels = pd.MultiIndex.from_tuples([("a", "x"), ("a", "y")])
+        con.register("pivoted", pd.DataFrame([[1, 2], [3, 4]], columns=levels))
+        assert table("pivoted").columns(con) == ["('a', 'x')", "('a', 'y')"]
+        assert rows(con, "SELECT sum(\"('a', 'y')\") FROM pivoted") == [(6,)]
+
+    def test_repeated_labels_are_renamed_as_the_engine_renames_arrow_fields(self, con: duckdb.frame.Connection) -> None:
+        frame = pd.DataFrame([(1, 2, 3, 4)], columns=["a_1", "a", "a", "a_2"])
+        con.register("df", frame)
+        con.register(
+            "arrow", pa.table([pa.array([1]), pa.array([2]), pa.array([3]), pa.array([4])], names=list(frame.columns))
+        )
+        assert table("df").columns(con) == table("arrow").columns(con) == ["a_1", "a", "a_2", "a_2_1"]
+        assert rows(con, "SELECT a_2, a_2_1 FROM df") == [(3, 4)]
+        con.register("cased", pd.DataFrame([(1, 2)], columns=["A", "a"]))
+        assert table("cased").columns(con) == ["A", "a_1"]
+
+    def test_a_frame_is_read_as_it_is_at_query_time(self, con: duckdb.frame.Connection) -> None:
+        frame = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+        con.register("df", frame)
+        assert rows(con, "SELECT sum(a) FROM df") == [(6,)]
+        frame.loc[0, "a"] = 100
+        assert rows(con, "SELECT sum(a) FROM df") == [(105,)]
+        frame.columns = ["z", "b"]
+        assert table("df").columns(con) == ["z", "b"]
+        assert rows(con, "SELECT sum(z) FROM df") == [(105,)]
+        frame.drop(columns=["b"], inplace=True)
+        frame["c"] = [7, 8, 9]
+        assert table("df").columns(con) == ["z", "c"]
+        assert rows(con, "SELECT sum(c) FROM df") == [(24,)]
+
+    def test_a_multi_level_row_index_is_left_out(self, con: duckdb.frame.Connection) -> None:
+        index = pd.MultiIndex.from_tuples([("x", 1), ("y", 2)], names=["letter", "number"])
+        con.register("df", pd.DataFrame({"v": [10, 20]}, index=index))
+        assert table("df").columns(con) == ["v"]
+        assert rows(con, "SELECT v FROM df ORDER BY v") == [(10,), (20,)]
+
+    def test_every_missing_marker_is_null(self, con: duckdb.frame.Connection) -> None:
+        moment = datetime.datetime(2024, 1, 2, 3, 4, 5)
+        frame = pd.DataFrame(
+            {
+                "moment": pd.Series([moment, None, pd.NaT, pd.NA], dtype=object),
+                "count": pd.Series([1, None, pd.NA, 4], dtype="Int64"),
+                "flag": pd.Series([True, None, pd.NA, False], dtype="boolean"),
+            }
+        )
+        con.register("df", frame)
+        assert table("df").schema(con) == [("moment", "TIMESTAMP"), ("count", "BIGINT"), ("flag", "BOOLEAN")]
+        assert rows(con, 'SELECT count(moment), count("count"), count(flag), count(*) FROM df') == [(1, 2, 2, 4)]
+
+
+class TestPolarsShapes:
+    def test_a_column_of_python_objects_is_refused(self, con: duckdb.frame.Connection) -> None:
+        frame = pl.DataFrame({"n": [1, 2], "o": pl.Series([object(), object()], dtype=pl.Object)})
+        with pytest.raises(TypeError, match="the polars column 'o' holds Python objects"):
+            con.register("eager", frame)
+        con.register("lazy", frame.lazy())
+        with pytest.raises(exceptions.InvalidInputError, match="the polars column 'o' holds Python objects"):
+            rows(con, "SELECT n FROM lazy")
+        con.register("fine", frame.select("n"))
+        assert rows(con, "SELECT sum(n) FROM fine") == [(3,)]
+
+
+class TestDatasetShapes:
+    @pytest.mark.parametrize("kind", [pa.string_view(), pa.binary_view()])
+    def test_a_view_column_keeps_every_filter_with_the_engine(
+        self, con: duckdb.frame.Connection, kind: pa.DataType
+    ) -> None:
+        values = [b"abc", b"efg", None] if pa.types.is_binary_view(kind) else ["abc", "efg", None]
+        source = Pushing(ds.dataset(pa.table({"v": pa.array(values, kind), "n": [1, 2, 3]})))
+        con.register("views", source)
+        assert rows(con, "SELECT n FROM views WHERE v IS NULL") == [(3,)]
+        assert rows(con, "SELECT n FROM views WHERE n > 1") == [(2,), (3,)]
+        assert rows(con, "SELECT v IS NULL FROM views WHERE n > 1") == [(False,), (True,)]
+        assert source.applied == [[], [], []]
+
+    def test_a_view_column_stays_unfilterable_in_this_pyarrow(self) -> None:
+        views = pa.table({"v": pa.array(["a", "b"], pa.string_view()), "n": [1, 2]})
+        with pytest.raises(pa.ArrowNotImplementedError, match="array_filter"):
+            ds.dataset(views).scanner(filter=ds.field("n") > 1).to_table()
+
+    def test_a_top_n_over_a_dataset_and_a_plan(self, con: duckdb.frame.Connection, typed_dir: Path) -> None:
+        con.register("files", ds.dataset(typed_dir, partitioning="hive"))
+        con.register("plan", pl.scan_parquet(typed_dir, hive_partitioning=True))
+        for name in ("files", "plan"):
+            assert rows(con, f"SELECT n FROM {name} ORDER BY n DESC LIMIT 2") == [(9,), (8,)]
+            assert rows(con, f"SELECT n FROM {name} ORDER BY n ASC NULLS FIRST LIMIT 3") == [(None,), (None,), (0,)]
+
+    def test_not_in_and_a_long_in_list(self, con: duckdb.frame.Connection, typed_dir: Path) -> None:
+        source = Pushing(ds.dataset(typed_dir, partitioning="hive"))
+        con.register("files", source)
+        assert rows(con, "SELECT n FROM files WHERE n NOT IN (0, 1, 3, 4, 5, 6) ORDER BY n") == [(8,), (9,)]
+        assert source.applied[-1] == ['(NOT ("n" IN (0, 1, 3, 4, 5, 6)))']
+        members = ", ".join(str(i) for i in range(1000, 6000)) + ", 9"
+        assert rows(con, f"SELECT n FROM files WHERE n IN ({members})") == [(9,)]
+        [applied] = source.applied[-1]
+        assert applied.startswith('("n" IN (1000, 1001')

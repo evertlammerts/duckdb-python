@@ -38,3 +38,34 @@ def test_importing_duckdb_pulls_in_no_optional_dependency() -> None:
     result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True)
     leaked = result.stdout.strip()
     assert not leaked, f"importing duckdb dragged in: {leaked}"
+
+
+def test_the_package_works_with_every_optional_dependency_absent() -> None:
+    # Blocking the modules in a fresh interpreter makes every import of them fail as on a bare install.
+    probe = (
+        "import sys\n"
+        f"for name in {OPTIONAL_DEPENDENCIES!r}:\n"
+        "    sys.modules[name] = None\n"
+        "import duckdb, duckdb.dbapi, duckdb._sources, duckdb._expressions.arrow, duckdb._expressions.polars\n"
+        "from duckdb.frame import col, connect\n"
+        "con = connect()\n"
+        "with con._execute('SELECT 42') as result:\n"
+        "    assert result.fetch_all() == [(42,)]\n"
+        "class Exporter:\n"
+        "    def __arrow_c_stream__(self, requested_schema=None):\n"
+        "        return None\n"
+        "con.register('plain', Exporter())\n"
+        "assert (col('a') > 1).fragment() == '(\"a\" > 1)'\n"
+        "class Frame:\n"
+        "    pass\n"
+        "Frame.__module__, Frame.__name__ = 'pandas.core.frame', 'DataFrame'\n"
+        "try:\n"
+        "    con.register('df', Frame())\n"
+        "except TypeError as error:\n"
+        "    assert 'needs pyarrow' in str(error), error\n"
+        "else:\n"
+        "    raise AssertionError('a pandas frame registered without pyarrow')\n"
+        "print('ok')\n"
+    )
+    result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True)
+    assert result.stdout.strip() == "ok", result.stderr

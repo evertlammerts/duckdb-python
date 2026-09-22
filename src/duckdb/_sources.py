@@ -14,10 +14,10 @@ from typing import TYPE_CHECKING, Any
 from . import _duckdb
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Iterator, Mapping, Sequence
 
     from pandas import DataFrame
-    from pyarrow import RecordBatch, Schema
+    from pyarrow import RecordBatch, Schema, Table
 
     from ._expressions import Expr
 
@@ -124,6 +124,10 @@ class TableSource(ExportingSource):
 class PolarsFrameSource(ExportingSource):
     """A polars DataFrame: `select` by name narrows it without copying."""
 
+    def __init__(self, obj: object) -> None:
+        super().__init__(obj)
+        _refuse_object_columns(self.obj.schema)
+
     def stream(self, columns: Sequence[int] | None, filters: Sequence[Expr]) -> tuple[object, bool]:
         if columns is None:
             return self.obj.__arrow_c_stream__(), False
@@ -140,7 +144,9 @@ class LazyFrameSource(Source):
     """
 
     def __arrow_c_schema__(self) -> object:
-        return self.obj.collect_schema().__arrow_c_schema__()
+        schema = self.obj.collect_schema()
+        _refuse_object_columns(schema)
+        return schema.__arrow_c_schema__()
 
     def accepts(self, predicate: Expr) -> bool:
         from ._expressions import Untranslatable
@@ -170,8 +176,9 @@ class PandasSource(Source):
 
     The index is left out, as the previous client did. Column types come from a sample of rows spread over the
     frame, as the previous client's analyzer sampled, since pyarrow can only type an object column by converting it;
-    every slice is then converted to those types, and a value a later slice holds that does not fit fails the query.
-    Only the requested columns are converted.
+    every slice is then converted to those types, and a value a later slice holds that they cannot hold exactly
+    fails the query. Only the requested columns are converted. Column labels become their text, and a label
+    repeating another gets a numbered suffix, as the engine names a repeated Arrow field.
     """
 
     #: Rows the types are inferred from, spread evenly over the frame.
@@ -188,24 +195,53 @@ class PandasSource(Source):
         super().__init__(obj)
         self.pyarrow = pyarrow
 
+    def _named(self, columns: Sequence[int] | None) -> DataFrame:
+        """The frame as it is now, or the requested columns of it, under the text names; a view sharing its data."""
+        names = _unique_names([str(label) for label in self.obj.columns])
+        frame = self.obj if columns is None else self.obj.iloc[:, list(columns)]
+        chosen = names if columns is None else [names[i] for i in columns]
+        return frame.set_axis(chosen, axis=1)
+
     def _schema(self, frame: DataFrame) -> Schema:
         step = max(1, len(frame) // self.SAMPLE_ROWS)
         sample = frame.iloc[::step].head(self.SAMPLE_ROWS)
         return self.pyarrow.Schema.from_pandas(sample, preserve_index=False)
 
     def _batches(self, frame: DataFrame, schema: Schema) -> Iterator[RecordBatch]:
+        loose = [str(name) for name, dtype in frame.dtypes.items() if dtype.kind == "O"]
         for start in range(0, len(frame), self.SLICE_ROWS):
             part = frame.iloc[start : start + self.SLICE_ROWS]
-            yield from self.pyarrow.Table.from_pandas(part, schema=schema, preserve_index=False).to_batches()
+            converted = self.pyarrow.Table.from_pandas(part, schema=schema, preserve_index=False)
+            for name in loose:
+                self._check_exact(part, name, converted, schema, start)
+            yield from converted.to_batches()
+
+    def _check_exact(self, part: DataFrame, name: str, converted: Table, schema: Schema, start: int) -> None:
+        """Refuses a slice whose Python objects the sampled type holds only approximately.
+
+        Under a forced type pyarrow truncates a float into an integer column silently, and typed on its own a
+        slice can lose as much, so the slice's own typing is cast to the sampled type with the cast that refuses
+        loss, and the two readings must agree.
+        """
+        kind = schema.field(name).type
+        message = f"column '{name}' holds a value after row {start} that its sampled type {kind} cannot hold exactly"
+        natural = self.pyarrow.array(part[name], from_pandas=True)
+        try:
+            checked = natural.cast(kind)
+        except self.pyarrow.ArrowException as error:
+            detail = f"{message}: {error}"
+            raise ValueError(detail) from None
+        if not checked.equals(converted[name].combine_chunks()):
+            raise ValueError(message)
 
     def __arrow_c_schema__(self) -> object:
-        return self._schema(self.obj).__arrow_c_schema__()
+        return self._schema(self._named(None)).__arrow_c_schema__()
 
     def rows(self) -> int | None:
         return len(self.obj)
 
     def stream(self, columns: Sequence[int] | None, filters: Sequence[Expr]) -> tuple[object, bool]:
-        frame = self.obj if columns is None else self.obj.iloc[:, list(columns)]
+        frame = self._named(columns)
         schema = self._schema(frame)
         reader = self.pyarrow.RecordBatchReader.from_batches(schema, self._batches(frame, schema))
         return reader.__arrow_c_stream__(), columns is not None
@@ -268,6 +304,31 @@ def _from(obj: object, library: str) -> bool:
 
 def _is(obj: object, library: str, *names: str) -> bool:
     return type(obj).__name__ in names and _from(obj, library)
+
+
+def _unique_names(labels: list[str]) -> list[str]:
+    """`labels` with a repeat renamed as the engine renames a repeated Arrow field: the first free numbered suffix."""
+    taken: set[str] = set()
+    names = []
+    for label in labels:
+        name = label
+        suffix = 0
+        while name.lower() in taken:
+            suffix += 1
+            name = f"{label}_{suffix}"
+        taken.add(name.lower())
+        names.append(name)
+    return names
+
+
+def _refuse_object_columns(schema: Mapping[str, object]) -> None:
+    """Polars exports a column of Python objects as the objects' addresses, so such a frame is refused up front."""
+    import polars
+
+    for name, dtype in schema.items():
+        if dtype == polars.Object:
+            message = f"the polars column '{name}' holds Python objects, which polars cannot export as Arrow"
+            raise TypeError(message)
 
 
 def _known_length(obj: object) -> int | None:
