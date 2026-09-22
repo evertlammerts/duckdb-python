@@ -70,8 +70,11 @@ private:
 	//! The names the Python layer reports, see the definition for why this is not always the result's own.
 	const vector<Identifier> &ResultNames() const;
 	bool Empty() const {
-		return !result && !stream;
+		return !result && !stream && !submitted;
 	}
+	//! The Arrow readers take the handle itself, so the stream is not opened before the first
+	//! consumer call decides.
+	void EnsureStream();
 	//! Flat vectors, for the row fetch
 	unique_ptr<DataChunk> FetchNext();
 	unique_ptr<DataChunk> FetchNextRaw();
@@ -94,6 +97,9 @@ private:
 	template <typename T>
 	T RunWithArrowSchema(const std::function<T(const ArrowSchema &)> &fun, bool dedup_col_names);
 	duckdb::pyarrow::Table MaterializedResultToArrowTable(const ArrowSchema &arrow_schema, idx_t rows_per_batch);
+	//! The stream's private data owns the handle, and its callbacks run without the GIL.
+	ArrowArrayStream FetchArrowArrayStream(idx_t rows_per_batch);
+	bool IsArrow() const;
 
 private:
 	idx_t chunk_offset = 0;
@@ -101,6 +107,8 @@ private:
 	unique_ptr<QueryResult> result;
 	//! The open stream the rows are drained through
 	unique_ptr<QueryResultStream> stream;
+	//! A handle that can be drained but has not been consumed yet
+	unique_ptr<QueryResult> submitted;
 	//! Set only when the result was re-bound (promotion to Arrow de-duplicates column names
 	//! and core exposes no setter), so the original names survive. Empty means "use result's".
 	vector<Identifier> names_override;

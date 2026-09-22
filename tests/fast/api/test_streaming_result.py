@@ -124,6 +124,46 @@ class TestStreamingSemantics:
         duckdb_cursor.execute("SELECT 1")
         assert produced[0] < ROW_COUNT // 2
 
+    def test_arrow_reader_streams(self, duckdb_cursor, produced):
+        pytest.importorskip("pyarrow")
+        reader = duckdb_cursor.sql(self.TALLY_QUERY).to_arrow_reader(1024)
+        assert len(reader.read_next_batch()) == 1024
+        del reader
+        assert produced[0] < ROW_COUNT // 2
+
+    def test_arrow_capsule_streams(self, duckdb_cursor, produced):
+        pa = pytest.importorskip("pyarrow")
+        # The capsule has no batch size parameter and its batches hold a million rows
+        query = f"SELECT tally(i) AS i FROM range({2 * ROW_COUNT}) t(i)"
+        capsule = duckdb_cursor.sql(query).__arrow_c_stream__()
+        reader = pa.RecordBatchReader._import_from_c_capsule(capsule)
+        assert len(reader.read_next_batch()) > 0
+        del reader
+        assert produced[0] < ROW_COUNT + ROW_COUNT // 2
+
+    def test_arrow_reader_after_row_fetch_returns_the_remainder(self, duckdb_cursor):
+        pytest.importorskip("pyarrow")
+        res = duckdb_cursor.sql("SELECT i FROM range(10) t(i)")
+        assert res.fetchone() == (0,)
+        assert res.to_arrow_reader().read_all().column("i").to_pylist() == list(range(1, 10))
+
+    def test_arrow_reader_over_a_retained_result(self, duckdb_cursor):
+        pytest.importorskip("pyarrow")
+        res = duckdb_cursor.sql("SELECT i FROM range(10) t(i)").execute()
+        assert res.to_arrow_reader(4).read_all().column("i").to_pylist() == list(range(10))
+
+    def test_second_statement_ends_the_open_arrow_reader(self, duckdb_cursor):
+        pytest.importorskip("pyarrow")
+        duckdb_cursor.execute(f"SET max_streaming_buffer_size='{SMALL_BUFFER}'")
+        reader = duckdb_cursor.sql(f"SELECT i FROM range({ROW_COUNT}) t(i)").to_arrow_reader(1024)
+        assert len(reader.read_next_batch()) == 1024
+
+        duckdb_cursor.execute("SELECT 42")
+
+        # The engine's blocking fetch reports the ended query as closed rather than as cancelled
+        with pytest.raises(OSError, match=r"cancelled|closed query result"):
+            reader.read_all()
+
     def test_relation_whole_fetch_runs_to_the_end(self, duckdb_cursor, produced):
         assert len(duckdb_cursor.sql(self.TALLY_QUERY).fetchall()) == ROW_COUNT
         assert produced[0] == ROW_COUNT
