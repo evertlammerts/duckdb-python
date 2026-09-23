@@ -37,6 +37,12 @@ void WrapAsBatch(ArrowSchema &schema);
 /// The array counterpart: a struct array with no validity buffer whose only child is the array.
 void WrapAsBatch(ArrowArray &array);
 
+/// Several Arrow exports read as one stream: `parts`, an iterable of objects with `__arrow_c_stream__`, are read
+/// in order, each part expected to carry the schema `schema` (itself anything with `__arrow_c_stream__`) exports;
+/// the caller guarantees that, the chain does not check it. Pulled from one thread at a time, as the Arrow stream
+/// interface requires of every stream.
+nb::capsule ChainStreams(nb::object schema, nb::handle parts);
+
 /// The name of a batch schema's child, empty when it has none.
 std::string NameOf(const ArrowSchema &schema, cxx::idx_t index);
 

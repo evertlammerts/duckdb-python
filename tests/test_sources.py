@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import decimal
+import threading
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -1024,6 +1025,59 @@ class TestPolarsShapes:
         con.register("fine", frame.select("n"))
         assert rows(con, "SELECT sum(n) FROM fine") == [(3,)]
 
+    def test_a_frame_just_over_one_slice_scans_whole(self, con: duckdb.frame.Connection) -> None:
+        n = PolarsFrameSource.SLICE_ROWS + 1
+        holes = [None if i in (0, n - 2, n - 1) else str(i) for i in range(n)]
+        con.register("src", pl.DataFrame({"n": range(n), "s": holes}))
+        assert rows(con, "SELECT count(*), sum(n), count(s) FROM src") == [(n, sum(range(n)), n - 3)]
+        last = rows(con, "SELECT n, s FROM src ORDER BY n DESC LIMIT 3")
+        assert last == [(n - 1, None), (n - 2, None), (n - 3, str(n - 3))]
+        assert rows(con, "SELECT n FROM src WHERE n IN (0, 65535, 65536) ORDER BY n") == [(0,), (65535,), (65536,)]
+
+    @pytest.mark.parametrize("lazy", [False, True])
+    def test_an_empty_frame_gives_no_rows(self, con: duckdb.frame.Connection, *, lazy: bool) -> None:
+        frame = pl.DataFrame({"n": pl.Series([], dtype=pl.Int64), "s": pl.Series([], dtype=pl.String)})
+        con.register("empty", frame.lazy() if lazy else frame)
+        assert rows(con, "SELECT * FROM empty") == []
+        assert rows(con, "SELECT count(*), sum(n) FROM empty") == [(0, None)]
+
+    def test_a_self_join_reads_a_chunked_frame_twice_at_once(self, con: duckdb.frame.Connection) -> None:
+        con.run("SET threads = 4")
+        parts = [pl.DataFrame({"n": range(start, start + 1000)}) for start in range(0, 5000, 1000)]
+        frame = pl.concat(parts, rechunk=False)
+        con.register("m", frame)
+        assert rows(con, "SELECT count(*), sum(a.n) FROM m a JOIN m b USING (n)") == [(5000, sum(range(5000)))]
+        assert frame.n_chunks() == 5
+
+    def test_scanning_a_chunked_frame_leaves_its_chunk_count_unchanged(self, con: duckdb.frame.Connection) -> None:
+        frame = pl.concat([pl.DataFrame({"n": [1, 2]}), pl.DataFrame({"n": [3, 4, 5]})], rechunk=False)
+        assert frame.n_chunks() == 2
+        con.register("src", frame)
+        assert rows(con, "SELECT n FROM src") == [(1,), (2,), (3,), (4,), (5,)]
+        assert frame.n_chunks() == 2
+
+    @pytest.mark.parametrize("lazy", [False, True])
+    def test_several_engine_threads_pull_from_a_polars_frame(
+        self, con: duckdb.frame.Connection, monkeypatch: pytest.MonkeyPatch, *, lazy: bool
+    ) -> None:
+        from duckdb import _sources
+
+        pulled: set[int] = set()
+        slices = _sources._polars_slices
+
+        def recording(frame: pl.DataFrame) -> Iterator[pl.Series]:
+            for part in slices(frame):
+                pulled.add(threading.get_ident())
+                yield part
+
+        monkeypatch.setattr(_sources, "_polars_slices", recording)
+        con.run("SET threads = 4")
+        n = 2_000_000
+        frame = pl.DataFrame({"n": range(n), "s": [str(i) for i in range(n)]})
+        con.register("src", frame.lazy() if lazy else frame)
+        assert rows(con, "SELECT count(*), sum(n) FROM src") == [(n, sum(range(n)))]
+        assert len(pulled) > 1
+
 
 class TestDatasetShapes:
     @pytest.mark.parametrize("kind", [pa.string_view(), pa.binary_view()])
@@ -1094,6 +1148,28 @@ class TestParallelOrdering:
         table_ = pa.Table.from_batches(batches)
         assert table_.column(0).num_chunks == len(sizes)
         con.register("src", table_)
+        check_order_preserved(con, lambda: None, "src", total)
+
+    def test_order_preserved_over_a_polars_frame_with_many_chunks(self, con: duckdb.frame.Connection) -> None:
+        con.run("SET threads = 4")
+        sizes = uneven_sizes(204)
+        total = sum(sizes)
+        start = 0
+        parts = []
+        for size in sizes:
+            parts.append(pl.DataFrame({"n": range(start, start + size)}))
+            start += size
+        frame = pl.concat(parts, rechunk=False)
+        assert frame.n_chunks() == len(sizes)
+        con.register("src", frame)
+        check_order_preserved(con, lambda: None, "src", total)
+
+    def test_order_preserved_over_a_one_chunk_polars_frame(self, con: duckdb.frame.Connection) -> None:
+        con.run("SET threads = 4")
+        total = sum(uneven_sizes(204))
+        frame = pl.DataFrame({"n": range(total)})
+        assert frame.n_chunks() == 1
+        con.register("src", frame)
         check_order_preserved(con, lambda: None, "src", total)
 
 

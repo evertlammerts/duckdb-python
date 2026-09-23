@@ -19,6 +19,7 @@
 #include <utility>
 #include <vector>
 
+#include "arrowc.hpp"
 #include "chunkview.hpp"
 #include "lifetime.hpp"
 #include "registry.hpp"
@@ -376,4 +377,7 @@ NB_MODULE(_duckdb, m) {
 		    return std::string(name ? name : "");
 	    },
 	    nb::arg("object"), "The name a capsule carries, which for Arrow data says what it holds; None for anything else.");
+	m.def("chain_streams", &ChainStreams, nb::arg("schema"), nb::arg("parts"),
+	      "Several exports read as one stream, each part with the schema of `schema`, which the caller guarantees; "
+	      "the chain does not check it.");
 }

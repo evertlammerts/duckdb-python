@@ -17,6 +17,7 @@ from . import _duckdb
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
 
+    import polars as pl
     from pandas import DataFrame
     from pyarrow import RecordBatch, Schema, Table
 
@@ -31,9 +32,9 @@ class Source:
     """What the scan talks to. `one_shot` sources are read once; every other source is read as often as asked."""
 
     one_shot = False
-    #: Whether pulling the next array from the exported stream may run Python code, so the scan takes the GIL
-    #: around every pull. A source whose stream is pure C, C++ or Rust sets this False, and its pulls then run
-    #: on engine threads with no GIL held.
+    #: Whether the exported stream needs the scan to hold the GIL while it pulls the next array. A source whose
+    #: stream is pure C, C++ or Rust, or takes the GIL itself where it runs Python, sets this False, and its pulls
+    #: then run on engine threads with no GIL held.
     pull_under_gil = True
 
     def __init__(self, obj: object) -> None:
@@ -129,9 +130,17 @@ class TableSource(ExportingSource):
 
 
 class PolarsFrameSource(ExportingSource):
-    """A polars DataFrame: `select` by name narrows it without copying."""
+    """A polars DataFrame: `select` by name narrows it without copying, and slices of it are exported in a chain.
+
+    Polars exports a whole frame as one array however many chunks it holds, and rechunks the frame in place doing
+    so, which would leave the scan one array for all its threads. A slice is a view whose export keeps the chunks
+    it spans, so the chain hands the scan one array per slice or chunk. The chain takes the GIL itself around the
+    slicing, so a pull needs none.
+    """
 
     pull_under_gil = False
+    #: Rows per slice, which bounds how many threads can share a frame held in one chunk.
+    SLICE_ROWS = 1 << 16
 
     def __init__(self, obj: object) -> None:
         super().__init__(obj)
@@ -139,9 +148,12 @@ class PolarsFrameSource(ExportingSource):
 
     def stream(self, columns: Sequence[int] | None, filters: Sequence[Expr]) -> tuple[object, bool]:
         if columns is None:
-            return self.obj.__arrow_c_stream__(), False
-        names = self.obj.columns
-        return self.obj.select([names[i] for i in columns]).__arrow_c_stream__(), True
+            narrowed = self.obj
+        else:
+            names = self.obj.columns
+            narrowed = self.obj.select([names[i] for i in columns])
+        stream = _duckdb.chain_streams(narrowed.head(0).to_struct(), _polars_slices(narrowed))
+        return stream, columns is not None
 
 
 class LazyFrameSource(Source):
@@ -149,7 +161,8 @@ class LazyFrameSource(Source):
 
     The schema is the plan's prediction; a step whose declared output differs from what it produces, such as a
     `map_batches` without a return type, is refused by polars when the plan runs, and the query fails with that.
-    A predicate the polars translator models becomes a `filter` step, which polars pushes into its own scan.
+    A predicate the polars translator models becomes a `filter` step, which polars pushes into its own scan. The
+    collected frame is sliced and chained as `PolarsFrameSource` does.
     """
 
     pull_under_gil = False
@@ -179,7 +192,9 @@ class LazyFrameSource(Source):
         if columns is not None:
             names = schema.names()
             plan = plan.select([names[i] for i in columns])
-        return plan.collect().__arrow_c_stream__(), columns is not None
+        collected = plan.collect()
+        stream = _duckdb.chain_streams(collected.head(0).to_struct(), _polars_slices(collected))
+        return stream, columns is not None
 
 
 class PandasSource(Source):
@@ -344,6 +359,12 @@ def _refuse_object_columns(schema: Mapping[str, object]) -> None:
         if dtype == polars.Object:
             message = f"the polars column '{name}' holds Python objects, which polars cannot export as Arrow"
             raise TypeError(message)
+
+
+def _polars_slices(frame: pl.DataFrame) -> Iterator[pl.Series]:
+    """`frame` as views of `PolarsFrameSource.SLICE_ROWS` rows, each a struct series, which exports per chunk."""
+    for part in frame.iter_slices(PolarsFrameSource.SLICE_ROWS):
+        yield part.to_struct()
 
 
 def _known_length(obj: object) -> int | None:

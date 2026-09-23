@@ -1,7 +1,7 @@
 """Type stubs for the compiled extension module."""
 
 import enum
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
 class FunctionNullHandling(enum.Enum):
@@ -127,3 +127,6 @@ def library_version() -> str:
 
 def capsule_name(object: object) -> str | None:
     """The name a capsule carries, which for Arrow data says what it holds; None for anything else."""
+
+def chain_streams(schema: object, parts: Iterable[object]) -> object:
+    """Several exports read as one stream, each part with the schema of `schema`, which the caller guarantees."""

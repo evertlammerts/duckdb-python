@@ -431,6 +431,84 @@ class TestStreams:
             rows(con, "SELECT * FROM s")
 
 
+class FailingExport:
+    """An object whose Arrow export raises."""
+
+    def __init__(self, message: str) -> None:
+        self.message = message
+
+    def __arrow_c_stream__(self, requested_schema: object = None) -> object:
+        raise ValueError(self.message)
+
+
+class TestChainedStream:
+    """`_duckdb.chain_streams` over pyarrow parts, read through pyarrow and through the scan."""
+
+    def test_the_parts_give_every_batch_in_order(self) -> None:
+        parts = [pa.table({"n": [1, 2]}), pa.table({"n": [3]}), pa.table({"n": [4, 5, 6]})]
+        capsule = _duckdb.chain_streams(parts[0], iter(parts))
+        reader = pa.RecordBatchReader._import_from_c_capsule(capsule)
+        batches = list(reader)
+        assert [batch.column("n").to_pylist() for batch in batches] == [[1, 2], [3], [4, 5, 6]]
+
+    def test_a_part_of_several_batches_gives_each_in_turn(self) -> None:
+        schema = pa.schema([("n", pa.int64())])
+        multi = pa.Table.from_batches(
+            [
+                pa.record_batch([pa.array([1, 2])], schema=schema),
+                pa.record_batch([pa.array([3, 4, 5])], schema=schema),
+            ]
+        )
+        single = pa.table({"n": [6]})
+        capsule = _duckdb.chain_streams(single, iter([multi, single]))
+        reader = pa.RecordBatchReader._import_from_c_capsule(capsule)
+        batches = list(reader)
+        assert [batch.column("n").to_pylist() for batch in batches] == [[1, 2], [3, 4, 5], [6]]
+
+    def test_empty_parts_between_others_give_no_batch(self) -> None:
+        empty = pa.table({"n": pa.array([], pa.int64())})
+        capsule = _duckdb.chain_streams(empty, iter([pa.table({"n": [1]}), empty, empty, pa.table({"n": [2]})]))
+        reader = pa.RecordBatchReader._import_from_c_capsule(capsule)
+        assert [batch.column("n").to_pylist() for batch in reader] == [[1], [2]]
+
+    def test_an_empty_iterator_gives_the_schema_and_no_batches(self) -> None:
+        schema_source = pa.table({"n": pa.array([], pa.int64())})
+        capsule = _duckdb.chain_streams(schema_source, iter([]))
+        reader = pa.RecordBatchReader._import_from_c_capsule(capsule)
+        assert reader.schema == schema_source.schema
+        assert list(reader) == []
+
+    def test_parts_as_a_list_rather_than_an_iterator_works(self) -> None:
+        parts = [pa.table({"n": [1]}), pa.table({"n": [2]})]
+        capsule = _duckdb.chain_streams(parts[0], parts)
+        reader = pa.RecordBatchReader._import_from_c_capsule(capsule)
+        assert reader.read_all().column("n").to_pylist() == [1, 2]
+
+    def test_a_failing_part_surfaces_its_exception_text(self) -> None:
+        good = pa.table({"n": [1]})
+        capsule = _duckdb.chain_streams(good, iter([good, FailingExport("boom here")]))
+        reader = pa.RecordBatchReader._import_from_c_capsule(capsule)
+        with pytest.raises(pa.ArrowInvalid, match="ValueError: boom here"):
+            reader.read_all()
+
+    def test_a_failing_part_fails_the_query_with_the_sources_name(self, con: duckdb.frame.Connection) -> None:
+        good = pa.table({"n": [1, 2]})
+
+        class Chained(Source):
+            def __arrow_c_schema__(self) -> object:
+                return self.obj.schema.__arrow_c_schema__()
+
+            def stream(self, columns: Sequence[int] | None, filters: Sequence[object]) -> tuple[object, bool]:
+                parts = [self.obj, self.obj, FailingExport("boom in the third part")]
+                return _duckdb.chain_streams(self.obj, iter(parts)), False
+
+        con.register("chained", Chained(good))
+        with pytest.raises(
+            exceptions.InvalidInputError, match=r"registered as 'chained' failed: ValueError: boom in the third part"
+        ):
+            rows(con, "SELECT * FROM chained")
+
+
 class Recording(Source):
     """A source over a pyarrow table that remembers which columns each scan asked for."""
 
