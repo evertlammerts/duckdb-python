@@ -28,7 +28,7 @@ from duckdb._sources import (
 from duckdb.frame import col, sql, table
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Iterator, Sequence
     from pathlib import Path
 
     from duckdb._expressions import Expr
@@ -52,6 +52,27 @@ def parquet_dir(tmp_path: Path) -> Path:
 def rows(con: duckdb.frame.Connection, query: str) -> list[tuple[object, ...]]:
     with con._execute(query) as result:
         return result.fetch_all()
+
+
+def uneven_sizes(count: int) -> list[int]:
+    """`count` batch sizes cycling through a mix of tiny and large, some of which split across several chunks."""
+    pattern = [1, 7, 100, 2048, 3000, 5000]
+    return (pattern * (count // len(pattern) + 1))[:count]
+
+
+def check_order_preserved(con: duckdb.frame.Connection, register: Callable[[], None], name: str, total: int) -> None:
+    """A monotone `n` column over `name` survives a plain scan, a windowed rank, a LIMIT and a CREATE TABLE AS."""
+    register()
+    assert [row[0] for row in rows(con, f"SELECT n FROM {name}")] == list(range(total))
+    register()
+    ranked = rows(con, f"SELECT row_number() OVER () AS r, n FROM {name}")
+    assert all(r == n + 1 for r, n in ranked)
+    register()
+    assert rows(con, f"SELECT n FROM {name} LIMIT 5") == [(i,) for i in range(5)]
+    register()
+    con.run(f'CREATE TABLE "{name}_copy" AS SELECT * FROM {name}')
+    assert [row[0] for row in rows(con, f'SELECT n FROM "{name}_copy"')] == list(range(total))
+    con.run(f'DROP TABLE "{name}_copy"')
 
 
 class TestClassification:
@@ -979,6 +1000,18 @@ class TestPandasShapes:
         assert table("df").schema(con) == [("moment", "TIMESTAMP"), ("count", "BIGINT"), ("flag", "BOOLEAN")]
         assert rows(con, 'SELECT count(moment), count("count"), count(flag), count(*) FROM df') == [(1, 2, 2, 4)]
 
+    def test_an_object_column_scans_correctly_under_four_threads(self, con: duckdb.frame.Connection) -> None:
+        n = 300_000
+        frame = pd.DataFrame({"i": range(n), "o": [str(i) for i in range(n)]})
+        con.run("SET threads = 4")
+        con.register("df", frame)
+        assert rows(con, "SELECT count(*), sum(i) FROM df") == [(n, sum(range(n)))]
+        assert rows(con, "SELECT i, o FROM df WHERE i IN (0, 150000, 299999) ORDER BY i") == [
+            (0, "0"),
+            (150000, "150000"),
+            (299999, "299999"),
+        ]
+
 
 class TestPolarsShapes:
     def test_a_column_of_python_objects_is_refused(self, con: duckdb.frame.Connection) -> None:
@@ -1026,3 +1059,93 @@ class TestDatasetShapes:
         assert rows(con, f"SELECT n FROM files WHERE n IN ({members})") == [(9,)]
         [applied] = source.applied[-1]
         assert applied.startswith('("n" IN (1000, 1001')
+
+
+class TestParallelOrdering:
+    """The scan's batch ordering survives four threads pulling from one chunked or batched source."""
+
+    def test_order_preserved_over_a_record_batch_reader(self, con: duckdb.frame.Connection) -> None:
+        con.run("SET threads = 4")
+        sizes = uneven_sizes(204)
+        total = sum(sizes)
+        schema = pa.schema([("n", pa.int64())])
+
+        def batches() -> Iterator[pa.RecordBatch]:
+            start = 0
+            for size in sizes:
+                yield pa.record_batch([pa.array(range(start, start + size))], schema=schema)
+                start += size
+
+        def register() -> None:
+            con.register("src", pa.RecordBatchReader.from_batches(schema, batches()))
+
+        check_order_preserved(con, register, "src", total)
+
+    def test_order_preserved_over_a_table_with_many_chunks(self, con: duckdb.frame.Connection) -> None:
+        con.run("SET threads = 4")
+        sizes = uneven_sizes(204)
+        total = sum(sizes)
+        schema = pa.schema([("n", pa.int64())])
+        start = 0
+        batches = []
+        for size in sizes:
+            batches.append(pa.record_batch([pa.array(range(start, start + size))], schema=schema))
+            start += size
+        table_ = pa.Table.from_batches(batches)
+        assert table_.column(0).num_chunks == len(sizes)
+        con.register("src", table_)
+        check_order_preserved(con, lambda: None, "src", total)
+
+
+class TestParallelResultsMatch:
+    """Every source family gives the same answer scanned by one thread as by four."""
+
+    def test_matches_the_single_threaded_scan(self, con: duckdb.frame.Connection) -> None:
+        n = 20_000
+        chunk = 137
+        schema = pa.schema([("n", pa.int64())])
+
+        def table_batches() -> list[pa.RecordBatch]:
+            return [
+                pa.record_batch([pa.array(range(start, min(start + chunk, n)))], schema=schema)
+                for start in range(0, n, chunk)
+            ]
+
+        table_ = pa.Table.from_batches(table_batches())
+        frame = pl.concat(
+            [pl.DataFrame({"n": range(start, min(start + chunk, n))}) for start in range(0, n, chunk)],
+            rechunk=False,
+        )
+        pandas_frame = pd.DataFrame({"n": range(n)})
+
+        makers: list[tuple[str, Callable[[], object]]] = [
+            ("table", lambda: table_),
+            ("batch reader", lambda: pa.RecordBatchReader.from_batches(schema, table_batches())),
+            ("polars frame", lambda: frame),
+            ("lazy frame", lambda: frame.lazy()),
+            ("pandas frame", lambda: pandas_frame),
+            ("capsule", lambda: table_.__arrow_c_stream__()),
+        ]
+        for name, maker in makers:
+            for threads in (1, 4):
+                con.run(f"SET threads = {threads}")
+                con.register("src", maker())
+                assert rows(con, "SELECT count(*), sum(n) FROM src") == [(n, sum(range(n)))], (name, threads)
+
+    def test_a_dataset_and_a_scanner_match_the_single_threaded_scan(
+        self, con: duckdb.frame.Connection, tmp_path: Path
+    ) -> None:
+        n = 200_000
+        files = 4
+        for part in range(files):
+            start = part * n // files
+            pq.write_table(pa.table({"n": range(start, start + n // files)}), tmp_path / f"{part}.parquet")
+        makers: list[tuple[str, Callable[[], object]]] = [
+            ("dataset", lambda: ds.dataset(tmp_path)),
+            ("scanner", lambda: ds.dataset(tmp_path).scanner(batch_size=1000)),
+        ]
+        for name, maker in makers:
+            for threads in (1, 4):
+                con.run(f"SET threads = {threads}")
+                con.register("files", maker())
+                assert rows(con, "SELECT count(*), sum(n) FROM files") == [(n, sum(range(n)))], (name, threads)

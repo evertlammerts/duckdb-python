@@ -128,15 +128,16 @@ struct ScanBind {
 	std::vector<nb::object> filters;
 };
 
-/// One scan's stream and the importer turning its arrays into chunks.
+/// One scan's source, shared by every thread pulling from it: either a stream or the single array a source handed
+/// over through `__arrow_c_array__`, and the schema every thread's own importer is built from.
 struct ScanState {
-	ScanState(nb::object capsule, ArrowArrayStream *stream, ArrowArray single, bool wrap, cxx::ArrowImporter importer,
-	          std::vector<cxx::idx_t> picks)
-	    : capsule(std::move(capsule)), stream(stream), single(single), wrap(wrap), importer(std::move(importer)),
-	      picks(std::move(picks)) {
+	ScanState(nb::object capsule, ArrowArrayStream *stream, ArrowArray single, ArrowSchema schema, bool wrap,
+	          std::vector<cxx::idx_t> picks, bool pull_under_gil)
+	    : capsule(std::move(capsule)), stream(stream), single(single), schema(schema), wrap(wrap),
+	      picks(std::move(picks)), pull_under_gil(pull_under_gil) {
 	}
 
-	/// Torn down from an engine thread, so the stream is released and the capsule dropped under the GIL.
+	/// Torn down from an engine thread, so the stream, array, schema and capsule are released under the GIL.
 	~ScanState() {
 		nb::gil_scoped_acquire gil;
 		if (stream != nullptr && stream->release != nullptr) {
@@ -145,23 +146,43 @@ struct ScanState {
 		if (single.release != nullptr) {
 			single.release(&single);
 		}
-		current.reset();
+		if (schema.release != nullptr) {
+			schema.release(&schema);
+		}
 		capsule.reset();
 	}
 
 	nb::object capsule;
 	/// The stream the arrays come from, or null when the source handed over one array.
 	ArrowArrayStream *stream;
-	/// The one array, until it is appended.
+	/// The one array, until some thread claims it.
 	ArrowArray single;
+	/// The schema every thread's own importer is resolved against; not consumed by building an importer from it.
+	ArrowSchema schema;
 	/// Whether the source's arrays are plain values rather than batches, to be wrapped as a one-column batch.
 	bool wrap;
-	cxx::ArrowImporter importer;
 	/// Which of the stream's columns each output vector takes; empty when the stream holds exactly the output.
 	std::vector<cxx::idx_t> picks;
+	/// Whether pulling the next array may run Python code, so the pull takes the GIL.
+	bool pull_under_gil;
+
+	/// Guards the pull, the claim of a batch index and the claim of the single array; the fields above never change.
+	std::mutex pull_lock;
+	cxx::idx_t next_batch = 0;
+	bool exhausted = false;
+};
+
+/// One scanning thread's own importer, which the Arrow C data contract requires to be single threaded, and the
+/// chunk it is currently emitting.
+struct ScanLocalState {
+	explicit ScanLocalState(cxx::ArrowImporter importer) : importer(std::move(importer)) {
+	}
+
+	cxx::ArrowImporter importer;
 	/// The chunk the output vectors reference, kept until the next batch replaces it.
 	std::optional<cxx::DataChunk> current;
-	bool exhausted = false;
+	/// The ordering position of the array this thread is currently emitting rows from.
+	cxx::idx_t batch_index = 0;
 };
 
 /// Resolved by name at bind time, so a query sees the object registered under the name when it binds, as it would
@@ -267,9 +288,9 @@ void PyScanFilterPushdown(cxx::TableFunction::FilterPushdownInput &input) {
 	}
 }
 
-/// Exports the stream, narrowed to the columns the query uses when the source can, and builds the importer over
-/// the stream's own schema. The scan takes columns by position, so a source that answers with other columns
-/// than it said, in width or in order as far as the names tell, is refused rather than read wrongly.
+/// Exports the stream, narrowed to the columns the query uses when the source can, and validates it against the
+/// declared columns. The scan takes columns by position, so a source that answers with other columns than it
+/// said, in width or in order as far as the names tell, is refused rather than read wrongly.
 void OpenStream(const ScanBind &bound, cxx::TableFunction::InitGlobalInput &input) {
 	auto &entry = *bound.entry;
 	const auto declared = static_cast<cxx::idx_t>(bound.names.size());
@@ -287,6 +308,12 @@ void OpenStream(const ScanBind &bound, cxx::TableFunction::InitGlobalInput &inpu
 		throw cxx::InvalidInputException("exporting a stream from the object registered as '" + entry.name +
 		                                 "' failed: " + DescribePythonError(error));
 	}
+	nb::object flag = entry.object.attr("pull_under_gil");
+	if (!nb::isinstance<nb::bool_>(flag)) {
+		throw cxx::InvalidInputException("the source registered as '" + entry.name +
+		                                 "' has pull_under_gil set to something other than True or False");
+	}
+	const bool pull_under_gil = nb::cast<bool>(flag);
 	ArrowArrayStream *stream = nullptr;
 	ArrowArray single {};
 	ArrowSchema schema {};
@@ -339,10 +366,12 @@ void OpenStream(const ScanBind &bound, cxx::TableFunction::InitGlobalInput &inpu
 				                                 bound.names[expected] + "' was expected");
 			}
 		}
-		cxx::ArrowImporter importer(input.GetContext(), schema, input.GetUserData<ScanUserData>().batch_rows);
-		schema.release(&schema);
+		// The engine clamps the cap to its scheduler's thread count, so a large one asks for every thread it has;
+		// a single array is one batch, which only one thread can ever work on.
+		input.SetMaxThreads(exported.IsArray() ? 1 : 1024);
 		nb::object keep = exported.IsArray() ? std::move(exported.array) : std::move(exported.stream);
-		input.SetGlobalState<ScanState>(std::move(keep), stream, single, wrap, std::move(importer), std::move(picks));
+		input.SetGlobalState<ScanState>(std::move(keep), stream, single, schema, wrap, std::move(picks),
+		                                pull_under_gil);
 	} catch (...) {
 		if (schema.release != nullptr) {
 			schema.release(&schema);
@@ -379,8 +408,16 @@ void PyScanInitGlobal(cxx::TableFunction::InitGlobalInput &input) {
 	}
 }
 
+/// Builds this thread's own importer over the global schema; the Arrow importer is single threaded by contract,
+/// which is why every scanning thread gets one of its own. Runs on an engine thread: no Python here.
+void PyScanInitLocal(cxx::TableFunction::InitLocalInput &input) {
+	auto &global = input.GetGlobalState<ScanState>();
+	const auto batch_rows = input.GetUserData<ScanUserData>().batch_rows;
+	input.SetLocalState<ScanLocalState>(cxx::ArrowImporter(input.GetContext(), global.schema, batch_rows));
+}
+
 /// Hands the next chunk to the engine: the importer's chunk is referenced, not copied, and stays alive here.
-void HandOver(ScanState &state, cxx::DataChunk chunk, cxx::TableFunction::ExecInput &input) {
+void HandOver(ScanState &global, ScanLocalState &local, cxx::DataChunk chunk, cxx::TableFunction::ExecInput &input) {
 	auto output = input.GetOutputChunk();
 	const auto columns = output.GetVectorCount();
 	// The engine sizes a batch from its first output vector, so it never asks for zero columns; a count over the
@@ -389,52 +426,82 @@ void HandOver(ScanState &state, cxx::DataChunk chunk, cxx::TableFunction::ExecIn
 		throw cxx::InvalidInputException("the scan of '" + input.GetBindData<ScanBind>().entry->name +
 		                                 "' was asked for no columns, which it cannot report rows through");
 	}
-	const auto needed = state.picks.empty() ? columns : state.picks.size();
+	const auto needed = global.picks.empty() ? columns : global.picks.size();
 	if (chunk.GetVectorCount() < needed) {
 		throw cxx::InvalidInputException("an Arrow batch carried " + std::to_string(chunk.GetVectorCount()) +
 		                                 " columns where " + std::to_string(needed) + " were expected");
 	}
 	for (cxx::idx_t i = 0; i < columns; i++) {
-		output.GetVector(i).Reference(chunk.GetVector(state.picks.empty() ? i : state.picks[i]));
+		output.GetVector(i).Reference(chunk.GetVector(global.picks.empty() ? i : global.picks[i]));
 	}
 	output.GetVector(0).SetSize(chunk.GetRowCount());
-	state.current = std::move(chunk);
+	local.current = std::move(chunk);
+}
+
+/// Pulls the stream's next array, under the GIL when the source said pulling may run Python.
+void PullNext(ArrowArrayStream &stream, bool under_gil, const std::string &name, ArrowArray &out) {
+	std::optional<nb::gil_scoped_acquire> gil;
+	if (under_gil) {
+		gil.emplace();
+	}
+	if (stream.get_next(&stream, &out) != 0) {
+		throw cxx::InvalidInputException("reading the stream registered as '" + name + "' failed: " +
+		                                 StreamError(stream));
+	}
 }
 
 void PyScanExec(cxx::TableFunction::ExecInput &input) {
-	auto &state = input.GetGlobalState<ScanState>();
+	auto &global = input.GetGlobalState<ScanState>();
+	auto &local = input.GetLocalState<ScanLocalState>();
 	const auto &entry = *input.GetBindData<ScanBind>().entry;
 	for (;;) {
-		auto chunk = state.importer.NextChunk();
+		auto chunk = local.importer.NextChunk();
 		if (chunk && chunk.GetRowCount() > 0) {
-			HandOver(state, std::move(chunk), input);
-			return;
-		}
-		if (state.exhausted) {
+			HandOver(global, local, std::move(chunk), input);
 			return;
 		}
 		ArrowArray array {};
-		if (state.stream == nullptr) {
-			array = state.single;
-			state.single.release = nullptr;
-		} else {
-			// A stream backed by Python code runs Python in get_next, so the GIL is held for every pull.
-			nb::gil_scoped_acquire gil;
-			if (state.stream->get_next(state.stream, &array) != 0) {
-				throw cxx::InvalidInputException("reading the stream registered as '" + entry.name +
-				                                 "' failed: " + StreamError(*state.stream));
+		{
+			std::lock_guard<std::mutex> guard(global.pull_lock);
+			if (global.exhausted) {
+				return;
 			}
-			if (array.release != nullptr && state.wrap) {
-				WrapAsBatch(array);
+			if (global.stream == nullptr) {
+				array = global.single;
+				global.single.release = nullptr;
+				global.exhausted = true;
+			} else {
+				try {
+					PullNext(*global.stream, global.pull_under_gil, entry.name, array);
+				} catch (...) {
+					// A stream that failed is not pulled again by another thread while the query is being cancelled.
+					global.exhausted = true;
+					throw;
+				}
+				if (array.release != nullptr && global.wrap) {
+					try {
+						WrapAsBatch(array);
+					} catch (...) {
+						array.release(&array);
+						throw;
+					}
+				}
+				if (array.release == nullptr) {
+					global.exhausted = true;
+				}
+			}
+			if (array.release != nullptr) {
+				local.batch_index = global.next_batch++;
 			}
 		}
 		if (array.release == nullptr) {
-			state.exhausted = true;
-			state.importer.Flush();
 			continue;
 		}
 		try {
-			state.importer.Append(array, true, false);
+			// Flushed on every array, not only at the end: otherwise the importer would carry a held-back tail
+			// of rows into the next array it is given, and with two threads pulling, that tail would emit rows
+			// of one array under a later array's batch index once both arrays had come out.
+			local.importer.Append(array, true, true);
 		} catch (...) {
 			if (array.release != nullptr) {
 				array.release(&array);
@@ -442,6 +509,19 @@ void PyScanExec(cxx::TableFunction::ExecInput &input) {
 			throw;
 		}
 	}
+}
+
+/// Reports the ordering position of the batch the exec callback just produced. The engine requires this on every
+/// call and never sees it decrease within one thread, which holds because a thread only ever claims increasing
+/// indices from the global counter.
+void PyScanPartitionData(cxx::TableFunction::PartitionDataInput &input) {
+	if (input.GetPartitionColumnCount() != 0) {
+		// Without a partitioning callback the engine never asks for partition values; a silent answer would be wrong.
+		throw cxx::InvalidInputException("the scan of a registered object was asked for partition values, which it "
+		                                 "does not report");
+	}
+	auto &local = input.GetLocalState<ScanLocalState>();
+	input.SetBatchIndex(local.batch_index);
 }
 
 } // namespace
@@ -455,8 +535,10 @@ void RegisterObjectScan(cxx::Connection &connection, std::shared_ptr<Registry> r
 	function.SetUserData<ScanUserData>(ScanUserData {std::move(registry), std::move(module), batch_rows});
 	function.SetBindCallback(&PyScanBind);
 	function.SetInitGlobalCallback(&PyScanInitGlobal);
+	function.SetInitLocalCallback(&PyScanInitLocal);
 	function.SetExecCallback(&PyScanExec);
 	function.SetFilterPushdownCallback(&PyScanFilterPushdown);
+	function.SetPartitionDataCallback(&PyScanPartitionData);
 	function.SetProjectionPushdown(true);
 	function.Register();
 }

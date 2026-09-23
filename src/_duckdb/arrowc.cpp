@@ -63,18 +63,21 @@ bool IsBatch(const ArrowSchema &schema) {
 void WrapAsBatch(ArrowSchema &schema) {
 	auto *child = new ArrowSchema(schema);
 	auto **children = new ArrowSchema *[1] {child};
+	// Allocated before the wrapper takes over, so a failed allocation leaves the caller's schema releasable.
+	auto *wrapped = new Wrapped<ArrowSchema> {child, children};
 	schema = ArrowSchema {};
 	schema.format = "+s";
 	schema.name = "";
 	schema.n_children = 1;
 	schema.children = children;
 	schema.release = &ReleaseWrapped<ArrowSchema>;
-	schema.private_data = new Wrapped<ArrowSchema> {child, children};
+	schema.private_data = wrapped;
 }
 
 void WrapAsBatch(ArrowArray &array) {
 	auto *child = new ArrowArray(array);
 	auto **children = new ArrowArray *[1] {child};
+	auto *wrapped = new Wrapped<ArrowArray> {child, children};
 	array = ArrowArray {};
 	array.length = child->length;
 	array.null_count = 0;
@@ -84,7 +87,7 @@ void WrapAsBatch(ArrowArray &array) {
 	array.n_children = 1;
 	array.children = children;
 	array.release = &ReleaseWrapped<ArrowArray>;
-	array.private_data = new Wrapped<ArrowArray> {child, children};
+	array.private_data = wrapped;
 }
 
 std::string NameOf(const ArrowSchema &schema, cxx::idx_t index) {

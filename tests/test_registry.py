@@ -365,6 +365,64 @@ class TestStreams:
         with pytest.raises(exceptions.InvalidInputError, match=r"registered as 'bad' failed: .*no more rows for you"):
             rows(con, "SELECT sum(a) FROM bad")
 
+    def test_a_python_error_in_the_stream_fails_the_query_under_four_threads(
+        self, con: duckdb.frame.Connection
+    ) -> None:
+        con.run("SET threads = 4")
+        schema = pa.schema([("a", pa.int64())])
+
+        def batches() -> Iterator[pa.RecordBatch]:
+            for i in range(200):
+                yield pa.record_batch([pa.array([i])], schema=schema)
+            message = "no more rows for you"
+            raise ValueError(message)
+
+        con.register("bad", pa.RecordBatchReader.from_batches(schema, batches()))
+        with pytest.raises(exceptions.InvalidInputError, match=r"registered as 'bad' failed: .*no more rows for you"):
+            rows(con, "SELECT sum(a) FROM bad")
+
+    def test_several_engine_threads_pull_from_one_stream(self, con: duckdb.frame.Connection) -> None:
+        """The pulling thread is whichever engine thread ran out of chunks, so a long stream sees more than one."""
+        con.run("SET threads = 4")
+        schema = pa.schema([("n", pa.int64()), ("s", pa.string())])
+        size = 5000
+        prebuilt = [
+            pa.record_batch(
+                [pa.array(range(start, start + size)), pa.array([str(i) for i in range(start, start + size)])],
+                schema=schema,
+            )
+            for start in range(0, 400 * size, size)
+        ]
+        pulled: set[int] = set()
+
+        def batches() -> Iterator[pa.RecordBatch]:
+            for batch in prebuilt:
+                pulled.add(threading.get_ident())
+                yield batch
+
+        con.register("long", pa.RecordBatchReader.from_batches(schema, batches()))
+        total = 400 * size
+        assert rows(con, "SELECT count(*), sum(n) FROM long") == [(total, sum(range(total)))]
+        assert len(pulled) > 1
+
+    def test_a_generator_that_builds_each_batch_in_python_is_correct_under_four_threads(
+        self, con: duckdb.frame.Connection
+    ) -> None:
+        """GIL contention: every pull runs Python to build the batch, while four threads compete for it."""
+        con.run("SET threads = 4")
+        schema = pa.schema([("n", pa.int64())])
+        batch_rows = 50
+        batch_count = 300
+
+        def batches() -> Iterator[pa.RecordBatch]:
+            for i in range(batch_count):
+                values = [i * batch_rows + j for j in range(batch_rows)]
+                yield pa.record_batch([pa.array(values)], schema=schema)
+
+        con.register("built", pa.RecordBatchReader.from_batches(schema, batches()))
+        total = batch_count * batch_rows
+        assert rows(con, "SELECT count(*), sum(n) FROM built") == [(total, sum(range(total)))]
+
     def test_a_released_stream_is_refused(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
         capsule = numbers.__arrow_c_stream__()
         pa.RecordBatchReader._import_from_c_capsule(capsule).read_all()

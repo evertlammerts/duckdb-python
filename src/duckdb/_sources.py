@@ -1,8 +1,9 @@
 """The Python objects that register as tables, each behind a source that exports Arrow for the scan.
 
 A source exposes `__arrow_c_schema__`, when the object can say its schema without producing data, `accepts`, which
-says whether a scan will apply a predicate itself, and `stream(columns, filters)`, which exports an Arrow stream
-capsule holding either exactly the requested columns, in that order, or every column; it says which. Nothing here
+says whether a scan will apply a predicate itself, `stream(columns, filters)`, which exports an Arrow stream
+capsule holding either exactly the requested columns, in that order, or every column; it says which, and
+`pull_under_gil`, which says whether the scan must hold the GIL while pulling from that stream. Nothing here
 imports pyarrow, polars or pandas at module level: a family is recognised by its class's module and name, or by the
 methods it carries, and its library is imported only inside the source that needs it.
 """
@@ -30,6 +31,10 @@ class Source:
     """What the scan talks to. `one_shot` sources are read once; every other source is read as often as asked."""
 
     one_shot = False
+    #: Whether pulling the next array from the exported stream may run Python code, so the scan takes the GIL
+    #: around every pull. A source whose stream is pure C, C++ or Rust sets this False, and its pulls then run
+    #: on engine threads with no GIL held.
+    pull_under_gil = True
 
     def __init__(self, obj: object) -> None:
         self.obj: Any = obj
@@ -115,6 +120,8 @@ class CapsuleSource(Source):
 class TableSource(ExportingSource):
     """A pyarrow Table or RecordBatch: `select` by position narrows it without copying."""
 
+    pull_under_gil = False
+
     def stream(self, columns: Sequence[int] | None, filters: Sequence[Expr]) -> tuple[object, bool]:
         if columns is None:
             return self.obj.__arrow_c_stream__(), False
@@ -123,6 +130,8 @@ class TableSource(ExportingSource):
 
 class PolarsFrameSource(ExportingSource):
     """A polars DataFrame: `select` by name narrows it without copying."""
+
+    pull_under_gil = False
 
     def __init__(self, obj: object) -> None:
         super().__init__(obj)
@@ -142,6 +151,8 @@ class LazyFrameSource(Source):
     `map_batches` without a return type, is refused by polars when the plan runs, and the query fails with that.
     A predicate the polars translator models becomes a `filter` step, which polars pushes into its own scan.
     """
+
+    pull_under_gil = False
 
     def __arrow_c_schema__(self) -> object:
         schema = self.obj.collect_schema()
@@ -254,6 +265,8 @@ class DatasetSource(Source):
     it before reading.
     """
 
+    pull_under_gil = False
+
     def __arrow_c_schema__(self) -> object:
         return self.obj.schema.__arrow_c_schema__()
 
@@ -289,6 +302,8 @@ class DatasetSource(Source):
 
 class ScannerSource(Source):
     """A pyarrow Scanner: its projection and filter are its own, so it always yields every column it was given."""
+
+    pull_under_gil = False
 
     def __arrow_c_schema__(self) -> object:
         return self.obj.projected_schema.__arrow_c_schema__()
