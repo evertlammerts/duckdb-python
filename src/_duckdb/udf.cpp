@@ -17,7 +17,7 @@ namespace {
 ///
 /// The callable is borrowed, not owned: an owning reference here would be invisible to Python's cycle
 /// collector, so a callable that reaches its own connection would keep the database alive forever. The
-/// Database's registry owns it instead, and by the time that is dropped no query can still run.
+/// database that registered the function owns it instead, and by the time that is dropped no query can still run.
 struct PyFunctionData {
 	PyFunctionData(nb::handle callable, std::string name, std::vector<cxx::LogicalType> parameter_types,
 	               bool skip_nulls, std::shared_ptr<ModuleState> module)

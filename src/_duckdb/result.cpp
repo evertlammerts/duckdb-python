@@ -225,7 +225,7 @@ Result::Pumped Result::Pump(cxx::QueryResult &live, SINK &sink) {
 template <class SINK>
 bool Result::Stream(SINK &&sink) {
 	while (true) {
-		// Held for the whole slice, before the GIL is dropped, so a concurrent close cannot free the result.
+		// Held for the whole burst, before the GIL is dropped, so a concurrent close cannot free the result.
 		auto live = Live();
 		const auto pumped = Pump(*live.engine, sink);
 		if (pumped == Pumped::Cancelled) {

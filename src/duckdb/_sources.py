@@ -45,7 +45,7 @@ class Source:
         return None
 
     def accepts(self, predicate: Expr) -> bool:
-        """Whether every scan will apply `predicate`, a frame expression over the object's own column names, itself.
+        """Whether every scan will apply `predicate`, a `duckdb._expressions` tree over the object's columns, itself.
 
         The engine offers each predicate a query applies to the rows, and stops applying one that is accepted, so
         True is a promise: the stream must then hold only rows satisfying it, with the engine's meaning of the

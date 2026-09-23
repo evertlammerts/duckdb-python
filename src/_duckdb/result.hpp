@@ -52,8 +52,9 @@ public:
 	/// Run the statement to completion and report how many rows it changed.
 	///
 	/// A statement takes effect only once its result is run out, so dropping one unread does nothing, unless
-	/// it has RETURNING, which DuckDB applies at execute. Short slices let a Ctrl-C land partway, and every
-	/// batch is consumed inside the slice, since handing them back would starve the thread delivering it.
+	/// it has RETURNING, which DuckDB applies at execute. The engine is run in short bursts (`Pump`) so a Ctrl-C
+	/// lands partway, and every batch is consumed inside its burst, since handing them back would starve the
+	/// thread delivering it.
 	cxx::idx_t Drain();
 
 	/// Release the result: DuckDB allows one live result per connection, and holding it keeps the file in use.
@@ -82,7 +83,7 @@ private:
 
 	/// Run until `sink` keeps a batch (true) or the result ends (false); a cancelled query raises.
 	///
-	/// A pending Ctrl-C is checked between slices and after a batch has been stored, so catching it loses no
+	/// A pending Ctrl-C is checked between bursts and after a batch has been stored, so catching it loses no
 	/// rows. It is never checked once the result ends: the statement already took effect, and raising there
 	/// would read as "it did not happen". Python delivers the signal at its own next check instead.
 	template <class SINK>

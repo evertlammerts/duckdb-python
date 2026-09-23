@@ -1,4 +1,4 @@
-"""A frame expression as a polars expression, for a source that filters through polars."""
+"""An expression of this package as a polars expression, for a registered object read through polars."""
 
 from __future__ import annotations
 
@@ -43,7 +43,8 @@ def to_polars(node: Expr, schema: pl.Schema) -> pl.Expr:
     `IS NOT NULL`, `AND`, `OR` and `NOT`, over boolean, integer, floating-point, string, decimal, date, time and
     naive datetime columns. Polars orders NaN above every number as the engine does, and combines NULL with the
     engine's three-valued logic, so no comparison is rewritten; a NaN value is refused all the same. `schema` must
-    be the schema the scan declared to the engine, since the value is typed as the column is.
+    be the schema the object declares to the engine when a query binds over it, since the value is typed as the
+    column is.
     """
     import polars as pl
 

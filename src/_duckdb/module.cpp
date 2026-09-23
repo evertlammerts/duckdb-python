@@ -176,7 +176,7 @@ public:
 		auto &owner = Database::From(held.database);
 		RegisterScalarFunction(*held.engine, name, callable, parameters, returns, nulls, level,
 		                       connection.Module());
-		// DuckDB borrows the callable only once registration succeeds, so only then must the registry keep it.
+		// DuckDB borrows the callable only once registration succeeds, so only then must the database keep it.
 		owner.Callables().push_back(std::move(callable));
 	}
 
@@ -378,6 +378,6 @@ NB_MODULE(_duckdb, m) {
 	    },
 	    nb::arg("object"), "The name a capsule carries, which for Arrow data says what it holds; None for anything else.");
 	m.def("chain_streams", &ChainStreams, nb::arg("schema"), nb::arg("parts"),
-	      "Several exports read as one stream, each part with the schema of `schema`, which the caller guarantees; "
-	      "the chain does not check it.");
+	      "Several exports read as one stream, each part with the schema of `schema`; the caller guarantees that, "
+	      "nothing checks it.");
 }

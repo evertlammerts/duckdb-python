@@ -39,7 +39,7 @@ void WrapAsBatch(ArrowArray &array);
 
 /// Several Arrow exports read as one stream: `parts`, an iterable of objects with `__arrow_c_stream__`, are read
 /// in order, each part expected to carry the schema `schema` (itself anything with `__arrow_c_stream__`) exports;
-/// the caller guarantees that, the chain does not check it. Pulled from one thread at a time, as the Arrow stream
+/// the caller guarantees that, nothing checks it. Pulled from one thread at a time, as the Arrow stream
 /// interface requires of every stream.
 nb::capsule ChainStreams(nb::object schema, nb::handle parts);
 

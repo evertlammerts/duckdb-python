@@ -159,8 +159,8 @@ class Connection:
             if isinstance(body, Expr):
                 definition = body.fragment()
             elif isinstance(body, Frame):
-                # Asks DuckDB only for the steps that need their input's columns, since a parameter only exists
-                # once the macro does.
+                # Asks DuckDB only for the parts of the plan that need their input's columns, since a parameter
+                # only exists once the macro does.
                 definition = "TABLE " + body._definition(self)
             else:
                 message = f"a macro body is an expression or a plan, not {type(body).__name__}"

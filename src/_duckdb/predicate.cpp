@@ -24,7 +24,7 @@ bool Temporal(cxx::LogicalTypeId type) {
 	}
 }
 
-/// The comparison's operator as the frame spells it.
+/// The comparison's operator as `duckdb._expressions` spells it.
 const char *Operator(cxx::ExpressionType comparison) {
 	switch (comparison) {
 	case cxx::ExpressionType::COMPARE_EQUAL:

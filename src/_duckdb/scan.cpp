@@ -13,6 +13,11 @@
 
 #include <utility>
 
+// The table function that reads a registered object, and one run of it over a query is a scan. The registered
+// object is always a source, the adapter in duckdb/_sources.py that wraps the caller's data and answers stream(),
+// accepts() and rows(); "the source" below names that adapter. A predicate offered to it is a tree of
+// duckdb._expressions nodes, built by predicate.cpp.
+
 namespace duckdb_python {
 namespace {
 
@@ -109,7 +114,7 @@ struct ScanUserData {
 };
 
 /// The entry a query bound over, the Arrow names and types of the columns it declared, in order, and the predicates
-/// the source promised to apply, as frame expressions.
+/// the source promised to apply, as `duckdb._expressions` nodes.
 struct ScanBind {
 	ScanBind(std::shared_ptr<Registered> entry, std::vector<std::string> names, std::vector<cxx::LogicalTypeId> types)
 	    : entry(std::move(entry)), names(std::move(names)), types(std::move(types)) {
@@ -163,7 +168,7 @@ struct ScanState {
 	bool wrap;
 	/// Which of the stream's columns each output vector takes; empty when the stream holds exactly the output.
 	std::vector<cxx::idx_t> picks;
-	/// Whether pulling the next array may run Python code, so the pull takes the GIL.
+	/// Whether the stream needs the GIL held while its next array is pulled, because pulling may run Python.
 	bool pull_under_gil;
 
 	/// Guards the pull, the claim of a batch index and the claim of the single array; the fields above never change.

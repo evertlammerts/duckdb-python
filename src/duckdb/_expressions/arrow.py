@@ -1,4 +1,4 @@
-"""A frame expression as a pyarrow compute expression, for a source that filters through pyarrow."""
+"""An expression of this package as a pyarrow compute expression, for a registered object read through pyarrow."""
 
 from __future__ import annotations
 
@@ -31,9 +31,9 @@ def to_arrow(node: Expr, schema: pa.Schema) -> pc.Expression:
     What translates: a comparison of a column with a value of the column's type, `BETWEEN`, `IN`, `IS NULL`,
     `IS NOT NULL`, `AND`, `OR` and `NOT`, over boolean, integer, floating-point, string, date and naive timestamp
     columns. The engine orders NaN above every number and pyarrow orders it nowhere, so `>` and `>=` on a
-    floating-point column admit NaN rows, and a NaN value is refused. `schema` must be the schema the scan
-    declared to the engine, since the value is typed as the column is and a unit or width that differs would
-    compare differently.
+    floating-point column admit NaN rows, and a NaN value is refused. `schema` must be the schema the object
+    declares to the engine when a query binds over it, since the value is typed as the column is and a unit or width
+    that differs would compare differently.
     """
     import pyarrow as pa
     import pyarrow.compute as pc

@@ -21,7 +21,7 @@
 
 namespace duckdb_python {
 
-/// A Python object registered under a table name, read through the scan function by that name.
+/// A Python object registered under a table name, read by that name through the table function in scan.hpp.
 ///
 /// The registry owns the object for as long as the name is registered; a plan bound over the name holds its own
 /// reference, so an unregister cannot pull the object from under a query already bound.
@@ -32,7 +32,7 @@ struct Registered {
 
 	std::string name;
 	nb::object object;
-	/// A stream: it can be read once, so a second scan is refused rather than silently empty.
+	/// A stream: it can be read once, so a second query over it is refused rather than silently empty.
 	bool one_shot;
 	std::mutex read_lock;
 	bool read = false;
@@ -56,7 +56,7 @@ private:
 	std::unordered_map<std::string, std::shared_ptr<Registered>> by_name;
 };
 
-/// Add the scan function and the replacement scan that resolves registered names to the database; called once,
+/// Add the table function of scan.hpp and the replacement scan that resolves registered names to it; called once,
 /// before any other connection exists, since an instance-wide replacement scan may not be added while queries bind.
 void InstallRegistryScan(cxx::Instance &instance, std::shared_ptr<Registry> registry,
                          std::shared_ptr<ModuleState> module);

@@ -100,7 +100,8 @@ std::string NameOf(const ArrowSchema &schema, cxx::idx_t index) {
 
 namespace {
 
-/// The chain's own private data: the schema source, the remaining parts, and the part currently being read.
+/// What `ChainStreams` below reads from: several Arrow exports, the parts, read one after another as one stream.
+/// Holds the object whose export gives the schema, the iterator of parts still to read, and the part being read.
 struct ChainedStream {
 	nb::object schema_source;
 	/// A Python iterator, so a plain exhaustion is `next(parts)` raising StopIteration.
@@ -138,13 +139,13 @@ int ReadSchema(ChainedStream &chain, ArrowSchema *out) {
 	return rc;
 }
 
-/// The next array of the chain: the current part's, or the first of the next part; throws what a part throws.
+/// The next array: the next of the part being read, or the first of the part after it; throws what a part throws.
 int ReadNext(ChainedStream &chain, ArrowArray *out) {
 	for (;;) {
 		if (chain.current_stream != nullptr) {
 			int rc = 0;
 			{
-				// A part's own pull is native work, or takes the GIL itself where it runs Python.
+				// Reading a part's next array is native work, or takes the GIL itself where it runs Python.
 				nb::gil_scoped_release released;
 				rc = chain.current_stream->get_next(chain.current_stream, out);
 			}
