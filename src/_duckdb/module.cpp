@@ -63,7 +63,20 @@ public:
 
 	std::unique_ptr<Connection> Connect();
 
-	std::vector<nb::object> &Callables() {
+	/// Keep `callable` alive for as long as DuckDB may call it; duplicate connections register concurrently.
+	void KeepCallable(nb::object callable) {
+		nb::ft_lock_guard guard(callables_lock);
+		callables.push_back(std::move(callable));
+	}
+
+	/// Hand the kept callables to the caller, which drops them outside the lock.
+	std::vector<nb::object> TakeCallables() {
+		nb::ft_lock_guard guard(callables_lock);
+		return std::exchange(callables, {});
+	}
+
+	/// Only for the garbage collector's visit, which runs with every other thread stopped.
+	const std::vector<nb::object> &CallablesForTraversal() const {
 		return callables;
 	}
 
@@ -89,6 +102,7 @@ private:
 	}
 
 	std::shared_ptr<ModuleState> module;
+	nb::ft_mutex callables_lock;
 	// Declared before the database so they are destroyed after it, since DuckDB only borrows these callables.
 	std::vector<nb::object> callables;
 	std::shared_ptr<Registry> registry;
@@ -118,15 +132,20 @@ public:
 
 		auto &ctx = connection.Module()->conversion;
 		std::vector<cxx::NamedParam> bound;
+		const auto bind_named = [&](nb::handle name, nb::handle value) {
+			// Checked here because a failed nanobind cast surfaces as std::bad_cast, which names nothing.
+			if (!nb::isinstance<nb::str>(name)) {
+				throw cxx::InvalidInputException("Invalid Input Error: parameter names must be strings");
+			}
+			bound.push_back({nb::cast<std::string>(name), PythonToValue(live, value, ctx)});
+		};
 		if (nb::isinstance<nb::dict>(parameters)) {
 			for (auto entry : nb::cast<nb::dict>(parameters)) {
-				// Checked here because a failed nanobind cast surfaces as std::bad_cast, which names nothing.
-				if (!nb::isinstance<nb::str>(entry.first)) {
-					throw cxx::InvalidInputException(
-					    "Invalid Input Error: parameter names must be strings");
-				}
-				bound.push_back({nb::cast<std::string>(entry.first),
-				                 PythonToValue(live, entry.second, ctx)});
+				bind_named(entry.first, entry.second);
+			}
+		} else if (nb::isinstance(parameters, ctx.mapping_cls)) {
+			for (nb::handle entry : parameters.attr("items")()) {
+				bind_named(entry[0], entry[1]);
 			}
 		} else {
 			for (nb::handle item : parameters) {
@@ -177,7 +196,7 @@ public:
 		RegisterScalarFunction(*held.engine, name, callable, parameters, returns, nulls, level,
 		                       connection.Module());
 		// DuckDB borrows the callable only once registration succeeds, so only then must the database keep it.
-		owner.Callables().push_back(std::move(callable));
+		owner.KeepCallable(std::move(callable));
 	}
 
 	/// Register a Python object as the table `name`; a one-shot object is a stream, readable once, and a native
@@ -240,7 +259,7 @@ int TraverseDatabase(PyObject *self, visitproc visit, void *arg) {
 		return 0;
 	}
 	auto &database = *nb::inst_ptr<Database>(self);
-	for (const auto &callable : database.Callables()) {
+	for (const auto &callable : database.CallablesForTraversal()) {
 		Py_VISIT(callable.ptr());
 	}
 	for (const auto &object : database.Objects().Objects()) {
@@ -253,7 +272,7 @@ int TraverseDatabase(PyObject *self, visitproc visit, void *arg) {
 int ClearDatabase(PyObject *self) {
 	if (nb::inst_ready(self)) {
 		auto &database = *nb::inst_ptr<Database>(self);
-		database.Callables().clear();
+		auto released = database.TakeCallables();
 		database.Objects().Clear();
 	}
 	return 0;

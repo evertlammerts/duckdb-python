@@ -663,7 +663,13 @@ class Aggregate(Step):
 
     def render(self, names: tuple[str, ...], shapes: tuple[Shape | None, ...]) -> str:
         selected = [k.as_select() for k in self.keys] + [e.as_select() for e in self.aggregates]
-        clause = " GROUP BY " + ", ".join(k.fragment() for k in self.keys) if self.keys else ""
+        if any(isinstance(k, Star) for k in self.keys):
+            # A star spans an unknown number of positions.
+            grouped = [k.fragment() for k in self.keys]
+        else:
+            # By position, since rendering a key twice would give each of its values a second parameter number.
+            grouped = [str(i) for i in range(1, len(self.keys) + 1)]
+        clause = " GROUP BY " + ", ".join(grouped) if self.keys else ""
         return f"SELECT {', '.join(selected)} FROM {names[0]}{clause}"
 
     def shape(self, shapes: tuple[Shape, ...]) -> Shape | None:
@@ -754,13 +760,19 @@ class Join(Step):
             raise ValueError(message)
         renamed = {fold_name(name): name + str(self.suffix) for name in shared}
         folded = {fold_name(key) for key in self.using}
+        right_types = {fold_name(c.name): c.type for c in right_shape}
+        # A merged key takes the type both sides promote to, which only DuckDB knows unless the two already agree.
+        left = [
+            Column(c.name, None) if fold_name(c.name) in folded and right_types.get(fold_name(c.name)) != c.type else c
+            for c in left_shape
+        ]
         carried = [
             Column(renamed.get(fold_name(c.name), c.name), c.type)
             for c in right_shape
             if fold_name(c.name) not in folded
         ]
         # The renamed copies must be free too: suffixing onto a name the left already holds only moves the clash.
-        return _require_unique((*left_shape, *carried), "join")
+        return _require_unique((*left, *carried), "join")
 
     def expressions(self) -> tuple[Expr, ...]:
         return (self.on,) if self.on is not None else ()
@@ -776,7 +788,13 @@ class SetOp(Step):
 
     def shape(self, shapes: tuple[Shape, ...]) -> Shape | None:
         # Matching by name can add a column from the right, so only DuckDB knows the result.
-        return None if self.by_name else shapes[0]
+        if self.by_name:
+            return None
+        left, right = shapes
+        # Each column takes the type both sides promote to, which only DuckDB knows unless the two already agree.
+        if len(left) != len(right):
+            return tuple(Column(c.name, None) for c in left)
+        return tuple(Column(c.name, c.type if c.type == r.type else None) for c, r in zip(left, right, strict=True))
 
 
 def _projected(chosen: tuple[Expr, ...], source: Shape, verb: str) -> Shape | None:

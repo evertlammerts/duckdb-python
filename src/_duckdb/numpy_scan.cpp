@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <numeric>
 #include <optional>
 #include <string>
 #include <utility>
@@ -109,21 +110,31 @@ struct NumpyColumn {
 	bool has_mask_buffer = false;
 };
 
+/// The Python objects an object column's cells are recognised by, looked up once per scan under the GIL.
+struct ScalarMarkers {
+	/// pandas' NA and NaT singletons.
+	nb::object na;
+	nb::object nat;
+	/// numpy's scalar base class and the scalar classes whose missing value is not equal to itself.
+	nb::object numpy_generic;
+	nb::object numpy_floating;
+	nb::object numpy_datetime64;
+	nb::object numpy_timedelta64;
+	/// `numpy.datetime_data`, which names a datetime64 or timedelta64 dtype's unit and step count.
+	nb::object datetime_data;
+};
+
 /// One scan's columns, the row count they cover, and the claim counter every thread divides the object with.
 struct NumpyScanState {
-	NumpyScanState(std::vector<NumpyColumn> columns, cxx::idx_t rows, cxx::idx_t range_rows, nb::object na,
-	                 nb::object nat, nb::object numpy_generic)
-	    : columns(std::move(columns)), rows(rows), range_rows(range_rows), na(std::move(na)), nat(std::move(nat)),
-	      numpy_generic(std::move(numpy_generic)) {
+	NumpyScanState(std::vector<NumpyColumn> columns, cxx::idx_t rows, cxx::idx_t range_rows, ScalarMarkers markers)
+	    : columns(std::move(columns)), rows(rows), range_rows(range_rows), markers(std::move(markers)) {
 	}
 
 	/// Torn down from an engine thread, so every buffer and Python reference is released under the GIL.
 	~NumpyScanState() {
 		nb::gil_scoped_acquire gil;
 		columns.clear();
-		na = nb::object();
-		nat = nb::object();
-		numpy_generic = nb::object();
+		markers = ScalarMarkers();
 	}
 
 	std::vector<NumpyColumn> columns;
@@ -131,10 +142,7 @@ struct NumpyScanState {
 	/// Rows claimed together by one thread: 50 batches' worth, so a thread does not pay the claim's cost every batch.
 	cxx::idx_t range_rows;
 	std::atomic<cxx::idx_t> next {0};
-	/// pandas' NA and NaT singletons and numpy's scalar base class, looked up once per scan under the GIL.
-	nb::object na;
-	nb::object nat;
-	nb::object numpy_generic;
+	ScalarMarkers markers;
 };
 
 /// One thread's claimed range within the object, and the ordering position that range stands for.
@@ -394,18 +402,20 @@ void NumpyScanInitGlobal(cxx::TableFunction::InitGlobalInput &input) {
 	const cxx::idx_t range_rows = std::max<cxx::idx_t>(1, batch_rows) * 50;
 	const cxx::idx_t max_threads = std::max<cxx::idx_t>(1, (bound.rows + range_rows - 1) / range_rows);
 	input.SetMaxThreads(max_threads);
-	nb::object na;
-	nb::object nat;
-	nb::object numpy_generic;
+	ScalarMarkers markers;
 	{
 		nb::gil_scoped_acquire gil;
 		nb::module_ pandas = nb::module_::import_("pandas");
-		na = pandas.attr("NA");
-		nat = pandas.attr("NaT");
-		numpy_generic = nb::module_::import_("numpy").attr("generic");
+		nb::module_ numpy = nb::module_::import_("numpy");
+		markers.na = pandas.attr("NA");
+		markers.nat = pandas.attr("NaT");
+		markers.numpy_generic = numpy.attr("generic");
+		markers.numpy_floating = numpy.attr("floating");
+		markers.numpy_datetime64 = numpy.attr("datetime64");
+		markers.numpy_timedelta64 = numpy.attr("timedelta64");
+		markers.datetime_data = numpy.attr("datetime_data");
 	}
-	input.SetGlobalState<NumpyScanState>(std::move(columns), bound.rows, range_rows, std::move(na), std::move(nat),
-	                                       std::move(numpy_generic));
+	input.SetGlobalState<NumpyScanState>(std::move(columns), bound.rows, range_rows, std::move(markers));
 }
 
 void NumpyScanInitLocal(cxx::TableFunction::InitLocalInput &input) {
@@ -584,21 +594,103 @@ void FillEnum(cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t start, 
 }
 
 /// Whether a cell of an object column stands for SQL NULL: Python's None, pandas' `NA` or `NaT` singletons
-/// (compared by identity, since neither is equal to itself under `==`), or a float NaN, the marker a plain
-/// float64 column uses.
-bool IsNoneLike(const NumpyScanState &global, PyObject *value) {
-	if (value == Py_None || value == global.na.ptr() || value == global.nat.ptr()) {
+/// (compared by identity, since neither is equal to itself under `==`), a float NaN of any width, the marker a
+/// plain float column uses, or numpy's datetime64 or timedelta64 NaT; the sampling rule must count the same cells.
+bool IsNoneLike(const ScalarMarkers &markers, PyObject *value) {
+	if (value == Py_None || value == markers.na.ptr() || value == markers.nat.ptr()) {
 		return true;
 	}
-	return PyFloat_Check(value) && std::isnan(PyFloat_AsDouble(value));
+	if (PyFloat_Check(value)) {
+		return std::isnan(PyFloat_AsDouble(value));
+	}
+	nb::handle cell(value);
+	if (!nb::isinstance(cell, markers.numpy_generic)) {
+		return false;
+	}
+	if (nb::isinstance(cell, markers.numpy_floating)) {
+		return std::isnan(nb::cast<double>(cell));
+	}
+	if (nb::isinstance(cell, markers.numpy_datetime64) || nb::isinstance(cell, markers.numpy_timedelta64)) {
+		// Not PyObject_RichCompareBool, which reports any object equal to itself without asking it.
+		nb::object differs = nb::steal(PyObject_RichCompare(value, value, Py_NE));
+		const int truth = differs.is_valid() ? PyObject_IsTrue(differs.ptr()) : -1;
+		if (truth < 0) {
+			// Left to the conversion, which reports a failing value with its row and column.
+			PyErr_Clear();
+			return false;
+		}
+		return truth == 1;
+	}
+	return false;
 }
 
-/// A numpy scalar as the plain Python value it wraps, since `PythonToValue` understands only Python's own types.
-nb::object UnwrapNumpyScalar(const NumpyScanState &global, nb::handle value) {
-	if (PyObject_IsInstance(value.ptr(), global.numpy_generic.ptr()) != 0) {
-		return value.attr("item")();
+/// How many `unit`s of numpy's datetime64 or timedelta64 make one `target` ("ns" or "us"), as a multiplier when
+/// the unit is coarser and a divisor when it is finer; false for a calendar unit, which has no fixed length.
+bool UnitScale(const std::string &unit, const std::string &target, int64_t &multiplier, int64_t &divisor) {
+	static const std::pair<const char *, int64_t> nanos_per_unit[] = {
+	    {"W", 604'800'000'000'000}, {"D", 86'400'000'000'000}, {"h", 3'600'000'000'000}, {"m", 60'000'000'000},
+	    {"s", 1'000'000'000},      {"ms", 1'000'000},         {"us", 1'000},             {"ns", 1}};
+	static const std::pair<const char *, int64_t> units_per_nano[] = {{"ps", 1'000}, {"fs", 1'000'000},
+	                                                                  {"as", 1'000'000'000}};
+	const int64_t nanos_per_target = target == "us" ? 1'000 : 1;
+	for (const auto &[name, nanos] : nanos_per_unit) {
+		if (unit == name) {
+			multiplier = nanos >= nanos_per_target ? nanos / nanos_per_target : 1;
+			divisor = nanos >= nanos_per_target ? 1 : nanos_per_target / nanos;
+			return true;
+		}
 	}
-	return nb::borrow(value);
+	for (const auto &[name, units] : units_per_nano) {
+		if (unit == name) {
+			multiplier = 1;
+			divisor = units * nanos_per_target;
+			return true;
+		}
+	}
+	return false;
+}
+
+/// A numpy datetime64 or timedelta64 whose `.item()` is a bare int, as a TIMESTAMP_NS held exactly or an INTERVAL
+/// truncated to microseconds like a timedelta64 column; nullopt for anything else.
+std::optional<cxx::Value> NumpyTemporalValue(const ScalarMarkers &markers, cxx::Context &context, nb::handle value,
+                                             nb::object &item) {
+	const bool is_datetime = nb::isinstance(value, markers.numpy_datetime64);
+	if (!is_datetime && !nb::isinstance(value, markers.numpy_timedelta64)) {
+		return std::nullopt;
+	}
+	if (!nb::isinstance<nb::int_>(item)) {
+		return std::nullopt;
+	}
+	nb::tuple unit = nb::borrow<nb::tuple>(markers.datetime_data(value.attr("dtype")));
+	int64_t multiplier = 1;
+	int64_t divisor = 1;
+	if (!UnitScale(nb::cast<std::string>(unit[0]), is_datetime ? "ns" : "us", multiplier, divisor)) {
+		throw cxx::InvalidInputException("a calendar unit has no fixed length");
+	}
+	const int64_t raw = nb::cast<int64_t>(nb::int_(value.attr("view")("i8")));
+	int64_t numerator = 1;
+	if (__builtin_mul_overflow(nb::cast<int64_t>(unit[1]), multiplier, &numerator)) {
+		throw cxx::InvalidInputException("the unit overflows its engine type");
+	}
+	// Reduced and divided first, so a stepped fine unit such as 1000ps overflows only when the result does.
+	const int64_t common = std::gcd(numerator, divisor);
+	numerator /= common;
+	const int64_t denominator = divisor / common;
+	int64_t whole = 0;
+	int64_t part = 0;
+	int64_t scaled = 0;
+	if (__builtin_mul_overflow(raw / denominator, numerator, &whole) ||
+	    __builtin_mul_overflow(raw % denominator, numerator, &part) ||
+	    __builtin_add_overflow(whole, part / denominator, &scaled)) {
+		throw cxx::InvalidInputException("the value overflows its engine type");
+	}
+	if (is_datetime) {
+		if (part % denominator != 0) {
+			throw cxx::InvalidInputException("the instant is finer than a nanosecond");
+		}
+		return cxx::Value::Create(context, cxx::timestamp_ns_t {scaled});
+	}
+	return cxx::Value::Create(context, cxx::interval_t {0, 0, scaled});
 }
 
 /// A Python-object array of `str`, `None`, `pd.NA` or a float NaN: each string read as UTF-8 directly, and any
@@ -609,7 +701,7 @@ void FillText(const NumpyScanState &global, cxx::Vector &vector, const NumpyColu
 	auto *const *values = static_cast<PyObject *const *>(column.data.buf) + start;
 	for (cxx::idx_t i = 0; i < count; i++) {
 		PyObject *value = values[i];
-		if (IsNoneLike(global, value)) {
+		if (IsNoneLike(global.markers, value)) {
 			vector.SetNull(i);
 			continue;
 		}
@@ -644,14 +736,18 @@ void FillObjects(const NumpyScanState &global, cxx::Context &context, cxx::Vecto
 	auto *const *values = static_cast<PyObject *const *>(column.data.buf) + start;
 	for (cxx::idx_t i = 0; i < count; i++) {
 		PyObject *value = values[i];
-		if (IsNoneLike(global, value)) {
+		if (IsNoneLike(global.markers, value)) {
 			vector.SetNull(i);
 			continue;
 		}
 		std::optional<cxx::Value> cast;
 		try {
-			nb::object unwrapped = UnwrapNumpyScalar(global, nb::handle(value));
-			cxx::Value converted = PythonToValue(context, unwrapped, conversion);
+			nb::handle cell(value);
+			// PythonToValue understands only Python's own types, so a numpy scalar is unwrapped first.
+			nb::object item =
+			    nb::isinstance(cell, global.markers.numpy_generic) ? cell.attr("item")() : nb::borrow(cell);
+			auto temporal = NumpyTemporalValue(global.markers, context, cell, item);
+			cxx::Value converted = temporal ? std::move(*temporal) : PythonToValue(context, item, conversion);
 			cast = converted.Cast(context, column.type);
 			bool exact = false;
 			try {

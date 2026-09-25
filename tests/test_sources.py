@@ -23,7 +23,7 @@ import duckdb
 from duckdb import exceptions
 from duckdb._sources import adapt
 from duckdb._sources.arrow import ArrowArraySource, ArrowStreamSource
-from duckdb._sources.numpy import _object_kind
+from duckdb._sources.numpy import SAMPLE_ROWS, _object_kind
 from duckdb._sources.pandas import PandasSource
 from duckdb._sources.polars import LazyFrameSource, PolarsFrameSource
 from duckdb._sources.pyarrow import PyArrowDatasetSource, PyArrowScannerSource
@@ -1544,6 +1544,239 @@ class TestPandasNativeStrings:
         frame = pd.DataFrame({"a": range(5)}).iloc[1:]
         con.register("t", frame)
         assert rows(con, "SELECT a FROM t") == [(1,), (2,), (3,), (4,)]
+
+
+def epoch_ns(con: duckdb.frame.Connection, name: str) -> list[tuple[object, ...]]:
+    return rows(con, f"SELECT epoch_ns(v), typeof(v) FROM {name}")
+
+
+class TestPandasNumpyScalars:
+    """numpy scalars in an object column read by what they mean, not by what `.item()` returns, on both paths."""
+
+    @pytest.mark.parametrize(
+        ("missing", "present"),
+        [
+            (np.float32("nan"), np.float32(1.5)),
+            (np.float64("nan"), np.float64(1.5)),
+            (np.datetime64("NaT", "ns"), np.datetime64("2020-01-01", "ns")),
+            (np.datetime64("NaT", "us"), np.datetime64("2020-01-01", "us")),
+            (np.timedelta64("NaT", "ns"), np.timedelta64(5, "ns")),
+            (np.timedelta64("NaT", "us"), np.timedelta64(5, "us")),
+        ],
+        ids=repr,
+    )
+    def test_a_missing_marker_is_null(
+        self, con: duckdb.frame.Connection, missing: np.generic, present: np.generic
+    ) -> None:
+        frame = pd.DataFrame({"v": pd.Series([missing, present, missing], dtype=object)})
+        native_rows, arrow_rows = both(con, frame, "SELECT count(v), count(*), bool_or(v IS NULL) FROM {}")
+        assert native_rows == arrow_rows == [(1, 3, True)]
+
+    def test_a_half_precision_nan_is_null(self, con: duckdb.frame.Connection) -> None:
+        # Native only: pyarrow types float16 objects as halffloat, which the engine's Arrow importer does not read.
+        frame = pd.DataFrame({"v": pd.Series([np.float16("nan"), np.float16(1.5)], dtype=object)})
+        con.register("t", frame)
+        assert rows(con, "SELECT v, typeof(v) FROM t") == [(None, "DOUBLE"), (1.5, "DOUBLE")]
+
+    def test_a_column_of_nothing_but_nat_is_all_null(self, con: duckdb.frame.Connection) -> None:
+        frame = pd.DataFrame({"v": pd.Series([np.datetime64("NaT", "ns")] * 3, dtype=object)})
+        native_rows, arrow_rows = both(con, frame, "SELECT count(v), count(*) FROM {}")
+        assert native_rows == arrow_rows == [(0, 3)]
+
+    def test_nat_among_text_is_null_not_the_text_nat(self, con: duckdb.frame.Connection) -> None:
+        frame = pd.DataFrame({"v": pd.Series(["a", np.datetime64("NaT", "ns"), 1], dtype=object)})
+        native_rows, arrow_rows = both(con, frame, "SELECT v FROM {}")
+        assert native_rows == arrow_rows == [("a",), (None,), ("1",)]
+
+    def test_nanosecond_datetimes_read_as_timestamp_ns(self, con: duckdb.frame.Connection) -> None:
+        values = [
+            np.datetime64("2020-01-01T00:00:00.000000001", "ns"),
+            np.datetime64("1969-12-31T23:59:59.999999999", "ns"),
+            np.datetime64("NaT", "ns"),
+        ]
+        frame = pd.DataFrame({"v": pd.Series(values, dtype=object)})
+        register_both(con, frame)
+        expected = [(1_577_836_800_000_000_001, "TIMESTAMP_NS"), (-1, "TIMESTAMP_NS"), (None, "TIMESTAMP_NS")]
+        assert epoch_ns(con, "native") == epoch_ns(con, "arrow") == expected
+
+    def test_nanosecond_datetimes_mixed_with_python_datetimes(self, con: duckdb.frame.Connection) -> None:
+        values = [np.datetime64("2020-01-01T00:00:00.000000001", "ns"), datetime.datetime(2020, 1, 1, 0, 0, 1)]
+        frame = pd.DataFrame({"v": pd.Series(values, dtype=object)})
+        con.register("native", frame)
+        assert epoch_ns(con, "native") == [
+            (1_577_836_800_000_000_001, "TIMESTAMP_NS"),
+            (1_577_836_801_000_000_000, "TIMESTAMP_NS"),
+        ]
+
+    def test_a_datetime_past_the_nanosecond_range_keeps_the_column_at_microseconds(
+        self, con: duckdb.frame.Connection
+    ) -> None:
+        far = datetime.datetime(2300, 1, 1, 1, 2, 3)
+        near = np.datetime64("2021-06-01T00:00:00.000001", "ns")
+        con.register("t", pd.DataFrame({"v": pd.Series([far, near], dtype=object)}))
+        assert rows(con, "SELECT v, typeof(v) FROM t") == [
+            (far, "TIMESTAMP"),
+            (datetime.datetime(2021, 6, 1, 0, 0, 0, 1), "TIMESTAMP"),
+        ]
+
+    def test_a_date_past_the_nanosecond_range_keeps_the_column_at_microseconds(
+        self, con: duckdb.frame.Connection
+    ) -> None:
+        values = [datetime.date(1500, 1, 1), np.datetime64("2021-06-01", "ns")]
+        con.register("t", pd.DataFrame({"v": pd.Series(values, dtype=object)}))
+        assert table("t").schema(con) == [("v", "TIMESTAMP")]
+        assert rows(con, "SELECT v FROM t") == [(datetime.datetime(1500, 1, 1),), (datetime.datetime(2021, 6, 1),)]
+
+    def test_a_sub_microsecond_value_in_a_microsecond_column_is_refused(self, con: duckdb.frame.Connection) -> None:
+        values = [datetime.datetime(2300, 1, 1), np.datetime64("2021-06-01T00:00:00.000000001", "ns")]
+        con.register("t", pd.DataFrame({"v": pd.Series(values, dtype=object)}))
+        with pytest.raises(exceptions.InvalidInputError, match="cannot hold exactly"):
+            rows(con, "SELECT v FROM t")
+
+    @pytest.mark.parametrize(
+        ("instant", "expected"),
+        [
+            (datetime.datetime(1677, 9, 21, 23, 59, 59, 999999), "TIMESTAMP"),
+            (datetime.datetime(1677, 9, 22), "TIMESTAMP_NS"),
+            (datetime.datetime(2262, 4, 11, 1), "TIMESTAMP_NS"),
+            (datetime.datetime(2262, 4, 11, 23, 47, 16, 854775), "TIMESTAMP_NS"),
+            (datetime.datetime(2262, 4, 11, 23, 47, 16, 854776), "TIMESTAMP"),
+            (datetime.date(1677, 9, 21), "TIMESTAMP"),
+            (datetime.date(2262, 4, 11), "TIMESTAMP_NS"),
+        ],
+        ids=str,
+    )
+    def test_the_nanosecond_range_is_judged_by_the_whole_instant(
+        self, con: duckdb.frame.Connection, instant: datetime.date, expected: str
+    ) -> None:
+        near = np.datetime64("2021-06-01T00:00:00.000001", "ns")
+        con.register("t", pd.DataFrame({"v": pd.Series([instant, near], dtype=object)}))
+        assert table("t").schema(con) == [("v", expected)]
+        read = rows(con, "SELECT v FROM t")
+        whole = (
+            instant if isinstance(instant, datetime.datetime) else datetime.datetime.combine(instant, datetime.time())
+        )
+        assert read == [(whole,), (datetime.datetime(2021, 6, 1, 0, 0, 0, 1),)]
+
+    @pytest.mark.parametrize(
+        "stepped",
+        [
+            np.array(10**16, dtype="datetime64[1000ps]")[()],
+            np.array(10**13, dtype="datetime64[1000000fs]")[()],
+            np.array(-(10**16), dtype="datetime64[1000ps]")[()],
+        ],
+        ids=["1000ps", "1000000fs", "negative 1000ps"],
+    )
+    def test_a_stepped_fine_unit_reads_like_its_nanoseconds(
+        self, con: duckdb.frame.Connection, stepped: np.datetime64
+    ) -> None:
+        equivalent = stepped.astype("datetime64[ns]")
+        con.register("t", pd.DataFrame({"v": pd.Series([stepped], dtype=object)}))
+        assert epoch_ns(con, "t") == [(int(equivalent.view("i8")), "TIMESTAMP_NS")]
+
+    def test_a_stepped_fine_duration_truncates_like_its_nanoseconds(self, con: duckdb.frame.Connection) -> None:
+        stepped = [np.array(n, dtype="timedelta64[500ps]")[()] for n in (3, -3, 10**16)]
+        con.register("t", pd.DataFrame({"v": pd.Series(stepped, dtype=object)}))
+        assert rows(con, "SELECT v FROM t") == [
+            (datetime.timedelta(0),),
+            (datetime.timedelta(0),),
+            (datetime.timedelta(microseconds=5 * 10**12),),
+        ]
+
+    def test_an_instant_past_the_nanosecond_range_is_refused(self, con: duckdb.frame.Connection) -> None:
+        far = np.array(2 * 10**18, dtype="datetime64[10ns]")[()]
+        con.register("u", pd.DataFrame({"v": pd.Series([far], dtype=object)}))
+        with pytest.raises(exceptions.InvalidInputError, match="cannot hold exactly"):
+            rows(con, "SELECT v FROM u")
+
+    def test_microsecond_datetimes_still_read_as_timestamp(self, con: duckdb.frame.Connection) -> None:
+        frame = pd.DataFrame({"v": pd.Series([np.datetime64("2020-01-01T00:00:00.000001", "us")], dtype=object)})
+        con.register("t", frame)
+        assert rows(con, "SELECT v, typeof(v) FROM t") == [
+            (datetime.datetime(2020, 1, 1, 0, 0, 0, 1), "TIMESTAMP"),
+        ]
+
+    def test_a_datetime_finer_than_a_nanosecond_is_refused(self, con: duckdb.frame.Connection) -> None:
+        frame = pd.DataFrame({"v": pd.Series([np.datetime64(1, "ps")], dtype=object)})
+        con.register("t", frame)
+        with pytest.raises(exceptions.InvalidInputError, match="cannot hold exactly"):
+            rows(con, "SELECT v FROM t")
+
+    def test_an_unsampled_nanosecond_datetime_is_refused_by_a_microsecond_column(
+        self, con: duckdb.frame.Connection
+    ) -> None:
+        values: list[object] = [datetime.datetime(2020, 1, 1)] * (2 * SAMPLE_ROWS)
+        values[1] = np.datetime64("2020-01-01T00:00:00.000000001", "ns")
+        frame = pd.DataFrame({"v": pd.Series(values, dtype=object)})
+        con.register("t", frame)
+        assert table("t").schema(con) == [("v", "TIMESTAMP")]
+        with pytest.raises(exceptions.InvalidInputError, match="cannot hold exactly"):
+            rows(con, "SELECT v FROM t")
+
+    def test_nanosecond_timedeltas_truncate_to_microseconds(self, con: duckdb.frame.Connection) -> None:
+        values = [np.timedelta64(1500, "ns"), np.timedelta64(-1500, "ns"), np.timedelta64(2_000_000_000, "ns")]
+        frame = pd.DataFrame({"v": pd.Series(values, dtype=object)})
+        native_rows, arrow_rows = both(con, frame, "SELECT v, typeof(v) FROM {}")
+        expected = [
+            (datetime.timedelta(microseconds=1), "INTERVAL"),
+            (datetime.timedelta(microseconds=-1), "INTERVAL"),
+            (datetime.timedelta(seconds=2), "INTERVAL"),
+        ]
+        assert native_rows == arrow_rows == expected
+
+    def test_mixed_units_in_one_column(self, con: duckdb.frame.Connection) -> None:
+        # Native only: pyarrow refuses to mix numpy units within one object column.
+        durations = [np.timedelta64(2, "s"), np.timedelta64(1500, "ns"), np.timedelta64(3, "D")]
+        instants = [np.datetime64(1, "s"), np.datetime64(1, "ns")]
+        con.register("d", pd.DataFrame({"v": pd.Series(durations, dtype=object)}))
+        con.register("i", pd.DataFrame({"v": pd.Series(instants, dtype=object)}))
+        assert rows(con, "SELECT v FROM d") == [
+            (datetime.timedelta(seconds=2),),
+            (datetime.timedelta(microseconds=1),),
+            (datetime.timedelta(days=3),),
+        ]
+        assert epoch_ns(con, "i") == [(1_000_000_000, "TIMESTAMP_NS"), (1, "TIMESTAMP_NS")]
+
+    def test_object_and_typed_timedelta_columns_agree(self, con: duckdb.frame.Connection) -> None:
+        values = [np.timedelta64(n, "ns") for n in (1500, -1500, 999, -999)]
+        con.register("objects", pd.DataFrame({"v": pd.Series(values, dtype=object)}))
+        con.register("typed", pd.DataFrame({"v": pd.Series(values, dtype="timedelta64[ns]")}))
+        assert rows(con, "SELECT v FROM objects") == rows(con, "SELECT v FROM typed")
+
+
+STRIDED_COLUMNS = {
+    "i": pd.Series(range(7)),
+    "f": pd.Series([0.5, float("nan"), 2.5, 3.5, 4.5, 5.5, 6.5]),
+    "o": pd.Series(list("abcdefg"), dtype=object),
+    "m": pd.Series([1, None, 3, 4, None, 6, 7], dtype="Int64"),
+    "c": pd.Categorical(list("xyzxyzx")),
+    "t": pd.Series(pd.date_range("2020-01-01", periods=7, freq="h")),
+    "z": pd.Series(pd.date_range("2020-01-01", periods=7, freq="h", tz="Europe/Amsterdam")),
+    "d": pd.Series(pd.to_timedelta(range(7), unit="s")),
+}
+
+
+class TestPandasStridedViews:
+    """A row-stepped view hands over strided buffers, which the native scan reads as a contiguous copy."""
+
+    @pytest.mark.parametrize("step", [2, -1, -3])
+    @pytest.mark.parametrize("column", list(STRIDED_COLUMNS))
+    def test_a_stepped_view_reads_like_its_copy(self, con: duckdb.frame.Connection, column: str, step: int) -> None:
+        view = pd.DataFrame({column: STRIDED_COLUMNS[column]}).iloc[::step]
+        register_both(con, view)
+        con.register("copy", view.copy())
+        expected = rows(con, f"SELECT {column} FROM copy")
+        assert len(expected) == len(range(7)[::step])
+        assert rows(con, f"SELECT {column} FROM native") == rows(con, f"SELECT {column} FROM arrow") == expected
+
+    def test_an_empty_reversed_view(self, con: duckdb.frame.Connection) -> None:
+        con.register("t", pd.DataFrame({"i": pd.Series([], dtype="int64")}).iloc[::-1])
+        assert rows(con, "SELECT i FROM t") == []
+
+    def test_a_contiguous_column_is_not_copied(self) -> None:
+        frame = pd.DataFrame({"i": np.arange(5), "o": pd.Series(list("abcde"), dtype=object)})
+        for (_, _, _, data, _), column in zip(PandasSource(frame).columns(None), ("i", "o"), strict=True):
+            assert np.shares_memory(data, frame[column].to_numpy(copy=False))
 
 
 class TestPandasTextUnification:

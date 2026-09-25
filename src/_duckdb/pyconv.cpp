@@ -120,6 +120,7 @@ ConversionContext::ConversionContext() {
 	decimal_context = decimal.attr("Context")(nb::arg("prec") = 45);
 	uuid_cls = nb::module_::import_("uuid").attr("UUID");
 	int_cls = nb::module_::import_("builtins").attr("int");
+	mapping_cls = nb::module_::import_("collections.abc").attr("Mapping");
 	two_pow_64 = int_cls("18446744073709551616");
 	epoch_date = date_cls(1970, 1, 1);
 	epoch_naive = datetime_cls(1970, 1, 1);

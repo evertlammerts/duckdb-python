@@ -332,6 +332,78 @@ class TestCollection:
         assert "nanobind: leaked" not in result.stderr, result.stderr
 
 
+#: Registers 320 functions from eight threads on duplicates of `con`, which share its database.
+REGISTER_FROM_THREADS = """
+import gc, threading, weakref
+import duckdb
+
+def register_from_threads(con):
+    twins = [con.duplicate() for _ in range(8)]
+    barrier = threading.Barrier(8)
+    failures = []
+
+    def register(index, twin):
+        try:
+            barrier.wait()
+            for j in range(40):
+                offset = index * 40 + j
+                twin.create_function(f"f{offset}", lambda x, offset=offset: x + offset, ["BIGINT"], "BIGINT")
+        except BaseException as error:
+            failures.append(error)
+
+    threads = [threading.Thread(target=register, args=(i, twin)) for i, twin in enumerate(twins)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert not failures, failures
+"""
+
+
+def run_isolated(script: str) -> None:
+    """Run `script` in a child process, so a registration that deadlocks is killed rather than hanging the suite."""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", REGISTER_FROM_THREADS + script],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("a concurrent registration hung")
+    assert result.returncode == 0, result.stderr
+
+
+class TestConcurrentRegistration:
+    """Duplicate connections share one database, and so the store that keeps every registered callable alive."""
+
+    def test_every_function_registered_concurrently_is_callable(self) -> None:
+        run_isolated(
+            "con = duckdb.frame.connect()\n"
+            "register_from_threads(con)\n"
+            "gc.collect()\n"
+            "calls = ' + '.join(f'f{i}(0)' for i in range(320))\n"
+            "assert duckdb.frame.sql(f'SELECT {calls}').rows(con) == [(sum(range(320)),)]\n"
+        )
+
+    def test_callables_registered_concurrently_are_collected_with_their_database(self) -> None:
+        run_isolated(
+            "class Service:\n"
+            "    def __init__(self):\n"
+            "        self.con = duckdb.frame.connect()\n"
+            "        self.con.create_function('own', self.transform, ['BIGINT'], 'BIGINT')\n"
+            "    def transform(self, x):\n"
+            "        return x\n"
+            "service = Service()\n"
+            "register_from_threads(service.con)\n"
+            "ref = weakref.ref(service)\n"
+            "del service\n"
+            "gc.collect()\n"
+            "assert ref() is None\n"
+        )
+
+
 class TestClosedHandles:
     """Closing a handle is also what Python's collector does to it, and every method refuses afterwards."""
 

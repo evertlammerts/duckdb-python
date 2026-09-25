@@ -44,6 +44,11 @@ _FIXED_TYPES = {
 #: A naive datetime64 unit to the engine type storing that same unit, so the ints copy straight through.
 _NAIVE_TIMESTAMP_TYPES = {"s": "TIMESTAMP_S", "ms": "TIMESTAMP_MS", "us": "TIMESTAMP", "ns": "TIMESTAMP_NS"}
 
+#: The first and last instants a TIMESTAMP casts to TIMESTAMP_NS, which is how the scan reads a Python datetime;
+#: the cast refuses every instant of 1677-09-21, although TIMESTAMP_NS itself starts during that day.
+_NANOSECOND_FIRST = datetime.datetime(1677, 9, 22)
+_NANOSECOND_LAST = datetime.datetime(2262, 4, 11, 23, 47, 16, 854775)
+
 #: The largest magnitude BIGINT and HUGEINT can each hold; a sampled int past both is read as text instead.
 _INT64_MAX = 2**63 - 1
 _INT128_MAX = 2**127 - 1
@@ -58,6 +63,14 @@ class ColumnPlan(NamedTuple):
     mask: object | None
 
 
+def contiguous(plan: ColumnPlan) -> ColumnPlan:
+    """`plan` with its arrays in one contiguous run each, as the scan reads them; a strided view is copied."""
+    import numpy as np
+
+    mask = None if plan.mask is None else np.ascontiguousarray(plan.mask)
+    return plan._replace(data=np.ascontiguousarray(plan.data), mask=mask)
+
+
 def _stride(length: int, sample_rows: int) -> slice:
     """Every step-th index over `length` items, the step chosen so at most `sample_rows` of them land in the stride."""
     step = max(1, length // sample_rows)
@@ -65,15 +78,20 @@ def _stride(length: int, sample_rows: int) -> slice:
 
 
 def _missing(value: object) -> bool:
-    """Whether `value` is a null marker: None, a float NaN, or pandas' NA/NaT singletons.
+    """Whether `value` is a null marker: None, a float NaN of any width, numpy's NaT, or pandas' NA/NaT singletons.
 
-    Never calls pandas' own `isna`, which turns a list or dict argument into an array rather than a bool.
+    Never calls pandas' own `isna`, which turns a list or dict argument into an array rather than a bool. The same
+    rule as `IsNoneLike` in numpy_scan.cpp.
     """
     if value is None:
         return True
     if isinstance(value, float):
         return value != value
     kind = type(value)
+    if kind.__module__ == "numpy":
+        import numpy as np
+
+        return isinstance(value, (np.floating, np.datetime64, np.timedelta64)) and bool(value != value)
     return kind.__module__.startswith("pandas") and kind.__name__ in ("NAType", "NaTType")
 
 
@@ -160,6 +178,15 @@ _SIMPLE_FAMILY_TYPES = {"bool": "BOOLEAN", "time": "TIME", "interval": "INTERVAL
 
 def _value_family(value: object) -> str | None:
     """Which family `value` unifies under, or None when its mere presence takes the whole column to text."""
+    if type(value).__module__ == "numpy":
+        # Only the temporal scalars `_significant_values` leaves wrapped reach here as numpy scalars.
+        import numpy as np
+
+        if isinstance(value, np.datetime64):
+            return "naive_ns"
+        if isinstance(value, np.timedelta64):
+            return "interval"
+        return None
     if isinstance(value, datetime.datetime):
         return "aware" if value.tzinfo is not None else "naive"
     if isinstance(value, datetime.date):
@@ -171,11 +198,20 @@ def _value_family(value: object) -> str | None:
 
 
 def _significant_values(sample: list[object]) -> list[object]:
-    """`sample` with missing markers dropped and numpy scalars unwrapped through `.item()`."""
+    """`sample` with missing markers dropped and numpy scalars unwrapped through `.item()`.
+
+    A datetime64 or timedelta64 that `.item()` would turn into a bare int, as it does for a nanosecond unit, stays
+    wrapped so it is still read as a time.
+    """
     import numpy as np
 
     def unwrap(value: object) -> object:
-        return value.item() if isinstance(value, np.generic) else value
+        if not isinstance(value, np.generic):
+            return value
+        item = value.item()
+        if isinstance(item, int) and isinstance(value, (np.datetime64, np.timedelta64)):
+            return value
+        return item
 
     return [unwrap(v) for v in sample if not _missing(v)]
 
@@ -191,6 +227,7 @@ def _classify_sample(sample: list[object]) -> tuple[str, str]:
         return "text", "VARCHAR"
 
     temporal: set[str] = set()
+    beyond_nanoseconds = False
     other: set[str] = set()
     has_float = False
     max_abs_int = 0
@@ -199,8 +236,12 @@ def _classify_sample(sample: list[object]) -> tuple[str, str]:
         family = _value_family(value)
         if family is None:
             return "text", "VARCHAR"
-        if family in ("date", "naive", "aware"):
+        if family in ("date", "naive", "naive_ns", "aware"):
             temporal.add(family)
+            if family != "aware" and isinstance(value, datetime.date):
+                midnight = datetime.time()
+                instant = value if isinstance(value, datetime.datetime) else datetime.datetime.combine(value, midnight)
+                beyond_nanoseconds = beyond_nanoseconds or not _NANOSECOND_FIRST <= instant <= _NANOSECOND_LAST
             continue
         other.add(family)
         if isinstance(value, float):
@@ -217,6 +258,11 @@ def _classify_sample(sample: list[object]) -> tuple[str, str]:
 
     if "aware" in temporal:
         return "objects", "TIMESTAMP WITH TIME ZONE"
+    if "naive_ns" in temporal and not beyond_nanoseconds:
+        return "objects", "TIMESTAMP_NS"
+    if "naive_ns" in temporal:
+        # A sampled value past TIMESTAMP_NS's range needs the wider type, which refuses a sub-microsecond value.
+        return "objects", "TIMESTAMP"
     if "naive" in temporal:
         return "objects", "TIMESTAMP"
     if "date" in temporal:

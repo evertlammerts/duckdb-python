@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import collections
 import datetime
 import decimal
+import types
 import uuid
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from duckdb import _duckdb, exceptions
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 @pytest.fixture(scope="module")
@@ -116,6 +121,30 @@ def test_a_non_string_parameter_name_is_refused_clearly(con: _duckdb.Connection)
 
 def test_named_parameters(con: _duckdb.Connection) -> None:
     assert con.execute("SELECT $a + $b", {"a": 2, "b": 3}).fetch_all()[0][0] == 5
+
+
+@pytest.mark.parametrize(
+    "mapping",
+    [collections.UserDict({"a": 2, "b": 3}), types.MappingProxyType({"a": 2, "b": 3})],
+    ids=lambda mapping: type(mapping).__name__,
+)
+def test_any_mapping_binds_by_name(con: _duckdb.Connection, mapping: Mapping[str, int]) -> None:
+    assert con.execute("SELECT $a + $b", mapping).fetch_all()[0][0] == 5
+
+
+def test_a_mapping_with_a_missing_name_is_refused(con: _duckdb.Connection) -> None:
+    with pytest.raises(exceptions.Error):
+        con.execute("SELECT $a + $b", collections.UserDict({"a": 2}))
+
+
+def test_a_mapping_with_a_non_string_name_is_refused_clearly(con: _duckdb.Connection) -> None:
+    with pytest.raises(exceptions.InvalidInputError, match="parameter names must be strings"):
+        con.execute("SELECT $1", collections.UserDict({1: 5}))  # type: ignore[dict-item]
+
+
+def test_a_generator_still_binds_positionally(con: _duckdb.Connection) -> None:
+    values = (v for v in ("first", "second"))
+    assert con.execute("SELECT $1, $2", values).fetch_all()[0] == ("first", "second")  # type: ignore[arg-type]
 
 
 def test_positional_parameters_bind_in_order(con: _duckdb.Connection) -> None:

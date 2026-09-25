@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import collections
 import datetime
 import threading
 import time
@@ -154,6 +155,13 @@ class TestCursor:
         cur = con.cursor()
         cur.execute("SELECT ? + ?", [2, 3])
         assert cur.fetchone() == (5,)
+
+    def test_a_mapping_that_is_not_a_dict_binds_by_name(self, con: dbapi.Connection) -> None:
+        cur = con.cursor()
+        cur.execute("CREATE TABLE t (v INTEGER)")
+        cur.executemany("INSERT INTO t VALUES ($v)", [collections.UserDict(v=1), collections.UserDict(v=2)])
+        cur.execute("SELECT sum(v) FROM t WHERE v <= $top", collections.UserDict(top=2))
+        assert cur.fetchone() == (3,)
 
     def test_fetch_without_execute_is_an_interface_error(self, con: dbapi.Connection) -> None:
         # PEP 249: the fault is in how the API was used, not in the database, so InterfaceError.

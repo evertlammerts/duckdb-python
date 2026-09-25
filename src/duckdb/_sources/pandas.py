@@ -29,6 +29,7 @@ from .numpy import (
     _object_plan,
     _significant_values,
     _stride,
+    contiguous,
 )
 
 if TYPE_CHECKING:
@@ -86,7 +87,7 @@ class PandasSource(Source):
     def columns(self, columns: Sequence[int] | None) -> list[tuple[str, str, str, object, object | None]]:
         """For the requested columns (all when None): name, kind, engine type, data array, mask array or None."""
         frame = self._named(columns)
-        return [(name, *_column_plan(frame[name])) for name in frame.columns]
+        return [(name, *contiguous(_column_plan(frame[name]))) for name in frame.columns]
 
     def _schema(self, frame: DataFrame) -> tuple[Schema, set[str]]:
         """The Arrow schema of a sample of the DataFrame `frame`, and the object columns read through `str()`."""
@@ -119,6 +120,8 @@ class PandasSource(Source):
             part = frame.iloc[start : start + self.SLICE_ROWS]
             if forced:
                 part = part.assign(**{name: _stringified(part[name]) for name in forced})
+            if loose:
+                part = part.assign(**{name: _nulled(part[name]) for name in loose})
             converted = self.pyarrow.Table.from_pandas(part, schema=schema, preserve_index=False)
             for name in loose:
                 self._check_exact(part, name, converted, schema, start)
@@ -184,7 +187,13 @@ def _row_sample(frame: DataFrame, sample_rows: int) -> DataFrame:
 
 def _stringified(series: pd.Series) -> pd.Series:
     """`series` with every non-null value replaced by its text, so pyarrow can hold the column as VARCHAR."""
-    return series.map(lambda value: value if _missing(value) else str(value))
+    return series.map(lambda value: None if _missing(value) else str(value))
+
+
+def _nulled(series: pd.Series) -> pd.Series:
+    """An object `series` with every missing marker as None, since pyarrow keeps a numpy float32 NaN as a NaN."""
+    missing = series.isna()
+    return series.where(~missing, None) if missing.any() else series
 
 
 def _needs_text_conversion(sample: list[object]) -> bool:

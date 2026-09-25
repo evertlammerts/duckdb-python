@@ -234,6 +234,38 @@ class TestAggregation:
         ranked = orders.with_columns(rank=duckdb.frame.row_number().over(order_by=col("id")))
         assert len(ranked.rows(con)) == 5
 
+    def test_a_key_holding_a_literal(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
+        grouped = orders.group_by(col("country").concat("_").alias("g")).agg(col("amount").sum().alias("total"))
+        assert grouped.schema(con) == [("g", "VARCHAR"), ("total", "HUGEINT")]
+        assert sorted(grouped.rows(con)) == [("be_", 80), ("de_", 50), ("nl_", 420)]
+
+    def test_a_key_comparing_to_a_literal(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
+        grouped = orders.group_by((col("country") == "nl").alias("is_nl")).agg(col("id").count().alias("n"))
+        assert sorted(grouped.rows(con)) == [(False, 2), (True, 3)]
+
+    def test_a_parameter_key(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
+        grouped = orders.group_by(param("tag").alias("tag")).agg(col("id").count().alias("n"))
+        assert grouped.rows(con, parameters={"tag": "all"}) == [("all", 5)]
+
+    def test_several_keys_holding_literals(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
+        grouped = orders.group_by(col("country").concat("!").alias("c"), (col("amount") > 100).alias("big")).agg(
+            col("id").count().alias("n")
+        )
+        assert sorted(grouped.rows(con), key=repr) == sorted(
+            [("be!", False, 1), ("de!", False, 1), ("nl!", True, 2), ("nl!", None, 1)], key=repr
+        )
+
+    def test_a_star_key_groups_by_every_column(self, con: duckdb.frame.Connection) -> None:
+        pairs = duckdb.frame.sql("SELECT * FROM (VALUES (1, 'a'), (1, 'a'), (2, 'b')) v(n, s)")
+        grouped = pairs.group_by(star()).agg(col("n").count().alias("c"))
+        assert sorted(grouped.rows(con)) == [(1, "a", 2), (2, "b", 1)]
+
+    def test_a_key_alias_that_names_an_input_column(
+        self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame
+    ) -> None:
+        grouped = orders.group_by(col("country").concat("_").alias("amount")).agg(col("amount").sum().alias("total"))
+        assert sorted(grouped.rows(con)) == [("be_", 80), ("de_", 50), ("nl_", 420)]
+
 
 class TestJoins:
     def test_join_on_a_shared_name(self, orders: duckdb.frame.Frame, con: duckdb.frame.Connection) -> None:
@@ -263,6 +295,18 @@ class TestJoins:
         )
         assert len(joined.rows(con)) == expected
 
+    @pytest.mark.parametrize("how", ["inner", "left", "right", "outer", "semi", "anti"])
+    @pytest.mark.parametrize(("left_type", "right_type"), [("INTEGER", "BIGINT"), ("BIGINT", "INTEGER")])
+    def test_a_using_key_takes_the_type_the_engine_binds(
+        self, con: duckdb.frame.Connection, how: str, left_type: str, right_type: str
+    ) -> None:
+        left = duckdb.frame.sql(f"SELECT 1::{left_type} AS k, 'l' AS a")
+        right = duckdb.frame.sql(f"SELECT 1::{right_type} AS k, 'r' AS b")
+        joined = left.join(right, on="k", how=how)
+        bound = [tuple(column) for column in con._engine().bind(joined.render(con))[0]]
+        assert [tuple(column) for column in joined.schema(con)] == bound
+        assert [tuple(column) for column in joined.select("k").schema(con)] == bound[:1]
+
     def test_cross_join_needs_no_keys(self, orders: duckdb.frame.Frame, con: duckdb.frame.Connection) -> None:
         assert len(orders.cross(duckdb.frame.table("countries")).rows(con)) == 10
 
@@ -285,6 +329,26 @@ class TestSetOperations:
         left = duckdb.frame.sql("SELECT 1 AS a, 2 AS b")
         right = duckdb.frame.sql("SELECT 3 AS b, 4 AS a")
         assert sorted(left.union_by_name(right).rows(con)) == [(1, 2), (4, 3)]
+
+    @pytest.mark.parametrize("verb", ["union", "intersect", "except_"])
+    @pytest.mark.parametrize(
+        ("left_type", "right_type"),
+        [("INTEGER", "VARCHAR"), ("INTEGER", "BIGINT"), ("DATE", "TIMESTAMP"), ("INTEGER", "INTEGER")],
+    )
+    def test_the_reported_type_is_the_one_the_engine_binds(
+        self, con: duckdb.frame.Connection, verb: str, left_type: str, right_type: str
+    ) -> None:
+        left = duckdb.frame.sql(f"SELECT NULL::{left_type} AS x, 1 AS y")
+        right = duckdb.frame.sql(f"SELECT NULL::{right_type} AS x, 2 AS y")
+        combined = getattr(left, verb)(right)
+        bound = [tuple(column) for column in con._engine().bind(combined.render(con))[0]]
+        assert [tuple(column) for column in combined.schema(con)] == bound
+        assert [tuple(column) for column in combined.select("x").schema(con)] == bound[:1]
+
+    def test_a_union_of_empty_inputs_is_typed_by_the_engine(self, con: duckdb.frame.Connection) -> None:
+        left = duckdb.frame.sql("SELECT 1::INTEGER AS x WHERE false")
+        right = duckdb.frame.sql("SELECT 'a'::VARCHAR AS x WHERE false")
+        assert left.union(right).schema(con) == [("x", "VARCHAR")]
 
     def test_intersect_and_except(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         nl = orders.filter(col("country") == "nl")

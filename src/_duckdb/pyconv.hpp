@@ -32,6 +32,7 @@ struct ConversionContext {
 	nb::object decimal_cls;
 	nb::object uuid_cls;
 	nb::object int_cls;
+	nb::object mapping_cls;
 
 	/// Wide enough for the 39 digits a 128-bit integer can carry, so rescaling a decimal never rounds.
 	nb::object decimal_context;
