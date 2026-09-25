@@ -374,7 +374,7 @@ class Connection:
             message = f"a registered name is a string, not {name!r}"  # type: ignore[unreachable]
             raise TypeError(message)
         source = adapt(obj)
-        self._engine().register_object(name, source, source.one_shot)
+        self._engine().register_object(name, source, source.one_shot, source.native)
 
     def unregister(self, name: str) -> None:
         """Forget the object registered as `name`."""

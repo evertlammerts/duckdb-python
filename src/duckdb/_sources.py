@@ -17,6 +17,8 @@ from . import _duckdb
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
 
+    import numpy as np
+    import pandas as pd
     import polars as pl
     from pandas import DataFrame
     from pyarrow import RecordBatch, Schema, Table
@@ -36,6 +38,9 @@ class Source:
     #: stream is pure C, C++ or Rust, or takes the GIL itself where it runs Python, sets this False, and its pulls
     #: then run on engine threads with no GIL held.
     pull_under_gil = True
+    #: Whether the registered name resolves to the native pandas scan rather than the Arrow object scan. Only a
+    #: pandas frame whose columns are all numpy- or Python-object-backed sets this True.
+    native = False
 
     def __init__(self, obj: object) -> None:
         self.obj: Any = obj
@@ -198,49 +203,83 @@ class LazyFrameSource(Source):
 
 
 class PandasSource(Source):
-    """A pandas DataFrame through pyarrow, converted a slice of rows at a time so the frame is never copied whole.
+    """A pandas DataFrame, read natively when every column is numpy- or Python-object-backed, through pyarrow otherwise.
 
-    The index is left out, as the previous client did. Column types come from a sample of rows spread over the
-    frame, as the previous client's analyzer sampled, since pyarrow can only type an object column by converting it;
-    every slice is then converted to those types, and a value a later slice holds that they cannot hold exactly
-    fails the query. Only the requested columns are converted. Column labels become their text, and a label
-    repeating another gets a numbered suffix, as the engine names a repeated Arrow field.
+    A pyarrow-backed column (an `ArrowExtensionArray`, which includes `ArrowStringArray`, the default for strings
+    when pyarrow is installed) sends the whole DataFrame through the Arrow path below, converted a slice of rows at a
+    time so the DataFrame is never copied whole; `native` is False for such a DataFrame. Otherwise `describe()` and
+    `columns()` serve `pandas_scan.cpp`'s table function directly off the DataFrame's own buffers.
+
+    The index is left out, as the previous client did. Column labels become their text, and a label repeating
+    another gets a numbered suffix, as the engine names a repeated Arrow field.
     """
 
-    #: Rows the types are inferred from, spread evenly over the frame.
+    #: Rows the types are inferred from, spread evenly over the DataFrame.
     SAMPLE_ROWS = 1000
-    #: Rows converted per slice; the memory held at any time is one slice's worth of Arrow.
+    #: Rows converted per slice on the Arrow path; the memory held at any time is one slice's worth of Arrow.
     SLICE_ROWS = 1 << 16
 
     def __init__(self, obj: object) -> None:
+        super().__init__(obj)
         try:
             import pyarrow
-        except ImportError as error:
-            message = "registering a pandas DataFrame needs pyarrow, which converts it to Arrow"
-            raise TypeError(message) from error
-        super().__init__(obj)
+        except ImportError:
+            pyarrow = None
+        self.native = _is_native_pandas_frame(obj)
+        if not self.native and pyarrow is None:
+            message = (
+                "registering a pandas DataFrame with a pyarrow-backed column needs pyarrow, which converts it to Arrow"
+            )
+            raise TypeError(message)
         self.pyarrow = pyarrow
 
     def _named(self, columns: Sequence[int] | None) -> DataFrame:
-        """The frame as it is now, or the requested columns of it, under the text names; a view sharing its data."""
+        """The DataFrame as it is now, or the requested columns of it, under the text names; a view sharing its data."""
         names = _unique_names([str(label) for label in self.obj.columns])
         frame = self.obj if columns is None else self.obj.iloc[:, list(columns)]
         chosen = names if columns is None else [names[i] for i in columns]
         return frame.set_axis(chosen, axis=1)
 
-    def _schema(self, frame: DataFrame) -> Schema:
-        step = max(1, len(frame) // self.SAMPLE_ROWS)
-        sample = frame.iloc[::step].head(self.SAMPLE_ROWS)
-        return self.pyarrow.Schema.from_pandas(sample, preserve_index=False)
+    def describe(self) -> list[tuple[str, str]]:
+        """Column names and engine types, for the native scan's bind."""
+        frame = self._named(None)
+        return [(name, _pandas_column_plan(frame[name])[1]) for name in frame.columns]
 
-    def _batches(self, frame: DataFrame, schema: Schema) -> Iterator[RecordBatch]:
-        loose = [str(name) for name, dtype in frame.dtypes.items() if dtype.kind == "O"]
+    def columns(self, columns: Sequence[int] | None) -> list[tuple[str, str, str, object, object | None]]:
+        """For the requested columns (all when None): name, kind, engine type, data array, mask array or None."""
+        frame = self._named(columns)
+        return [(name, *_pandas_column_plan(frame[name])) for name in frame.columns]
+
+    def _schema(self, frame: DataFrame) -> tuple[Schema, set[str]]:
+        """The Arrow schema of a sample of `frame`, and the object columns pyarrow cannot type, read as text."""
+        sample = _pandas_row_sample(frame, self.SAMPLE_ROWS)
+        forced = self._text_fallback_columns(sample)
+        if forced:
+            sample = sample.assign(**{name: _pandas_stringified(sample[name]) for name in forced})
+        return self.pyarrow.Schema.from_pandas(sample, preserve_index=False), forced
+
+    def _batches(self, frame: DataFrame, schema: Schema, forced: set[str]) -> Iterator[RecordBatch]:
+        loose = [str(name) for name, dtype in frame.dtypes.items() if dtype.kind == "O" and name not in forced]
         for start in range(0, len(frame), self.SLICE_ROWS):
             part = frame.iloc[start : start + self.SLICE_ROWS]
+            if forced:
+                part = part.assign(**{name: _pandas_stringified(part[name]) for name in forced})
             converted = self.pyarrow.Table.from_pandas(part, schema=schema, preserve_index=False)
             for name in loose:
                 self._check_exact(part, name, converted, schema, start)
             yield from converted.to_batches()
+
+    def _text_fallback_columns(self, sample: DataFrame) -> set[str]:
+        """Object columns whose sample pyarrow cannot type on its own, read as text on both paths instead."""
+        forced = set()
+        for name, dtype in sample.dtypes.items():
+            if dtype.kind != "O":
+                continue
+            try:
+                self.pyarrow.array(sample[name], from_pandas=True)
+            except self.pyarrow.ArrowException:
+                forced.add(str(name))
+        return forced
 
     def _check_exact(self, part: DataFrame, name: str, converted: Table, schema: Schema, start: int) -> None:
         """Refuses a slice whose Python objects the sampled type holds only approximately.
@@ -261,15 +300,15 @@ class PandasSource(Source):
             raise ValueError(message)
 
     def __arrow_c_schema__(self) -> object:
-        return self._schema(self._named(None)).__arrow_c_schema__()
+        return self._schema(self._named(None))[0].__arrow_c_schema__()
 
     def rows(self) -> int | None:
         return len(self.obj)
 
     def stream(self, columns: Sequence[int] | None, filters: Sequence[Expr]) -> tuple[object, bool]:
         frame = self._named(columns)
-        schema = self._schema(frame)
-        reader = self.pyarrow.RecordBatchReader.from_batches(schema, self._batches(frame, schema))
+        schema, forced = self._schema(frame)
+        reader = self.pyarrow.RecordBatchReader.from_batches(schema, self._batches(frame, schema, forced))
         return reader.__arrow_c_stream__(), columns is not None
 
 
@@ -375,6 +414,267 @@ def _known_length(obj: object) -> int | None:
         return len(obj)  # type: ignore[arg-type]
     except TypeError:
         return None
+
+
+def _is_native_pandas_frame(obj: DataFrame) -> bool:
+    """Whether every column of `obj` is numpy- or Python-object-backed rather than pyarrow-backed."""
+    try:
+        import pandas as pd
+    except ImportError as error:
+        message = "registering a pandas DataFrame needs pandas"
+        raise TypeError(message) from error
+    if not isinstance(obj, pd.DataFrame):
+        message = f"registering as a pandas DataFrame needs a pandas DataFrame, not {type(obj).__name__}"
+        raise TypeError(message)
+
+    string_kind = getattr(pd.arrays, "ArrowStringArray", None)
+    # A DataFrame's .values is the whole block as one array, not a per-column iterator like a dict's.
+    for _, column in obj.items():  # noqa: PERF102
+        array = column.array
+        if isinstance(array, pd.arrays.ArrowExtensionArray):
+            return False
+        if string_kind is not None and isinstance(array, string_kind):
+            return False
+    return True
+
+
+def _pandas_row_sample(frame: DataFrame, sample_rows: int) -> DataFrame:
+    """Up to `sample_rows` rows of the DataFrame `frame`, spread evenly, which is how column types are inferred."""
+    step = max(1, len(frame) // sample_rows)
+    return frame.iloc[::step].head(sample_rows)
+
+
+def _pandas_missing(value: object) -> bool:
+    """Whether `value` is a null marker: None, a float NaN, or pandas' NA/NaT singletons.
+
+    Never calls pandas' own `isna`, which turns a list or dict argument into an array rather than a bool.
+    """
+    if value is None:
+        return True
+    if isinstance(value, float):
+        return value != value
+    kind = type(value)
+    return kind.__module__.startswith("pandas") and kind.__name__ in ("NAType", "NaTType")
+
+
+def _pandas_stringified(series: pd.Series) -> pd.Series:
+    """`series` with every non-null value replaced by its text, so pyarrow can hold the column as VARCHAR."""
+    return series.map(lambda value: value if _pandas_missing(value) else str(value))
+
+
+def _sql_quote(text: str) -> str:
+    """`text` as a single-quoted SQL string literal."""
+    return "'" + text.replace("'", "''") + "'"
+
+
+#: numpy dtype code (byte order dropped) to the engine type of matching width.
+_FIXED_TYPES = {
+    "i1": "TINYINT",
+    "i2": "SMALLINT",
+    "i4": "INTEGER",
+    "i8": "BIGINT",
+    "u1": "UTINYINT",
+    "u2": "USMALLINT",
+    "u4": "UINTEGER",
+    "u8": "UBIGINT",
+    "f4": "FLOAT",
+    "f8": "DOUBLE",
+}
+
+#: A naive datetime64 unit to the engine type storing that same unit, so the ints copy straight through.
+_NAIVE_TIMESTAMP_TYPES = {"s": "TIMESTAMP_S", "ms": "TIMESTAMP_MS", "us": "TIMESTAMP", "ns": "TIMESTAMP_NS"}
+
+#: The largest magnitude BIGINT and HUGEINT can each hold; a sampled int past both is read as text instead.
+_INT64_MAX = 2**63 - 1
+_INT128_MAX = 2**127 - 1
+
+
+def _pandas_column_plan(series: pd.Series) -> tuple[str, str, object, object | None]:
+    """kind, engine type text, data array, mask array or None: the native reading of one pandas column."""
+    import numpy as np
+    import pandas as pd
+
+    dtype = series.dtype
+    array = series.array
+    if isinstance(dtype, pd.CategoricalDtype):
+        categories = dtype.categories
+        if all(isinstance(c, str) for c in categories):
+            return _pandas_enum_plan(series, categories)
+        # Categories are read through their own kind; materializing per-row values is simpler than indexing
+        # into arbitrary category types and this path is for the rare non-string categorical.
+        return _pandas_column_plan(series.astype(object))
+    if isinstance(dtype, pd.DatetimeTZDtype):
+        return _pandas_aware_timestamp_plan(series, dtype)
+    if hasattr(array, "_data") and hasattr(array, "_mask"):
+        return _pandas_masked_plan(array)
+    if isinstance(dtype, np.dtype):
+        if dtype.kind == "M":
+            return _pandas_naive_timestamp_plan(series, dtype)
+        if dtype.kind == "m":
+            return _pandas_interval_plan(series, dtype)
+        if dtype.kind == "b":
+            return "fixed", "BOOLEAN", series.to_numpy(copy=False), None
+        if dtype.kind in "iu":
+            return "fixed", _FIXED_TYPES[dtype.str[1:]], series.to_numpy(copy=False), None
+        if dtype.kind == "f":
+            data = series.to_numpy(copy=False)
+            if data.dtype.itemsize == 2:
+                return "fixed", "FLOAT", data.astype(np.float32), None
+            return "fixed", _FIXED_TYPES[dtype.str[1:]], data, None
+    return _pandas_object_plan(series)
+
+
+def _pandas_masked_plan(array: object) -> tuple[str, str, object, object]:
+    data = getattr(array, "_data")  # noqa: B009
+    mask = getattr(array, "_mask")  # noqa: B009
+    if data.dtype.kind == "b":
+        return "fixed", "BOOLEAN", data, mask
+    return "fixed", _FIXED_TYPES[data.dtype.str[1:]], data, mask
+
+
+def _pandas_naive_timestamp_plan(series: pd.Series, dtype: np.dtype[Any]) -> tuple[str, str, object, None]:
+    import numpy as np
+
+    unit = np.datetime_data(dtype)[0]
+    array = series.array
+    raw = array._ndarray if hasattr(array, "_ndarray") else series.to_numpy(copy=False)
+    return "timestamp", _NAIVE_TIMESTAMP_TYPES[unit], raw.view(np.int64), None
+
+
+def _pandas_aware_timestamp_plan(series: pd.Series, dtype: pd.DatetimeTZDtype) -> tuple[str, str, object, None]:
+    import numpy as np
+
+    array = series.array
+    if str(array.tz) != "UTC":
+        array = array.tz_convert("UTC")
+    return f"timestamp:{dtype.unit}", "TIMESTAMP WITH TIME ZONE", array._ndarray.view(np.int64), None
+
+
+def _pandas_interval_plan(series: pd.Series, dtype: np.dtype[Any]) -> tuple[str, str, object, None]:
+    import numpy as np
+
+    unit = np.datetime_data(dtype)[0]
+    array = series.array
+    raw = array._ndarray if hasattr(array, "_ndarray") else series.to_numpy(copy=False)
+    return f"interval:{unit}", "INTERVAL", raw.view(np.int64), None
+
+
+def _pandas_enum_plan(series: pd.Series, categories: Sequence[str]) -> tuple[str, str, object, None]:
+    codes = series.cat.codes.to_numpy()
+    type_text = "ENUM(" + ", ".join(_sql_quote(str(c)) for c in categories) + ")"
+    return "enum", type_text, codes, None
+
+
+def _pandas_object_plan(series: pd.Series) -> tuple[str, str, object, None]:
+    array = series.array
+    data = array._ndarray if hasattr(array, "_ndarray") else series.to_numpy(copy=False)
+    kind, type_text = _pandas_classify_sample(_pandas_object_sample(series, data))
+    return kind, type_text, data, None
+
+
+def _pandas_object_sample(series: pd.Series, data: np.ndarray[Any, Any]) -> list[object]:
+    """Up to `PandasSource.SAMPLE_ROWS` values spread over `data`, or the first valid one when none of those landed."""
+    step = max(1, len(data) // PandasSource.SAMPLE_ROWS)
+    sample: list[object] = data[::step][: PandasSource.SAMPLE_ROWS].tolist()
+    if sample and all(_pandas_missing(v) for v in sample):
+        first_label = series.first_valid_index()
+        if first_label is not None:
+            value = series.loc[first_label]
+            if isinstance(value, type(series)):
+                # A duplicate label reads back several rows; the first is as good a sample as any.
+                value = value.iloc[0]
+            return [value]
+    return sample
+
+
+def _pandas_classify_sample(sample: list[object]) -> tuple[str, str]:
+    """Kind and engine type text for an object column, from a sample of its non-null values.
+
+    `"text"` (VARCHAR) when the sample is empty, holds only strings, or does not unify under one family below;
+    `"objects"` otherwise, with each value later read through `PythonToValue` and cast to the chosen type.
+    """
+    import datetime
+    import decimal
+    import uuid as uuid_module
+
+    import numpy as np
+
+    def unwrap(value: object) -> object:
+        return value.item() if isinstance(value, np.generic) else value
+
+    values = [unwrap(v) for v in sample if not _pandas_missing(v)]
+    if not values:
+        return "text", "VARCHAR"
+    if all(isinstance(v, str) for v in values):
+        return "text", "VARCHAR"
+
+    saw_bool = saw_int = saw_float = saw_decimal = False
+    saw_date = saw_naive_dt = saw_aware_dt = False
+    saw_time = saw_interval = saw_bytes = saw_uuid = False
+    max_scale = 0
+    max_abs_int = 0
+
+    for value in values:
+        if isinstance(value, bool):
+            saw_bool = True
+        elif isinstance(value, int):
+            saw_int = True
+            max_abs_int = max(max_abs_int, abs(value))
+        elif isinstance(value, float):
+            saw_float = True
+        elif isinstance(value, decimal.Decimal):
+            saw_decimal = True
+            exponent = value.as_tuple().exponent
+            if isinstance(exponent, int):
+                max_scale = max(max_scale, -exponent)
+        elif isinstance(value, datetime.datetime):
+            if value.tzinfo is not None:
+                saw_aware_dt = True
+            else:
+                saw_naive_dt = True
+        elif isinstance(value, datetime.date):
+            saw_date = True
+        elif isinstance(value, datetime.time):
+            saw_time = True
+        elif isinstance(value, datetime.timedelta):
+            saw_interval = True
+        elif isinstance(value, bytes):
+            saw_bytes = True
+        elif isinstance(value, uuid_module.UUID):
+            saw_uuid = True
+        else:
+            return "text", "VARCHAR"
+
+    temporal = saw_date or saw_naive_dt or saw_aware_dt
+    families = sum([saw_bool, saw_decimal, temporal, saw_time, saw_interval, saw_bytes, saw_uuid, saw_int or saw_float])
+    if families > 1 or (saw_aware_dt and (saw_date or saw_naive_dt)):
+        return "text", "VARCHAR"
+
+    if saw_bool:
+        return "objects", "BOOLEAN"
+    if saw_decimal:
+        return "objects", f"DECIMAL(38,{min(max_scale, 38)})"
+    if saw_aware_dt:
+        return "objects", "TIMESTAMP WITH TIME ZONE"
+    if saw_naive_dt:
+        return "objects", "TIMESTAMP"
+    if saw_date:
+        return "objects", "DATE"
+    if saw_time:
+        return "objects", "TIME"
+    if saw_interval:
+        return "objects", "INTERVAL"
+    if saw_bytes:
+        return "objects", "BLOB"
+    if saw_uuid:
+        return "objects", "UUID"
+    if saw_int and not saw_float:
+        if max_abs_int > _INT128_MAX:
+            return "text", "VARCHAR"
+        if max_abs_int > _INT64_MAX:
+            return "objects", "HUGEINT"
+        return "objects", "BIGINT"
+    return "objects", "DOUBLE"
 
 
 def adapt(obj: object) -> Source:

@@ -8,6 +8,7 @@
 
 #include "registry.hpp"
 
+#include "pandas_scan.hpp"
 #include "scan.hpp"
 
 #include <string>
@@ -42,15 +43,15 @@ void ReplaceRegisteredName(cxx::ReplacementScan::Input &input) {
 	if (!entry) {
 		return;
 	}
-	input.SetFunctionName(kScanFunction);
+	input.SetFunctionName(entry->native ? kPandasScanFunction : kScanFunction);
 	auto context = input.GetContext();
 	input.AddArgument(context.CreateValue(cxx::varchar_t(name.GetPart(0))));
 }
 
 } // namespace
 
-Registered::Registered(std::string name, nb::object object, bool one_shot)
-    : name(std::move(name)), object(std::move(object)), one_shot(one_shot) {
+Registered::Registered(std::string name, nb::object object, bool one_shot, bool native)
+    : name(std::move(name)), object(std::move(object)), one_shot(one_shot), native(native) {
 }
 
 Registered::~Registered() {
@@ -58,7 +59,7 @@ Registered::~Registered() {
 	object.reset();
 }
 
-void Registry::Add(const std::string &name, nb::object object, bool one_shot) {
+void Registry::Add(const std::string &name, nb::object object, bool one_shot, bool native) {
 	// The replaced entry, if any, is dropped outside the lock: its destructor takes the GIL, which a thread waiting
 	// for this lock may hold.
 	std::shared_ptr<Registered> replaced;
@@ -66,7 +67,7 @@ void Registry::Add(const std::string &name, nb::object object, bool one_shot) {
 		std::lock_guard<std::mutex> guard(lock);
 		auto &slot = by_name[Fold(name)];
 		replaced = std::move(slot);
-		slot = std::make_shared<Registered>(name, std::move(object), one_shot);
+		slot = std::make_shared<Registered>(name, std::move(object), one_shot, native);
 	}
 }
 
@@ -117,7 +118,8 @@ void InstallRegistryScan(cxx::Instance &instance, std::shared_ptr<Registry> regi
 	const auto batch_rows =
 	    static_cast<cxx::idx_t>(std::stoull(std::string(instance.GetOption("standard_vector_size").GetValue())));
 	auto connection = instance.Connect();
-	RegisterObjectScan(connection, registry, std::move(module), batch_rows);
+	RegisterObjectScan(connection, registry, module, batch_rows);
+	RegisterPandasScan(connection, registry, std::move(module), batch_rows);
 
 	auto scan = cxx::ReplacementScan::Create(instance);
 	scan.SetUserData<ReplacementUserData>(ReplacementUserData {std::move(registry)});

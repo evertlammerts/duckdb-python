@@ -180,10 +180,11 @@ public:
 		owner.Callables().push_back(std::move(callable));
 	}
 
-	/// Register a Python object as the table `name`; a one-shot object is a stream, readable once.
-	void RegisterObject(const std::string &name, nb::object object, bool one_shot) {
+	/// Register a Python object as the table `name`; a one-shot object is a stream, readable once, and a native
+	/// object is a pandas frame read through the native pandas scan rather than the Arrow object scan.
+	void RegisterObject(const std::string &name, nb::object object, bool one_shot, bool native) {
 		auto held = Live();
-		Database::From(held.database).Objects().Add(name, std::move(object), one_shot);
+		Database::From(held.database).Objects().Add(name, std::move(object), one_shot, native);
 	}
 
 	bool UnregisterObject(const std::string &name) {
@@ -331,7 +332,8 @@ NB_MODULE(_duckdb, m) {
 	    .def("bind", &Connection::Bind, nb::arg("sql"))
 	    .def("create_scalar_function", &Connection::CreateScalarFunction, nb::arg("name"), nb::arg("callable"),
 	         nb::arg("parameters"), nb::arg("returns"), nb::arg("null_handling"), nb::arg("stability"))
-	    .def("register_object", &Connection::RegisterObject, nb::arg("name"), nb::arg("obj"), nb::arg("one_shot"))
+	    .def("register_object", &Connection::RegisterObject, nb::arg("name"), nb::arg("obj"), nb::arg("one_shot"),
+	         nb::arg("native"))
 	    .def("unregister_object", &Connection::UnregisterObject, nb::arg("name"))
 	    .def("registered_kind", &Connection::RegisteredKind, nb::arg("name"))
 	    .def("interrupt", &Connection::Interrupt)

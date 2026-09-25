@@ -62,9 +62,28 @@ def test_the_package_works_with_every_optional_dependency_absent() -> None:
         "try:\n"
         "    con.register('df', Frame())\n"
         "except TypeError as error:\n"
-        "    assert 'needs pyarrow' in str(error), error\n"
+        "    assert 'needs pandas' in str(error), error\n"
         "else:\n"
-        "    raise AssertionError('a pandas frame registered without pyarrow')\n"
+        "    raise AssertionError('a pandas frame registered without pandas')\n"
+        "print('ok')\n"
+    )
+    result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True)
+    assert result.stdout.strip() == "ok", result.stderr
+
+
+def test_a_pandas_frame_registers_and_queries_with_pyarrow_absent() -> None:
+    """Without pyarrow every pandas frame is native, so the package reads one straight off its numpy columns."""
+    probe = (
+        "import sys\n"
+        "sys.modules['pyarrow'] = None\n"
+        "import duckdb\n"
+        "import pandas as pd\n"
+        "from duckdb.frame import connect\n"
+        "con = connect()\n"
+        "frame = pd.DataFrame({'i': range(5), 'f': [1.5, 2.5, 3.5, 4.5, 5.5], 's': [str(i) for i in range(5)]})\n"
+        "con.register('df', frame)\n"
+        "with con._execute('SELECT count(*), sum(i), sum(f), max(s) FROM df') as result:\n"
+        "    assert result.fetch_all() == [(5, 10, 17.5, '4')]\n"
         "print('ok')\n"
     )
     result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True)

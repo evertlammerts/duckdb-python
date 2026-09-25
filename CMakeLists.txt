@@ -32,6 +32,7 @@ nanobind_add_module(_duckdb STABLE_ABI FREE_THREADED NB_DOMAIN duckdb
   src/_duckdb/pyconv.cpp
   src/_duckdb/registry.cpp
   src/_duckdb/scan.cpp
+  src/_duckdb/pandas_scan.cpp
   src/_duckdb/arrowc.cpp
   src/_duckdb/predicate.cpp
   src/_duckdb/result.cpp

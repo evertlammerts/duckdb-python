@@ -12,6 +12,7 @@ import uuid
 import weakref
 from typing import TYPE_CHECKING
 
+import pandas as pd
 import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
@@ -845,6 +846,40 @@ class TestRowsAndTypes:
         assert rows(con, "SELECT count(*) FROM python_object_scan('NUMBERS')") == [(10,)]
         with pytest.raises(exceptions.InvalidInputError, match="nothing is registered as 'ghost'"):
             rows(con, "SELECT * FROM python_object_scan('ghost')")
+
+
+class TestNativeRouting:
+    """A registered name resolves to the native pandas scan or the Arrow object scan, by the source's `native`."""
+
+    def test_a_native_pandas_frame_routes_to_the_frame_scan(self, con: duckdb.frame.Connection) -> None:
+        con.register("df", pd.DataFrame({"a": range(3)}))
+        assert "Python Pandas Scan" in table("df").on(con).explain()
+        assert rows(con, "SELECT count(*) FROM python_pandas_scan('df')") == [(3,)]
+        with pytest.raises(exceptions.InvalidInputError, match="nothing is registered as 'ghost'"):
+            rows(con, "SELECT * FROM python_pandas_scan('ghost')")
+
+    def test_a_non_native_source_routes_to_the_object_scan(
+        self, con: duckdb.frame.Connection, numbers: pa.Table
+    ) -> None:
+        con.register("numbers", numbers)
+        assert "Python Object Scan" in table("numbers").on(con).explain()
+        # Calling the pandas scan directly on a non-native entry reaches it, but the source has no describe().
+        message = "describing the pandas frame registered as 'numbers' failed"
+        with pytest.raises(exceptions.InvalidInputError, match=message):
+            rows(con, "SELECT * FROM python_pandas_scan('numbers')")
+
+    def test_registered_kind_is_unaffected_by_native(self, con: duckdb.frame.Connection) -> None:
+        con.register("df", pd.DataFrame({"a": range(3)}))
+        assert con._engine().registered_kind("df") == "object"
+
+    def test_replacing_a_native_registration_with_a_non_native_one_switches_the_scan(
+        self, con: duckdb.frame.Connection, numbers: pa.Table
+    ) -> None:
+        con.register("t", pd.DataFrame({"a": range(3)}))
+        assert "Python Pandas Scan" in table("t").on(con).explain()
+        con.register("t", numbers)
+        assert "Python Object Scan" in table("t").on(con).explain()
+        assert rows(con, "SELECT count(*) FROM t") == [(10,)]
 
 
 class StreamOnly:
