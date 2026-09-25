@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 import decimal
 import gc
+import subprocess
 import sys
 import threading
 import time
@@ -1756,8 +1757,31 @@ STRIDED_COLUMNS = {
 }
 
 
+class Relaid(PandasSource):
+    """A native source handing the scan each data array relaid in memory, the values unchanged, as `layout` says."""
+
+    def __init__(self, obj: object, layout: str) -> None:
+        super().__init__(obj)
+        self.layout = layout
+
+    def columns(self, columns: Sequence[int] | None) -> list[tuple[str, str, str, object, object | None]]:
+        answer: list[tuple[str, str, str, object, object | None]] = []
+        for name, kind, type_text, data, mask in super().columns(columns):
+            assert isinstance(data, np.ndarray)
+            if self.layout == "unaligned":
+                packed = np.zeros(len(data), dtype=np.dtype([("pad", "i1"), ("value", data.dtype)], align=False))
+                packed["value"] = data
+                data = packed["value"]
+                assert not data.flags.aligned
+            elif self.layout == "broadcast":
+                data = np.broadcast_to(data[:1], data.shape)
+                mask = None if mask is None else np.broadcast_to(np.asarray(mask)[:1], data.shape)
+            answer.append((name, kind, type_text, data, mask))
+        return answer
+
+
 class TestPandasStridedViews:
-    """A row-stepped view hands over strided buffers, which the native scan reads as a contiguous copy."""
+    """A row-stepped view hands over strided buffers, which the native scan reads in place."""
 
     @pytest.mark.parametrize("step", [2, -1, -3])
     @pytest.mark.parametrize("column", list(STRIDED_COLUMNS))
@@ -1773,10 +1797,75 @@ class TestPandasStridedViews:
         con.register("t", pd.DataFrame({"i": pd.Series([], dtype="int64")}).iloc[::-1])
         assert rows(con, "SELECT i FROM t") == []
 
-    def test_a_contiguous_column_is_not_copied(self) -> None:
-        frame = pd.DataFrame({"i": np.arange(5), "o": pd.Series(list("abcde"), dtype=object)})
+    @pytest.mark.parametrize("step", [1, -2])
+    def test_a_column_is_not_copied(self, step: int) -> None:
+        frame = pd.DataFrame({"i": np.arange(10), "o": pd.Series(list("abcdefghij"), dtype=object)}).iloc[::step]
         for (_, _, _, data, _), column in zip(PandasSource(frame).columns(None), ("i", "o"), strict=True):
+            assert isinstance(data, np.ndarray)
+            assert data.strides[0] == step * data.itemsize
             assert np.shares_memory(data, frame[column].to_numpy(copy=False))
+
+    def test_a_reversed_view_across_several_ranges_keeps_its_order(self, con: duckdb.frame.Connection) -> None:
+        # Past three of the ranges threads claim, so a range starting mid-view is read at its own offset.
+        n = 900_000
+        frame = pd.DataFrame({"i": np.arange(n), "o": pd.Series(np.arange(n).astype(str), dtype=object)}).iloc[::-3]
+        con.register("t", frame)
+        assert rows(con, "SELECT i, o FROM t") == list(zip(frame["i"].tolist(), frame["o"].tolist(), strict=True))
+
+    @pytest.mark.parametrize("column", ["i", "f", "m", "t", "z", "d"])
+    def test_an_unaligned_buffer_reads_like_its_copy(self, con: duckdb.frame.Connection, column: str) -> None:
+        frame = pd.DataFrame({column: STRIDED_COLUMNS[column]}).iloc[::2]
+        con.register("unaligned", Relaid(frame, "unaligned"))
+        con.register("copy", frame.copy())
+        assert rows(con, f"SELECT {column} FROM unaligned") == rows(con, f"SELECT {column} FROM copy")
+
+    @pytest.mark.parametrize("column", list(STRIDED_COLUMNS))
+    def test_a_broadcast_buffer_repeats_its_one_element(self, con: duckdb.frame.Connection, column: str) -> None:
+        frame = pd.DataFrame({column: STRIDED_COLUMNS[column]})
+        con.register("broadcast", Relaid(frame, "broadcast"))
+        first = rows(con, f"SELECT {column} FROM broadcast LIMIT 1")
+        assert rows(con, f"SELECT {column} FROM broadcast") == first * len(frame)
+        con.register("copy", frame.iloc[:1].copy())
+        assert first == rows(con, f"SELECT {column} FROM copy")
+
+
+#: A native source over bare numpy arrays, scanned with pandas unimportable.
+SCAN_WITHOUT_PANDAS = """
+import sys
+sys.modules["pandas"] = None
+import numpy as np
+import duckdb
+from duckdb._sources import Source
+
+class Arrays(Source):
+    native = True
+
+    def rows(self):
+        return 3
+
+    def describe(self):
+        return [("o", "VARCHAR"), ("i", "BIGINT")]
+
+    def columns(self, columns):
+        plans = [
+            ("o", "text", "VARCHAR", np.array(["a", "x", None, "y", "c"], dtype=object)[::2], None),
+            ("i", "fixed", "BIGINT", np.arange(6)[::-2], None),
+        ]
+        return plans if columns is None else [plans[c] for c in columns]
+
+con = duckdb.frame.connect()
+con.register("t", Arrays(None))
+assert duckdb.frame.sql("SELECT o, i FROM t").rows(con) == [("a", 5), (None, 3), ("c", 1)]
+assert sys.modules["pandas"] is None
+"""
+
+
+class TestNumpyScanWithoutPandas:
+    def test_a_native_source_scans_with_pandas_unimportable(self) -> None:
+        result = subprocess.run(
+            [sys.executable, "-c", SCAN_WITHOUT_PANDAS], capture_output=True, text=True, check=False, timeout=60
+        )
+        assert result.returncode == 0, result.stderr
 
 
 class TestPandasTextUnification:
@@ -1821,8 +1910,8 @@ class MisreportingColumns(PandasSource):
         assert isinstance(data, np.ndarray)
         if self.break_as == "renamed":
             return [("not_" + name, kind, kind_text, data, mask), *answer[1:]]
-        if self.break_as == "strided":
-            return [(name, kind, kind_text, data[::2], mask), *answer[1:]]
+        if self.break_as == "two_dimensional":
+            return [(name, kind, kind_text, data.reshape(-1, 1), mask), *answer[1:]]
         if self.break_as == "wrong_width":
             return [(name, kind, kind_text, data.astype(np.int8), mask), *answer[1:]]
         if self.break_as == "short_mask":
@@ -1852,9 +1941,9 @@ class TestPandasNativeValidation:
         with pytest.raises(exceptions.InvalidInputError, match="column 'not_a' at position 0 where 'a' was expected"):
             rows(con, "SELECT * FROM t")
 
-    def test_a_non_contiguous_buffer_is_refused(self, con: duckdb.frame.Connection) -> None:
-        con.register("t", MisreportingColumns(pd.DataFrame({"a": range(10)}), "strided"))
-        with pytest.raises(exceptions.InvalidInputError, match="answered columns\\(\\) for 'a'"):
+    def test_a_two_dimensional_buffer_is_refused(self, con: duckdb.frame.Connection) -> None:
+        con.register("t", MisreportingColumns(pd.DataFrame({"a": range(10)}), "two_dimensional"))
+        with pytest.raises(exceptions.InvalidInputError, match="for 'a' with a data array that is not one-dimensional"):
             rows(con, "SELECT * FROM t")
 
     def test_a_mask_of_the_wrong_length_is_refused_and_the_data_buffer_released(

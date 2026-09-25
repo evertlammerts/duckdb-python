@@ -63,14 +63,6 @@ class ColumnPlan(NamedTuple):
     mask: object | None
 
 
-def contiguous(plan: ColumnPlan) -> ColumnPlan:
-    """`plan` with its arrays in one contiguous run each, as the scan reads them; a strided view is copied."""
-    import numpy as np
-
-    mask = None if plan.mask is None else np.ascontiguousarray(plan.mask)
-    return plan._replace(data=np.ascontiguousarray(plan.data), mask=mask)
-
-
 def _stride(length: int, sample_rows: int) -> slice:
     """Every step-th index over `length` items, the step chosen so at most `sample_rows` of them land in the stride."""
     step = max(1, length // sample_rows)

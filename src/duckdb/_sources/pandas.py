@@ -29,7 +29,6 @@ from .numpy import (
     _object_plan,
     _significant_values,
     _stride,
-    contiguous,
 )
 
 if TYPE_CHECKING:
@@ -87,7 +86,7 @@ class PandasSource(Source):
     def columns(self, columns: Sequence[int] | None) -> list[tuple[str, str, str, object, object | None]]:
         """For the requested columns (all when None): name, kind, engine type, data array, mask array or None."""
         frame = self._named(columns)
-        return [(name, *contiguous(_column_plan(frame[name]))) for name in frame.columns]
+        return [(name, *_column_plan(frame[name])) for name in frame.columns]
 
     def _schema(self, frame: DataFrame) -> tuple[Schema, set[str]]:
         """The Arrow schema of a sample of the DataFrame `frame`, and the object columns read through `str()`."""

@@ -112,7 +112,7 @@ struct NumpyColumn {
 
 /// The Python objects an object column's cells are recognised by, looked up once per scan under the GIL.
 struct ScalarMarkers {
-	/// pandas' NA and NaT singletons.
+	/// pandas' NA and NaT singletons; null handles, matching no cell, when pandas is not loaded.
 	nb::object na;
 	nb::object nat;
 	/// numpy's scalar base class and the scalar classes whose missing value is not equal to itself.
@@ -272,15 +272,15 @@ bool HostIsLittleEndian() {
 	return *reinterpret_cast<const uint8_t *>(&probe) == 1;
 }
 
-/// Takes a buffer on `obj`, refusing one that is not one-dimensional, not contiguous, the wrong length, or the
-/// wrong element width for `column_kind` and `type`; `kind_of` names what `obj` is, for the message.
+/// Takes a strided buffer on `obj`, refusing one that is not one-dimensional, the wrong length, or the wrong element
+/// width for `column_kind` and `type`; `kind_of` names what `obj` is, for the message.
 void OpenBuffer(const std::string &registered_name, const std::string &column_name, const char *kind_of, nb::object &obj,
                 NumpyColumnKind column_kind, const cxx::LogicalType &type, cxx::idx_t rows, Py_buffer &view) {
-	if (PyObject_GetBuffer(obj.ptr(), &view, PyBUF_FORMAT | PyBUF_ND | PyBUF_C_CONTIGUOUS) != 0) {
+	if (PyObject_GetBuffer(obj.ptr(), &view, PyBUF_FORMAT | PyBUF_STRIDES) != 0) {
 		PyErr_Clear();
 		throw cxx::InvalidInputException("the object registered as '" + registered_name + "' answered columns() for '" +
 		                                 column_name + "' with a " + kind_of +
-		                                 " array that is not one-dimensional and contiguous");
+		                                 " array that exports no strided buffer");
 	}
 	if (view.ndim != 1) {
 		PyBuffer_Release(&view);
@@ -308,6 +308,34 @@ void OpenBuffer(const std::string &registered_name, const std::string &column_na
 		throw cxx::InvalidInputException("the object registered as '" + registered_name + "' answered columns() for '" +
 		                                 column_name + "' with a " + kind_of +
 		                                 " array in the other byte order, which is not read");
+	}
+}
+
+/// Row `row` of a one-dimensional strided view. numpy's `buf` addresses element 0 whatever the stride's sign, and a
+/// stride of 0 (a broadcast array) repeats that element.
+const uint8_t *Element(const Py_buffer &view, cxx::idx_t row) {
+	return static_cast<const uint8_t *>(view.buf) + static_cast<Py_ssize_t>(row) * view.strides[0];
+}
+
+/// Read through memcpy, since a strided view over a packed record array need not be aligned for `T`.
+template <class T>
+T Load(const Py_buffer &view, cxx::idx_t row) {
+	T value;
+	std::memcpy(&value, Element(view, row), sizeof(T));
+	return value;
+}
+
+/// `count` elements from row `start` of `view`, packed into `dest`: one copy for a contiguous run, one per element
+/// otherwise.
+void CopyRows(const Py_buffer &view, cxx::idx_t start, cxx::idx_t count, void *dest) {
+	const auto width = static_cast<size_t>(view.itemsize);
+	auto *out = static_cast<uint8_t *>(dest);
+	if (view.strides[0] == view.itemsize) {
+		std::memcpy(out, Element(view, start), count * width);
+		return;
+	}
+	for (cxx::idx_t i = 0; i < count; i++) {
+		std::memcpy(out + i * width, Element(view, start + i), width);
 	}
 }
 
@@ -405,10 +433,14 @@ void NumpyScanInitGlobal(cxx::TableFunction::InitGlobalInput &input) {
 	ScalarMarkers markers;
 	{
 		nb::gil_scoped_acquire gil;
-		nb::module_ pandas = nb::module_::import_("pandas");
+		// An array can hold pandas' singletons only once pandas is loaded, so an absent pandas leaves no marker to
+		// match and is never imported for one.
+		nb::object pandas = nb::module_::import_("sys").attr("modules").attr("get")("pandas");
+		if (!pandas.is_none()) {
+			markers.na = pandas.attr("NA");
+			markers.nat = pandas.attr("NaT");
+		}
 		nb::module_ numpy = nb::module_::import_("numpy");
-		markers.na = pandas.attr("NA");
-		markers.nat = pandas.attr("NaT");
 		markers.numpy_generic = numpy.attr("generic");
 		markers.numpy_floating = numpy.attr("floating");
 		markers.numpy_datetime64 = numpy.attr("datetime64");
@@ -449,24 +481,21 @@ int64_t ScaleToMicros(int64_t raw, char unit, const std::string &registered_name
 	}
 }
 
-/// A contiguous run of `width`-byte elements, validity from the mask when there is one, else for FLOAT and DOUBLE
-/// from a raw NaN, the only way a plain float column marks a missing value.
+/// A run of fixed-width elements, validity from the mask when there is one, else for FLOAT and DOUBLE from a raw
+/// NaN, the only way a plain float column marks a missing value.
 void FillFixed(cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t start, cxx::idx_t count) {
-	const auto width = FixedWidth(column.type);
 	auto *dest = static_cast<uint8_t *>(vector.GetDataMutable());
-	const auto *src = static_cast<const uint8_t *>(column.data.buf) + start * width;
-	std::memcpy(dest, src, static_cast<size_t>(count * width));
+	CopyRows(column.data, start, count, dest);
 
 	auto validity = vector.GetValidityMutable();
 	validity.SetAllValid(count);
 	const auto id = column.type.GetTypeId();
 	const bool is_float = id == cxx::LogicalTypeId::FLOAT;
 	const bool is_double = id == cxx::LogicalTypeId::DOUBLE;
-	const auto *mask = column.has_mask_buffer ? static_cast<const uint8_t *>(column.mask.buf) + start : nullptr;
 	for (cxx::idx_t i = 0; i < count; i++) {
 		bool invalid = false;
-		if (mask != nullptr) {
-			invalid = mask[i] != 0;
+		if (column.has_mask_buffer) {
+			invalid = *Element(column.mask, start + i) != 0;
 		} else if (is_float) {
 			invalid = std::isnan(reinterpret_cast<float *>(dest)[i]);
 		} else if (is_double) {
@@ -482,8 +511,7 @@ void FillFixed(cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t start,
 /// storage counts in the same unit numpy does, so no per-element conversion is needed, only the NaT sentinel.
 void FillTimestampNaive(cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t start, cxx::idx_t count) {
 	auto *dest = vector.GetDataMutable<int64_t>();
-	const auto *src = static_cast<const int64_t *>(column.data.buf) + start;
-	std::memcpy(dest, src, count * sizeof(int64_t));
+	CopyRows(column.data, start, count, dest);
 	auto validity = vector.GetValidityMutable();
 	validity.SetAllValid(count);
 	for (cxx::idx_t i = 0; i < count; i++) {
@@ -498,11 +526,10 @@ void FillTimestampNaive(cxx::Vector &vector, const NumpyColumn &column, cxx::idx
 void FillTimestampAware(cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t start, cxx::idx_t count,
                         const std::string &registered_name) {
 	auto *dest = vector.GetDataMutable<int64_t>();
-	const auto *src = static_cast<const int64_t *>(column.data.buf) + start;
 	auto validity = vector.GetValidityMutable();
 	validity.SetAllValid(count);
 	for (cxx::idx_t i = 0; i < count; i++) {
-		const auto raw = src[i];
+		const auto raw = Load<int64_t>(column.data, start + i);
 		if (raw == std::numeric_limits<int64_t>::min()) {
 			validity.SetInvalid(i);
 			dest[i] = 0;
@@ -517,11 +544,10 @@ void FillTimestampAware(cxx::Vector &vector, const NumpyColumn &column, cxx::idx
 void FillInterval(cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t start, cxx::idx_t count,
                   const std::string &registered_name) {
 	auto *dest = vector.GetDataMutable<cxx::interval_t>();
-	const auto *src = static_cast<const int64_t *>(column.data.buf) + start;
 	auto validity = vector.GetValidityMutable();
 	validity.SetAllValid(count);
 	for (cxx::idx_t i = 0; i < count; i++) {
-		const auto raw = src[i];
+		const auto raw = Load<int64_t>(column.data, start + i);
 		if (raw == std::numeric_limits<int64_t>::min()) {
 			validity.SetInvalid(i);
 			dest[i] = cxx::interval_t {0, 0, 0};
@@ -534,17 +560,14 @@ void FillInterval(cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t sta
 /// Categorical codes, narrowed or widened from pandas' own signed width into the ENUM's unsigned physical width;
 /// the two widths need not match, since pandas and DuckDB each size a dictionary's codes by a different rule.
 void FillEnum(cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t start, cxx::idx_t count) {
-	const auto src_width = static_cast<cxx::idx_t>(column.data.itemsize);
-	const auto *base = static_cast<const uint8_t *>(column.data.buf) + start * src_width;
 	const auto read_code = [&](cxx::idx_t i) -> int64_t {
-		const auto *element = base + i * src_width;
-		switch (src_width) {
+		switch (column.data.itemsize) {
 		case 1:
-			return *reinterpret_cast<const int8_t *>(element);
+			return Load<int8_t>(column.data, start + i);
 		case 2:
-			return *reinterpret_cast<const int16_t *>(element);
+			return Load<int16_t>(column.data, start + i);
 		default:
-			return *reinterpret_cast<const int32_t *>(element);
+			return Load<int32_t>(column.data, start + i);
 		}
 	};
 
@@ -698,9 +721,8 @@ std::optional<cxx::Value> NumpyTemporalValue(const ScalarMarkers &markers, cxx::
 void FillText(const NumpyScanState &global, cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t start,
               cxx::idx_t count, const std::string &registered_name) {
 	nb::gil_scoped_acquire gil;
-	auto *const *values = static_cast<PyObject *const *>(column.data.buf) + start;
 	for (cxx::idx_t i = 0; i < count; i++) {
-		PyObject *value = values[i];
+		PyObject *value = Load<PyObject *>(column.data, start + i);
 		if (IsNoneLike(global.markers, value)) {
 			vector.SetNull(i);
 			continue;
@@ -733,9 +755,8 @@ void FillObjects(const NumpyScanState &global, cxx::Context &context, cxx::Vecto
                  const NumpyColumn &column, cxx::idx_t start, cxx::idx_t count, ConversionContext &conversion,
                  const std::string &registered_name) {
 	nb::gil_scoped_acquire gil;
-	auto *const *values = static_cast<PyObject *const *>(column.data.buf) + start;
 	for (cxx::idx_t i = 0; i < count; i++) {
-		PyObject *value = values[i];
+		PyObject *value = Load<PyObject *>(column.data, start + i);
 		if (IsNoneLike(global.markers, value)) {
 			vector.SetNull(i);
 			continue;
