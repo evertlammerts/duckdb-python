@@ -21,16 +21,11 @@ import pytest
 
 import duckdb
 from duckdb import exceptions
-from duckdb._sources import (
-    ArraySource,
-    DatasetSource,
-    ExportingSource,
-    LazyFrameSource,
-    PandasSource,
-    PolarsFrameSource,
-    ScannerSource,
-    adapt,
-)
+from duckdb._sources import adapt
+from duckdb._sources.arrow import ArrowArraySource, ArrowStreamSource
+from duckdb._sources.pandas import PandasSource
+from duckdb._sources.polars import LazyFrameSource, PolarsFrameSource
+from duckdb._sources.pyarrow import PyArrowDatasetSource, PyArrowScannerSource
 from duckdb.frame import col, sql, table
 
 if TYPE_CHECKING:
@@ -84,8 +79,8 @@ def check_order_preserved(con: duckdb.frame.Connection, register: Callable[[], N
 class TestClassification:
     def test_each_family_gets_its_adapter(self, parquet_dir: Path) -> None:
         dataset = ds.dataset(parquet_dir)
-        assert isinstance(adapt(dataset), DatasetSource)
-        assert isinstance(adapt(dataset.scanner()), ScannerSource)
+        assert isinstance(adapt(dataset), PyArrowDatasetSource)
+        assert isinstance(adapt(dataset.scanner()), PyArrowScannerSource)
         assert isinstance(adapt(pl.DataFrame({"a": [1]}).lazy()), LazyFrameSource)
         assert isinstance(adapt(pd.DataFrame({"a": [1]})), PandasSource)
 
@@ -120,7 +115,7 @@ class TestClassification:
             def to_reader(self) -> pa.RecordBatchReader:
                 return self.inner.to_reader()
 
-        assert isinstance(adapt(Mine(ds.dataset(parquet_dir).scanner())), ScannerSource)
+        assert isinstance(adapt(Mine(ds.dataset(parquet_dir).scanner())), PyArrowScannerSource)
 
     def test_a_class_named_like_a_reader_still_needs_the_export(self) -> None:
         class RecordBatchReader:
@@ -132,9 +127,9 @@ class TestClassification:
     def test_series_and_fragments_are_not_datasets(self, parquet_dir: Path) -> None:
         for series in (pd.Series([1]), pl.Series([1])):
             source = adapt(series)
-            assert isinstance(source, ExportingSource)
+            assert isinstance(source, ArrowStreamSource)
             assert not source.one_shot
-        assert isinstance(adapt(pa.array([1])), ArraySource)
+        assert isinstance(adapt(pa.array([1])), ArrowArraySource)
         fragment = next(iter(ds.dataset(parquet_dir).get_fragments()))
         with pytest.raises(TypeError, match="none of these"):
             adapt(fragment)
@@ -151,7 +146,7 @@ class TestClassification:
             def scanner(self) -> ds.Scanner:
                 return self.inner.scanner()
 
-        assert isinstance(adapt(Mine(ds.dataset(parquet_dir))), DatasetSource)
+        assert isinstance(adapt(Mine(ds.dataset(parquet_dir))), PyArrowDatasetSource)
 
 
 class TestDatasets:
@@ -539,7 +534,7 @@ def typed_dir(tmp_path: Path) -> Path:
     return tmp_path
 
 
-class Pushing(DatasetSource):
+class Pushing(PyArrowDatasetSource):
     """A dataset source that remembers what it was offered and what each scan applied."""
 
     def __init__(self, dataset: ds.Dataset) -> None:
@@ -623,7 +618,7 @@ class TestDatasetPushdown:
     def register_both(self, con: duckdb.frame.Connection, typed_dir: Path) -> Pushing:
         source = Pushing(ds.dataset(typed_dir, partitioning="hive"))
         con.register("pushed", source)
-        con.register("plain", ExportingSource(ds.dataset(typed_dir, partitioning="hive").to_table()))
+        con.register("plain", ArrowStreamSource(ds.dataset(typed_dir, partitioning="hive").to_table()))
         return source
 
     @pytest.mark.parametrize("where", PUSHED)
@@ -703,7 +698,7 @@ class TestLazyFramePushdown:
     def register_both(self, con: duckdb.frame.Connection, typed_dir: Path) -> PushingLazily:
         source = PushingLazily(pl.scan_parquet(typed_dir, hive_partitioning=True))
         con.register("pushed", source)
-        con.register("plain", ExportingSource(pl.scan_parquet(typed_dir, hive_partitioning=True).collect()))
+        con.register("plain", ArrowStreamSource(pl.scan_parquet(typed_dir, hive_partitioning=True).collect()))
         return source
 
     @pytest.mark.parametrize("where", PUSHED)
@@ -1078,7 +1073,39 @@ class TestPandasNativeClassification:
         frame = pd.DataFrame({"i": range(3), "s": pd.array(["a", "b", "c"], dtype="string[pyarrow]")})
         con.register("t", frame)
         assert rows(con, "SELECT i, s FROM t ORDER BY i") == [(0, "a"), (1, "b"), (2, "c")]
-        assert "Python Object Scan" in table("t").on(con).explain()
+        assert "Python Arrow Scan" in table("t").on(con).explain()
+
+
+_KIND_PLAN_CASES = {
+    "int64": pd.Series([1, 2, 3], dtype="int64"),
+    "float16": pd.Series([1.5, 2.5, 3.5], dtype="float16"),
+    "float64": pd.Series([1.5, 2.5, 3.5], dtype="float64"),
+    "bool": pd.Series([True, False, True]),
+    "nullable Int64": pd.Series([1, None, 3], dtype="Int64"),
+    "nullable Float64": pd.Series([1.5, None, 3.5], dtype="Float64"),
+    "nullable boolean": pd.Series([True, None, False], dtype="boolean"),
+    "datetime64[ns]": pd.Series(pd.to_datetime(["2020-01-01", "2020-01-02"])),
+    "datetime64[us, UTC]": pd.Series(
+        pd.to_datetime(["2020-01-01", "2020-01-02"]).tz_localize("UTC").astype("datetime64[us, UTC]")
+    ),
+    "timedelta64[ms]": pd.Series(pd.array([1000, 2000], dtype="timedelta64[ms]")),
+    "string categorical": pd.Series(pd.Categorical(["a", "b", "a"])),
+    "integer categorical": pd.Series(pd.Categorical([1, 2, 1])),
+    "object ints": pd.Series([1, 2, 3], dtype=object),
+    "object strings": pd.Series(["a", "b", "c"], dtype=object),
+    "object mixed": pd.Series([1, "a", 2.5], dtype=object),
+}
+
+
+class TestPandasKindAndPlanAgree:
+    """`describe()`'s kind-only reading and `columns()`'s full plan must never disagree over a column's type."""
+
+    @pytest.mark.parametrize("label", list(_KIND_PLAN_CASES))
+    def test_kind_matches_the_plans_kind_and_type(self, label: str) -> None:
+        from duckdb._sources import pandas as _sources_pandas
+
+        series = _KIND_PLAN_CASES[label]
+        assert _sources_pandas._column_kind(series) == _sources_pandas._column_plan(series)[:2]
 
 
 class TestPandasNativeFixed:
@@ -1270,6 +1297,18 @@ class TestPandasNativeCategorical:
         assert native_rows == arrow_rows == [("x",), ("y",), (None,), ("x",)]
         con.register("t", frame)
         assert table("t").schema(con) == [("c", "ENUM('x', 'y')")]
+
+    def test_a_declared_but_unused_category_of_another_type_does_not_change_the_type(
+        self, con: duckdb.frame.Connection
+    ) -> None:
+        """Filtering keeps a category declared; the values, not the declaration, type the column."""
+        mixed = pd.Series(pd.Categorical([1, 2, 1, datetime.date(2020, 1, 1)]))
+        filtered = mixed[mixed != datetime.date(2020, 1, 1)].reset_index(drop=True)
+        assert len(filtered.cat.categories) == 3
+        frame = pd.DataFrame({"c": filtered})
+        con.register("t", frame)
+        assert table("t").schema(con) == [("c", "BIGINT")]
+        assert rows(con, "SELECT c FROM t") == [(1,), (2,), (1,)]
 
     def test_integer_categories_are_read_through_their_own_kind(self, con: duckdb.frame.Connection) -> None:
         frame = pd.DataFrame({"c": pd.Categorical([1, 2, 1])})
@@ -1487,6 +1526,33 @@ class TestPandasNativeStrings:
         frame = pd.DataFrame({"a": range(5)}).iloc[1:]
         con.register("t", frame)
         assert rows(con, "SELECT a FROM t") == [(1,), (2,), (3,), (4,)]
+
+
+class TestPandasTextUnification:
+    """The Arrow path stringifies a mixed object column the same way the native scan reads it as text."""
+
+    def test_consistent_dicts_and_lists_of_ints_read_as_text_on_the_arrow_path(
+        self, con: duckdb.frame.Connection
+    ) -> None:
+        dicts = pd.DataFrame({"a": pd.Series([{"x": 1}, {"x": 2}], dtype=object)})
+        dicts_source = PandasSource(dicts)
+        dicts_source.native = False
+        con.register("d", dicts_source)
+        assert table("d").schema(con) == [("a", "VARCHAR")]
+        assert rows(con, "SELECT a FROM d") == [(str({"x": 1}),), (str({"x": 2}),)]
+
+        lists = pd.DataFrame({"a": pd.Series([[1, 2], [3, 4]], dtype=object)})
+        lists_source = PandasSource(lists)
+        lists_source.native = False
+        con.register("l", lists_source)
+        assert table("l").schema(con) == [("a", "VARCHAR")]
+        assert rows(con, "SELECT a FROM l") == [(str([1, 2]),), (str([3, 4]),)]
+
+    def test_bytes_mixed_with_str_reads_as_text_on_both_paths(self, con: duckdb.frame.Connection) -> None:
+        values: list[object] = [b"abc", "text"]
+        frame = pd.DataFrame({"a": pd.Series(values, dtype=object)})
+        native_rows, arrow_rows = both(con, frame, "SELECT a FROM {}")
+        assert native_rows == arrow_rows == [(str(v),) for v in values]
 
 
 class MisreportingColumns(PandasSource):
@@ -1824,17 +1890,17 @@ class TestPolarsShapes:
     def test_several_engine_threads_pull_from_a_polars_frame(
         self, con: duckdb.frame.Connection, monkeypatch: pytest.MonkeyPatch, *, lazy: bool
     ) -> None:
-        from duckdb import _sources
+        from duckdb._sources import polars as _sources_polars
 
         pulled: set[int] = set()
-        slices = _sources._polars_slices
+        slices = _sources_polars._polars_slices
 
         def recording(frame: pl.DataFrame) -> Iterator[pl.Series]:
             for part in slices(frame):
                 pulled.add(threading.get_ident())
                 yield part
 
-        monkeypatch.setattr(_sources, "_polars_slices", recording)
+        monkeypatch.setattr(_sources_polars, "_polars_slices", recording)
         con.run("SET threads = 4")
         n = 2_000_000
         frame = pl.DataFrame({"n": range(n), "s": [str(i) for i in range(n)]})

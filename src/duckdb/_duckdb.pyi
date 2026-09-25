@@ -105,7 +105,7 @@ class Connection:
         """Make `obj` readable as the table `name` on this database.
 
         A one-shot object is a stream, read once. A native object is a pandas frame read through the native
-        pandas scan rather than the Arrow object scan.
+        pandas scan rather than the Arrow scan.
         """
 
     def unregister_object(self, name: str) -> bool:

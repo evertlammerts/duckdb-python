@@ -11,7 +11,7 @@ PEP 249 face over the same engine bindings.
 - `src/duckdb/` is the Python package: `exceptions`, `dbapi`, the `frame`
   package holding the plan and connection modules, and `_expressions/`, the
   expression builder and its SQL rendering the frame package is built on;
-  `_sources.py` classifies the Python objects both faces register as tables.
+  `_sources/` classifies the Python objects both faces register as tables.
   `_error_codes.py` and, under `_expressions/`, `aggregates.py`,
   `func_namespaces.py` and `keywords.py` are generated: edit
   `scripts/func_namespaces.toml` or bump `engine.pin`, then regenerate with

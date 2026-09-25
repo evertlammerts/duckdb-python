@@ -181,7 +181,7 @@ public:
 	}
 
 	/// Register a Python object as the table `name`; a one-shot object is a stream, readable once, and a native
-	/// object is a pandas frame read through the native pandas scan rather than the Arrow object scan.
+	/// object is a pandas frame read through the native pandas scan rather than the Arrow scan.
 	void RegisterObject(const std::string &name, nb::object object, bool one_shot, bool native) {
 		auto held = Live();
 		Database::From(held.database).Objects().Add(name, std::move(object), one_shot, native);

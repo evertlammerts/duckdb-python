@@ -20,11 +20,11 @@
 #include <utility>
 #include <vector>
 
-// A registered pandas frame is a pandas DataFrame that PandasSource, in duckdb/_sources.py, has judged fit to read
-// without pyarrow: every column numpy- or Python-object-backed. Its describe() names the columns and their engine
-// types; its columns() answers each requested column as a kind, an engine type, a data array and a mask array or
-// None. A kind picks how a row's bytes turn into a vector element below, and the scan reads the pandas frame in ranges of
-// rows that its threads claim in turn.
+// A registered pandas frame is a pandas DataFrame that PandasSource, in duckdb/_sources/pandas.py, has judged fit
+// to read without pyarrow: every column numpy- or Python-object-backed. Its describe() names the columns and their
+// engine types; its columns() answers each requested column as a kind, an engine type, a data array and a mask
+// array or None. A kind picks how a row's bytes turn into a vector element below, and the scan reads the pandas
+// frame in ranges of rows that its threads claim in turn.
 
 namespace duckdb_python {
 namespace {

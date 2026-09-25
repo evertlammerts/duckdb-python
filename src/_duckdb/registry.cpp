@@ -8,8 +8,8 @@
 
 #include "registry.hpp"
 
+#include "arrow_scan.hpp"
 #include "pandas_scan.hpp"
-#include "scan.hpp"
 
 #include <string>
 #include <utility>
@@ -43,7 +43,7 @@ void ReplaceRegisteredName(cxx::ReplacementScan::Input &input) {
 	if (!entry) {
 		return;
 	}
-	input.SetFunctionName(entry->native ? kPandasScanFunction : kScanFunction);
+	input.SetFunctionName(entry->native ? kPandasScanFunction : kArrowScanFunction);
 	auto context = input.GetContext();
 	input.AddArgument(context.CreateValue(cxx::varchar_t(name.GetPart(0))));
 }
@@ -118,7 +118,7 @@ void InstallRegistryScan(cxx::Instance &instance, std::shared_ptr<Registry> regi
 	const auto batch_rows =
 	    static_cast<cxx::idx_t>(std::stoull(std::string(instance.GetOption("standard_vector_size").GetValue())));
 	auto connection = instance.Connect();
-	RegisterObjectScan(connection, registry, module, batch_rows);
+	RegisterArrowScan(connection, registry, module, batch_rows);
 	RegisterPandasScan(connection, registry, std::move(module), batch_rows);
 
 	auto scan = cxx::ReplacementScan::Create(instance);

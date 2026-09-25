@@ -20,7 +20,9 @@ import pytest
 import duckdb
 from duckdb import _duckdb, dbapi, exceptions
 from duckdb._expressions import Binary, Col
-from duckdb._sources import CapsuleSource, Source, StreamSource, TableSource, adapt
+from duckdb._sources import Source, adapt
+from duckdb._sources.arrow import ArrowCapsuleSource
+from duckdb._sources.pyarrow import PyArrowReaderSource, PyArrowTableSource
 from duckdb.frame import col, sql, table
 
 if TYPE_CHECKING:
@@ -53,12 +55,13 @@ class TestClassification:
     def test_tables_and_batches_are_read_repeatedly(self, numbers: pa.Table) -> None:
         for obj in (numbers, numbers.to_batches()[0]):
             source = adapt(obj)
-            assert isinstance(source, TableSource)
+            assert isinstance(source, PyArrowTableSource)
             assert source.obj is obj
             assert not source.one_shot
 
     def test_readers_and_capsules_are_streams(self, numbers: pa.Table) -> None:
-        for obj, kind in ((reader_over(numbers), StreamSource), (numbers.__arrow_c_stream__(), CapsuleSource)):
+        cases = ((reader_over(numbers), PyArrowReaderSource), (numbers.__arrow_c_stream__(), ArrowCapsuleSource))
+        for obj, kind in cases:
             source = adapt(obj)
             assert isinstance(source, kind)
             assert source.obj is obj
@@ -308,7 +311,7 @@ class TestStreams:
     def test_binding_does_not_consume_a_stream(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
         con.register("r", reader_over(numbers))
         assert table("r").schema(con) == [("n", "BIGINT"), ("s", "VARCHAR")]
-        assert "PYTHON_OBJECT_SCAN" in table("r").on(con).explain()
+        assert "PYTHON_ARROW_SCAN" in table("r").on(con).explain()
         assert rows(con, "SELECT count(*) FROM r") == [(10,)]
 
     def test_registering_again_makes_it_readable_again(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
@@ -327,7 +330,7 @@ class TestStreams:
         con.register("r", reader_over(numbers))
         plan = table("r").join(table("R"), on="n", suffix="_r").select(col("n"))
         rendered = plan.render(con)
-        assert rendered.count("python_object_scan") == 0
+        assert rendered.count("python_arrow_scan") == 0
         assert rendered.count('FROM "r"') + rendered.count('FROM "R"') == 1
         assert plan.on(con).rows() == [(i,) for i in range(10)]
 
@@ -839,17 +842,17 @@ class TestRowsAndTypes:
 
     def test_the_scan_shows_in_the_plan(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
         con.register("numbers", numbers)
-        assert "PYTHON_OBJECT_SCAN" in table("numbers").on(con).explain()
+        assert "PYTHON_ARROW_SCAN" in table("numbers").on(con).explain()
 
     def test_the_scan_function_takes_the_name(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
         con.register("numbers", numbers)
-        assert rows(con, "SELECT count(*) FROM python_object_scan('NUMBERS')") == [(10,)]
+        assert rows(con, "SELECT count(*) FROM python_arrow_scan('NUMBERS')") == [(10,)]
         with pytest.raises(exceptions.InvalidInputError, match="nothing is registered as 'ghost'"):
-            rows(con, "SELECT * FROM python_object_scan('ghost')")
+            rows(con, "SELECT * FROM python_arrow_scan('ghost')")
 
 
 class TestNativeRouting:
-    """A registered name resolves to the native pandas scan or the Arrow object scan, by the source's `native`."""
+    """A registered name resolves to the native pandas scan or the Arrow scan, by the source's `native`."""
 
     def test_a_native_pandas_frame_routes_to_the_frame_scan(self, con: duckdb.frame.Connection) -> None:
         con.register("df", pd.DataFrame({"a": range(3)}))
@@ -858,11 +861,11 @@ class TestNativeRouting:
         with pytest.raises(exceptions.InvalidInputError, match="nothing is registered as 'ghost'"):
             rows(con, "SELECT * FROM python_pandas_scan('ghost')")
 
-    def test_a_non_native_source_routes_to_the_object_scan(
+    def test_a_non_native_source_routes_to_the_arrow_scan(
         self, con: duckdb.frame.Connection, numbers: pa.Table
     ) -> None:
         con.register("numbers", numbers)
-        assert "Python Object Scan" in table("numbers").on(con).explain()
+        assert "Python Arrow Scan" in table("numbers").on(con).explain()
         # Calling the pandas scan directly on a non-native entry reaches it, but the source has no describe().
         message = "describing the pandas frame registered as 'numbers' failed"
         with pytest.raises(exceptions.InvalidInputError, match=message):
@@ -878,7 +881,7 @@ class TestNativeRouting:
         con.register("t", pd.DataFrame({"a": range(3)}))
         assert "Python Pandas Scan" in table("t").on(con).explain()
         con.register("t", numbers)
-        assert "Python Object Scan" in table("t").on(con).explain()
+        assert "Python Arrow Scan" in table("t").on(con).explain()
         assert rows(con, "SELECT count(*) FROM t") == [(10,)]
 
 
@@ -1482,7 +1485,7 @@ class TestFilters:
 
     def test_a_stream_is_never_asked(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
         source = adapt(reader_over(numbers))
-        assert isinstance(source, StreamSource)
+        assert isinstance(source, PyArrowReaderSource)
         assert source.accepts(col("n") > 7) is False
         con.register("once", source)
         assert rows(con, "SELECT count(*) FROM once WHERE n > 7") == [(2,)]
