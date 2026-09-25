@@ -34,7 +34,7 @@ struct Registered {
 	nb::object object;
 	/// A stream: it can be read once, so a second query over it is refused rather than silently empty.
 	bool one_shot;
-	/// Whether the replacement scan resolves this name to the native pandas scan rather than the Arrow scan.
+	/// Whether the replacement scan resolves this name to the numpy scan rather than the Arrow scan.
 	bool native;
 	std::mutex read_lock;
 	bool read = false;

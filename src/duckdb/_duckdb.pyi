@@ -104,8 +104,8 @@ class Connection:
     def register_object(self, name: str, obj: object, one_shot: bool, native: bool) -> None:
         """Make `obj` readable as the table `name` on this database.
 
-        A one-shot object is a stream, read once. A native object is a pandas frame read through the native
-        pandas scan rather than the Arrow scan.
+        A one-shot object is a stream, read once. A native object is read through the numpy scan rather than the
+        Arrow scan.
         """
 
     def unregister_object(self, name: str) -> bool:

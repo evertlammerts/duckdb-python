@@ -1,7 +1,7 @@
 """The Python objects that register as tables, each behind a source that exports Arrow for a scan.
 
 There are two scans: the Arrow scan reads an Arrow C stream from the Arrow, pyarrow and polars sources in
-`arrow.py`, `pyarrow.py` and `polars.py`, and the pandas scan reads a pandas DataFrame natively off its own buffers
+`arrow.py`, `pyarrow.py` and `polars.py`, and the numpy scan reads a pandas DataFrame natively off its own buffers
 through the source in `pandas.py`, which hands a DataFrame with a pyarrow-backed column to the Arrow scan instead.
 
 A source exposes `__arrow_c_schema__`, when the object can say its schema without producing data, `accepts`, which
@@ -36,7 +36,7 @@ class Source:
     #: stream is pure C, C++ or Rust, or takes the GIL itself where it runs Python, sets this False, and its pulls
     #: then run on engine threads with no GIL held.
     pull_under_gil = True
-    #: Whether the registered name resolves to the native pandas scan rather than the Arrow scan. Only a pandas
+    #: Whether the registered name resolves to the numpy scan rather than the Arrow scan. Only a pandas
     #: frame whose columns are all numpy- or Python-object-backed sets this True.
     native = False
 

@@ -1,12 +1,12 @@
 //===----------------------------------------------------------------------===//
 //                         DuckDB
 //
-// src/_duckdb/pandas_scan.cpp
+// src/_duckdb/numpy_scan.cpp
 //
 //
 //===----------------------------------------------------------------------===//
 
-#include "pandas_scan.hpp"
+#include "numpy_scan.hpp"
 
 #include "pyconv.hpp"
 
@@ -20,16 +20,17 @@
 #include <utility>
 #include <vector>
 
-// A registered pandas frame is a pandas DataFrame that PandasSource, in duckdb/_sources/pandas.py, has judged fit
-// to read without pyarrow: every column numpy- or Python-object-backed. Its describe() names the columns and their
-// engine types; its columns() answers each requested column as a kind, an engine type, a data array and a mask
-// array or None. A kind picks how a row's bytes turn into a vector element below, and the scan reads the pandas
-// frame in ranges of rows that its threads claim in turn.
+// A registered object is a source from duckdb/_sources that answers two calls: describe() names its columns and
+// their engine types, and columns() answers each requested column as a kind, an engine type, a numpy data array and
+// a numpy mask array or None. A pandas DataFrame is one such source. A kind picks how a row's bytes turn into a
+// vector element below. One run of this table function over a query is a scan, and its threads read the object in
+// ranges of rows they claim in turn. An object array can hold pandas' NA and NaT singletons, so they stay among the
+// missing markers this file checks for.
 
 namespace duckdb_python {
 namespace {
 
-struct PandasScanUserData {
+struct NumpyScanUserData {
 	std::shared_ptr<Registry> registry;
 	std::shared_ptr<ModuleState> module;
 	/// The engine's standard vector size, which bounds how many rows one exec call fills.
@@ -37,14 +38,14 @@ struct PandasScanUserData {
 };
 
 /// The entry a query bound over, and the column names and engine type texts `describe()` gave, in declared order.
-struct PandasScanBindData {
-	PandasScanBindData(std::shared_ptr<Registered> entry, std::vector<std::string> names, std::vector<std::string> type_texts,
+struct NumpyScanBindData {
+	NumpyScanBindData(std::shared_ptr<Registered> entry, std::vector<std::string> names, std::vector<std::string> type_texts,
 	         cxx::idx_t rows)
 	    : entry(std::move(entry)), names(std::move(names)), type_texts(std::move(type_texts)), rows(rows) {
 	}
 
 	/// Freed from engine threads too, so the Python reference is dropped under the GIL.
-	~PandasScanBindData() {
+	~NumpyScanBindData() {
 		nb::gil_scoped_acquire gil;
 		entry.reset();
 	}
@@ -57,7 +58,7 @@ struct PandasScanBindData {
 
 /// Which write rule a column's bytes follow. `TIMESTAMP_TZ` and `INTERVAL` carry the source unit of their int64
 /// data, everything else needs none.
-enum class PandasColumnKind : uint8_t {
+enum class NumpyColumnKind : uint8_t {
 	FIXED,
 	TIMESTAMP,
 	TIMESTAMP_TZ,
@@ -69,24 +70,24 @@ enum class PandasColumnKind : uint8_t {
 
 /// One requested column's buffers, kept for the scan's life: the arrays `columns()` handed over, and the buffer
 /// protocol views taken on them at global init.
-struct PandasColumn {
-	PandasColumn(std::string name, PandasColumnKind column_kind, char unit, cxx::LogicalType type)
+struct NumpyColumn {
+	NumpyColumn(std::string name, NumpyColumnKind column_kind, char unit, cxx::LogicalType type)
 	    : name(std::move(name)), column_kind(column_kind), unit(unit), type(std::move(type)) {
 	}
 
-	PandasColumn(PandasColumn &&other) noexcept
+	NumpyColumn(NumpyColumn &&other) noexcept
 	    : name(std::move(other.name)), column_kind(other.column_kind), unit(other.unit), type(std::move(other.type)),
 	      data_obj(std::move(other.data_obj)), mask_obj(std::move(other.mask_obj)), data(other.data),
 	      has_data_buffer(other.has_data_buffer), mask(other.mask), has_mask_buffer(other.has_mask_buffer) {
 		other.has_data_buffer = false;
 		other.has_mask_buffer = false;
 	}
-	PandasColumn(const PandasColumn &) = delete;
-	PandasColumn &operator=(const PandasColumn &) = delete;
-	PandasColumn &operator=(PandasColumn &&) = delete;
+	NumpyColumn(const NumpyColumn &) = delete;
+	NumpyColumn &operator=(const NumpyColumn &) = delete;
+	NumpyColumn &operator=(NumpyColumn &&) = delete;
 
 	/// Runs under the GIL: at global init when a later column is refused, and at the scan's teardown.
-	~PandasColumn() {
+	~NumpyColumn() {
 		if (has_data_buffer) {
 			PyBuffer_Release(&data);
 		}
@@ -96,7 +97,7 @@ struct PandasColumn {
 	}
 
 	std::string name;
-	PandasColumnKind column_kind;
+	NumpyColumnKind column_kind;
 	/// The unit of a TIMESTAMP_TZ or INTERVAL column's int64 data: 's', 'm' (milli), 'u' (micro) or 'n' (nano).
 	char unit;
 	cxx::LogicalType type;
@@ -108,16 +109,16 @@ struct PandasColumn {
 	bool has_mask_buffer = false;
 };
 
-/// One scan's columns, the row count they cover, and the claim counter every thread divides the pandas frame with.
-struct PandasScanState {
-	PandasScanState(std::vector<PandasColumn> columns, cxx::idx_t rows, cxx::idx_t range_rows, nb::object na,
+/// One scan's columns, the row count they cover, and the claim counter every thread divides the object with.
+struct NumpyScanState {
+	NumpyScanState(std::vector<NumpyColumn> columns, cxx::idx_t rows, cxx::idx_t range_rows, nb::object na,
 	                 nb::object nat, nb::object numpy_generic)
 	    : columns(std::move(columns)), rows(rows), range_rows(range_rows), na(std::move(na)), nat(std::move(nat)),
 	      numpy_generic(std::move(numpy_generic)) {
 	}
 
 	/// Torn down from an engine thread, so every buffer and Python reference is released under the GIL.
-	~PandasScanState() {
+	~NumpyScanState() {
 		nb::gil_scoped_acquire gil;
 		columns.clear();
 		na = nb::object();
@@ -125,7 +126,7 @@ struct PandasScanState {
 		numpy_generic = nb::object();
 	}
 
-	std::vector<PandasColumn> columns;
+	std::vector<NumpyColumn> columns;
 	cxx::idx_t rows;
 	/// Rows claimed together by one thread: 50 batches' worth, so a thread does not pay the claim's cost every batch.
 	cxx::idx_t range_rows;
@@ -136,16 +137,16 @@ struct PandasScanState {
 	nb::object numpy_generic;
 };
 
-/// One thread's claimed range within the pandas frame, and the ordering position that range stands for.
-struct PandasScanLocalState {
+/// One thread's claimed range within the object, and the ordering position that range stands for.
+struct NumpyScanLocalState {
 	cxx::idx_t start = 0;
 	cxx::idx_t end = 0;
 	cxx::idx_t batch_index = 0;
 };
 
-/// Resolved once per query while bound, so a scan sees the pandas frame registered under the name when it binds.
-void PandasScanBind(cxx::TableFunction::BindInput &input) {
-	auto &registry = *input.GetUserData<PandasScanUserData>().registry;
+/// Resolved once per query while bound, so a scan sees the object registered under the name when it binds.
+void NumpyScanBind(cxx::TableFunction::BindInput &input) {
+	auto &registry = *input.GetUserData<NumpyScanUserData>().registry;
 	const auto name = std::string(input.GetArgument(0).Get<cxx::varchar_t>());
 	auto entry = registry.ByName(name);
 	if (!entry) {
@@ -173,48 +174,48 @@ void PandasScanBind(cxx::TableFunction::BindInput &input) {
 			}
 			rows = nb::cast<cxx::idx_t>(count);
 		} catch (nb::python_error &error) {
-			throw cxx::InvalidInputException("describing the pandas frame registered as '" + entry->name +
+			throw cxx::InvalidInputException("describing the object registered as '" + entry->name +
 			                                 "' failed: " + DescribePythonError(error));
 		} catch (const nb::cast_error &) {
-			throw cxx::InvalidInputException("the pandas frame registered as '" + entry->name +
+			throw cxx::InvalidInputException("the object registered as '" + entry->name +
 			                                 "' answered describe() or rows() with something other than (name, type) "
 			                                 "pairs and a row count");
 		}
 	}
 	input.SetCardinality(rows, true);
-	input.SetBindData<PandasScanBindData>(std::move(entry), std::move(names), std::move(type_texts), rows);
+	input.SetBindData<NumpyScanBindData>(std::move(entry), std::move(names), std::move(type_texts), rows);
 }
 
 /// `kind` as `columns()` spelled it, split into the write rule and, for a TIMESTAMP_TZ or INTERVAL column, the
 /// source unit its int64 data carries.
-PandasColumnKind ParseKind(const std::string &registered_name, const std::string &column_name, const std::string &kind,
+NumpyColumnKind ParseKind(const std::string &registered_name, const std::string &column_name, const std::string &kind,
                     char &unit) {
 	unit = 0;
 	if (kind == "fixed") {
-		return PandasColumnKind::FIXED;
+		return NumpyColumnKind::FIXED;
 	}
 	if (kind == "timestamp") {
-		return PandasColumnKind::TIMESTAMP;
+		return NumpyColumnKind::TIMESTAMP;
 	}
 	// The unit is "s", "ms", "us" or "ns"; the first letter alone tells the two apart, so the rest is not checked.
 	if (kind.rfind("timestamp:", 0) == 0 && kind.size() > 10) {
 		unit = kind[10];
-		return PandasColumnKind::TIMESTAMP_TZ;
+		return NumpyColumnKind::TIMESTAMP_TZ;
 	}
 	if (kind.rfind("interval:", 0) == 0 && kind.size() > 9) {
 		unit = kind[9];
-		return PandasColumnKind::INTERVAL;
+		return NumpyColumnKind::INTERVAL;
 	}
 	if (kind == "enum") {
-		return PandasColumnKind::ENUM_CODES;
+		return NumpyColumnKind::ENUM_CODES;
 	}
 	if (kind == "text") {
-		return PandasColumnKind::TEXT;
+		return NumpyColumnKind::TEXT;
 	}
 	if (kind == "objects") {
-		return PandasColumnKind::OBJECTS;
+		return NumpyColumnKind::OBJECTS;
 	}
-	throw cxx::InvalidInputException("the pandas frame registered as '" + registered_name + "' answered columns() for '" +
+	throw cxx::InvalidInputException("the object registered as '" + registered_name + "' answered columns() for '" +
 	                                 column_name + "' with the unknown kind '" + kind + "'");
 }
 
@@ -244,14 +245,14 @@ cxx::idx_t FixedWidth(const cxx::LogicalType &type) {
 /// Whether a data buffer of `itemsize` bytes is the width `column_kind` and `type` need: the engine type's own width
 /// for a fixed column, 8 bytes (the int64 view Python took) for a timestamp or interval, a signed code of 1, 2 or 4
 /// bytes for an enum, and a pointer width for text or objects.
-bool ValidDataWidth(PandasColumnKind column_kind, const cxx::LogicalType &type, cxx::idx_t itemsize) {
+bool ValidDataWidth(NumpyColumnKind column_kind, const cxx::LogicalType &type, cxx::idx_t itemsize) {
 	switch (column_kind) {
-	case PandasColumnKind::FIXED:
+	case NumpyColumnKind::FIXED:
 		return itemsize == FixedWidth(type);
-	case PandasColumnKind::ENUM_CODES:
+	case NumpyColumnKind::ENUM_CODES:
 		return itemsize == 1 || itemsize == 2 || itemsize == 4;
-	case PandasColumnKind::TEXT:
-	case PandasColumnKind::OBJECTS:
+	case NumpyColumnKind::TEXT:
+	case NumpyColumnKind::OBJECTS:
 		return itemsize == sizeof(void *);
 	default: // TIMESTAMP, TIMESTAMP_TZ, INTERVAL
 		return itemsize == sizeof(int64_t);
@@ -266,28 +267,28 @@ bool HostIsLittleEndian() {
 /// Takes a buffer on `obj`, refusing one that is not one-dimensional, not contiguous, the wrong length, or the
 /// wrong element width for `column_kind` and `type`; `kind_of` names what `obj` is, for the message.
 void OpenBuffer(const std::string &registered_name, const std::string &column_name, const char *kind_of, nb::object &obj,
-                PandasColumnKind column_kind, const cxx::LogicalType &type, cxx::idx_t rows, Py_buffer &view) {
+                NumpyColumnKind column_kind, const cxx::LogicalType &type, cxx::idx_t rows, Py_buffer &view) {
 	if (PyObject_GetBuffer(obj.ptr(), &view, PyBUF_FORMAT | PyBUF_ND | PyBUF_C_CONTIGUOUS) != 0) {
 		PyErr_Clear();
-		throw cxx::InvalidInputException("the pandas frame registered as '" + registered_name + "' answered columns() for '" +
+		throw cxx::InvalidInputException("the object registered as '" + registered_name + "' answered columns() for '" +
 		                                 column_name + "' with a " + kind_of +
 		                                 " array that is not one-dimensional and contiguous");
 	}
 	if (view.ndim != 1) {
 		PyBuffer_Release(&view);
-		throw cxx::InvalidInputException("the pandas frame registered as '" + registered_name + "' answered columns() for '" +
+		throw cxx::InvalidInputException("the object registered as '" + registered_name + "' answered columns() for '" +
 		                                 column_name + "' with a " + kind_of + " array that is not one-dimensional");
 	}
 	if (static_cast<cxx::idx_t>(view.shape[0]) != rows) {
 		const auto length = std::to_string(view.shape[0]);
 		PyBuffer_Release(&view);
-		throw cxx::InvalidInputException("the pandas frame registered as '" + registered_name + "' answered columns() for '" +
+		throw cxx::InvalidInputException("the object registered as '" + registered_name + "' answered columns() for '" +
 		                                 column_name + "' with a " + kind_of + " array of " + length +
 		                                 " rows where " + std::to_string(rows) + " were expected");
 	}
 	if (!ValidDataWidth(column_kind, type, static_cast<cxx::idx_t>(view.itemsize))) {
 		PyBuffer_Release(&view);
-		throw cxx::InvalidInputException("the pandas frame registered as '" + registered_name + "' answered columns() for '" +
+		throw cxx::InvalidInputException("the object registered as '" + registered_name + "' answered columns() for '" +
 		                                 column_name + "' with a " + kind_of +
 		                                 " array whose element size does not match its engine type");
 	}
@@ -296,26 +297,26 @@ void OpenBuffer(const std::string &registered_name, const std::string &column_na
 	const bool swapped = HostIsLittleEndian() ? (format[0] == '>' || format[0] == '!') : format[0] == '<';
 	if (swapped) {
 		PyBuffer_Release(&view);
-		throw cxx::InvalidInputException("the pandas frame registered as '" + registered_name + "' answered columns() for '" +
+		throw cxx::InvalidInputException("the object registered as '" + registered_name + "' answered columns() for '" +
 		                                 column_name + "' with a " + kind_of +
 		                                 " array in the other byte order, which is not read");
 	}
 }
 
-/// `columns(requested)`'s reply, opened into buffered `PandasColumn`s; every buffer already opened is released
+/// `columns(requested)`'s reply, opened into buffered `NumpyColumn`s; every buffer already opened is released
 /// before an error escapes, so a later column's refusal never leaks an earlier one's.
-std::vector<PandasColumn> OpenColumns(const Registered &entry, const PandasScanBindData &bound, cxx::Context &context,
+std::vector<NumpyColumn> OpenColumns(const Registered &entry, const NumpyScanBindData &bound, cxx::Context &context,
                                      const std::vector<cxx::idx_t> &requested, nb::object answer) {
 	if (!nb::isinstance<nb::list>(answer) && !nb::isinstance<nb::tuple>(answer)) {
-		throw cxx::InvalidInputException("the pandas frame registered as '" + entry.name +
+		throw cxx::InvalidInputException("the object registered as '" + entry.name +
 		                                 "' answered columns() with something other than a list");
 	}
 	if (static_cast<cxx::idx_t>(nb::len(answer)) != requested.size()) {
-		throw cxx::InvalidInputException("the pandas frame registered as '" + entry.name + "' answered columns() with " +
+		throw cxx::InvalidInputException("the object registered as '" + entry.name + "' answered columns() with " +
 		                                 std::to_string(nb::len(answer)) + " columns where " +
 		                                 std::to_string(requested.size()) + " were requested");
 	}
-	std::vector<PandasColumn> columns;
+	std::vector<NumpyColumn> columns;
 	columns.reserve(requested.size());
 	try {
 		for (cxx::idx_t i = 0; i < requested.size(); i++) {
@@ -323,7 +324,7 @@ std::vector<PandasColumn> OpenColumns(const Registered &entry, const PandasScanB
 			auto column_name = nb::cast<std::string>(item[0]);
 			const auto declared = requested[i];
 			if (column_name != bound.names.at(declared)) {
-				throw cxx::InvalidInputException("the pandas frame registered as '" + entry.name +
+				throw cxx::InvalidInputException("the object registered as '" + entry.name +
 				                                 "' answered columns() with column '" + column_name +
 				                                 "' at position " + std::to_string(i) + " where '" +
 				                                 bound.names.at(declared) + "' was expected");
@@ -333,7 +334,7 @@ std::vector<PandasColumn> OpenColumns(const Registered &entry, const PandasScanB
 			const auto column_kind = ParseKind(entry.name, column_name, kind_text, unit);
 			auto type = context.ParseType(bound.type_texts.at(declared));
 
-			PandasColumn column(std::move(column_name), column_kind, unit, std::move(type));
+			NumpyColumn column(std::move(column_name), column_kind, unit, std::move(type));
 			column.data_obj = nb::borrow(item[3]);
 			OpenBuffer(entry.name, column.name, "data", column.data_obj, column_kind, column.type, bound.rows,
 			          column.data);
@@ -342,22 +343,22 @@ std::vector<PandasColumn> OpenColumns(const Registered &entry, const PandasScanB
 			nb::object mask = nb::borrow(item[4]);
 			if (!mask.is_none()) {
 				column.mask_obj = mask;
-				OpenBuffer(entry.name, column.name, "mask", column.mask_obj, PandasColumnKind::FIXED,
+				OpenBuffer(entry.name, column.name, "mask", column.mask_obj, NumpyColumnKind::FIXED,
 				          context.ParseType("BOOLEAN"), bound.rows, column.mask);
 				column.has_mask_buffer = true;
 			}
 			columns.push_back(std::move(column));
 		}
 	} catch (const nb::cast_error &) {
-		throw cxx::InvalidInputException("the pandas frame registered as '" + entry.name +
+		throw cxx::InvalidInputException("the object registered as '" + entry.name +
 		                                 "' answered columns() with something other than (name, kind, type, data, "
 		                                 "mask) tuples");
 	}
 	return columns;
 }
 
-void PandasScanInitGlobal(cxx::TableFunction::InitGlobalInput &input) {
-	const auto &bound = input.GetBindData<PandasScanBindData>();
+void NumpyScanInitGlobal(cxx::TableFunction::InitGlobalInput &input) {
+	const auto &bound = input.GetBindData<NumpyScanBindData>();
 	auto &entry = *bound.entry;
 	const auto declared = static_cast<cxx::idx_t>(bound.names.size());
 	std::vector<cxx::idx_t> requested;
@@ -367,7 +368,7 @@ void PandasScanInitGlobal(cxx::TableFunction::InitGlobalInput &input) {
 		identity = identity && requested.back() == i;
 	}
 
-	std::vector<PandasColumn> columns;
+	std::vector<NumpyColumn> columns;
 	{
 		nb::gil_scoped_acquire gil;
 		nb::object answer;
@@ -382,14 +383,14 @@ void PandasScanInitGlobal(cxx::TableFunction::InitGlobalInput &input) {
 			}
 			answer = entry.object.attr("columns")(request);
 		} catch (nb::python_error &error) {
-			throw cxx::InvalidInputException("reading the columns of the pandas frame registered as '" + entry.name +
+			throw cxx::InvalidInputException("reading the columns of the object registered as '" + entry.name +
 			                                 "' failed: " + DescribePythonError(error));
 		}
 		auto context = input.GetContext();
 		columns = OpenColumns(entry, bound, context, requested, std::move(answer));
 	}
 
-	const auto batch_rows = input.GetUserData<PandasScanUserData>().batch_rows;
+	const auto batch_rows = input.GetUserData<NumpyScanUserData>().batch_rows;
 	const cxx::idx_t range_rows = std::max<cxx::idx_t>(1, batch_rows) * 50;
 	const cxx::idx_t max_threads = std::max<cxx::idx_t>(1, (bound.rows + range_rows - 1) / range_rows);
 	input.SetMaxThreads(max_threads);
@@ -403,12 +404,12 @@ void PandasScanInitGlobal(cxx::TableFunction::InitGlobalInput &input) {
 		nat = pandas.attr("NaT");
 		numpy_generic = nb::module_::import_("numpy").attr("generic");
 	}
-	input.SetGlobalState<PandasScanState>(std::move(columns), bound.rows, range_rows, std::move(na), std::move(nat),
+	input.SetGlobalState<NumpyScanState>(std::move(columns), bound.rows, range_rows, std::move(na), std::move(nat),
 	                                       std::move(numpy_generic));
 }
 
-void PandasScanInitLocal(cxx::TableFunction::InitLocalInput &input) {
-	input.SetLocalState<PandasScanLocalState>();
+void NumpyScanInitLocal(cxx::TableFunction::InitLocalInput &input) {
+	input.SetLocalState<NumpyScanLocalState>();
 }
 
 /// A row's worth of raw bytes into microseconds, from the unit `columns()` carried in the kind string; the caller
@@ -418,13 +419,13 @@ int64_t ScaleToMicros(int64_t raw, char unit, const std::string &registered_name
 	switch (unit) {
 	case 's':
 		if (__builtin_mul_overflow(raw, static_cast<int64_t>(1'000'000), &scaled)) {
-			throw cxx::InvalidInputException("the pandas frame registered as '" + registered_name + "' has a value in column '" +
+			throw cxx::InvalidInputException("the object registered as '" + registered_name + "' has a value in column '" +
 			                                 column_name + "' whose instant overflows microseconds");
 		}
 		return scaled;
 	case 'm':
 		if (__builtin_mul_overflow(raw, static_cast<int64_t>(1'000), &scaled)) {
-			throw cxx::InvalidInputException("the pandas frame registered as '" + registered_name + "' has a value in column '" +
+			throw cxx::InvalidInputException("the object registered as '" + registered_name + "' has a value in column '" +
 			                                 column_name + "' whose instant overflows microseconds");
 		}
 		return scaled;
@@ -433,14 +434,14 @@ int64_t ScaleToMicros(int64_t raw, char unit, const std::string &registered_name
 	case 'n':
 		return raw / 1000;
 	default:
-		throw cxx::InvalidInputException("the pandas frame registered as '" + registered_name + "' has an unrecognised unit '" +
+		throw cxx::InvalidInputException("the object registered as '" + registered_name + "' has an unrecognised unit '" +
 		                                 std::string(1, unit) + "' for column '" + column_name + "'");
 	}
 }
 
 /// A contiguous run of `width`-byte elements, validity from the mask when there is one, else for FLOAT and DOUBLE
 /// from a raw NaN, the only way a plain float column marks a missing value.
-void FillFixed(cxx::Vector &vector, const PandasColumn &column, cxx::idx_t start, cxx::idx_t count) {
+void FillFixed(cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t start, cxx::idx_t count) {
 	const auto width = FixedWidth(column.type);
 	auto *dest = static_cast<uint8_t *>(vector.GetDataMutable());
 	const auto *src = static_cast<const uint8_t *>(column.data.buf) + start * width;
@@ -469,7 +470,7 @@ void FillFixed(cxx::Vector &vector, const PandasColumn &column, cxx::idx_t start
 
 /// A naive timestamp's int64 view, copied straight through: DuckDB's own TIMESTAMP_S/MS/TIMESTAMP/TIMESTAMP_NS
 /// storage counts in the same unit numpy does, so no per-element conversion is needed, only the NaT sentinel.
-void FillTimestampNaive(cxx::Vector &vector, const PandasColumn &column, cxx::idx_t start, cxx::idx_t count) {
+void FillTimestampNaive(cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t start, cxx::idx_t count) {
 	auto *dest = vector.GetDataMutable<int64_t>();
 	const auto *src = static_cast<const int64_t *>(column.data.buf) + start;
 	std::memcpy(dest, src, count * sizeof(int64_t));
@@ -484,7 +485,7 @@ void FillTimestampNaive(cxx::Vector &vector, const PandasColumn &column, cxx::id
 
 /// A UTC-normalized aware timestamp, one element at a time: the engine's TIMESTAMP_TZ is always microseconds, so a
 /// column of another unit is scaled per row.
-void FillTimestampAware(cxx::Vector &vector, const PandasColumn &column, cxx::idx_t start, cxx::idx_t count,
+void FillTimestampAware(cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t start, cxx::idx_t count,
                         const std::string &registered_name) {
 	auto *dest = vector.GetDataMutable<int64_t>();
 	const auto *src = static_cast<const int64_t *>(column.data.buf) + start;
@@ -503,7 +504,7 @@ void FillTimestampAware(cxx::Vector &vector, const PandasColumn &column, cxx::id
 
 /// A timedelta64 column as INTERVAL, the whole span in microseconds and no months or days, since a timedelta
 /// carries no calendar component to split out.
-void FillInterval(cxx::Vector &vector, const PandasColumn &column, cxx::idx_t start, cxx::idx_t count,
+void FillInterval(cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t start, cxx::idx_t count,
                   const std::string &registered_name) {
 	auto *dest = vector.GetDataMutable<cxx::interval_t>();
 	const auto *src = static_cast<const int64_t *>(column.data.buf) + start;
@@ -522,7 +523,7 @@ void FillInterval(cxx::Vector &vector, const PandasColumn &column, cxx::idx_t st
 
 /// Categorical codes, narrowed or widened from pandas' own signed width into the ENUM's unsigned physical width;
 /// the two widths need not match, since pandas and DuckDB each size a dictionary's codes by a different rule.
-void FillEnum(cxx::Vector &vector, const PandasColumn &column, cxx::idx_t start, cxx::idx_t count) {
+void FillEnum(cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t start, cxx::idx_t count) {
 	const auto src_width = static_cast<cxx::idx_t>(column.data.itemsize);
 	const auto *base = static_cast<const uint8_t *>(column.data.buf) + start * src_width;
 	const auto read_code = [&](cxx::idx_t i) -> int64_t {
@@ -585,7 +586,7 @@ void FillEnum(cxx::Vector &vector, const PandasColumn &column, cxx::idx_t start,
 /// Whether a cell of an object column stands for SQL NULL: Python's None, pandas' `NA` or `NaT` singletons
 /// (compared by identity, since neither is equal to itself under `==`), or a float NaN, the marker a plain
 /// float64 column uses.
-bool IsNoneLike(const PandasScanState &global, PyObject *value) {
+bool IsNoneLike(const NumpyScanState &global, PyObject *value) {
 	if (value == Py_None || value == global.na.ptr() || value == global.nat.ptr()) {
 		return true;
 	}
@@ -593,7 +594,7 @@ bool IsNoneLike(const PandasScanState &global, PyObject *value) {
 }
 
 /// A numpy scalar as the plain Python value it wraps, since `PythonToValue` understands only Python's own types.
-nb::object UnwrapNumpyScalar(const PandasScanState &global, nb::handle value) {
+nb::object UnwrapNumpyScalar(const NumpyScanState &global, nb::handle value) {
 	if (PyObject_IsInstance(value.ptr(), global.numpy_generic.ptr()) != 0) {
 		return value.attr("item")();
 	}
@@ -602,7 +603,7 @@ nb::object UnwrapNumpyScalar(const PandasScanState &global, nb::handle value) {
 
 /// A Python-object array of `str`, `None`, `pd.NA` or a float NaN: each string read as UTF-8 directly, and any
 /// other value, which only reaches this kind through the sampling rule's mixed-type fallback, through `str()`.
-void FillText(const PandasScanState &global, cxx::Vector &vector, const PandasColumn &column, cxx::idx_t start,
+void FillText(const NumpyScanState &global, cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t start,
               cxx::idx_t count, const std::string &registered_name) {
 	nb::gil_scoped_acquire gil;
 	auto *const *values = static_cast<PyObject *const *>(column.data.buf) + start;
@@ -626,7 +627,7 @@ void FillText(const PandasScanState &global, cxx::Vector &vector, const PandasCo
 			const auto rendered = nb::cast<std::string>(nb::str(nb::handle(value)));
 			vector.AssignStringUnsafe(i, rendered);
 		} catch (nb::python_error &error) {
-			throw cxx::InvalidInputException("the pandas frame registered as '" + registered_name + "' failed: column '" +
+			throw cxx::InvalidInputException("the object registered as '" + registered_name + "' failed: column '" +
 			                                 column.name + "' holds a value at row " + std::to_string(start + i) +
 			                                 " that cannot be read as text: " + DescribePythonError(error));
 		}
@@ -636,8 +637,8 @@ void FillText(const PandasScanState &global, cxx::Vector &vector, const PandasCo
 /// An object column sampled to one engine type other than VARCHAR: each value converted with `PythonToValue` and
 /// cast to that type, with the cast checked to be lossless by casting back and comparing text, since the engine's
 /// own cast rounds rather than refuses a value such as a fractional double read into an integer column.
-void FillObjects(const PandasScanState &global, cxx::Context &context, cxx::Vector &vector,
-                 const PandasColumn &column, cxx::idx_t start, cxx::idx_t count, ConversionContext &conversion,
+void FillObjects(const NumpyScanState &global, cxx::Context &context, cxx::Vector &vector,
+                 const NumpyColumn &column, cxx::idx_t start, cxx::idx_t count, ConversionContext &conversion,
                  const std::string &registered_name) {
 	nb::gil_scoped_acquire gil;
 	auto *const *values = static_cast<PyObject *const *>(column.data.buf) + start;
@@ -665,7 +666,7 @@ void FillObjects(const PandasScanState &global, cxx::Context &context, cxx::Vect
 			cast.reset();
 		}
 		if (!cast) {
-			throw cxx::InvalidInputException("the pandas frame registered as '" + registered_name + "' failed: column '" +
+			throw cxx::InvalidInputException("the object registered as '" + registered_name + "' failed: column '" +
 			                                 column.name + "' holds a value at row " + std::to_string(start + i) +
 			                                 " that its sampled type " + column.type.ToText() +
 			                                 " cannot hold exactly");
@@ -674,10 +675,10 @@ void FillObjects(const PandasScanState &global, cxx::Context &context, cxx::Vect
 	}
 }
 
-void PandasScanExec(cxx::TableFunction::ExecInput &input) {
-	auto &global = input.GetGlobalState<PandasScanState>();
-	auto &local = input.GetLocalState<PandasScanLocalState>();
-	auto &entry = *input.GetBindData<PandasScanBindData>().entry;
+void NumpyScanExec(cxx::TableFunction::ExecInput &input) {
+	auto &global = input.GetGlobalState<NumpyScanState>();
+	auto &local = input.GetLocalState<NumpyScanLocalState>();
+	auto &entry = *input.GetBindData<NumpyScanBindData>().entry;
 
 	if (local.start >= local.end) {
 		const auto claimed = global.next.fetch_add(global.range_rows);
@@ -692,38 +693,38 @@ void PandasScanExec(cxx::TableFunction::ExecInput &input) {
 	auto output = input.GetOutputChunk();
 	const auto out_columns = output.GetVectorCount();
 	if (out_columns == 0) {
-		throw cxx::InvalidInputException("the pandas frame registered as '" + entry.name +
+		throw cxx::InvalidInputException("the object registered as '" + entry.name +
 		                                 "' was asked for no columns, which it cannot report rows through");
 	}
-	const auto batch_rows = input.GetUserData<PandasScanUserData>().batch_rows;
+	const auto batch_rows = input.GetUserData<NumpyScanUserData>().batch_rows;
 	const auto emit = std::min(batch_rows, local.end - local.start);
 	auto context = input.GetContext();
-	auto &conversion = input.GetUserData<PandasScanUserData>().module->conversion;
+	auto &conversion = input.GetUserData<NumpyScanUserData>().module->conversion;
 
 	for (cxx::idx_t i = 0; i < out_columns; i++) {
 		auto &column = global.columns.at(i);
 		auto vector = output.GetVector(i);
 		vector.SetSize(emit);
 		switch (column.column_kind) {
-		case PandasColumnKind::FIXED:
+		case NumpyColumnKind::FIXED:
 			FillFixed(vector, column, local.start, emit);
 			break;
-		case PandasColumnKind::TIMESTAMP:
+		case NumpyColumnKind::TIMESTAMP:
 			FillTimestampNaive(vector, column, local.start, emit);
 			break;
-		case PandasColumnKind::TIMESTAMP_TZ:
+		case NumpyColumnKind::TIMESTAMP_TZ:
 			FillTimestampAware(vector, column, local.start, emit, entry.name);
 			break;
-		case PandasColumnKind::INTERVAL:
+		case NumpyColumnKind::INTERVAL:
 			FillInterval(vector, column, local.start, emit, entry.name);
 			break;
-		case PandasColumnKind::ENUM_CODES:
+		case NumpyColumnKind::ENUM_CODES:
 			FillEnum(vector, column, local.start, emit);
 			break;
-		case PandasColumnKind::TEXT:
+		case NumpyColumnKind::TEXT:
 			FillText(global, vector, column, local.start, emit, entry.name);
 			break;
-		case PandasColumnKind::OBJECTS:
+		case NumpyColumnKind::OBJECTS:
 			FillObjects(global, context, vector, column, local.start, emit, conversion, entry.name);
 			break;
 		}
@@ -733,17 +734,17 @@ void PandasScanExec(cxx::TableFunction::ExecInput &input) {
 
 /// Reports the ordering position of the range this thread is emitting from; ranges are fixed-size slabs claimed in
 /// order, so their index needs no separate counter, unlike a stream whose batches vary in size.
-void PandasScanPartitionData(cxx::TableFunction::PartitionDataInput &input) {
+void NumpyScanPartitionData(cxx::TableFunction::PartitionDataInput &input) {
 	if (input.GetPartitionColumnCount() != 0) {
 		throw cxx::InvalidInputException(
-		    "the scan of a registered pandas frame was asked for partition values, which it does not report");
+		    "the scan of a registered object was asked for partition values, which it does not report");
 	}
-	auto &local = input.GetLocalState<PandasScanLocalState>();
+	auto &local = input.GetLocalState<NumpyScanLocalState>();
 	input.SetBatchIndex(local.batch_index);
 }
 
-void PandasScanProgress(cxx::TableFunction::ProgressInput &input) {
-	auto &global = input.GetGlobalState<PandasScanState>();
+void NumpyScanProgress(cxx::TableFunction::ProgressInput &input) {
+	auto &global = input.GetGlobalState<NumpyScanState>();
 	if (global.rows == 0) {
 		input.SetProgress(1.0);
 		return;
@@ -754,19 +755,19 @@ void PandasScanProgress(cxx::TableFunction::ProgressInput &input) {
 
 } // namespace
 
-void RegisterPandasScan(cxx::Connection &connection, std::shared_ptr<Registry> registry,
+void RegisterNumpyScan(cxx::Connection &connection, std::shared_ptr<Registry> registry,
                         std::shared_ptr<ModuleState> module, cxx::idx_t batch_rows) {
 	auto function = cxx::TableFunction::Create(connection);
-	function.SetName(kPandasScanFunction);
+	function.SetName(kNumpyScanFunction);
 	function.WithSignature(
 	    [&](cxx::FunctionSignature &signature) { signature.AddParameter("name", connection.ParseType("VARCHAR")); });
-	function.SetUserData<PandasScanUserData>(PandasScanUserData {std::move(registry), std::move(module), batch_rows});
-	function.SetBindCallback(&PandasScanBind);
-	function.SetInitGlobalCallback(&PandasScanInitGlobal);
-	function.SetInitLocalCallback(&PandasScanInitLocal);
-	function.SetExecCallback(&PandasScanExec);
-	function.SetProgressCallback(&PandasScanProgress);
-	function.SetPartitionDataCallback(&PandasScanPartitionData);
+	function.SetUserData<NumpyScanUserData>(NumpyScanUserData {std::move(registry), std::move(module), batch_rows});
+	function.SetBindCallback(&NumpyScanBind);
+	function.SetInitGlobalCallback(&NumpyScanInitGlobal);
+	function.SetInitLocalCallback(&NumpyScanInitLocal);
+	function.SetExecCallback(&NumpyScanExec);
+	function.SetProgressCallback(&NumpyScanProgress);
+	function.SetPartitionDataCallback(&NumpyScanPartitionData);
 	function.SetProjectionPushdown(true);
 	function.Register();
 }

@@ -1,7 +1,7 @@
 //===----------------------------------------------------------------------===//
 //                         DuckDB
 //
-// src/_duckdb/pandas_scan.hpp
+// src/_duckdb/numpy_scan.hpp
 //
 //
 //===----------------------------------------------------------------------===//
@@ -14,14 +14,14 @@
 
 namespace duckdb_python {
 
-/// The table function that reads a registered pandas frame natively, named by the replacement scan for an entry
-/// whose source answered native.
-inline constexpr const char *kPandasScanFunction = "python_pandas_scan";
+/// The table function that reads a registered object natively, named by the replacement scan for an entry whose
+/// source answered native.
+inline constexpr const char *kNumpyScanFunction = "python_numpy_scan";
 
 /// Registers the table function on the connection's database: bind resolves the name against `registry` and reads
 /// the source's `describe()`, and the scan reads its `columns()` through the buffer protocol, in batches of at
 /// most `batch_rows`, the engine's standard vector size.
-void RegisterPandasScan(cxx::Connection &connection, std::shared_ptr<Registry> registry,
-                        std::shared_ptr<ModuleState> module, cxx::idx_t batch_rows);
+void RegisterNumpyScan(cxx::Connection &connection, std::shared_ptr<Registry> registry,
+                       std::shared_ptr<ModuleState> module, cxx::idx_t batch_rows);
 
 } // namespace duckdb_python

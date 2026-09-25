@@ -23,6 +23,7 @@ import duckdb
 from duckdb import exceptions
 from duckdb._sources import adapt
 from duckdb._sources.arrow import ArrowArraySource, ArrowStreamSource
+from duckdb._sources.numpy import _object_kind
 from duckdb._sources.pandas import PandasSource
 from duckdb._sources.polars import LazyFrameSource, PolarsFrameSource
 from duckdb._sources.pyarrow import PyArrowDatasetSource, PyArrowScannerSource
@@ -67,7 +68,7 @@ def check_order_preserved(con: duckdb.frame.Connection, register: Callable[[], N
     assert [row[0] for row in rows(con, f"SELECT n FROM {name}")] == list(range(total))
     register()
     ranked = rows(con, f"SELECT row_number() OVER () AS r, n FROM {name}")
-    assert all(r == n + 1 for r, n in ranked)
+    assert ranked == [(n + 1, n) for n in range(total)]
     register()
     assert rows(con, f"SELECT n FROM {name} LIMIT 5") == [(i,) for i in range(5)]
     register()
@@ -1408,6 +1409,23 @@ class TestPandasNativeStrings:
         assert table("t").schema(con) == [("a", "BIGINT")]
         assert rows(con, "SELECT a FROM t WHERE a IS NOT NULL") == [(5,)]
 
+    def test_a_sample_that_misses_the_only_value_finds_it_by_position_under_a_repeated_label(
+        self, con: duckdb.frame.Connection
+    ) -> None:
+        values: list[object] = [None] * 2001
+        values[1999] = 5
+        labels = list(range(2001))
+        labels[0] = labels[1999]
+        frame = pd.DataFrame({"a": pd.Series(values, index=labels, dtype=object)})
+        con.register("t", frame)
+        assert table("t").schema(con) == [("a", "BIGINT")]
+        assert rows(con, "SELECT a FROM t WHERE a IS NOT NULL") == [(5,)]
+
+    def test_an_object_array_whose_sample_misses_the_only_value_still_finds_it(self) -> None:
+        values: list[object] = [None, float("nan"), pd.NA, pd.NaT] * 600
+        values.append(5)
+        assert _object_kind(np.array(values, dtype=object)) == ("objects", "BIGINT")
+
     def test_a_list_outside_the_sample_fails_the_query_naming_the_row(self, con: duckdb.frame.Connection) -> None:
         values: list[object] = list(range(10_000))
         values[5] = [1, 2, 3]
@@ -1566,20 +1584,17 @@ class MisreportingColumns(PandasSource):
         answer = super().columns(columns)
         if self.break_as == "short":
             return answer[:-1]
+        name, kind, kind_text, data, mask = answer[0]
+        assert isinstance(data, np.ndarray)
         if self.break_as == "renamed":
-            name, kind, kind_text, data, mask = answer[0]
             return [("not_" + name, kind, kind_text, data, mask), *answer[1:]]
         if self.break_as == "strided":
-            name, kind, kind_text, data, mask = answer[0]
             return [(name, kind, kind_text, data[::2], mask), *answer[1:]]
         if self.break_as == "wrong_width":
-            name, kind, kind_text, data, mask = answer[0]
             return [(name, kind, kind_text, data.astype(np.int8), mask), *answer[1:]]
         if self.break_as == "short_mask":
-            name, kind, kind_text, data, mask = answer[0]
             return [(name, kind, kind_text, data, np.zeros(len(data) - 1, dtype=bool)), *answer[1:]]
         if self.break_as == "swapped":
-            name, kind, kind_text, data, mask = answer[0]
             return [(name, kind, kind_text, data.astype(data.dtype.newbyteorder()), mask), *answer[1:]]
         return answer
 

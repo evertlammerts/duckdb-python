@@ -852,24 +852,24 @@ class TestRowsAndTypes:
 
 
 class TestNativeRouting:
-    """A registered name resolves to the native pandas scan or the Arrow scan, by the source's `native`."""
+    """A registered name resolves to the numpy scan or the Arrow scan, by the source's `native`."""
 
     def test_a_native_pandas_frame_routes_to_the_frame_scan(self, con: duckdb.frame.Connection) -> None:
         con.register("df", pd.DataFrame({"a": range(3)}))
-        assert "Python Pandas Scan" in table("df").on(con).explain()
-        assert rows(con, "SELECT count(*) FROM python_pandas_scan('df')") == [(3,)]
+        assert "Python Numpy Scan" in table("df").on(con).explain()
+        assert rows(con, "SELECT count(*) FROM python_numpy_scan('df')") == [(3,)]
         with pytest.raises(exceptions.InvalidInputError, match="nothing is registered as 'ghost'"):
-            rows(con, "SELECT * FROM python_pandas_scan('ghost')")
+            rows(con, "SELECT * FROM python_numpy_scan('ghost')")
 
     def test_a_non_native_source_routes_to_the_arrow_scan(
         self, con: duckdb.frame.Connection, numbers: pa.Table
     ) -> None:
         con.register("numbers", numbers)
         assert "Python Arrow Scan" in table("numbers").on(con).explain()
-        # Calling the pandas scan directly on a non-native entry reaches it, but the source has no describe().
-        message = "describing the pandas frame registered as 'numbers' failed"
+        # Calling the numpy scan directly on a non-native entry reaches it, but the source has no describe().
+        message = "describing the object registered as 'numbers' failed"
         with pytest.raises(exceptions.InvalidInputError, match=message):
-            rows(con, "SELECT * FROM python_pandas_scan('numbers')")
+            rows(con, "SELECT * FROM python_numpy_scan('numbers')")
 
     def test_registered_kind_is_unaffected_by_native(self, con: duckdb.frame.Connection) -> None:
         con.register("df", pd.DataFrame({"a": range(3)}))
@@ -879,7 +879,7 @@ class TestNativeRouting:
         self, con: duckdb.frame.Connection, numbers: pa.Table
     ) -> None:
         con.register("t", pd.DataFrame({"a": range(3)}))
-        assert "Python Pandas Scan" in table("t").on(con).explain()
+        assert "Python Numpy Scan" in table("t").on(con).explain()
         con.register("t", numbers)
         assert "Python Arrow Scan" in table("t").on(con).explain()
         assert rows(con, "SELECT count(*) FROM t") == [(10,)]
