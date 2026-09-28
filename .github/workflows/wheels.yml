@@ -53,6 +53,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.container }}
     name: ${{ matrix.target }} / ${{ matrix.flavor }}
+    env:
+      # Without the architecture, uv on Windows on ARM64 installs an x86_64 CPython when the runner has no native one.
+      PYTHON_REQUEST: ${{ matrix.target == 'windows-arm64' && format('cpython-{0}-windows-aarch64', matrix.python) || matrix.python }}
     defaults:
       run:
         # Windows runners default to PowerShell; every step below is bash.
@@ -93,7 +96,7 @@ jobs:
           # arm64 macOS starts at 11.0; Intel keeps 10.14, the floor nanobind's aligned new and delete need.
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.target == 'macos-arm64' && '11.0' || '10.14' }}
         run: |
-          uv venv --python ${{ matrix.python }} .venv-build
+          uv venv --python "$PYTHON_REQUEST" .venv-build
           PY=.venv-build/bin/python
           [ -x "$PY" ] || PY=.venv-build/Scripts/python.exe
           VIRTUAL_ENV=.venv-build uv pip install "scikit-build-core>=0.10" "nanobind>=2.13"
@@ -156,7 +159,7 @@ jobs:
         if: matrix.flavor == 'cp311'
         run: |
           whl=$(ls "$PWD"/dist/*.whl)
-          uv venv --python 3.11 "$RUNNER_TEMP/t3.11"
+          uv venv --python "$PYTHON_REQUEST" "$RUNNER_TEMP/t3.11"
           PY="$RUNNER_TEMP/t3.11/bin/python"
           [ -x "$PY" ] || PY="$RUNNER_TEMP/t3.11/Scripts/python.exe"
           VIRTUAL_ENV="$RUNNER_TEMP/t3.11" uv pip install "$whl"

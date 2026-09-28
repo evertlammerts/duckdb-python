@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 import uuid
+import warnings
 import weakref
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -2633,7 +2634,9 @@ class TestNumpyDtypes:
             con.register("t", data)
 
     def test_a_duration_without_a_unit_is_refused(self, con: duckdb.frame.Connection) -> None:
-        with pytest.warns(DeprecationWarning, match="'generic' unit"):
+        with warnings.catch_warnings():
+            # numpy deprecates the unit-less duration from 2.5 on, which Python 3.11 cannot install.
+            warnings.filterwarnings("ignore", "The 'generic' unit", DeprecationWarning)
             data = np.array([1], dtype="timedelta64")
         with pytest.raises(TypeError, match="has the numpy dtype timedelta64, which has no unit"):
             con.register("t", data)
