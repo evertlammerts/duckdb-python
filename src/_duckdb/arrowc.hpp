@@ -26,9 +26,47 @@ inline constexpr const char *kArrayCapsule = "arrow_array";
 
 std::string StreamError(ArrowArrayStream &stream);
 
-/// The stream a capsule carries, checked to be one that has not been released; `name` is the registered name
-/// for the error.
-ArrowArrayStream &StreamOf(nb::handle capsule, const std::string &name);
+/// Custody of one Arrow C struct (a schema, an array or a stream), released when the owner goes unless it was
+/// handed on first. The Arrow C interfaces let a struct move by copying it and clearing the source's `release`,
+/// which is what moving the owner does; nothing may point into the struct itself.
+template <class T>
+struct ArrowOwned {
+	ArrowOwned() = default;
+	ArrowOwned(ArrowOwned &&other) noexcept : value(other.value) {
+		other.value.release = nullptr;
+	}
+	ArrowOwned &operator=(ArrowOwned &&other) noexcept {
+		if (this != &other) {
+			Release();
+			value = other.value;
+			other.value.release = nullptr;
+		}
+		return *this;
+	}
+	ArrowOwned(const ArrowOwned &) = delete;
+	ArrowOwned &operator=(const ArrowOwned &) = delete;
+	~ArrowOwned() {
+		Release();
+	}
+
+	/// A release callback that throws is broken; the struct is then abandoned rather than released a second time,
+	/// and the exception does not escape into the C code or the destructor that called this.
+	void Release() noexcept {
+		if (value.release == nullptr) {
+			return;
+		}
+		try {
+			value.release(&value);
+		} catch (...) {
+		}
+		value.release = nullptr;
+	}
+	explicit operator bool() const {
+		return value.release != nullptr;
+	}
+
+	T value {};
+};
 
 bool IsBatch(const ArrowSchema &schema);
 
@@ -46,20 +84,30 @@ nb::capsule ChainStreams(nb::object schema, nb::handle parts);
 /// The name of a batch schema's child, empty when it has none.
 std::string NameOf(const ArrowSchema &schema, cxx::idx_t index);
 
-/// Moves the struct out of a capsule, leaving the capsule nothing to release.
+/// The struct a capsule named `kind` carries, still owned by the capsule, refused when the capsule is of another
+/// kind or already released; `source` says where the capsule came from, for the error, such as "the object
+/// registered as 't'".
 template <class T>
-T TakeFromCapsule(nb::handle capsule, const char *kind, const std::string &name) {
+T &InCapsule(nb::handle capsule, const char *kind, const std::string &source) {
 	if (!PyCapsule_IsValid(capsule.ptr(), kind)) {
-		throw cxx::InvalidInputException("the object registered as '" + name + "' did not hand out an '" + kind +
-		                                 "' capsule");
+		const char *found = PyCapsule_CheckExact(capsule.ptr()) ? PyCapsule_GetName(capsule.ptr()) : nullptr;
+		throw cxx::InvalidInputException(source + " did not export an '" + kind + "' capsule but " +
+		                                 (found ? "a '" + std::string(found) + "' capsule" : "something else"));
 	}
 	auto *held = static_cast<T *>(PyCapsule_GetPointer(capsule.ptr(), kind));
 	if (held == nullptr || held->release == nullptr) {
-		throw cxx::InvalidInputException("the object registered as '" + name + "' handed out a released '" + kind +
-		                                 "' capsule");
+		throw cxx::InvalidInputException("the '" + std::string(kind) + "' capsule of " + source +
+		                                 " is released already");
 	}
-	T taken = *held;
-	held->release = nullptr;
+	return *held;
+}
+
+template <class T>
+ArrowOwned<T> TakeFromCapsule(nb::handle capsule, const char *kind, const std::string &source) {
+	auto &held = InCapsule<T>(capsule, kind, source);
+	ArrowOwned<T> taken;
+	taken.value = held;
+	held.release = nullptr;
 	return taken;
 }
 

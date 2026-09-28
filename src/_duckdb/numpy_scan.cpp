@@ -15,18 +15,20 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
-// A registered object is a source from duckdb/_sources that answers two calls: describe() names its columns and
-// their engine types, and columns() answers each requested column as a kind, an engine type, a numpy data array and
-// a numpy mask array or None. A pandas DataFrame is one such source. A kind picks how a row's bytes turn into a
-// vector element below. One run of this table function over a query is a scan, and its threads read the object in
-// ranges of rows they claim in turn. An object array can hold pandas' NA and NaT singletons, so they stay among the
-// missing markers this file checks for.
+// A registered object is a source from duckdb/_sources that answers two calls: describe() names its columns and their
+// engine types, and columns() answers each requested column as an encoding, an engine type, a numpy data array and a
+// numpy mask array or None. A pandas DataFrame and a numpy array are such sources. The encoding says how a row's bytes
+// turn into a vector element below. One run of this table function over a query is a scan, and its threads read the
+// object in ranges of rows they claim in turn. An object array can hold pandas' NA and NaT singletons, so they stay
+// among the missing markers this file checks for.
 
 namespace duckdb_python {
 namespace {
@@ -38,11 +40,12 @@ struct NumpyScanUserData {
 	cxx::idx_t batch_rows;
 };
 
-/// The entry a query bound over, and the column names and engine type texts `describe()` gave, in declared order.
+/// The entry a query bound over, and the column names and engine types `describe()` gave, in declared order: the
+/// types declared when the query was bound, which every scan of it must fill.
 struct NumpyScanBindData {
-	NumpyScanBindData(std::shared_ptr<Registered> entry, std::vector<std::string> names, std::vector<std::string> type_texts,
-	         cxx::idx_t rows)
-	    : entry(std::move(entry)), names(std::move(names)), type_texts(std::move(type_texts)), rows(rows) {
+	NumpyScanBindData(std::shared_ptr<Registered> entry, std::vector<std::string> names,
+	                  std::vector<cxx::LogicalType> types, cxx::idx_t rows)
+	    : entry(std::move(entry)), names(std::move(names)), types(std::move(types)), rows(rows) {
 	}
 
 	/// Freed from engine threads too, so the Python reference is dropped under the GIL.
@@ -53,61 +56,48 @@ struct NumpyScanBindData {
 
 	std::shared_ptr<Registered> entry;
 	std::vector<std::string> names;
-	std::vector<std::string> type_texts;
+	std::vector<cxx::LogicalType> types;
 	cxx::idx_t rows;
 };
 
-/// Which write rule a column's bytes follow. `TIMESTAMP_TZ` and `INTERVAL` carry the source unit of their int64
-/// data, everything else needs none.
-enum class NumpyColumnKind : uint8_t {
+/// A column's encoding: how the scan turns its data array's bytes into the column's engine type. `TIMESTAMP` and
+/// `INTERVAL` data are int64 counts in a unit the encoding names, or for a bare `timestamp`, in the unit of the
+/// declared naive timestamp type.
+enum class NumpyEncoding : uint8_t {
 	FIXED,
 	TIMESTAMP,
-	TIMESTAMP_TZ,
 	INTERVAL,
 	ENUM_CODES,
 	TEXT,
 	OBJECTS,
+	UCS4,
+	BYTES,
 };
 
-/// One requested column's buffers, kept for the scan's life: the arrays `columns()` handed over, and the buffer
-/// protocol views taken on them at global init.
+/// Releases a buffer protocol view and frees the structure holding it; runs under the GIL, when opening a later
+/// column fails at global init and at the scan's teardown.
+struct ReleaseBuffer {
+	void operator()(Py_buffer *view) const {
+		PyBuffer_Release(view);
+		delete view;
+	}
+};
+
+/// A buffer protocol view of an array, holding a reference to the array until released. The view lives on the heap
+/// and only the pointer moves, since an exporter such as `bytes` points the view's shape and strides into the view
+/// itself.
+using BufferView = std::unique_ptr<Py_buffer, ReleaseBuffer>;
+
+/// One requested column, kept for the scan's life: the rule its bytes are read by, the engine type it fills, and
+/// views of its data array and, when it has one, its mask array.
 struct NumpyColumn {
-	NumpyColumn(std::string name, NumpyColumnKind column_kind, char unit, cxx::LogicalType type)
-	    : name(std::move(name)), column_kind(column_kind), unit(unit), type(std::move(type)) {
-	}
-
-	NumpyColumn(NumpyColumn &&other) noexcept
-	    : name(std::move(other.name)), column_kind(other.column_kind), unit(other.unit), type(std::move(other.type)),
-	      data_obj(std::move(other.data_obj)), mask_obj(std::move(other.mask_obj)), data(other.data),
-	      has_data_buffer(other.has_data_buffer), mask(other.mask), has_mask_buffer(other.has_mask_buffer) {
-		other.has_data_buffer = false;
-		other.has_mask_buffer = false;
-	}
-	NumpyColumn(const NumpyColumn &) = delete;
-	NumpyColumn &operator=(const NumpyColumn &) = delete;
-	NumpyColumn &operator=(NumpyColumn &&) = delete;
-
-	/// Runs under the GIL: at global init when a later column is refused, and at the scan's teardown.
-	~NumpyColumn() {
-		if (has_data_buffer) {
-			PyBuffer_Release(&data);
-		}
-		if (has_mask_buffer) {
-			PyBuffer_Release(&mask);
-		}
-	}
-
 	std::string name;
-	NumpyColumnKind column_kind;
-	/// The unit of a TIMESTAMP_TZ or INTERVAL column's int64 data: 's', 'm' (milli), 'u' (micro) or 'n' (nano).
-	char unit;
+	NumpyEncoding encoding;
+	/// How a TIMESTAMP or INTERVAL column's counts become the engine's; unused otherwise.
+	UnitConversion conversion;
 	cxx::LogicalType type;
-	nb::object data_obj;
-	nb::object mask_obj;
-	Py_buffer data {};
-	bool has_data_buffer = false;
-	Py_buffer mask {};
-	bool has_mask_buffer = false;
+	BufferView data;
+	BufferView mask;
 };
 
 /// The Python objects an object column's cells are recognised by, looked up once per scan under the GIL.
@@ -161,7 +151,7 @@ void NumpyScanBind(cxx::TableFunction::BindInput &input) {
 		throw cxx::InvalidInputException("nothing is registered as '" + name + "'");
 	}
 	std::vector<std::string> names;
-	std::vector<std::string> type_texts;
+	std::vector<cxx::LogicalType> types;
 	cxx::idx_t rows = 0;
 	{
 		nb::gil_scoped_acquire gil;
@@ -170,10 +160,10 @@ void NumpyScanBind(cxx::TableFunction::BindInput &input) {
 			for (nb::handle item : described) {
 				auto pair = nb::cast<nb::tuple>(item);
 				auto column_name = nb::cast<std::string>(pair[0]);
-				auto type_text = nb::cast<std::string>(pair[1]);
-				input.AddResultColumn(column_name, input.GetContext().ParseType(type_text));
+				auto type = input.GetContext().ParseType(nb::cast<std::string>(pair[1]));
+				input.AddResultColumn(column_name, type);
 				names.push_back(std::move(column_name));
-				type_texts.push_back(std::move(type_text));
+				types.push_back(std::move(type));
 			}
 			nb::object count = entry->object.attr("rows")();
 			// A bool is an int to Python, and a truth value is never a row count.
@@ -191,80 +181,272 @@ void NumpyScanBind(cxx::TableFunction::BindInput &input) {
 		}
 	}
 	input.SetCardinality(rows, true);
-	input.SetBindData<NumpyScanBindData>(std::move(entry), std::move(names), std::move(type_texts), rows);
+	input.SetBindData<NumpyScanBindData>(std::move(entry), std::move(names), std::move(types), rows);
 }
 
-/// `kind` as `columns()` spelled it, split into the write rule and, for a TIMESTAMP_TZ or INTERVAL column, the
-/// source unit its int64 data carries.
-NumpyColumnKind ParseKind(const std::string &registered_name, const std::string &column_name, const std::string &kind,
-                    char &unit) {
-	unit = 0;
-	if (kind == "fixed") {
-		return NumpyColumnKind::FIXED;
+/// A unit numpy spells after a datetime64 or timedelta64 step, as `nanos` nanoseconds or, for the last three, one
+/// `per_nano`-th of a nanosecond. Every unit of a nanosecond or more is a whole multiple, or a power-of-ten fraction,
+/// of every target unit, which is what keeps `UnitConversion`'s denominator above 1 only when its unit factor is 1.
+struct TimeUnit {
+	std::string_view code;
+	uint64_t nanos;
+	uint64_t per_nano;
+};
+
+constexpr TimeUnit kTimeUnits[] = {{"W", 604'800'000'000'000, 1},
+                                   {"D", 86'400'000'000'000, 1},
+                                   {"h", 3'600'000'000'000, 1},
+                                   {"m", 60'000'000'000, 1},
+                                   {"s", 1'000'000'000, 1},
+                                   {"ms", 1'000'000, 1},
+                                   {"us", 1'000, 1},
+                                   {"ns", 1, 1},
+                                   {"ps", 1, 1'000},
+                                   {"fs", 1, 1'000'000},
+                                   {"as", 1, 1'000'000'000}};
+
+/// The unit `code` names; null for a calendar or unknown code, and for a unit finer than a nanosecond unless
+/// `finer_than_nanos`.
+const TimeUnit *FindTimeUnit(std::string_view code, bool finer_than_nanos) {
+	for (const auto &unit : kTimeUnits) {
+		if (unit.code == code) {
+			return unit.per_nano == 1 || finer_than_nanos ? &unit : nullptr;
+		}
 	}
-	if (kind == "timestamp") {
-		return NumpyColumnKind::TIMESTAMP;
+	return nullptr;
+}
+
+UnitConversion ConversionOf(const TimeUnit &unit, uint64_t step, uint64_t target_nanos) {
+	const uint64_t whole = unit.per_nano * target_nanos;
+	const uint64_t common = std::gcd(unit.nanos, whole);
+	const uint64_t reduced = whole / common;
+	const uint64_t shared = std::gcd(step, reduced);
+	const UnitConversion conversion {step / shared, unit.nanos / common, reduced / shared};
+	// ScaleCount relies on both; a unit added to the table that broke them would convert wrongly without a sound.
+	if (conversion.denominator >= (uint64_t(1) << 40) || (conversion.denominator > 1 && conversion.unit != 1)) {
+		throw cxx::InvalidInputException("the time unit '" + std::string(unit.code) + "' has no exact conversion");
 	}
-	// The unit is "s", "ms", "us" or "ns"; the first letter alone tells the two apart, so the rest is not checked.
-	if (kind.rfind("timestamp:", 0) == 0 && kind.size() > 10) {
-		unit = kind[10];
-		return NumpyColumnKind::TIMESTAMP_TZ;
+	return conversion;
+}
+
+/// A unit as a datetime64 or timedelta64 dtype spells it inside its brackets: an optional step, from 0 to numpy's
+/// largest, 2147483647, with no sign or leading zero, then a code of a nanosecond or more.
+bool ParseTimeUnit(std::string_view text, const TimeUnit *&unit, uint64_t &step) {
+	const auto digits = text.find_first_not_of("0123456789");
+	if (digits == std::string_view::npos || (digits > 1 && text[0] == '0') || digits > 10) {
+		return false;
 	}
-	if (kind.rfind("interval:", 0) == 0 && kind.size() > 9) {
-		unit = kind[9];
-		return NumpyColumnKind::INTERVAL;
+	step = 1;
+	if (digits > 0) {
+		step = 0;
+		for (std::size_t i = 0; i < digits; i++) {
+			step = step * 10 + static_cast<uint64_t>(text[i] - '0');
+		}
+		if (step > 2'147'483'647) {
+			return false;
+		}
 	}
-	if (kind == "enum") {
-		return NumpyColumnKind::ENUM_CODES;
+	unit = FindTimeUnit(text.substr(digits), false);
+	return unit != nullptr;
+}
+
+/// The encoding `columns()` named and, for `timestamp:<unit>` or `interval:<unit>`, that unit and its step; `unit`
+/// stays null for a bare `timestamp`.
+NumpyEncoding ParseEncoding(const std::string &registered_name, const std::string &column_name,
+                            const std::string &spelling, const TimeUnit *&unit, uint64_t &step) {
+	const std::string_view spelled(spelling);
+	unit = nullptr;
+	step = 1;
+	if (spelling == "fixed") {
+		return NumpyEncoding::FIXED;
 	}
-	if (kind == "text") {
-		return NumpyColumnKind::TEXT;
+	if (spelling == "timestamp") {
+		return NumpyEncoding::TIMESTAMP;
 	}
-	if (kind == "objects") {
-		return NumpyColumnKind::OBJECTS;
+	if (spelled.rfind("timestamp:", 0) == 0 && ParseTimeUnit(spelled.substr(10), unit, step)) {
+		return NumpyEncoding::TIMESTAMP;
+	}
+	if (spelled.rfind("interval:", 0) == 0 && ParseTimeUnit(spelled.substr(9), unit, step)) {
+		return NumpyEncoding::INTERVAL;
+	}
+	if (spelling == "enum") {
+		return NumpyEncoding::ENUM_CODES;
+	}
+	if (spelling == "text") {
+		return NumpyEncoding::TEXT;
+	}
+	if (spelling == "objects") {
+		return NumpyEncoding::OBJECTS;
+	}
+	if (spelling == "ucs4") {
+		return NumpyEncoding::UCS4;
+	}
+	if (spelling == "bytes") {
+		return NumpyEncoding::BYTES;
 	}
 	throw cxx::InvalidInputException("the object registered as '" + registered_name + "' answered columns() for '" +
-	                                 column_name + "' with the unknown kind '" + kind + "'");
+	                                 column_name + "' with the unknown encoding '" + spelling + "'");
 }
 
-/// The byte width of a `"fixed"` column's engine type; 0 for a type this kind never carries.
-cxx::idx_t FixedWidth(const cxx::LogicalType &type) {
+/// How a TIMESTAMP or INTERVAL column's counts in `unit` (null for a bare `timestamp`) become counts of the declared
+/// `type`: seconds, milliseconds, microseconds or nanoseconds for a naive timestamp, microseconds for a zoned one or
+/// an interval. A naive timestamp only ever multiplies, since the source chose a type at least as fine as its unit.
+UnitConversion TimeConversion(const std::string &registered_name, const std::string &column_name,
+                              const std::string &encoding_text, const TimeUnit *unit, uint64_t step,
+                              const cxx::LogicalType &type) {
+	uint64_t target_nanos = 1'000;
+	bool naive = true;
+	switch (type.GetTypeId()) {
+	case cxx::LogicalTypeId::TIMESTAMP_SEC:
+		target_nanos = 1'000'000'000;
+		break;
+	case cxx::LogicalTypeId::TIMESTAMP_MS:
+		target_nanos = 1'000'000;
+		break;
+	case cxx::LogicalTypeId::TIMESTAMP_NS:
+		target_nanos = 1;
+		break;
+	case cxx::LogicalTypeId::TIMESTAMP:
+		break;
+	default:
+		naive = false;
+		break;
+	}
+	const auto refuse = [&](const std::string &why) {
+		return cxx::InvalidInputException("the object registered as '" + registered_name +
+		                                  "' answered columns() for '" + column_name + "' with the encoding '" +
+		                                  encoding_text + "', " + why + " " + type.ToText());
+	};
+	if (unit == nullptr) {
+		if (!naive) {
+			throw refuse("which names no unit for");
+		}
+		return UnitConversion {1, 1, 1};
+	}
+	const auto conversion = ConversionOf(*unit, step, target_nanos);
+	if (naive && conversion.denominator != 1) {
+		throw refuse("whose unit is finer than");
+	}
+	return conversion;
+}
+
+/// What a buffer's elements are, as far as the scan needs to know.
+enum class ElementClass : uint8_t { SIGNED, UNSIGNED, FLOAT, BOOLEAN, OBJECT, UCS4, BYTES, OTHER };
+
+/// The class of a buffer's elements, from the struct module format the buffer protocol reports: an optional
+/// byte-order prefix, an optional repeat count, and one code. A repeat count belongs only to numpy's fixed-width
+/// strings, whose element is the whole string; on any other code it makes the element an array, which is not read.
+ElementClass ClassOf(const char *format) {
+	std::string_view text = format != nullptr ? format : "B";
+	if (!text.empty() && std::string_view("@=<>!").find(text.front()) != std::string_view::npos) {
+		text.remove_prefix(1);
+	}
+	const auto code = text.find_first_not_of("0123456789");
+	if (code == std::string_view::npos || code + 1 != text.size()) {
+		return ElementClass::OTHER;
+	}
+	switch (text[code]) {
+	case 'w':
+		return ElementClass::UCS4;
+	case 's':
+		return ElementClass::BYTES;
+	default:
+		break;
+	}
+	if (code > 0) {
+		return ElementClass::OTHER;
+	}
+	switch (text[code]) {
+	case 'b':
+	case 'h':
+	case 'i':
+	case 'l':
+	case 'q':
+	case 'n':
+		return ElementClass::SIGNED;
+	case 'B':
+	case 'H':
+	case 'I':
+	case 'L':
+	case 'Q':
+	case 'N':
+		return ElementClass::UNSIGNED;
+	case 'e':
+	case 'f':
+	case 'd':
+	case 'g':
+		return ElementClass::FLOAT;
+	case '?':
+		return ElementClass::BOOLEAN;
+	case 'O':
+		return ElementClass::OBJECT;
+	default:
+		return ElementClass::OTHER;
+	}
+}
+
+/// The element a `"fixed"` column of `type` is copied from, class and width; OTHER for a type not stored as a plain
+/// number.
+std::pair<ElementClass, cxx::idx_t> FixedElement(const cxx::LogicalType &type) {
 	switch (type.GetTypeId()) {
 	case cxx::LogicalTypeId::BOOLEAN:
+		return {ElementClass::BOOLEAN, 1};
 	case cxx::LogicalTypeId::TINYINT:
-	case cxx::LogicalTypeId::UTINYINT:
-		return 1;
+		return {ElementClass::SIGNED, 1};
 	case cxx::LogicalTypeId::SMALLINT:
-	case cxx::LogicalTypeId::USMALLINT:
-		return 2;
+		return {ElementClass::SIGNED, 2};
 	case cxx::LogicalTypeId::INTEGER:
-	case cxx::LogicalTypeId::UINTEGER:
-	case cxx::LogicalTypeId::FLOAT:
-		return 4;
+	case cxx::LogicalTypeId::DATE:
+		return {ElementClass::SIGNED, 4};
 	case cxx::LogicalTypeId::BIGINT:
+		return {ElementClass::SIGNED, 8};
+	case cxx::LogicalTypeId::UTINYINT:
+		return {ElementClass::UNSIGNED, 1};
+	case cxx::LogicalTypeId::USMALLINT:
+		return {ElementClass::UNSIGNED, 2};
+	case cxx::LogicalTypeId::UINTEGER:
+		return {ElementClass::UNSIGNED, 4};
 	case cxx::LogicalTypeId::UBIGINT:
+		return {ElementClass::UNSIGNED, 8};
+	case cxx::LogicalTypeId::FLOAT:
+		return {ElementClass::FLOAT, 4};
 	case cxx::LogicalTypeId::DOUBLE:
-		return 8;
+		return {ElementClass::FLOAT, 8};
 	default:
-		return 0;
+		return {ElementClass::OTHER, 0};
 	}
 }
 
-/// Whether a data buffer of `itemsize` bytes is the width `column_kind` and `type` need: the engine type's own width
-/// for a fixed column, 8 bytes (the int64 view Python took) for a timestamp or interval, a signed code of 1, 2 or 4
-/// bytes for an enum, and a pointer width for text or objects.
-bool ValidDataWidth(NumpyColumnKind column_kind, const cxx::LogicalType &type, cxx::idx_t itemsize) {
-	switch (column_kind) {
-	case NumpyColumnKind::FIXED:
-		return itemsize == FixedWidth(type);
-	case NumpyColumnKind::ENUM_CODES:
-		return itemsize == 1 || itemsize == 2 || itemsize == 4;
-	case NumpyColumnKind::TEXT:
-	case NumpyColumnKind::OBJECTS:
-		return itemsize == sizeof(void *);
-	default: // TIMESTAMP, TIMESTAMP_TZ, INTERVAL
-		return itemsize == sizeof(int64_t);
+/// Whether a data buffer of `element`s `itemsize` bytes wide is what `encoding` reads into a column of `type`, the
+/// type declared when the query was bound. Each fill function below writes `type`'s own layout and reads its buffer
+/// as this allows, so this one check keeps both the reads and the writes inside their memory.
+bool BufferFits(NumpyEncoding encoding, const cxx::LogicalType &type, ElementClass element, cxx::idx_t itemsize) {
+	const auto id = type.GetTypeId();
+	const bool int64 = element == ElementClass::SIGNED && itemsize == sizeof(int64_t);
+	switch (encoding) {
+	case NumpyEncoding::FIXED: {
+		const auto fixed = FixedElement(type);
+		return fixed.first != ElementClass::OTHER && element == fixed.first && itemsize == fixed.second;
 	}
+	case NumpyEncoding::TIMESTAMP:
+		return int64 && (id == cxx::LogicalTypeId::TIMESTAMP_SEC || id == cxx::LogicalTypeId::TIMESTAMP_MS ||
+		                 id == cxx::LogicalTypeId::TIMESTAMP || id == cxx::LogicalTypeId::TIMESTAMP_NS ||
+		                 id == cxx::LogicalTypeId::TIMESTAMP_TZ);
+	case NumpyEncoding::INTERVAL:
+		return int64 && id == cxx::LogicalTypeId::INTERVAL;
+	case NumpyEncoding::ENUM_CODES:
+		return id == cxx::LogicalTypeId::ENUM && element == ElementClass::SIGNED &&
+		       (itemsize == 1 || itemsize == 2 || itemsize == 4);
+	case NumpyEncoding::TEXT:
+		return id == cxx::LogicalTypeId::VARCHAR && element == ElementClass::OBJECT && itemsize == sizeof(void *);
+	case NumpyEncoding::OBJECTS:
+		return element == ElementClass::OBJECT && itemsize == sizeof(void *);
+	case NumpyEncoding::UCS4:
+		return id == cxx::LogicalTypeId::VARCHAR && element == ElementClass::UCS4 && itemsize > 0 && itemsize % 4 == 0;
+	case NumpyEncoding::BYTES:
+		return id == cxx::LogicalTypeId::BLOB && element == ElementClass::BYTES && itemsize > 0;
+	}
+	return false;
 }
 
 bool HostIsLittleEndian() {
@@ -272,77 +454,79 @@ bool HostIsLittleEndian() {
 	return *reinterpret_cast<const uint8_t *>(&probe) == 1;
 }
 
-/// Takes a strided buffer on `obj`, refusing one that is not one-dimensional, the wrong length, or the wrong element
-/// width for `column_kind` and `type`; `kind_of` names what `obj` is, for the message.
-void OpenBuffer(const std::string &registered_name, const std::string &column_name, const char *kind_of, nb::object &obj,
-                NumpyColumnKind column_kind, const cxx::LogicalType &type, cxx::idx_t rows, Py_buffer &view) {
-	if (PyObject_GetBuffer(obj.ptr(), &view, PyBUF_FORMAT | PyBUF_STRIDES) != 0) {
+/// A strided buffer view of `obj`, refusing one that is not one-dimensional, the wrong length, in the other byte order,
+/// or whose elements `fits` refuses; `role` names what `obj` is and `refusal` ends the message for the last case.
+template <class FITS>
+BufferView OpenBuffer(const std::string &registered_name, const std::string &column_name, const char *role,
+                      nb::handle obj, cxx::idx_t rows, FITS fits, const std::string &refusal) {
+	const auto refuse = [&](const std::string &what) {
+		return cxx::InvalidInputException("the object registered as '" + registered_name +
+		                                  "' answered columns() for '" + column_name + "' with a " + role + " array " +
+		                                  what);
+	};
+	auto acquired = std::make_unique<Py_buffer>();
+	if (PyObject_GetBuffer(obj.ptr(), acquired.get(), PyBUF_FORMAT | PyBUF_STRIDES) != 0) {
 		PyErr_Clear();
-		throw cxx::InvalidInputException("the object registered as '" + registered_name + "' answered columns() for '" +
-		                                 column_name + "' with a " + kind_of +
-		                                 " array that exports no strided buffer");
+		throw refuse("that exports no strided buffer");
 	}
+	BufferView buffer(acquired.release());
+	const auto &view = *buffer;
 	if (view.ndim != 1) {
-		PyBuffer_Release(&view);
-		throw cxx::InvalidInputException("the object registered as '" + registered_name + "' answered columns() for '" +
-		                                 column_name + "' with a " + kind_of + " array that is not one-dimensional");
+		throw refuse("that is not one-dimensional");
 	}
 	if (static_cast<cxx::idx_t>(view.shape[0]) != rows) {
-		const auto length = std::to_string(view.shape[0]);
-		PyBuffer_Release(&view);
-		throw cxx::InvalidInputException("the object registered as '" + registered_name + "' answered columns() for '" +
-		                                 column_name + "' with a " + kind_of + " array of " + length +
-		                                 " rows where " + std::to_string(rows) + " were expected");
-	}
-	if (!ValidDataWidth(column_kind, type, static_cast<cxx::idx_t>(view.itemsize))) {
-		PyBuffer_Release(&view);
-		throw cxx::InvalidInputException("the object registered as '" + registered_name + "' answered columns() for '" +
-		                                 column_name + "' with a " + kind_of +
-		                                 " array whose element size does not match its engine type");
+		throw refuse("of " + std::to_string(view.shape[0]) + " rows where " + std::to_string(rows) + " were expected");
 	}
 	// The bytes are copied as they are, so a buffer in the other byte order would read as garbage.
 	const char *format = view.format != nullptr ? view.format : "";
-	const bool swapped = HostIsLittleEndian() ? (format[0] == '>' || format[0] == '!') : format[0] == '<';
-	if (swapped) {
-		PyBuffer_Release(&view);
-		throw cxx::InvalidInputException("the object registered as '" + registered_name + "' answered columns() for '" +
-		                                 column_name + "' with a " + kind_of +
-		                                 " array in the other byte order, which is not read");
+	if (HostIsLittleEndian() ? (format[0] == '>' || format[0] == '!') : format[0] == '<') {
+		throw refuse("in the other byte order, which is not read");
 	}
+	if (!fits(ClassOf(view.format), static_cast<cxx::idx_t>(view.itemsize))) {
+		throw refuse("of elements in the buffer format '" + std::string(format) + "', " +
+		             std::to_string(view.itemsize) + " bytes wide, " + refusal);
+	}
+	return buffer;
 }
 
 /// Row `row` of a one-dimensional strided view. numpy's `buf` addresses element 0 whatever the stride's sign, and a
 /// stride of 0 (a broadcast array) repeats that element.
-const uint8_t *Element(const Py_buffer &view, cxx::idx_t row) {
-	return static_cast<const uint8_t *>(view.buf) + static_cast<Py_ssize_t>(row) * view.strides[0];
+const uint8_t *Element(const BufferView &buffer, cxx::idx_t row) {
+	return static_cast<const uint8_t *>(buffer->buf) + static_cast<Py_ssize_t>(row) * buffer->strides[0];
 }
 
 /// Read through memcpy, since a strided view over a packed record array need not be aligned for `T`.
 template <class T>
-T Load(const Py_buffer &view, cxx::idx_t row) {
+T Load(const BufferView &buffer, cxx::idx_t row) {
 	T value;
-	std::memcpy(&value, Element(view, row), sizeof(T));
+	std::memcpy(&value, Element(buffer, row), sizeof(T));
 	return value;
 }
 
 /// `count` elements from row `start` of `view`, packed into `dest`: one copy for a contiguous run, one per element
 /// otherwise.
-void CopyRows(const Py_buffer &view, cxx::idx_t start, cxx::idx_t count, void *dest) {
-	const auto width = static_cast<size_t>(view.itemsize);
+void CopyRows(const BufferView &buffer, cxx::idx_t start, cxx::idx_t count, void *dest) {
+	const auto width = static_cast<size_t>(buffer->itemsize);
 	auto *out = static_cast<uint8_t *>(dest);
-	if (view.strides[0] == view.itemsize) {
-		std::memcpy(out, Element(view, start), count * width);
+	if (buffer->strides[0] == buffer->itemsize) {
+		std::memcpy(out, Element(buffer, start), count * width);
 		return;
 	}
 	for (cxx::idx_t i = 0; i < count; i++) {
-		std::memcpy(out + i * width, Element(view, start + i), width);
+		std::memcpy(out + i * width, Element(buffer, start + i), width);
 	}
 }
 
-/// `columns(requested)`'s reply, opened into buffered `NumpyColumn`s; every buffer already opened is released
-/// before an error escapes, so a later column's refusal never leaks an earlier one's.
+/// Whether the mask marks row `row` of `column` missing; false for a column without a mask.
+bool Masked(const NumpyColumn &column, cxx::idx_t row) {
+	return column.mask && *Element(column.mask, row) != 0;
+}
+
+/// `columns(requested)`'s answer, checked against the query's bound names and types and opened into `NumpyColumn`s;
+/// every view already opened is released before an error escapes, so a later column's refusal never leaks an earlier
+/// one's.
 std::vector<NumpyColumn> OpenColumns(const Registered &entry, const NumpyScanBindData &bound, cxx::Context &context,
-                                     const std::vector<cxx::idx_t> &requested, nb::object answer) {
+                                     const std::vector<cxx::idx_t> &requested, nb::handle answer) {
 	if (!nb::isinstance<nb::list>(answer) && !nb::isinstance<nb::tuple>(answer)) {
 		throw cxx::InvalidInputException("the object registered as '" + entry.name +
 		                                 "' answered columns() with something other than a list");
@@ -357,37 +541,50 @@ std::vector<NumpyColumn> OpenColumns(const Registered &entry, const NumpyScanBin
 	try {
 		for (cxx::idx_t i = 0; i < requested.size(); i++) {
 			auto item = nb::cast<nb::tuple>(answer[i]);
+			if (nb::len(item) != 5) {
+				throw nb::cast_error();
+			}
 			auto column_name = nb::cast<std::string>(item[0]);
 			const auto declared = requested[i];
 			if (column_name != bound.names.at(declared)) {
+				throw cxx::InvalidInputException(
+				    "the object registered as '" + entry.name + "' answered columns() with column '" + column_name +
+				    "' at position " + std::to_string(i) + " where '" + bound.names.at(declared) + "' was expected");
+			}
+			const auto encoding_text = nb::cast<std::string>(item[1]);
+			const TimeUnit *unit = nullptr;
+			uint64_t step = 1;
+			const auto encoding = ParseEncoding(entry.name, column_name, encoding_text, unit, step);
+			// The object is read afresh for every scan, so it may have changed since the query was bound.
+			auto type = context.ParseType(nb::cast<std::string>(item[2]));
+			if (type != bound.types.at(declared)) {
 				throw cxx::InvalidInputException("the object registered as '" + entry.name +
-				                                 "' answered columns() with column '" + column_name +
-				                                 "' at position " + std::to_string(i) + " where '" +
-				                                 bound.names.at(declared) + "' was expected");
+				                                 "' answered columns() for '" + column_name + "' with the type " +
+				                                 type.ToText() + ", but the query was bound when it was " +
+				                                 bound.types.at(declared).ToText());
 			}
-			const auto kind_text = nb::cast<std::string>(item[1]);
-			char unit = 0;
-			const auto column_kind = ParseKind(entry.name, column_name, kind_text, unit);
-			auto type = context.ParseType(bound.type_texts.at(declared));
-
-			NumpyColumn column(std::move(column_name), column_kind, unit, std::move(type));
-			column.data_obj = nb::borrow(item[3]);
-			OpenBuffer(entry.name, column.name, "data", column.data_obj, column_kind, column.type, bound.rows,
-			          column.data);
-			column.has_data_buffer = true;
-
-			nb::object mask = nb::borrow(item[4]);
-			if (!mask.is_none()) {
-				column.mask_obj = mask;
-				OpenBuffer(entry.name, column.name, "mask", column.mask_obj, NumpyColumnKind::FIXED,
-				          context.ParseType("BOOLEAN"), bound.rows, column.mask);
-				column.has_mask_buffer = true;
+			const auto data_fits = [&](ElementClass element, cxx::idx_t width) {
+				return BufferFits(encoding, type, element, width);
+			};
+			auto data = OpenBuffer(entry.name, column_name, "data", item[3], bound.rows, data_fits,
+			                       "which the encoding '" + encoding_text + "' does not read into " + type.ToText());
+			const auto mask_fits = [](ElementClass element, cxx::idx_t width) {
+				return width == 1 && (element == ElementClass::BOOLEAN || element == ElementClass::SIGNED ||
+				                      element == ElementClass::UNSIGNED);
+			};
+			auto mask = item[4].is_none() ? BufferView()
+			                              : OpenBuffer(entry.name, column_name, "mask", item[4], bound.rows, mask_fits,
+			                                           "where a mask holds one byte per row");
+			UnitConversion conversion {1, 1, 1};
+			if (encoding == NumpyEncoding::TIMESTAMP || encoding == NumpyEncoding::INTERVAL) {
+				conversion = TimeConversion(entry.name, column_name, encoding_text, unit, step, type);
 			}
-			columns.push_back(std::move(column));
+			columns.push_back(NumpyColumn {std::move(column_name), encoding, conversion, std::move(type),
+			                               std::move(data), std::move(mask)});
 		}
 	} catch (const nb::cast_error &) {
 		throw cxx::InvalidInputException("the object registered as '" + entry.name +
-		                                 "' answered columns() with something other than (name, kind, type, data, "
+		                                 "' answered columns() with something other than (name, encoding, type, data, "
 		                                 "mask) tuples");
 	}
 	return columns;
@@ -404,81 +601,48 @@ void NumpyScanInitGlobal(cxx::TableFunction::InitGlobalInput &input) {
 		identity = identity && requested.back() == i;
 	}
 
-	std::vector<NumpyColumn> columns;
-	{
-		nb::gil_scoped_acquire gil;
-		nb::object answer;
-		try {
-			nb::object request = nb::none();
-			if (!identity) {
-				nb::list wanted;
-				for (const auto column : requested) {
-					wanted.append(nb::int_(static_cast<uint64_t>(column)));
-				}
-				request = std::move(wanted);
-			}
-			answer = entry.object.attr("columns")(request);
-		} catch (nb::python_error &error) {
-			throw cxx::InvalidInputException("reading the columns of the object registered as '" + entry.name +
-			                                 "' failed: " + DescribePythonError(error));
-		}
-		auto context = input.GetContext();
-		columns = OpenColumns(entry, bound, context, requested, std::move(answer));
-	}
-
 	const auto batch_rows = input.GetUserData<NumpyScanUserData>().batch_rows;
 	const cxx::idx_t range_rows = std::max<cxx::idx_t>(1, batch_rows) * 50;
-	const cxx::idx_t max_threads = std::max<cxx::idx_t>(1, (bound.rows + range_rows - 1) / range_rows);
-	input.SetMaxThreads(max_threads);
-	ScalarMarkers markers;
-	{
-		nb::gil_scoped_acquire gil;
-		// An array can hold pandas' singletons only once pandas is loaded, so an absent pandas leaves no marker to
-		// match and is never imported for one.
-		nb::object pandas = nb::module_::import_("sys").attr("modules").attr("get")("pandas");
-		if (!pandas.is_none()) {
-			markers.na = pandas.attr("NA");
-			markers.nat = pandas.attr("NaT");
+	input.SetMaxThreads(std::max<cxx::idx_t>(1, (bound.rows + range_rows - 1) / range_rows));
+
+	// One GIL scope up to the hand-over, so views and markers dropped by a failure are released under the GIL.
+	nb::gil_scoped_acquire gil;
+	nb::object answer;
+	try {
+		nb::object request = nb::none();
+		if (!identity) {
+			nb::list wanted;
+			for (const auto column : requested) {
+				wanted.append(nb::int_(static_cast<uint64_t>(column)));
+			}
+			request = std::move(wanted);
 		}
-		nb::module_ numpy = nb::module_::import_("numpy");
-		markers.numpy_generic = numpy.attr("generic");
-		markers.numpy_floating = numpy.attr("floating");
-		markers.numpy_datetime64 = numpy.attr("datetime64");
-		markers.numpy_timedelta64 = numpy.attr("timedelta64");
-		markers.datetime_data = numpy.attr("datetime_data");
+		answer = entry.object.attr("columns")(request);
+	} catch (nb::python_error &error) {
+		throw cxx::InvalidInputException("reading the columns of the object registered as '" + entry.name +
+		                                 "' failed: " + DescribePythonError(error));
 	}
+	auto context = input.GetContext();
+	auto columns = OpenColumns(entry, bound, context, requested, answer);
+	ScalarMarkers markers;
+	// An array can hold pandas' singletons only once pandas is loaded, so an absent pandas leaves no marker to match
+	// and is never imported for one.
+	nb::object pandas = nb::module_::import_("sys").attr("modules").attr("get")("pandas");
+	if (!pandas.is_none()) {
+		markers.na = pandas.attr("NA");
+		markers.nat = pandas.attr("NaT");
+	}
+	nb::module_ numpy = nb::module_::import_("numpy");
+	markers.numpy_generic = numpy.attr("generic");
+	markers.numpy_floating = numpy.attr("floating");
+	markers.numpy_datetime64 = numpy.attr("datetime64");
+	markers.numpy_timedelta64 = numpy.attr("timedelta64");
+	markers.datetime_data = numpy.attr("datetime_data");
 	input.SetGlobalState<NumpyScanState>(std::move(columns), bound.rows, range_rows, std::move(markers));
 }
 
 void NumpyScanInitLocal(cxx::TableFunction::InitLocalInput &input) {
 	input.SetLocalState<NumpyScanLocalState>();
-}
-
-/// A row's worth of raw bytes into microseconds, from the unit `columns()` carried in the kind string; the caller
-/// checks the NaT sentinel first, since scaling it would overflow.
-int64_t ScaleToMicros(int64_t raw, char unit, const std::string &registered_name, const std::string &column_name) {
-	int64_t scaled = raw;
-	switch (unit) {
-	case 's':
-		if (__builtin_mul_overflow(raw, static_cast<int64_t>(1'000'000), &scaled)) {
-			throw cxx::InvalidInputException("the object registered as '" + registered_name + "' has a value in column '" +
-			                                 column_name + "' whose instant overflows microseconds");
-		}
-		return scaled;
-	case 'm':
-		if (__builtin_mul_overflow(raw, static_cast<int64_t>(1'000), &scaled)) {
-			throw cxx::InvalidInputException("the object registered as '" + registered_name + "' has a value in column '" +
-			                                 column_name + "' whose instant overflows microseconds");
-		}
-		return scaled;
-	case 'u':
-		return raw;
-	case 'n':
-		return raw / 1000;
-	default:
-		throw cxx::InvalidInputException("the object registered as '" + registered_name + "' has an unrecognised unit '" +
-		                                 std::string(1, unit) + "' for column '" + column_name + "'");
-	}
 }
 
 /// A run of fixed-width elements, validity from the mask when there is one, else for FLOAT and DOUBLE from a raw
@@ -494,8 +658,8 @@ void FillFixed(cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t start,
 	const bool is_double = id == cxx::LogicalTypeId::DOUBLE;
 	for (cxx::idx_t i = 0; i < count; i++) {
 		bool invalid = false;
-		if (column.has_mask_buffer) {
-			invalid = *Element(column.mask, start + i) != 0;
+		if (column.mask) {
+			invalid = Masked(column, start + i);
 		} else if (is_float) {
 			invalid = std::isnan(reinterpret_cast<float *>(dest)[i]);
 		} else if (is_double) {
@@ -507,112 +671,92 @@ void FillFixed(cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t start,
 	}
 }
 
-/// A naive timestamp's int64 view, copied straight through: DuckDB's own TIMESTAMP_S/MS/TIMESTAMP/TIMESTAMP_NS
-/// storage counts in the same unit numpy does, so no per-element conversion is needed, only the NaT sentinel.
-void FillTimestampNaive(cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t start, cxx::idx_t count) {
-	auto *dest = vector.GetDataMutable<int64_t>();
-	CopyRows(column.data, start, count, dest);
+void FillCounts(cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t start, cxx::idx_t count,
+                const std::string &registered_name) {
+	const auto &conversion = column.conversion;
+	const bool interval = column.type.GetTypeId() == cxx::LogicalTypeId::INTERVAL;
 	auto validity = vector.GetValidityMutable();
 	validity.SetAllValid(count);
+	if (!interval && conversion.step == 1 && conversion.unit == 1 && conversion.denominator == 1) {
+		auto *dest = vector.GetDataMutable<int64_t>();
+		CopyRows(column.data, start, count, dest);
+		for (cxx::idx_t i = 0; i < count; i++) {
+			if (dest[i] == std::numeric_limits<int64_t>::min() || Masked(column, start + i)) {
+				validity.SetInvalid(i);
+			}
+		}
+		return;
+	}
+	auto *counts = interval ? nullptr : vector.GetDataMutable<int64_t>();
+	auto *intervals = interval ? vector.GetDataMutable<cxx::interval_t>() : nullptr;
 	for (cxx::idx_t i = 0; i < count; i++) {
-		if (dest[i] == std::numeric_limits<int64_t>::min()) {
+		const auto raw = Load<int64_t>(column.data, start + i);
+		int64_t scaled = 0;
+		if (raw == std::numeric_limits<int64_t>::min() || Masked(column, start + i)) {
 			validity.SetInvalid(i);
+		} else if (!ScaleCount(raw, conversion, false, scaled)) {
+			throw cxx::InvalidInputException("the object registered as '" + registered_name + "' failed: column '" +
+			                                 column.name + "' holds a value at row " + std::to_string(start + i) +
+			                                 " that overflows its engine type");
+		}
+		if (interval) {
+			intervals[i] = cxx::interval_t {0, 0, scaled};
+		} else {
+			counts[i] = scaled;
 		}
 	}
 }
 
-/// A UTC-normalized aware timestamp, one element at a time: the engine's TIMESTAMP_TZ is always microseconds, so a
-/// column of another unit is scaled per row.
-void FillTimestampAware(cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t start, cxx::idx_t count,
-                        const std::string &registered_name) {
-	auto *dest = vector.GetDataMutable<int64_t>();
+int64_t ReadCode(const NumpyColumn &column, cxx::idx_t row) {
+	switch (column.data->itemsize) {
+	case 1:
+		return Load<int8_t>(column.data, row);
+	case 2:
+		return Load<int16_t>(column.data, row);
+	default:
+		return Load<int32_t>(column.data, row);
+	}
+}
+
+/// Category codes into an ENUM whose codes the engine stores as `CODE`; a code past the ENUM's labels is refused,
+/// since the engine would look its label up out of range.
+template <class CODE>
+void FillEnumCodes(cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t start, cxx::idx_t count,
+                   const std::string &registered_name) {
+	auto *dest = vector.GetDataMutable<CODE>();
+	const auto labels = column.type.GetEnumSize();
 	auto validity = vector.GetValidityMutable();
 	validity.SetAllValid(count);
 	for (cxx::idx_t i = 0; i < count; i++) {
-		const auto raw = Load<int64_t>(column.data, start + i);
-		if (raw == std::numeric_limits<int64_t>::min()) {
+		const auto code = ReadCode(column, start + i);
+		if (code < 0 || Masked(column, start + i)) {
 			validity.SetInvalid(i);
 			dest[i] = 0;
 			continue;
 		}
-		dest[i] = ScaleToMicros(raw, column.unit, registered_name, column.name);
-	}
-}
-
-/// A timedelta64 column as INTERVAL, the whole span in microseconds and no months or days, since a timedelta
-/// carries no calendar component to split out.
-void FillInterval(cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t start, cxx::idx_t count,
-                  const std::string &registered_name) {
-	auto *dest = vector.GetDataMutable<cxx::interval_t>();
-	auto validity = vector.GetValidityMutable();
-	validity.SetAllValid(count);
-	for (cxx::idx_t i = 0; i < count; i++) {
-		const auto raw = Load<int64_t>(column.data, start + i);
-		if (raw == std::numeric_limits<int64_t>::min()) {
-			validity.SetInvalid(i);
-			dest[i] = cxx::interval_t {0, 0, 0};
-			continue;
+		if (static_cast<cxx::idx_t>(code) >= labels) {
+			throw cxx::InvalidInputException("the object registered as '" + registered_name + "' failed: column '" +
+			                                 column.name + "' holds a category code at row " +
+			                                 std::to_string(start + i) + " that its ENUM has no label for");
 		}
-		dest[i] = cxx::interval_t {0, 0, ScaleToMicros(raw, column.unit, registered_name, column.name)};
+		dest[i] = static_cast<CODE>(code);
 	}
 }
 
 /// Categorical codes, narrowed or widened from pandas' own signed width into the ENUM's unsigned physical width;
 /// the two widths need not match, since pandas and DuckDB each size a dictionary's codes by a different rule.
-void FillEnum(cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t start, cxx::idx_t count) {
-	const auto read_code = [&](cxx::idx_t i) -> int64_t {
-		switch (column.data.itemsize) {
-		case 1:
-			return Load<int8_t>(column.data, start + i);
-		case 2:
-			return Load<int16_t>(column.data, start + i);
-		default:
-			return Load<int32_t>(column.data, start + i);
-		}
-	};
-
-	auto validity = vector.GetValidityMutable();
-	validity.SetAllValid(count);
+void FillEnum(cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t start, cxx::idx_t count,
+              const std::string &registered_name) {
 	switch (column.type.GetEnumInternalTypeId()) {
-	case cxx::LogicalTypeId::UTINYINT: {
-		auto *dest = vector.GetDataMutable<uint8_t>();
-		for (cxx::idx_t i = 0; i < count; i++) {
-			const auto code = read_code(i);
-			if (code < 0) {
-				validity.SetInvalid(i);
-				dest[i] = 0;
-			} else {
-				dest[i] = static_cast<uint8_t>(code);
-			}
-		}
+	case cxx::LogicalTypeId::UTINYINT:
+		FillEnumCodes<uint8_t>(vector, column, start, count, registered_name);
 		break;
-	}
-	case cxx::LogicalTypeId::USMALLINT: {
-		auto *dest = vector.GetDataMutable<uint16_t>();
-		for (cxx::idx_t i = 0; i < count; i++) {
-			const auto code = read_code(i);
-			if (code < 0) {
-				validity.SetInvalid(i);
-				dest[i] = 0;
-			} else {
-				dest[i] = static_cast<uint16_t>(code);
-			}
-		}
+	case cxx::LogicalTypeId::USMALLINT:
+		FillEnumCodes<uint16_t>(vector, column, start, count, registered_name);
 		break;
-	}
-	default: {
-		auto *dest = vector.GetDataMutable<uint32_t>();
-		for (cxx::idx_t i = 0; i < count; i++) {
-			const auto code = read_code(i);
-			if (code < 0) {
-				validity.SetInvalid(i);
-				dest[i] = 0;
-			} else {
-				dest[i] = static_cast<uint32_t>(code);
-			}
-		}
+	default:
+		FillEnumCodes<uint32_t>(vector, column, start, count, registered_name);
 		break;
-	}
 	}
 }
 
@@ -647,32 +791,6 @@ bool IsNoneLike(const ScalarMarkers &markers, PyObject *value) {
 	return false;
 }
 
-/// How many `unit`s of numpy's datetime64 or timedelta64 make one `target` ("ns" or "us"), as a multiplier when
-/// the unit is coarser and a divisor when it is finer; false for a calendar unit, which has no fixed length.
-bool UnitScale(const std::string &unit, const std::string &target, int64_t &multiplier, int64_t &divisor) {
-	static const std::pair<const char *, int64_t> nanos_per_unit[] = {
-	    {"W", 604'800'000'000'000}, {"D", 86'400'000'000'000}, {"h", 3'600'000'000'000}, {"m", 60'000'000'000},
-	    {"s", 1'000'000'000},      {"ms", 1'000'000},         {"us", 1'000},             {"ns", 1}};
-	static const std::pair<const char *, int64_t> units_per_nano[] = {{"ps", 1'000}, {"fs", 1'000'000},
-	                                                                  {"as", 1'000'000'000}};
-	const int64_t nanos_per_target = target == "us" ? 1'000 : 1;
-	for (const auto &[name, nanos] : nanos_per_unit) {
-		if (unit == name) {
-			multiplier = nanos >= nanos_per_target ? nanos / nanos_per_target : 1;
-			divisor = nanos >= nanos_per_target ? 1 : nanos_per_target / nanos;
-			return true;
-		}
-	}
-	for (const auto &[name, units] : units_per_nano) {
-		if (unit == name) {
-			multiplier = 1;
-			divisor = units * nanos_per_target;
-			return true;
-		}
-	}
-	return false;
-}
-
 /// A numpy datetime64 or timedelta64 whose `.item()` is a bare int, as a TIMESTAMP_NS held exactly or an INTERVAL
 /// truncated to microseconds like a timedelta64 column; nullopt for anything else.
 std::optional<cxx::Value> NumpyTemporalValue(const ScalarMarkers &markers, cxx::Context &context, nb::handle value,
@@ -685,45 +803,30 @@ std::optional<cxx::Value> NumpyTemporalValue(const ScalarMarkers &markers, cxx::
 		return std::nullopt;
 	}
 	nb::tuple unit = nb::borrow<nb::tuple>(markers.datetime_data(value.attr("dtype")));
-	int64_t multiplier = 1;
-	int64_t divisor = 1;
-	if (!UnitScale(nb::cast<std::string>(unit[0]), is_datetime ? "ns" : "us", multiplier, divisor)) {
+	const auto *time_unit = FindTimeUnit(nb::cast<std::string>(unit[0]), true);
+	if (time_unit == nullptr) {
 		throw cxx::InvalidInputException("a calendar unit has no fixed length");
 	}
+	const auto conversion = ConversionOf(*time_unit, nb::cast<uint64_t>(unit[1]), is_datetime ? 1 : 1'000);
 	const int64_t raw = nb::cast<int64_t>(nb::int_(value.attr("view")("i8")));
-	int64_t numerator = 1;
-	if (__builtin_mul_overflow(nb::cast<int64_t>(unit[1]), multiplier, &numerator)) {
-		throw cxx::InvalidInputException("the unit overflows its engine type");
-	}
-	// Reduced and divided first, so a stepped fine unit such as 1000ps overflows only when the result does.
-	const int64_t common = std::gcd(numerator, divisor);
-	numerator /= common;
-	const int64_t denominator = divisor / common;
-	int64_t whole = 0;
-	int64_t part = 0;
 	int64_t scaled = 0;
-	if (__builtin_mul_overflow(raw / denominator, numerator, &whole) ||
-	    __builtin_mul_overflow(raw % denominator, numerator, &part) ||
-	    __builtin_add_overflow(whole, part / denominator, &scaled)) {
-		throw cxx::InvalidInputException("the value overflows its engine type");
+	if (!ScaleCount(raw, conversion, is_datetime, scaled)) {
+		throw cxx::InvalidInputException("the value overflows its engine type or is finer than a nanosecond");
 	}
 	if (is_datetime) {
-		if (part % denominator != 0) {
-			throw cxx::InvalidInputException("the instant is finer than a nanosecond");
-		}
 		return cxx::Value::Create(context, cxx::timestamp_ns_t {scaled});
 	}
 	return cxx::Value::Create(context, cxx::interval_t {0, 0, scaled});
 }
 
 /// A Python-object array of `str`, `None`, `pd.NA` or a float NaN: each string read as UTF-8 directly, and any
-/// other value, which only reaches this kind through the sampling rule's mixed-type fallback, through `str()`.
+/// other value, which only reaches this encoding through the sampling rule's mixed-type fallback, through `str()`.
 void FillText(const NumpyScanState &global, cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t start,
               cxx::idx_t count, const std::string &registered_name) {
 	nb::gil_scoped_acquire gil;
 	for (cxx::idx_t i = 0; i < count; i++) {
 		PyObject *value = Load<PyObject *>(column.data, start + i);
-		if (IsNoneLike(global.markers, value)) {
+		if (Masked(column, start + i) || IsNoneLike(global.markers, value)) {
 			vector.SetNull(i);
 			continue;
 		}
@@ -751,13 +854,13 @@ void FillText(const NumpyScanState &global, cxx::Vector &vector, const NumpyColu
 /// An object column sampled to one engine type other than VARCHAR: each value converted with `PythonToValue` and
 /// cast to that type, with the cast checked to be lossless by casting back and comparing text, since the engine's
 /// own cast rounds rather than refuses a value such as a fractional double read into an integer column.
-void FillObjects(const NumpyScanState &global, cxx::Context &context, cxx::Vector &vector,
-                 const NumpyColumn &column, cxx::idx_t start, cxx::idx_t count, ConversionContext &conversion,
+void FillObjects(const NumpyScanState &global, cxx::Context &context, cxx::Vector &vector, const NumpyColumn &column,
+                 cxx::idx_t start, cxx::idx_t count, ConversionContext &conversion,
                  const std::string &registered_name) {
 	nb::gil_scoped_acquire gil;
 	for (cxx::idx_t i = 0; i < count; i++) {
 		PyObject *value = Load<PyObject *>(column.data, start + i);
-		if (IsNoneLike(global.markers, value)) {
+		if (Masked(column, start + i) || IsNoneLike(global.markers, value)) {
 			vector.SetNull(i);
 			continue;
 		}
@@ -785,10 +888,76 @@ void FillObjects(const NumpyScanState &global, cxx::Context &context, cxx::Vecto
 		if (!cast) {
 			throw cxx::InvalidInputException("the object registered as '" + registered_name + "' failed: column '" +
 			                                 column.name + "' holds a value at row " + std::to_string(start + i) +
-			                                 " that its sampled type " + column.type.ToText() +
-			                                 " cannot hold exactly");
+			                                 " that its sampled type " + column.type.ToText() + " cannot hold exactly");
 		}
 		vector.SetValue(i, *cast);
+	}
+}
+
+/// A fixed-width UCS-4 string column, as numpy's `U` dtype stores it, encoded to UTF-8 without the GIL; numpy pads a
+/// shorter string with NUL code points and drops them on read, so trailing NULs are not part of the value.
+void FillUcs4(cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t start, cxx::idx_t count,
+              const std::string &registered_name) {
+	const auto width = static_cast<cxx::idx_t>(column.data->itemsize) / 4;
+	std::string utf8;
+	for (cxx::idx_t i = 0; i < count; i++) {
+		if (Masked(column, start + i)) {
+			vector.SetNull(i);
+			continue;
+		}
+		const auto *element = Element(column.data, start + i);
+		const auto code_point = [&](cxx::idx_t k) {
+			uint32_t value;
+			std::memcpy(&value, element + k * 4, 4);
+			return value;
+		};
+		auto length = width;
+		while (length > 0 && code_point(length - 1) == 0) {
+			length--;
+		}
+		utf8.clear();
+		for (cxx::idx_t k = 0; k < length; k++) {
+			const auto value = code_point(k);
+			if (value > 0x10FFFF || (value >= 0xD800 && value <= 0xDFFF)) {
+				throw cxx::InvalidInputException("the object registered as '" + registered_name + "' failed: column '" +
+				                                 column.name + "' holds a value at row " + std::to_string(start + i) +
+				                                 " that is not valid Unicode");
+			}
+			if (value < 0x80) {
+				utf8.push_back(static_cast<char>(value));
+			} else if (value < 0x800) {
+				utf8.push_back(static_cast<char>(0xC0 | (value >> 6)));
+				utf8.push_back(static_cast<char>(0x80 | (value & 0x3F)));
+			} else if (value < 0x10000) {
+				utf8.push_back(static_cast<char>(0xE0 | (value >> 12)));
+				utf8.push_back(static_cast<char>(0x80 | ((value >> 6) & 0x3F)));
+				utf8.push_back(static_cast<char>(0x80 | (value & 0x3F)));
+			} else {
+				utf8.push_back(static_cast<char>(0xF0 | (value >> 18)));
+				utf8.push_back(static_cast<char>(0x80 | ((value >> 12) & 0x3F)));
+				utf8.push_back(static_cast<char>(0x80 | ((value >> 6) & 0x3F)));
+				utf8.push_back(static_cast<char>(0x80 | (value & 0x3F)));
+			}
+		}
+		vector.AssignStringUnsafe(i, utf8);
+	}
+}
+
+/// A fixed-width bytes column, as numpy's `S` dtype stores it, read as BLOB without the GIL; trailing NUL bytes are
+/// padding, as for `FillUcs4`.
+void FillBytes(cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t start, cxx::idx_t count) {
+	const auto width = static_cast<size_t>(column.data->itemsize);
+	for (cxx::idx_t i = 0; i < count; i++) {
+		if (Masked(column, start + i)) {
+			vector.SetNull(i);
+			continue;
+		}
+		const auto *element = reinterpret_cast<const char *>(Element(column.data, start + i));
+		auto length = width;
+		while (length > 0 && element[length - 1] == 0) {
+			length--;
+		}
+		vector.AssignString(i, std::string_view(element, length));
 	}
 }
 
@@ -822,27 +991,28 @@ void NumpyScanExec(cxx::TableFunction::ExecInput &input) {
 		auto &column = global.columns.at(i);
 		auto vector = output.GetVector(i);
 		vector.SetSize(emit);
-		switch (column.column_kind) {
-		case NumpyColumnKind::FIXED:
+		switch (column.encoding) {
+		case NumpyEncoding::FIXED:
 			FillFixed(vector, column, local.start, emit);
 			break;
-		case NumpyColumnKind::TIMESTAMP:
-			FillTimestampNaive(vector, column, local.start, emit);
+		case NumpyEncoding::TIMESTAMP:
+		case NumpyEncoding::INTERVAL:
+			FillCounts(vector, column, local.start, emit, entry.name);
 			break;
-		case NumpyColumnKind::TIMESTAMP_TZ:
-			FillTimestampAware(vector, column, local.start, emit, entry.name);
+		case NumpyEncoding::ENUM_CODES:
+			FillEnum(vector, column, local.start, emit, entry.name);
 			break;
-		case NumpyColumnKind::INTERVAL:
-			FillInterval(vector, column, local.start, emit, entry.name);
-			break;
-		case NumpyColumnKind::ENUM_CODES:
-			FillEnum(vector, column, local.start, emit);
-			break;
-		case NumpyColumnKind::TEXT:
+		case NumpyEncoding::TEXT:
 			FillText(global, vector, column, local.start, emit, entry.name);
 			break;
-		case NumpyColumnKind::OBJECTS:
+		case NumpyEncoding::OBJECTS:
 			FillObjects(global, context, vector, column, local.start, emit, conversion, entry.name);
+			break;
+		case NumpyEncoding::UCS4:
+			FillUcs4(vector, column, local.start, emit, entry.name);
+			break;
+		case NumpyEncoding::BYTES:
+			FillBytes(vector, column, local.start, emit);
 			break;
 		}
 	}
@@ -873,7 +1043,7 @@ void NumpyScanProgress(cxx::TableFunction::ProgressInput &input) {
 } // namespace
 
 void RegisterNumpyScan(cxx::Connection &connection, std::shared_ptr<Registry> registry,
-                        std::shared_ptr<ModuleState> module, cxx::idx_t batch_rows) {
+                       std::shared_ptr<ModuleState> module, cxx::idx_t batch_rows) {
 	auto function = cxx::TableFunction::Create(connection);
 	function.SetName(kNumpyScanFunction);
 	function.WithSignature(

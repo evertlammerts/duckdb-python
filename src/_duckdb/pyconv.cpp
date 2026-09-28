@@ -38,23 +38,20 @@ constexpr int64_t TIMESTAMP_NEGATIVE_INFINITY = -9223372036854775807LL;
 // DuckDB dates reach far past Python's year 9999, so name the offending value; OverflowError names a day count.
 [[noreturn]] void ThrowUnrepresentable(const std::string &what, const std::string &rendered,
                                        const char *python_type = "datetime") {
-	throw duckdb::cxx::Exception(4001 /* TYPE_CONVERSION */,
-	                             "Conversion Error: " + what + " " + rendered + " is outside the range Python's " +
-	                                 python_type + " can represent");
+	throw duckdb::cxx::Exception(4001 /* TYPE_CONVERSION */, "Conversion Error: " + what + " " + rendered +
+	                                                             " is outside the range Python's " + python_type +
+	                                                             " can represent");
 }
 
 // Scaling the infinity markers would overflow and destroy them, so they pass through in their own unit. A coarse
 // unit can hold an instant no microsecond count can, which is unrepresentable rather than a wrapped value; the
 // diagnostic names the raw count, since rendering the value through DuckDB fails on the same conversion.
-int64_t MicrosFromUnit(int64_t raw, int64_t multiply, int64_t divide) {
+int64_t MicrosFromUnit(int64_t raw, uint64_t multiply, uint64_t divide) {
 	if (raw == TIMESTAMP_POSITIVE_INFINITY || raw == TIMESTAMP_NEGATIVE_INFINITY) {
 		return raw;
 	}
-	if (multiply == 1) {
-		return raw / divide;
-	}
 	int64_t micros;
-	if (__builtin_mul_overflow(raw, multiply, &micros)) {
+	if (!ScaleCount(raw, UnitConversion {multiply, 1, divide}, false, micros)) {
 		const char *unit = multiply == 1'000'000 ? " seconds" : " milliseconds";
 		ThrowUnrepresentable("timestamp", std::to_string(raw) + unit + " since the epoch");
 	}
@@ -240,18 +237,24 @@ nb::object ValueToPython(const Value &value, ConversionContext &ctx) {
 	case LogicalTypeId::TIME:
 		return TimeFromMicros(ctx, value.Get<duckdb::cxx::dtime_t>().micros);
 	case LogicalTypeId::TIMESTAMP:
-		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_t>().micros, false, [&value] { return value.ToText(); });
+		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_t>().micros, false,
+		                     [&value] { return value.ToText(); });
 	case LogicalTypeId::TIMESTAMP_TZ:
-		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_tz_t>().micros, true, [&value] { return value.ToText(); });
+		return EpochDateTime(ctx, value.Get<duckdb::cxx::timestamp_tz_t>().micros, true,
+		                     [&value] { return value.ToText(); });
 	case LogicalTypeId::TIMESTAMP_SEC:
-		return EpochDateTime(ctx, MicrosFromUnit(value.Get<duckdb::cxx::timestamp_s_t>().seconds, 1'000'000, 1), false, [&value] { return value.ToText(); });
+		return EpochDateTime(ctx, MicrosFromUnit(value.Get<duckdb::cxx::timestamp_s_t>().seconds, 1'000'000, 1), false,
+		                     [&value] { return value.ToText(); });
 	case LogicalTypeId::TIMESTAMP_MS:
-		return EpochDateTime(ctx, MicrosFromUnit(value.Get<duckdb::cxx::timestamp_ms_t>().millis, 1'000, 1), false, [&value] { return value.ToText(); });
+		return EpochDateTime(ctx, MicrosFromUnit(value.Get<duckdb::cxx::timestamp_ms_t>().millis, 1'000, 1), false,
+		                     [&value] { return value.ToText(); });
 	case LogicalTypeId::TIMESTAMP_NS:
 		// Python datetime stops at microseconds, so finer digits are dropped on purpose.
-		return EpochDateTime(ctx, MicrosFromUnit(value.Get<duckdb::cxx::timestamp_ns_t>().nanos, 1, 1'000), false, [&value] { return value.ToText(); });
+		return EpochDateTime(ctx, MicrosFromUnit(value.Get<duckdb::cxx::timestamp_ns_t>().nanos, 1, 1'000), false,
+		                     [&value] { return value.ToText(); });
 	case LogicalTypeId::TIMESTAMP_TZ_NS:
-		return EpochDateTime(ctx, MicrosFromUnit(value.Get<duckdb::cxx::timestamp_tz_ns_t>().nanos, 1, 1'000), true, [&value] { return value.ToText(); });
+		return EpochDateTime(ctx, MicrosFromUnit(value.Get<duckdb::cxx::timestamp_tz_ns_t>().nanos, 1, 1'000), true,
+		                     [&value] { return value.ToText(); });
 	case LogicalTypeId::TIME_NS:
 		// Same microsecond floor as TIMESTAMP_NS.
 		return TimeFromMicros(ctx, value.Get<duckdb::cxx::dtime_ns_t>().nanos / 1'000);
@@ -264,8 +267,7 @@ nb::object ValueToPython(const Value &value, ConversionContext &ctx) {
 		const auto interval = value.Get<duckdb::cxx::interval_t>();
 		// A month has no fixed length, so months fold at 30 days as the previous package did. Lossy on purpose.
 		try {
-			return ctx.timedelta_cls(static_cast<int64_t>(interval.months) * 30 + interval.days, 0,
-			                         interval.micros);
+			return ctx.timedelta_cls(static_cast<int64_t>(interval.months) * 30 + interval.days, 0, interval.micros);
 		} catch (const nb::python_error &) {
 			ThrowUnrepresentable("interval", value.ToText(), "timedelta");
 		}
@@ -304,8 +306,8 @@ nb::object ValueToPython(const Value &value, ConversionContext &ctx) {
 		if (!KeysHashable(type.GetMapKeyType())) {
 			nb::list pairs;
 			for (duckdb::cxx::idx_t i = 0; i + 1 < count; i += 2) {
-				pairs.append(nb::make_tuple(ValueToPython(value.GetChild(i), ctx),
-				                            ValueToPython(value.GetChild(i + 1), ctx)));
+				pairs.append(
+				    nb::make_tuple(ValueToPython(value.GetChild(i), ctx), ValueToPython(value.GetChild(i + 1), ctx)));
 			}
 			return pairs;
 		}
@@ -450,9 +452,7 @@ void EmitElements(cxx::Vector &vector, const LogicalType &type, cxx::idx_t first
 		});
 		break;
 	case Id::TIME:
-		typed([&](cxx::idx_t i) {
-			return TimeFromMicros(ctx, view.Data<cxx::dtime_t>()[i].micros).release().ptr();
-		});
+		typed([&](cxx::idx_t i) { return TimeFromMicros(ctx, view.Data<cxx::dtime_t>()[i].micros).release().ptr(); });
 		break;
 	case Id::TIMESTAMP:
 	case Id::TIMESTAMP_TZ:
@@ -464,13 +464,14 @@ void EmitElements(cxx::Vector &vector, const LogicalType &type, cxx::idx_t first
 		const bool utc = id == Id::TIMESTAMP_TZ || id == Id::TIMESTAMP_TZ_NS;
 		typed([&](cxx::idx_t i) {
 			const auto raw = view.Data<int64_t>()[i];
-			const auto text = [&] { return vector.GetValue(i).ToText(); };
+			const auto text = [&] {
+				return vector.GetValue(i).ToText();
+			};
 			// Nanosecond columns floor to microseconds as the per-value path does; markers keep their unit.
-			const auto micros = id == Id::TIMESTAMP_SEC ? MicrosFromUnit(raw, 1'000'000, 1)
+			const auto micros = id == Id::TIMESTAMP_SEC  ? MicrosFromUnit(raw, 1'000'000, 1)
 			                    : id == Id::TIMESTAMP_MS ? MicrosFromUnit(raw, 1'000, 1)
-			                    : id == Id::TIMESTAMP_NS || id == Id::TIMESTAMP_TZ_NS
-			                        ? MicrosFromUnit(raw, 1, 1'000)
-			                        : raw;
+			                    : id == Id::TIMESTAMP_NS || id == Id::TIMESTAMP_TZ_NS ? MicrosFromUnit(raw, 1, 1'000)
+			                                                                          : raw;
 			return EpochDateTime(ctx, micros, utc, text).release().ptr();
 		});
 		break;
@@ -484,9 +485,7 @@ void EmitElements(cxx::Vector &vector, const LogicalType &type, cxx::idx_t first
 	case Id::UHUGEINT:
 		typed([&](cxx::idx_t i) {
 			const auto &limbs = view.Data<cxx::uint128_t>()[i];
-			return CombineLimbs(ctx, nb::steal(PyLong_FromUnsignedLongLong(limbs.upper)), limbs.lower)
-			    .release()
-			    .ptr();
+			return CombineLimbs(ctx, nb::steal(PyLong_FromUnsignedLongLong(limbs.upper)), limbs.lower).release().ptr();
 		});
 		break;
 	case Id::UUID:
@@ -585,8 +584,7 @@ void EmitElements(cxx::Vector &vector, const LogicalType &type, cxx::idx_t first
 					throw nb::python_error();
 				}
 				for (uint64_t j = 0; j < entry.length; j++) {
-					if (PyList_SetItem(row.ptr(), static_cast<Py_ssize_t>(j),
-					                   Py_NewRef(values[base + j].ptr())) != 0) {
+					if (PyList_SetItem(row.ptr(), static_cast<Py_ssize_t>(j), Py_NewRef(values[base + j].ptr())) != 0) {
 						throw nb::python_error();
 					}
 				}
@@ -643,8 +641,7 @@ void EmitElements(cxx::Vector &vector, const LogicalType &type, cxx::idx_t first
 			}
 			const auto base = static_cast<size_t>(e - first) * size;
 			for (cxx::idx_t j = 0; j < size; j++) {
-				if (PyList_SetItem(row.ptr(), static_cast<Py_ssize_t>(j),
-				                   Py_NewRef(elements[base + j].ptr())) != 0) {
+				if (PyList_SetItem(row.ptr(), static_cast<Py_ssize_t>(j), Py_NewRef(elements[base + j].ptr())) != 0) {
 					throw nb::python_error();
 				}
 			}
@@ -747,8 +744,7 @@ Value FromText(SCOPE &scope, const std::string &text, const LogicalType &target)
 }
 
 [[noreturn]] void ThrowUnsupported(nb::handle object) {
-	throw UnsupportedTypeException(
-	    nb::cast<std::string>(nb::handle(Py_TYPE(object.ptr())).attr("__name__")));
+	throw UnsupportedTypeException(nb::cast<std::string>(nb::handle(Py_TYPE(object.ptr())).attr("__name__")));
 }
 
 // The message is carried twice, with and without the prefix, since DuckDB adds its own inside a callback.
@@ -801,8 +797,7 @@ Value PythonToValue(SCOPE &scope, nb::handle object, ConversionContext &ctx) {
 		if (bytes.size() > std::numeric_limits<uint32_t>::max()) {
 			ThrowInvalidInput("bytes value is larger than a BLOB can hold");
 		}
-		return Value::Create(scope, duckdb::cxx::blob_t(bytes.c_str(),
-		                                                    static_cast<uint32_t>(bytes.size())));
+		return Value::Create(scope, duckdb::cxx::blob_t(bytes.c_str(), static_cast<uint32_t>(bytes.size())));
 	}
 	// datetime before date: datetime subclasses date, so order decides.
 	if (nb::isinstance(object, ctx.datetime_cls)) {
@@ -825,14 +820,11 @@ Value PythonToValue(SCOPE &scope, nb::handle object, ConversionContext &ctx) {
 		// A time with a time zone becomes TIME_TZ; dropping the offset would silently break the round trip.
 		nb::object offset = object.attr("utcoffset")();
 		if (!offset.is_none()) {
-			const auto seconds =
-			    nb::cast<int64_t>(offset.attr("total_seconds")().attr("__int__")());
-			if (seconds > duckdb::cxx::dtime_tz_t::MAX_OFFSET ||
-			    seconds < -duckdb::cxx::dtime_tz_t::MAX_OFFSET) {
+			const auto seconds = nb::cast<int64_t>(offset.attr("total_seconds")().attr("__int__")());
+			if (seconds > duckdb::cxx::dtime_tz_t::MAX_OFFSET || seconds < -duckdb::cxx::dtime_tz_t::MAX_OFFSET) {
 				ThrowInvalidInput("time zone offset is outside the range TIME_TZ can hold");
 			}
-			return Value::Create(scope,
-			                     duckdb::cxx::dtime_tz_t(micros, static_cast<int32_t>(seconds)));
+			return Value::Create(scope, duckdb::cxx::dtime_tz_t(micros, static_cast<int32_t>(seconds)));
 		}
 		return Value::Create(scope, duckdb::cxx::dtime_t {micros});
 	}
@@ -841,8 +833,8 @@ Value PythonToValue(SCOPE &scope, nb::handle object, ConversionContext &ctx) {
 		duckdb::cxx::interval_t interval {};
 		interval.months = 0;
 		interval.days = nb::cast<int32_t>(object.attr("days"));
-		interval.micros = nb::cast<int64_t>(object.attr("seconds")) * 1'000'000 +
-		                  nb::cast<int64_t>(object.attr("microseconds"));
+		interval.micros =
+		    nb::cast<int64_t>(object.attr("seconds")) * 1'000'000 + nb::cast<int64_t>(object.attr("microseconds"));
 		return Value::Create(scope, interval);
 	}
 	if (nb::isinstance(object, ctx.decimal_cls)) {
@@ -863,12 +855,10 @@ Value PythonToValue(SCOPE &scope, nb::handle object, ConversionContext &ctx) {
 			ThrowInvalidInput("Decimal has more fractional digits than DECIMAL can hold");
 		}
 		return FromText(scope, nb::cast<std::string>(nb::str(object)),
-		                scope.ParseType("DECIMAL(" + std::to_string(width) + "," +
-		                                     std::to_string(scale) + ")"));
+		                scope.ParseType("DECIMAL(" + std::to_string(width) + "," + std::to_string(scale) + ")"));
 	}
 	if (nb::isinstance(object, ctx.uuid_cls)) {
-		return FromText(scope, nb::cast<std::string>(nb::str(object)),
-		                scope.CreateType(LogicalTypeId::UUID));
+		return FromText(scope, nb::cast<std::string>(nb::str(object)), scope.CreateType(LogicalTypeId::UUID));
 	}
 	if (nb::isinstance<nb::list>(object) || nb::isinstance<nb::tuple>(object)) {
 		std::vector<Value> children;
@@ -894,15 +884,13 @@ Value PythonToValue(SCOPE &scope, nb::handle object, ConversionContext &ctx) {
 		if (all_strings) {
 			std::vector<std::pair<std::string, Value>> fields;
 			for (auto entry : mapping) {
-				fields.emplace_back(nb::cast<std::string>(entry.first),
-				                    PythonToValue(scope, entry.second, ctx));
+				fields.emplace_back(nb::cast<std::string>(entry.first), PythonToValue(scope, entry.second, ctx));
 			}
 			return Value::CreateStruct(scope, fields);
 		}
 		std::vector<std::pair<Value, Value>> entries;
 		for (auto entry : mapping) {
-			entries.emplace_back(PythonToValue(scope, entry.first, ctx),
-			                     PythonToValue(scope, entry.second, ctx));
+			entries.emplace_back(PythonToValue(scope, entry.first, ctx), PythonToValue(scope, entry.second, ctx));
 		}
 		return Value::CreateMap(scope, entries);
 	}

@@ -1,8 +1,9 @@
 """The Python objects that register as tables, each behind a source that exports Arrow for a scan.
 
 There are two scans: the Arrow scan reads an Arrow C stream from the Arrow, pyarrow and polars sources in
-`arrow.py`, `pyarrow.py` and `polars.py`, and the numpy scan reads a pandas DataFrame natively off its own buffers
-through the source in `pandas.py`, which hands a DataFrame with a pyarrow-backed column to the Arrow scan instead.
+`arrow.py`, `pyarrow.py` and `polars.py`, and the numpy scan reads numpy arrays natively off their own buffers
+through the sources in `numpy.py` and `pandas.py`; the pandas source hands a DataFrame with a pyarrow-backed column
+to the Arrow scan instead.
 
 A source exposes `__arrow_c_schema__`, when the object can say its schema without producing data, `accepts`, which
 says whether a scan will apply a predicate itself, `stream(columns, filters)`, which exports an Arrow stream
@@ -36,8 +37,8 @@ class Source:
     #: stream is pure C, C++ or Rust, or takes the GIL itself where it runs Python, sets this False, and its pulls
     #: then run on engine threads with no GIL held.
     pull_under_gil = True
-    #: Whether the registered name resolves to the numpy scan rather than the Arrow scan. Only a pandas
-    #: frame whose columns are all numpy- or Python-object-backed sets this True.
+    #: Whether the registered name resolves to the numpy scan rather than the Arrow scan: numpy arrays, and a pandas
+    #: frame whose columns are all numpy- or Python-object-backed.
     native = False
 
     def __init__(self, obj: object) -> None:
@@ -98,11 +99,12 @@ def adapt(obj: object) -> Source:
     """The source to register for `obj`.
 
     An Arrow stream capsule and a pyarrow RecordBatchReader are read once. A pyarrow Table or RecordBatch, a polars
-    DataFrame or LazyFrame, a pandas DataFrame, a pyarrow Dataset or Scanner, and anything else exporting
-    `__arrow_c_stream__` or `__arrow_c_array__`, are read as often as asked. A `Source` of one's own is registered
-    as it is.
+    DataFrame or LazyFrame, a pandas DataFrame, a numpy array or a dict, list or tuple of them, a pyarrow Dataset
+    or Scanner, and anything else exporting `__arrow_c_stream__` or `__arrow_c_array__`, are read as often as asked.
+    A `Source` of one's own is registered as it is.
     """
     from .arrow import ArrowArraySource, ArrowCapsuleSource, ArrowStreamSource
+    from .numpy import NumpySource
     from .pandas import PandasSource
     from .polars import LazyFrameSource, PolarsFrameSource
     from .pyarrow import PyArrowDatasetSource, PyArrowReaderSource, PyArrowScannerSource, PyArrowTableSource
@@ -122,6 +124,8 @@ def adapt(obj: object) -> Source:
         return LazyFrameSource(obj)
     if _is(obj, "pandas", "DataFrame"):
         return PandasSource(obj)
+    if isinstance(obj, (dict, list, tuple)) or _from(obj, "numpy"):
+        return NumpySource(obj)
     if exports and _is(obj, "pyarrow", "Table", "RecordBatch"):
         return PyArrowTableSource(obj)
     if exports and _is(obj, "polars", "DataFrame"):
@@ -136,7 +140,7 @@ def adapt(obj: object) -> Source:
         return PyArrowDatasetSource(obj)
     message = (
         f"a registered object must export Arrow through __arrow_c_stream__ or __arrow_c_array__, be an Arrow stream "
-        f"capsule, a pyarrow Dataset or Scanner, a polars LazyFrame or a pandas DataFrame; {type(obj).__name__} is "
-        f"none of these"
+        f"capsule, a pyarrow Dataset or Scanner, a polars LazyFrame, a pandas DataFrame, or a numpy array or a dict, "
+        f"list or tuple of them; {type(obj).__name__} is none of these"
     )
     raise TypeError(message)

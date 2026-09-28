@@ -45,20 +45,6 @@ std::string StreamError(ArrowArrayStream &stream) {
 	return text ? text : "no error message";
 }
 
-ArrowArrayStream &StreamOf(nb::handle capsule, const std::string &name) {
-	if (!PyCapsule_IsValid(capsule.ptr(), kStreamCapsule)) {
-		const char *found = PyCapsule_CheckExact(capsule.ptr()) ? PyCapsule_GetName(capsule.ptr()) : nullptr;
-		throw cxx::InvalidInputException("the object registered as '" + name + "' did not export an '" +
-		                                 kStreamCapsule + "' capsule but " +
-		                                 (found ? "a '" + std::string(found) + "' capsule" : "something else"));
-	}
-	auto *stream = static_cast<ArrowArrayStream *>(PyCapsule_GetPointer(capsule.ptr(), kStreamCapsule));
-	if (stream == nullptr || stream->release == nullptr) {
-		throw cxx::InvalidInputException("the stream registered as '" + name + "' is released already");
-	}
-	return *stream;
-}
-
 bool IsBatch(const ArrowSchema &schema) {
 	return schema.format != nullptr && std::strcmp(schema.format, "+s") == 0;
 }
@@ -106,9 +92,7 @@ struct ChainedStream {
 	nb::object schema_source;
 	/// A Python iterator, so a plain exhaustion is `next(parts)` raising StopIteration.
 	nb::object parts;
-	/// Kept alive only while its stream is the one being read; dropped once that part is exhausted.
-	nb::object current_capsule;
-	ArrowArrayStream *current_stream = nullptr;
+	ArrowOwned<ArrowArrayStream> current;
 	std::string last_error;
 };
 
@@ -116,25 +100,16 @@ ChainedStream &PrivateOf(ArrowArrayStream &stream) {
 	return *static_cast<ChainedStream *>(stream.private_data);
 }
 
-/// The stream `object.__arrow_c_stream__()` exports, with the capsule that keeps it alive.
-std::pair<nb::object, ArrowArrayStream *> OpenExport(nb::handle object, const std::string &what) {
-	nb::object capsule = object.attr("__arrow_c_stream__")();
-	if (!PyCapsule_IsValid(capsule.ptr(), kStreamCapsule)) {
-		throw cxx::InvalidInputException(what + " did not export an Arrow stream capsule");
-	}
-	auto &stream = StreamOf(capsule, what);
-	return {std::move(capsule), &stream};
+ArrowOwned<ArrowArrayStream> TakeExport(nb::handle object, const std::string &what) {
+	return TakeFromCapsule<ArrowArrayStream>(object.attr("__arrow_c_stream__")(), kStreamCapsule, what);
 }
 
 /// Reads the schema off a fresh export of the schema source; throws what the export throws.
 int ReadSchema(ChainedStream &chain, ArrowSchema *out) {
-	auto [capsule, stream] = OpenExport(chain.schema_source, "the chained stream's schema source");
-	const int rc = stream->get_schema(stream, out);
+	auto stream = TakeExport(chain.schema_source, "the chained stream's schema source");
+	const int rc = stream.value.get_schema(&stream.value, out);
 	if (rc != 0) {
-		chain.last_error = StreamError(*stream);
-	}
-	if (stream->release != nullptr) {
-		stream->release(stream);
+		chain.last_error = StreamError(stream.value);
 	}
 	return rc;
 }
@@ -142,25 +117,22 @@ int ReadSchema(ChainedStream &chain, ArrowSchema *out) {
 /// The next array: the next of the part being read, or the first of the part after it; throws what a part throws.
 int ReadNext(ChainedStream &chain, ArrowArray *out) {
 	for (;;) {
-		if (chain.current_stream != nullptr) {
+		if (chain.current) {
+			auto &stream = chain.current.value;
 			int rc = 0;
 			{
 				// Reading a part's next array is native work, or takes the GIL itself where it runs Python.
 				nb::gil_scoped_release released;
-				rc = chain.current_stream->get_next(chain.current_stream, out);
+				rc = stream.get_next(&stream, out);
 			}
 			if (rc != 0) {
-				chain.last_error = StreamError(*chain.current_stream);
+				chain.last_error = StreamError(stream);
 				return rc;
 			}
 			if (out->release != nullptr) {
 				return 0;
 			}
-			if (chain.current_stream->release != nullptr) {
-				chain.current_stream->release(chain.current_stream);
-			}
-			chain.current_stream = nullptr;
-			chain.current_capsule = nb::object();
+			chain.current.Release();
 		}
 		// PyIter_Next clears a StopIteration itself, so a null with no error set is the end of the parts.
 		PyObject *raw = PyIter_Next(chain.parts.ptr());
@@ -172,9 +144,7 @@ int ReadNext(ChainedStream &chain, ArrowArray *out) {
 			return 0;
 		}
 		nb::object part = nb::steal(raw);
-		auto [capsule, stream] = OpenExport(part, "a part of the chained stream");
-		chain.current_capsule = std::move(capsule);
-		chain.current_stream = stream;
+		chain.current = TakeExport(part, "a part of the chained stream");
 	}
 }
 
@@ -214,15 +184,7 @@ const char *ChainGetLastError(ArrowArrayStream *self) {
 
 void ChainRelease(ArrowArrayStream *self) {
 	nb::gil_scoped_acquire gil;
-	auto *chain = static_cast<ChainedStream *>(self->private_data);
-	if (chain->current_stream != nullptr && chain->current_stream->release != nullptr) {
-		try {
-			chain->current_stream->release(chain->current_stream);
-		} catch (...) {
-			// A part whose release throws is broken; leaking it beats terminating from a noexcept destructor.
-		}
-	}
-	delete chain;
+	delete static_cast<ChainedStream *>(self->private_data);
 	self->private_data = nullptr;
 	self->get_schema = nullptr;
 	self->get_next = nullptr;

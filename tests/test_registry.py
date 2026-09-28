@@ -81,9 +81,9 @@ class TestClassification:
         assert _duckdb.capsule_name(numbers) is None
 
     def test_anything_else_is_refused(self) -> None:
-        with pytest.raises(TypeError, match=r"__arrow_c_stream__.*list is none of these"):
+        with pytest.raises(TypeError, match="the value at position 0 is a int, not a numpy array"):
             adapt([1, 2, 3])
-        with pytest.raises(TypeError, match="object is none of these"):
+        with pytest.raises(TypeError, match=r"__arrow_c_stream__.*object is none of these"):
             adapt(object())
 
     def test_a_schema_alone_is_not_a_dataset(self) -> None:
@@ -153,6 +153,8 @@ class TestResolution:
 
     def test_an_object_without_a_stream_is_refused(self, con: duckdb.frame.Connection) -> None:
         with pytest.raises(TypeError, match="__arrow_c_stream__"):
+            con.register("t", object())
+        with pytest.raises(TypeError, match="the value at key 'a' is a list, not a numpy array"):
             con.register("t", {"a": [1]})
 
     def test_a_closed_connection_refuses(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
@@ -289,7 +291,7 @@ class TestDbapi:
 
     def test_an_object_without_a_stream_is_refused_at_register(self) -> None:
         con = dbapi.connect()
-        with pytest.raises(TypeError, match="dict is none of these"):
+        with pytest.raises(TypeError, match="the value at key 'a' is a list, not a numpy array"):
             con.register("t", {"a": [1]})
         with pytest.raises(exceptions.CatalogError):
             con.cursor().execute("SELECT * FROM t")
@@ -511,6 +513,192 @@ class TestChainedStream:
             exceptions.InvalidInputError, match=r"registered as 'chained' failed: ValueError: boom in the third part"
         ):
             rows(con, "SELECT * FROM chained")
+
+
+class Streaming(Source):
+    """A source exporting a fresh generator-backed stream per call, keeping a weak reference to each generator.
+
+    pyarrow frees a stream's generator when the stream is released, so a dead reference means a released stream.
+    """
+
+    def __init__(
+        self,
+        schema: pa.Schema,
+        *,
+        declared: pa.Schema | None = None,
+        fail_at: int | None = None,
+        peeked: bool = False,
+    ) -> None:
+        super().__init__(None)
+        self.schema = schema
+        self.declared = declared or schema
+        self.fail_at = fail_at
+        self.generators: list[weakref.ref[object]] = []
+        if not peeked:
+            self.__dict__["__arrow_c_schema__"] = self.declared.__arrow_c_schema__
+
+    def stream(self, columns: Sequence[int] | None, filters: Sequence[object]) -> tuple[object, bool]:
+        def batches() -> Iterator[pa.RecordBatch]:
+            for index in range(3):
+                if index == self.fail_at:
+                    message = f"boom in batch {index}"
+                    raise ValueError(message)
+                yield pa.record_batch([pa.array([index] * 5, self.schema.field(0).type)], schema=self.schema)
+
+        generator = batches()
+        self.generators.append(weakref.ref(generator))
+        return pa.RecordBatchReader.from_batches(self.schema, generator).__arrow_c_stream__(), False
+
+    def all_released(self) -> bool:
+        gc.collect()
+        return bool(self.generators) and all(ref() is None for ref in self.generators)
+
+
+class OneArray(Source):
+    """A source handing over one freshly allocated pyarrow array per call through `__arrow_c_array__`."""
+
+    def __init__(self, name: str = "value") -> None:
+        super().__init__(None)
+        self.name = name
+
+    def __arrow_c_schema__(self) -> object:
+        return pa.schema([("value", pa.int64())]).__arrow_c_schema__()
+
+    def stream(self, columns: Sequence[int] | None, filters: Sequence[object]) -> tuple[object, bool]:
+        values = pc.add(pa.array(range(100_000), pa.int64()), 1)
+        return pa.RecordBatch.from_arrays([values], names=[self.name]).__arrow_c_array__(), False
+
+
+class TestArrowRelease:
+    """Every schema, array and stream a scan takes from a source is released once, whether the query succeeds or not."""
+
+    NUMBERS = pa.schema([("n", pa.int64())])
+
+    def test_a_stream_read_to_the_end_is_released(self, con: duckdb.frame.Connection) -> None:
+        source = Streaming(self.NUMBERS)
+        con.register("t", source)
+        assert rows(con, "SELECT count(*), sum(n) FROM t") == [(15, 15)]
+        assert source.all_released()
+
+    def test_a_stream_the_query_stops_reading_early_is_released(self, con: duckdb.frame.Connection) -> None:
+        # pyarrow frees an exhausted stream's generator on its own, so only an unfinished read shows the release.
+        source = Streaming(self.NUMBERS)
+        con.register("t", source)
+        assert rows(con, "SELECT n FROM t LIMIT 1") == [(0,)]
+        assert source.all_released()
+
+    def test_a_stream_that_fails_while_read_is_released(self, con: duckdb.frame.Connection) -> None:
+        source = Streaming(self.NUMBERS, fail_at=1)
+        con.register("t", source)
+        with pytest.raises(exceptions.InvalidInputError, match="boom in batch 1"):
+            rows(con, "SELECT * FROM t")
+        assert source.all_released()
+
+    def test_a_stream_refused_when_the_scan_opens_is_released(self, con: duckdb.frame.Connection) -> None:
+        source = Streaming(pa.schema([("m", pa.int64())]), declared=self.NUMBERS)
+        con.register("t", source)
+        with pytest.raises(exceptions.InvalidInputError, match="answered with column 'm' at position 0 where 'n'"):
+            rows(con, "SELECT * FROM t")
+        assert source.all_released()
+
+    def test_a_kept_stream_refused_before_a_row_is_read_is_still_there_for_the_next_query(
+        self, con: duckdb.frame.Connection
+    ) -> None:
+        data = pa.table({"n": [1, 2, 3]})
+
+        class Kept(Source):
+            """A read-once source that hands over the same stored stream every time."""
+
+            one_shot = True
+            declared = pa.schema([("wrong", pa.int64())])
+
+            def __arrow_c_schema__(self) -> object:
+                return self.declared.__arrow_c_schema__()
+
+            def stream(self, columns: Sequence[int] | None, filters: Sequence[object]) -> tuple[object, bool]:
+                return self.obj, False
+
+        source = Kept(data.__arrow_c_stream__())
+        con.register("s", source)
+        with pytest.raises(exceptions.InvalidInputError, match="answered with column 'n' at position 0 where 'wrong'"):
+            rows(con, "SELECT * FROM s")
+        source.declared = data.schema
+        assert rows(con, "SELECT * FROM s") == [(1,), (2,), (3,)]
+        with pytest.raises(exceptions.InvalidInputError, match="has been read already"):
+            rows(con, "SELECT * FROM s")
+
+    def test_a_stream_only_peeked_for_its_schema_is_released(self, con: duckdb.frame.Connection) -> None:
+        source = Streaming(self.NUMBERS, peeked=True)
+        con.register("t", source)
+        assert table("t").schema(con) == [("n", "BIGINT")]
+        assert source.all_released()
+        assert rows(con, "SELECT sum(n) FROM t") == [(15,)]
+        assert source.all_released()
+
+    def test_a_schema_the_engine_cannot_import_releases_its_stream(self, con: duckdb.frame.Connection) -> None:
+        source = Streaming(pa.schema([("h", pa.float16())]), peeked=True)
+        con.register("t", source)
+        with pytest.raises(exceptions.NotSupportedError, match="Unsupported Internal Arrow Type"):
+            rows(con, "SELECT * FROM t")
+        assert source.all_released()
+
+    def test_a_chained_stream_failing_in_a_later_part_releases_every_part(self, con: duckdb.frame.Connection) -> None:
+        good = pa.table({"n": [1, 2]})
+        generators: list[weakref.ref[object]] = []
+
+        class Chained(Source):
+            def __arrow_c_schema__(self) -> object:
+                return good.schema.__arrow_c_schema__()
+
+            def stream(self, columns: Sequence[int] | None, filters: Sequence[object]) -> tuple[object, bool]:
+                def parts() -> Iterator[object]:
+                    yield good
+                    yield FailingExport("boom in the second part")
+
+                generator = parts()
+                generators.append(weakref.ref(generator))
+                return _duckdb.chain_streams(good, generator), False
+
+        con.register("t", Chained(None))
+        with pytest.raises(exceptions.InvalidInputError, match="boom in the second part"):
+            rows(con, "SELECT * FROM t")
+        gc.collect()
+        assert generators
+        assert all(ref() is None for ref in generators)
+
+    def test_an_array_capsule_released_already_is_refused_after_its_schema_was_taken(
+        self, con: duckdb.frame.Connection
+    ) -> None:
+        values = pa.array([1, 2, 3])
+
+        class HalfReleased(Source):
+            def __arrow_c_schema__(self) -> object:
+                return pa.schema([("value", pa.int64())]).__arrow_c_schema__()
+
+            def stream(self, columns: Sequence[int] | None, filters: Sequence[object]) -> tuple[object, bool]:
+                schema, array = values.__arrow_c_array__()
+                other_schema, _ = values.__arrow_c_array__()
+                pa.Array._import_from_c_capsule(other_schema, array)
+                return (schema, array), False
+
+        con.register("t", HalfReleased(None))
+        with pytest.raises(exceptions.InvalidInputError, match="'arrow_array' capsule of the object registered as 't'"):
+            rows(con, "SELECT * FROM t")
+        assert rows(con, "SELECT 42") == [(42,)]
+
+    @pytest.mark.parametrize("refused", [False, True])
+    def test_a_single_array_is_released(self, con: duckdb.frame.Connection, refused: bool) -> None:
+        con.register("t", OneArray("other" if refused else "value"))
+        gc.collect()
+        before = pa.total_allocated_bytes()
+        for _ in range(3):
+            if refused:
+                with pytest.raises(exceptions.InvalidInputError, match="answered with column 'other'"):
+                    rows(con, "SELECT * FROM t")
+            else:
+                assert rows(con, "SELECT count(*), max(value) FROM t") == [(100_000, 100_000)]
+        gc.collect()
+        assert pa.total_allocated_bytes() == before
 
 
 class Recording(Source):

@@ -1,32 +1,29 @@
 """The pandas source: read natively off its own buffers, or through pyarrow a slice at a time.
 
 A pandas DataFrame whose columns are all numpy- or Python-object-backed is read natively: `describe()` names its
-columns and their engine types for `numpy_scan.cpp`'s bind, and `columns()` answers each requested column as a
-kind, an engine type, a data array and a mask array or None, straight off the DataFrame's own buffers. A DataFrame
+columns and their engine types for `numpy_scan.cpp`'s bind, and `columns()` answers each requested column as an
+encoding, an engine type, a data array and a mask array or None, straight off the DataFrame's own buffers. A DataFrame
 with a pyarrow-backed column (an `ArrowExtensionArray`, which includes `ArrowStringArray`, the default for strings
 when pyarrow is installed) is read through pyarrow instead, converted a slice of rows at a time so the DataFrame is
-never copied whole. Either way, an object column's engine type is judged from a sample of its values spread evenly
-over the column, classified in `numpy.py`: the sample unifies under one family there for a typed reading, or falls
-back to text.
+never copied whole. Either way, an object column's engine type is judged from the same sample of its values spread
+evenly over the column, classified in `numpy.py`: the sample unifies under one family there for a typed reading, or
+falls back to text, which both paths then apply to every value alike.
 """
 
 from __future__ import annotations
 
+from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
 from . import Source, _unique_names
 from .numpy import (
-    _NAIVE_TIMESTAMP_TYPES,
     SAMPLE_ROWS,
-    ColumnPlan,
+    ColumnReading,
+    ScanColumn,
+    _array_reading,
     _classify_sample,
-    _fixed_type_text,
-    _float_plan,
-    _interval_plan,
     _missing,
-    _naive_timestamp_plan,
-    _object_kind,
-    _object_plan,
+    _object_sample,
     _significant_values,
     _stride,
 )
@@ -59,17 +56,23 @@ class PandasSource(Source):
 
     def __init__(self, obj: object) -> None:
         super().__init__(obj)
-        try:
-            import pyarrow
-        except ImportError:
-            pyarrow = None
         self.native = _is_native_pandas_frame(obj)
-        if not self.native and pyarrow is None:
-            message = (
-                "registering a pandas DataFrame with a pyarrow-backed column needs pyarrow, which converts it to Arrow"
-            )
-            raise TypeError(message)
-        self.pyarrow = pyarrow
+        if not self.native:
+            try:
+                self.pyarrow  # noqa: B018
+            except ImportError as error:
+                message = (
+                    "registering a pandas DataFrame with a pyarrow-backed column needs pyarrow, which converts it to "
+                    "Arrow"
+                )
+                raise TypeError(message) from error
+
+    @cached_property
+    def pyarrow(self) -> Any:  # noqa: ANN401
+        """pyarrow, imported only once the Arrow path is taken."""
+        import pyarrow
+
+        return pyarrow
 
     def _named(self, columns: Sequence[int] | None) -> DataFrame:
         """The DataFrame as it is now, or the requested columns of it, under the text names; a view sharing its data."""
@@ -79,50 +82,58 @@ class PandasSource(Source):
         return frame.set_axis(chosen, axis=1)
 
     def describe(self) -> list[tuple[str, str]]:
-        """Column names and engine types, for the native scan's bind."""
+        """Column names and engine types, which a query is bound against."""
         frame = self._named(None)
-        return [(name, _column_kind(frame[name])[1]) for name in frame.columns]
+        return [(name, _column_reading(name, frame[name]).type_text) for name in frame.columns]
 
     def columns(self, columns: Sequence[int] | None) -> list[tuple[str, str, str, object, object | None]]:
-        """For the requested columns (all when None): name, kind, engine type, data array, mask array or None."""
+        """The name and `ScanColumn` of each requested column, all of them when None."""
         frame = self._named(columns)
-        return [(name, *_column_plan(frame[name])) for name in frame.columns]
+        return [(name, *_column_reading(name, frame[name]).prepare()) for name in frame.columns]
 
-    def _schema(self, frame: DataFrame) -> tuple[Schema, set[str]]:
-        """The Arrow schema of a sample of the DataFrame `frame`, and the object columns read through `str()`."""
-        sample = _row_sample(frame, SAMPLE_ROWS)
-        forced = self._text_conversions(sample)
-        if forced:
-            sample = sample.assign(**{name: _stringified(sample[name]) for name in forced})
-        return self.pyarrow.Schema.from_pandas(sample, preserve_index=False), forced
+    def _schema(self, frame: DataFrame) -> tuple[Schema, dict[str, str]]:
+        """The Arrow schema of the DataFrame `frame`, and which columns convert as `"text"` or checked `"exact"`.
 
-    def _text_conversions(self, sample: DataFrame) -> set[str]:
-        """Object columns of `sample` the classifier reads as text from something other than strings alone.
-
-        A sample that is empty or holds only strings is left for pyarrow's own inference, which already reads it
-        as a string array; every other text-classified sample mixes values pyarrow cannot build one array from, so
-        it is run through `str()` instead, on this sample and on every later slice of the same column.
+        A column of Python objects is classified from the numpy scan's own sample, so both transports read it alike.
         """
-        forced = set()
-        for name, dtype in sample.dtypes.items():
-            if dtype.kind != "O":
-                continue
-            values = sample[name].tolist()
-            kind, _ = _classify_sample(values)
-            if kind == "text" and _needs_text_conversion(values):
-                forced.add(str(name))
-        return forced
+        import numpy as np
+        import pandas as pd
 
-    def _batches(self, frame: DataFrame, schema: Schema, forced: set[str]) -> Iterator[RecordBatch]:
-        loose = [str(name) for name, dtype in frame.dtypes.items() if dtype.kind == "O" and name not in forced]
+        pa = self.pyarrow
+        sample = _row_sample(frame, SAMPLE_ROWS)
+        rules: dict[str, str] = {}
+        fields: dict[str, object] = {}
+        for name, dtype in frame.dtypes.items():
+            label = str(name)
+            if isinstance(dtype, np.dtype) and dtype.kind == "O":
+                values = _object_sample(_backing_array(frame[label]), _pandas_first_valid_position)
+                if _classify_sample(values)[0] == "text":
+                    rules[label], fields[label] = "text", pa.string()
+                else:
+                    typed = [v for v in values if not _missing(v)]
+                    rules[label], fields[label] = "exact", pa.array(typed, from_pandas=True).type
+            elif isinstance(dtype, pd.CategoricalDtype):
+                values = sample[label].tolist()
+                if _classify_sample(values)[0] == "text" and _needs_text_conversion(values):
+                    rules[label], fields[label] = "text", pa.string()
+                else:
+                    rules[label] = "exact"
+        inferred = pa.Schema.from_pandas(sample.drop(columns=list(fields)), preserve_index=False)
+        names = [str(name) for name in frame.columns]
+        schema = pa.schema([pa.field(n, fields[n]) if n in fields else inferred.field(n) for n in names])
+        return schema, rules
+
+    def _batches(self, frame: DataFrame, schema: Schema, rules: dict[str, str]) -> Iterator[RecordBatch]:
+        text = [name for name, rule in rules.items() if rule == "text"]
+        exact = [name for name, rule in rules.items() if rule == "exact"]
         for start in range(0, len(frame), self.SLICE_ROWS):
             part = frame.iloc[start : start + self.SLICE_ROWS]
-            if forced:
-                part = part.assign(**{name: _stringified(part[name]) for name in forced})
-            if loose:
-                part = part.assign(**{name: _nulled(part[name]) for name in loose})
+            if rules:
+                converted_columns = {name: _as_text(part[name]) for name in text}
+                converted_columns.update({name: _nulled(part[name]) for name in exact})
+                part = part.assign(**converted_columns)
             converted = self.pyarrow.Table.from_pandas(part, schema=schema, preserve_index=False)
-            for name in loose:
+            for name in exact:
                 self._check_exact(part, name, converted, schema, start)
             yield from converted.to_batches()
 
@@ -133,11 +144,13 @@ class PandasSource(Source):
         slice can lose as much, so the slice's own typing is cast to the sampled type with the cast that refuses
         loss, and the two readings must agree.
         """
-        kind = schema.field(name).type
-        message = f"column '{name}' holds a value after row {start} that its sampled type {kind} cannot hold exactly"
+        arrow_type = schema.field(name).type
+        message = (
+            f"column '{name}' holds a value after row {start} that its sampled type {arrow_type} cannot hold exactly"
+        )
         natural = self.pyarrow.array(part[name], from_pandas=True)
         try:
-            checked = natural.cast(kind)
+            checked = natural.cast(arrow_type)
         except self.pyarrow.ArrowException as error:
             detail = f"{message}: {error}"
             raise ValueError(detail) from None
@@ -152,8 +165,8 @@ class PandasSource(Source):
 
     def stream(self, columns: Sequence[int] | None, filters: Sequence[Expr]) -> tuple[object, bool]:
         frame = self._named(columns)
-        schema, forced = self._schema(frame)
-        reader = self.pyarrow.RecordBatchReader.from_batches(schema, self._batches(frame, schema, forced))
+        schema, rules = self._schema(frame)
+        reader = self.pyarrow.RecordBatchReader.from_batches(schema, self._batches(frame, schema, rules))
         return reader.__arrow_c_stream__(), columns is not None
 
 
@@ -168,13 +181,13 @@ def _is_native_pandas_frame(obj: DataFrame) -> bool:
         message = f"registering as a pandas DataFrame needs a pandas DataFrame, not {type(obj).__name__}"
         raise TypeError(message)
 
-    string_kind = getattr(pd.arrays, "ArrowStringArray", None)
+    string_array = getattr(pd.arrays, "ArrowStringArray", None)
     # A DataFrame's .values is the whole block as one array, not a per-column iterator like a dict's.
     for _, column in obj.items():  # noqa: PERF102
         array = column.array
         if isinstance(array, pd.arrays.ArrowExtensionArray):
             return False
-        if string_kind is not None and isinstance(array, string_kind):
+        if string_array is not None and isinstance(array, string_array):
             return False
     return True
 
@@ -186,7 +199,17 @@ def _row_sample(frame: DataFrame, sample_rows: int) -> DataFrame:
 
 def _stringified(series: pd.Series) -> pd.Series:
     """`series` with every non-null value replaced by its text, so pyarrow can hold the column as VARCHAR."""
-    return series.map(lambda value: None if _missing(value) else str(value))
+    return series.map(lambda value: None if _missing(value) else value if isinstance(value, str) else str(value))
+
+
+def _as_text(series: pd.Series) -> pd.Series:
+    """`series` under the numpy scan's text rule: strings as they are, missing markers None, anything else `str()`."""
+    from pandas.api.types import infer_dtype
+
+    if infer_dtype(series, skipna=True) in ("string", "empty"):
+        # Strings and missing markers only; the markers become None first, since pyarrow refuses a float32 NaN.
+        return _nulled(series)
+    return _stringified(series)
 
 
 def _nulled(series: pd.Series) -> pd.Series:
@@ -210,84 +233,48 @@ def _sql_quote(text: str) -> str:
     return "'" + text.replace("'", "''") + "'"
 
 
-def _column_kind(series: pd.Series) -> tuple[str, str]:
-    """The kind and engine type text `describe()` reports for `series`, without materializing its data."""
-    import numpy as np
+def _column_reading(name: str, series: pd.Series) -> ColumnReading:
+    """How the numpy scan reads one pandas column.
+
+    pandas' categorical and time zone dtypes and its nullable arrays, which pair a data array with a mask, are read
+    here; every other column is read as the numpy array holding its values, as the numpy source reads an array.
+    """
     import pandas as pd
 
     dtype = series.dtype
-    if isinstance(dtype, pd.CategoricalDtype):
-        if all(isinstance(c, str) for c in dtype.categories):
-            return "enum", _enum_type_text(dtype.categories)
-        return _classify_sample(_used_categories(series))
-    if isinstance(dtype, pd.DatetimeTZDtype):
-        return f"timestamp:{dtype.unit}", "TIMESTAMP WITH TIME ZONE"
-    array = series.array
-    if hasattr(array, "_data") and hasattr(array, "_mask"):
-        return "fixed", _fixed_type_text(array._data.dtype)
-    if isinstance(dtype, np.dtype):
-        if dtype.kind == "M":
-            return "timestamp", _NAIVE_TIMESTAMP_TYPES[np.datetime_data(dtype)[0]]
-        if dtype.kind == "m":
-            return f"interval:{np.datetime_data(dtype)[0]}", "INTERVAL"
-        if dtype.kind in "biuf":
-            return "fixed", _fixed_type_text(dtype)
-    return _object_kind(_backing_array(series), _pandas_first_valid_position)
-
-
-def _column_plan(series: pd.Series) -> ColumnPlan:
-    """kind, engine type text, data array, mask array or None: the native reading of one pandas column."""
-    import numpy as np
-    import pandas as pd
-
-    dtype = series.dtype
-    array = series.array
     if isinstance(dtype, pd.CategoricalDtype):
         categories = dtype.categories
         if all(isinstance(c, str) for c in categories):
-            return _enum_plan(series, categories)
-        kind, type_text = _classify_sample(_used_categories(series))
-        return ColumnPlan(kind, type_text, _backing_array(series.astype(object)), None)
+            type_text = _enum_type_text(categories)
+            return ColumnReading(type_text, lambda: ScanColumn("enum", type_text, series.cat.codes.to_numpy(), None))
+        encoding, type_text = _classify_sample(_used_categories(series))
+        return ColumnReading(
+            type_text, lambda: ScanColumn(encoding, type_text, _backing_array(series.astype(object)), None)
+        )
     if isinstance(dtype, pd.DatetimeTZDtype):
-        return _aware_timestamp_plan(series, dtype)
+        type_text = "TIMESTAMP WITH TIME ZONE"
+        return ColumnReading(
+            type_text, lambda: ScanColumn(f"timestamp:{dtype.unit}", type_text, _utc_counts(series), None)
+        )
+    array = series.array
     if hasattr(array, "_data") and hasattr(array, "_mask"):
-        return _masked_plan(array)
-    if isinstance(dtype, np.dtype):
-        if dtype.kind == "M":
-            raw = _backing_array(series)
-            return _naive_timestamp_plan(raw, dtype)
-        if dtype.kind == "m":
-            raw = _backing_array(series)
-            return _interval_plan(raw, dtype)
-        if dtype.kind in "biu":
-            return ColumnPlan("fixed", _fixed_type_text(dtype), series.to_numpy(copy=False), None)
-        if dtype.kind == "f":
-            return _float_plan(series.to_numpy(copy=False), dtype)
-    return _object_plan(_backing_array(series), _pandas_first_valid_position)
+        return _array_reading(name, array._data, array._mask)
+    return _array_reading(name, _backing_array(series), None, _pandas_first_valid_position)
 
 
-def _masked_plan(array: object) -> ColumnPlan:
-    data = getattr(array, "_data")  # noqa: B009
-    mask = getattr(array, "_mask")  # noqa: B009
-    return ColumnPlan("fixed", _fixed_type_text(data.dtype), data, mask)
-
-
-def _aware_timestamp_plan(series: pd.Series, dtype: pd.DatetimeTZDtype) -> ColumnPlan:
+def _utc_counts(series: pd.Series) -> np.ndarray[Any, Any]:
+    """A time zone aware series as int64 counts since the epoch in UTC, in the series' own unit."""
     import numpy as np
 
     array = series.array
     if str(array.tz) != "UTC":
         array = array.tz_convert("UTC")
-    return ColumnPlan(f"timestamp:{dtype.unit}", "TIMESTAMP WITH TIME ZONE", array._ndarray.view(np.int64), None)
+    counts: np.ndarray[Any, Any] = array._ndarray.view(np.int64)
+    return counts
 
 
 def _enum_type_text(categories: Sequence[str]) -> str:
     return "ENUM(" + ", ".join(_sql_quote(str(c)) for c in categories) + ")"
-
-
-def _enum_plan(series: pd.Series, categories: Sequence[str]) -> ColumnPlan:
-    codes = series.cat.codes.to_numpy()
-    return ColumnPlan("enum", _enum_type_text(categories), codes, None)
 
 
 def _pandas_first_valid_position(data: np.ndarray[Any, Any]) -> int | None:
