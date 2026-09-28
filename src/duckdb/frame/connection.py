@@ -218,11 +218,12 @@ class Connection:
     def register(self, name: str, obj: object) -> None:
         """Make a Python object readable as the table `name`, on every connection to this database.
 
-        Accepted: anything exporting an Arrow stream (a pyarrow Table or RecordBatch, a polars DataFrame), a pyarrow
-        Dataset or Scanner, a polars LazyFrame, a pandas DataFrame (its index left out), a RecordBatchReader, or an
-        Arrow stream capsule. A reader or a capsule is a stream, read once; register it again to read it again.
-        Everything else is read as often as it is queried, a LazyFrame by collecting it per query. Registering a name
-        again replaces the earlier object, and a real table of that name takes precedence.
+        Accepted: anything exporting an Arrow stream or array (a pyarrow Table, RecordBatch or Array, a polars
+        DataFrame or Series, a pandas Series), a pyarrow Dataset or Scanner, a polars LazyFrame, a pandas DataFrame
+        (its index left out), a numpy array or a dict, list or tuple of one-dimensional numpy arrays, a
+        RecordBatchReader, or an Arrow stream capsule. A reader or a capsule is a stream, read once; register it again
+        to read it again. Everything else is read as often as it is queried, a LazyFrame by collecting it per query.
+        Registering a name again replaces the earlier object, and a real table of that name takes precedence.
         """
         if not isinstance(name, str):
             message = f"a registered name is a string, not {name!r}"  # type: ignore[unreachable]
