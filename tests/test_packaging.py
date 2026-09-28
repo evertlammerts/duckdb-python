@@ -26,7 +26,12 @@ def test_engine_ships_beside_the_extension() -> None:
 @pytest.mark.skipif(sys.version_info < (3, 12), reason="nanobind has no stable ABI below 3.12")
 def test_extension_is_built_against_the_stable_abi() -> None:
     # A stable-ABI build silently does nothing without CMake's SABIModule, so only the file name is honest.
-    assert ".abi3." in Path(duckdb._duckdb.__file__).name
+    name = Path(duckdb._duckdb.__file__).name
+    if sys.platform == "win32":
+        # Windows has no stable-ABI suffix: there the stable-ABI name is the one without the interpreter's tag.
+        assert name == "_duckdb.pyd"
+    else:
+        assert ".abi3." in name
 
 
 @pytest.mark.skipif(sys.version_info >= (3, 12), reason="3.12 and up build against the stable ABI")

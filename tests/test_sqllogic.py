@@ -106,8 +106,9 @@ def test_the_runner_prints_a_value_as_the_engine_does(expression: str) -> None:
 
 def test_placeholders_resolve_as_the_engines_runner_resolves_them(tmp_path: Path) -> None:
     text = "COPY t TO '{TEST_DIR}/a.csv'; FROM '__TEST_DIR__/b'; FROM '__WORKING_DIRECTORY__/data'; {BASE_TEST_NAME}"
-    resolved = placeholders(text, tmp_path, Path("/checkout"), "join/x.test")
-    assert resolved == (f"COPY t TO '{tmp_path}/a.csv'; FROM '{tmp_path}/b'; FROM '/checkout/data'; join_x.test")
+    checkout = Path("/checkout")
+    resolved = placeholders(text, tmp_path, checkout, "join/x.test")
+    assert resolved == (f"COPY t TO '{tmp_path}/a.csv'; FROM '{tmp_path}/b'; FROM '{checkout}/data'; join_x.test")
     assert placeholders("{UUID}", tmp_path, Path("/c"), "t") != placeholders("{UUID}", tmp_path, Path("/c"), "t")
 
 
