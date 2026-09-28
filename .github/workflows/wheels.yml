@@ -40,19 +40,23 @@ jobs:
           # No free-threaded CPython for Windows on ARM64, and uv quietly installs the x86_64 build instead.
           - target: windows-arm64
             flavor: ft314
+        # suite: the interpreters the test suite runs on; the stable-ABI wheel on the oldest and newest it serves.
+        # omit: test dependencies with no build there; the tests needing them skip.
         include:
           - { target: windows-amd64,  runner: windows-2022,     container: "" }
-          - { target: windows-arm64,  runner: windows-11-arm,   container: "" }
+          - { target: windows-arm64,  runner: windows-11-arm,   container: "", omit: pyarrow }
           - { target: linux-x86_64,   runner: ubuntu-24.04,     container: "quay.io/pypa/manylinux_2_28_x86_64",  plat: manylinux_2_28_x86_64 }
           - { target: linux-aarch64,  runner: ubuntu-24.04-arm, container: "quay.io/pypa/manylinux_2_28_aarch64", plat: manylinux_2_28_aarch64 }
           - { target: macos-arm64,    runner: macos-15,         container: "" }
           - { target: macos-x86_64,   runner: macos-15-intel,   container: "" }
-          - { flavor: cp311, python: "3.11" }
-          - { flavor: abi3,  python: "3.12" }
-          - { flavor: ft314, python: "3.14t" }
+          - { flavor: cp311, python: "3.11",  suite: "3.11" }
+          - { flavor: abi3,  python: "3.12",  suite: "3.12 3.14" }
+          - { flavor: ft314, python: "3.14t", suite: "3.14t", omit: "polars polars-runtime-32" }
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.container }}
     name: ${{ matrix.target }} / ${{ matrix.flavor }}
+    # A hung test would otherwise hold the runner for GitHub's six-hour default.
+    timeout-minutes: 30
     env:
       # Without the architecture, uv on Windows on ARM64 installs an x86_64 CPython when the runner has no native one.
       PYTHON_REQUEST: ${{ matrix.target == 'windows-arm64' && format('cpython-{0}-windows-aarch64', matrix.python) || matrix.python }}
@@ -198,13 +202,40 @@ jobs:
           name: wheel-${{ matrix.target }}-${{ matrix.flavor }}
           path: dist/*.whl
 
+      - name: The test suite against the wheel
+        # After the upload, so a wheel that fails here can still be downloaded to reproduce it.
+        env:
+          OMIT: ${{ matrix.omit }}
+          SUITE: ${{ matrix.suite }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          whl=$(ls "$PWD"/dist/*.whl)
+          omit=()
+          for package in $OMIT; do omit+=(--no-emit-package "$package"); done
+          uv export --only-group test --no-emit-project --no-hashes "${omit[@]}" -o "$RUNNER_TEMP/test-requirements.txt"
+          failed=""
+          for v in $SUITE; do
+            request=$v
+            # Same reason as PYTHON_REQUEST above.
+            if [ "$TARGET" = windows-arm64 ]; then request="cpython-$v-windows-aarch64"; fi
+            uv venv --python "$request" "$RUNNER_TEMP/suite$v"
+            PY="$RUNNER_TEMP/suite$v/bin/python"
+            [ -x "$PY" ] || PY="$RUNNER_TEMP/suite$v/Scripts/python.exe"
+            # Wheels only: a source build of a missing dependency would fail late and obscurely, or take an hour.
+            VIRTUAL_ENV="$RUNNER_TEMP/suite$v" uv pip install --only-binary :all: -r "$RUNNER_TEMP/test-requirements.txt" "$whl"
+            # Run from elsewhere so the source tree cannot shadow the install.
+            # Every interpreter runs even after a failure, so one CI run shows all that fail.
+            (cd "$RUNNER_TEMP" && "$PY" -m pytest "$GITHUB_WORKSPACE/tests") || failed="$failed $v"
+          done
+          if [ -n "$failed" ]; then echo "the suite failed on:$failed"; exit 1; fi
+
   test:
-    name: Types and tests / ${{ matrix.python }}
+    name: Types and generated files / ${{ matrix.python }}
     needs: engine
     strategy:
       fail-fast: false
       matrix:
-        # 3.11 has its own extension build, so the suite runs there as well.
+        # mypy reads the stubs of the installed libraries, and 3.11 installs an older numpy than 3.12 does.
         python: ["3.11", "3.12"]
     runs-on: ubuntu-24.04
     container: quay.io/pypa/manylinux_2_28_x86_64
@@ -226,7 +257,6 @@ jobs:
 
       # mypy needs the built extension: the stub is checked against it, not accepted in its place.
       - run: uv run --no-sync mypy
-      - run: uv run --no-sync pytest
       # These files are read from DuckDB's catalog, so a stale one would advertise functions it does not have.
       - name: Generated files match the generators
         run: |

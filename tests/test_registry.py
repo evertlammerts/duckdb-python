@@ -12,10 +12,14 @@ import uuid
 import weakref
 from typing import TYPE_CHECKING
 
+import pytest
+
+# pyarrow publishes no build for Windows on ARM64, and nearly every test here builds its data with it.
+pytest.importorskip("pyarrow")
+
 import pandas as pd
 import pyarrow as pa
 import pyarrow.compute as pc
-import pytest
 
 import duckdb
 from duckdb import _duckdb, dbapi, exceptions

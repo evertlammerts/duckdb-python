@@ -27,15 +27,18 @@ build = [
 ]
 # numpy is what the egress tests need; pyarrow, polars and pandas are what the registry tests need. The package itself
 # depends on nothing: it imports pyarrow only when a pandas DataFrame is registered, and polars and pandas never.
-dev = [
+test = [
     "pytest>=8",
-    "pytest-cov>=5",
-    "ruff>=0.6",
-    "mypy>=1.11",
     "numpy",
     "pyarrow",
     "polars",
     "pandas",
+]
+dev = [
+    { include-group = "test" },
+    "pytest-cov>=5",
+    "ruff>=0.6",
+    "mypy>=1.11",
 ]
 # The benchmark harness; CI installs the frozen pins in benchmarks/requirements-bench.txt, so keep both in step.
 bench = [
@@ -51,6 +54,7 @@ addopts = "-ra --verbose --strict-markers --strict-config -m 'not corpus'"
 filterwarnings = ["error"]
 markers = [
     "freethreaded: only meaningful on a free-threaded interpreter",
+    "requires(*modules): needs libraries that some platforms have no build of",
     "corpus: runs the engine's sqllogictest corpus; needs a duckdb checkout and a minute (pytest -m corpus)",
 ]
 
