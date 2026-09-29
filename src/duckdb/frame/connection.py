@@ -93,10 +93,12 @@ class Connection:
         return live
 
     def _engine(self) -> _duckdb.Connection:
-        if self._raw is None:
+        # Read once: close() may run in another thread between a check and a second read.
+        raw = self._raw
+        if raw is None:
             message = "connection is closed"
             raise InterfaceError(message)
-        return self._raw
+        return raw
 
     def run(self, sql: str, parameters: Sequence[Any] | Mapping[str, Any] | None = None) -> int:
         """Run a statement and report how many rows it changed; use `sql()` for statements that produce rows."""
@@ -242,10 +244,11 @@ class Connection:
 
     def duplicate(self) -> Connection:
         """A second connection to the same database, with its own transaction; a subclass duplicates as itself."""
-        if self._database is None:
+        database = self._database
+        if database is None:
             message = "connection is closed"
             raise InterfaceError(message)
-        return type(self)(self._database, self._catalog)
+        return type(self)(database, self._catalog)
 
     def close(self) -> None:
         """Close the connection and release the database. Idempotent, and results still being read are closed too."""
