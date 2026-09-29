@@ -298,3 +298,87 @@ jobs:
           SO=$(find build -name '_duckdb*.so' | head -1)
           uv run --no-sync python scripts/seam_coverage.py "$RUNNER_TEMP/profraw" "$SO" \
             --min-lines 90 | tee "$GITHUB_STEP_SUMMARY"
+
+  sanitizers:
+    name: Sanitizers / ${{ matrix.target }}
+    needs: engine
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux-x86_64,  runner: ubuntu-24.04 }
+          - { target: linux-aarch64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: engine-${{ matrix.target }}
+          path: engine-bundle
+
+      # Only the extension is instrumented; the engine is the release bundle the wheels ship.
+      - uses: ./.github/actions/engine-bundle
+        with:
+          extra-defines: >-
+            CMAKE_CXX_FLAGS=-fsanitize=address,undefined -fsanitize-recover=address,undefined -fno-omit-frame-pointer;CMAKE_MODULE_LINKER_FLAGS=-fsanitize=address,undefined
+
+      - name: Build the extension with AddressSanitizer and UBSan
+        env:
+          # gcc, because the runtime preloaded below is gcc's.
+          CC: gcc
+          CXX: g++
+          # nanobind strips Release builds, and a report without symbols names no functions.
+          SKBUILD_CMAKE_BUILD_TYPE: RelWithDebInfo
+          SKBUILD_INSTALL_STRIP: "false"
+        run: |
+          uv venv --python 3.12 .venv-build
+          VIRTUAL_ENV=.venv-build uv pip install "scikit-build-core>=0.10" "nanobind>=2.13"
+          VIRTUAL_ENV=.venv-build uv build --wheel --no-build-isolation --python .venv-build/bin/python
+          uv export --only-group test --no-emit-project --no-hashes -o "$RUNNER_TEMP/test-requirements.txt"
+          uv venv --python 3.12 "$RUNNER_TEMP/suite"
+          VIRTUAL_ENV="$RUNNER_TEMP/suite" uv pip install --only-binary :all: -r "$RUNNER_TEMP/test-requirements.txt" dist/*.whl
+
+      - name: The sanitizers are live
+        # A run without reports proves nothing unless a real error would have been reported.
+        run: |
+          SO=$(ls "$RUNNER_TEMP"/suite/lib/python3.12/site-packages/duckdb/_duckdb*.so)
+          readelf -d "$SO" | grep -q libasan
+          readelf -d "$SO" | grep -q libubsan
+          mkdir -p "$RUNNER_TEMP/probe"
+          FORMAT="'    #%n %p %F %L (%m+%o)'"
+          # Python's own allocator would put the buffer inside a pool, where an over-read stays unseen.
+          LD_PRELOAD="$(gcc -print-file-name=libasan.so)" PYTHONMALLOC=malloc \
+            ASAN_OPTIONS="detect_leaks=0:halt_on_error=0:log_path=$RUNNER_TEMP/probe/asan:stack_trace_format=$FORMAT" \
+            "$RUNNER_TEMP/suite/bin/python" -c \
+            "import ctypes, duckdb; ctypes.memmove(ctypes.create_string_buffer(64), ctypes.create_string_buffer(8), 64)"
+          grep -q "ERROR: AddressSanitizer: heap-buffer-overflow" "$RUNNER_TEMP"/probe/asan.*
+          # The format took: here no frame has debug info, so each names its module twice, once only by default.
+          grep -qE "\([^()]+\+0x[0-9a-f]+\) \([^()]+\+0x[0-9a-f]+\)" "$RUNNER_TEMP"/probe/asan.*
+
+      - name: The test suite under the sanitizers
+        id: suite
+        run: |
+          LOGS="$RUNNER_TEMP/sanitizer-logs"
+          mkdir -p "$LOGS"
+          # Every frame names its module, which the report script needs to tell who a leak belongs to.
+          FORMAT="'    #%n %p %F %L (%m+%o)'"
+          # The interpreter is not instrumented, so the runtime is preloaded, and Python allocates through malloc
+          # so that its objects are checked too.
+          export LD_PRELOAD="$(gcc -print-file-name=libasan.so)" PYTHONMALLOC=malloc
+          export ASAN_OPTIONS="detect_leaks=1:halt_on_error=0:log_path=$LOGS/asan:stack_trace_format=$FORMAT"
+          export UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=0:log_path=$LOGS/ubsan:stack_trace_format=$FORMAT"
+          # Run from elsewhere so the source tree cannot shadow the install.
+          (cd "$RUNNER_TEMP" && "$RUNNER_TEMP/suite/bin/python" -m pytest "$GITHUB_WORKSPACE/tests")
+
+      - name: Judge the reports
+        # The run exits 0 whatever it found; the reports decide.
+        if: ${{ !cancelled() && steps.suite.conclusion != 'skipped' }}
+        run: '"$RUNNER_TEMP/suite/bin/python" scripts/sanitizer_report.py "$RUNNER_TEMP/sanitizer-logs"'
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: sanitizer-logs-${{ matrix.target }}
+          path: ${{ runner.temp }}/sanitizer-logs
