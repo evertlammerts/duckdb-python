@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-import _thread
+import contextlib
 import gc
+import os
+import signal
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -113,6 +115,28 @@ class TestOneEnvironment:
         assert reader.execute("SELECT count(*) FROM t").fetch_all() == [(1,)]
 
 
+@contextlib.contextmanager
+def ctrl_c_after(seconds: float, rescue: Callable[[], None]) -> Iterator[None]:
+    """Press Ctrl-C on this process after `seconds`, and call `rescue` should the block still run 10 seconds in.
+
+    Python's own Ctrl-C handler is installed for the block, which a process started with SIGINT ignored, as a
+    background job is, lacks. Use it inside `pytest.raises`: leaving it is a Python call, so a Ctrl-C still pending
+    once the rescue has stopped the work is raised here and caught, not in pytest's own code, which it would abort.
+    """
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    # Sent to the process, as a terminal sends Ctrl-C, so the OS may hand it to one of the engine's threads.
+    interrupter = threading.Timer(seconds, os.kill, (os.getpid(), signal.SIGINT))
+    rescuer = threading.Timer(10, rescue)
+    interrupter.start()
+    rescuer.start()
+    try:
+        yield
+    finally:
+        interrupter.cancel()
+        rescuer.cancel()
+        signal.signal(signal.SIGINT, previous)
+
+
 class TestPublicInterrupt:
     """`Connection.interrupt()` from another thread, and Ctrl-C in this one."""
 
@@ -147,43 +171,31 @@ class TestPublicInterrupt:
         with pytest.raises(exceptions.InterfaceError, match="closed"):
             con.interrupt()
 
-    @pytest.mark.skipif(sys.platform == "win32", reason="simulated Ctrl-C delivery differs on Windows")
+    @pytest.mark.skipif(sys.platform == "win32", reason="os.kill with SIGINT terminates the process on Windows")
     def test_a_keyboard_interrupt_stops_a_drain(self) -> None:
         # run() gives the interpreter back a few times a second to check for signals, so Ctrl-C lands promptly.
         con = duckdb.frame.connect()
-        interrupter = threading.Timer(0.3, _thread.interrupt_main)
-        # The rescue bounds a lost Ctrl-C so this test fails promptly instead of hanging the suite.
-        rescue = threading.Timer(10, con.interrupt)
-        interrupter.start()
-        rescue.start()
         started = time.monotonic()
-        try:
-            with pytest.raises(KeyboardInterrupt):
-                con.run("SELECT * FROM range(20_000_000_000)")
-        finally:
-            interrupter.cancel()
-            rescue.cancel()
+        with pytest.raises(KeyboardInterrupt), ctrl_c_after(0.3, con.interrupt):
+            con.run("SELECT * FROM range(20_000_000_000)")
         assert time.monotonic() - started < 5, "the interrupt did not land between step batches"
         assert duckdb.frame.sql("SELECT 1").rows(con) == [(1,)]
 
-    @pytest.mark.skipif(sys.platform == "win32", reason="simulated Ctrl-C delivery differs on Windows")
-    def test_a_keyboard_interrupt_stops_a_streaming_fetch(self) -> None:
-        # The signal check runs once per batch of rows; a query whose first batch comes only at the end is not covered.
-        con = duckdb.frame.connect()
-        interrupter = threading.Timer(0.3, _thread.interrupt_main)
-        # Same rescue as the test above: a lost Ctrl-C fails fast instead of hanging.
-        rescue = threading.Timer(10, con.interrupt)
-        interrupter.start()
-        rescue.start()
+    @pytest.mark.skipif(sys.platform == "win32", reason="os.kill with SIGINT terminates the process on Windows")
+    def test_a_keyboard_interrupt_stops_a_fetch(self) -> None:
+        # Minutes of work for a few thousand rows: a fetch that never checks for Ctrl-C runs into the rescue and
+        # fails the bound, where a quick query would finish inside it, and no rows pile up while it runs.
+        # On the engine's connection, so the result is closed after the timing: closing a result whose query is
+        # still running waits for the task running it unless the query is stopped first.
+        con = _duckdb.Database(":memory:").connect()
+        result = con.execute("SELECT i FROM range(100_000_000_000) t(i) WHERE i % 50_000_000 = 0")
         started = time.monotonic()
-        try:
-            with pytest.raises(KeyboardInterrupt):
-                duckdb.frame.sql("SELECT i, md5(i::VARCHAR) FROM range(8_000_000) t(i)").rows(con)
-        finally:
-            interrupter.cancel()
-            rescue.cancel()
-        assert time.monotonic() - started < 3, "the interrupt did not land between chunks"
-        assert duckdb.frame.sql("SELECT 1").rows(con) == [(1,)]
+        with pytest.raises(KeyboardInterrupt), ctrl_c_after(0.3, con.interrupt):
+            result.fetch_all()
+        assert time.monotonic() - started < 3, "the interrupt did not land while the fetch ran"
+        con.interrupt()
+        result.close()
+        assert con.execute("SELECT 1").fetch_all() == [(1,)]
 
 
 def abort_inside(
