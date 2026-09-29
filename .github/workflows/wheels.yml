@@ -344,15 +344,20 @@ jobs:
         # A run without reports proves nothing unless a real error would have been reported.
         run: |
           SO=$(ls "$RUNNER_TEMP"/suite/lib/python3.12/site-packages/duckdb/_duckdb*.so)
+          readelf -d "$SO" | grep NEEDED
           readelf -d "$SO" | grep -q libasan
           readelf -d "$SO" | grep -q libubsan
+          echo "vm.mmap_rnd_bits: $(sudo sysctl -n vm.mmap_rnd_bits)"
           mkdir -p "$RUNNER_TEMP/probe"
           FORMAT="'    #%n %p %F %L (%m+%o)'"
           # Python's own allocator would put the buffer inside a pool, where an over-read stays unseen.
+          # The probe's exit status says nothing, a runtime that aborts exits 1 too; its report is what counts.
           LD_PRELOAD="$(gcc -print-file-name=libasan.so)" PYTHONMALLOC=malloc \
             ASAN_OPTIONS="detect_leaks=0:halt_on_error=0:log_path=$RUNNER_TEMP/probe/asan:stack_trace_format=$FORMAT" \
             "$RUNNER_TEMP/suite/bin/python" -c \
-            "import ctypes, duckdb; ctypes.memmove(ctypes.create_string_buffer(64), ctypes.create_string_buffer(8), 64)"
+            "import ctypes, duckdb; ctypes.memmove(ctypes.create_string_buffer(64), ctypes.create_string_buffer(8), 64)" \
+            || echo "the probe exited $?"
+          head -n 6 "$RUNNER_TEMP"/probe/asan.* 2>/dev/null || echo "the probe wrote no report"
           grep -q "ERROR: AddressSanitizer: heap-buffer-overflow" "$RUNNER_TEMP"/probe/asan.*
           # The format took: here no frame has debug info, so each names its module twice, once only by default.
           grep -qE "\([^()]+\+0x[0-9a-f]+\) \([^()]+\+0x[0-9a-f]+\)" "$RUNNER_TEMP"/probe/asan.*
@@ -381,4 +386,6 @@ jobs:
         if: failure()
         with:
           name: sanitizer-logs-${{ matrix.target }}
-          path: ${{ runner.temp }}/sanitizer-logs
+          path: |
+            ${{ runner.temp }}/sanitizer-logs
+            ${{ runner.temp }}/probe
