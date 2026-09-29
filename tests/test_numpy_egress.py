@@ -65,11 +65,22 @@ class TestToNumpy:
             "SELECT DATE '2026-09-01' AS d, TIMESTAMP '2026-09-01 12:00:00' AS ts, "
             "TIMESTAMP_NS '2026-09-01 12:00:00.123456789' AS ns, INTERVAL 90 DAY AS iv"
         ).to_numpy(con)
-        assert out["d"].dtype == np.dtype("datetime64[us]")
+        assert out["d"].dtype == np.dtype("datetime64[D]")
         assert out["ts"].dtype == np.dtype("datetime64[us]")
         assert out["ns"].dtype == np.dtype("datetime64[ns]")
         assert out["iv"].dtype == np.dtype("timedelta64[us]")
+        assert out["d"][0] == np.datetime64("2026-09-01", "D")
         assert out["ts"][0] == np.datetime64("2026-09-01T12:00:00", "us")
+
+    def test_dates_far_from_the_epoch_come_back_to_the_day(self, con: duckdb.frame.Connection) -> None:
+        # The smallest and largest DATE and a year past datetime64[us], checked against the engine's own day count.
+        out = duckdb.frame.sql(
+            "SELECT d, d - DATE '1970-01-01' AS days FROM (VALUES (DATE '5877642-06-25 (BC)'), "
+            "(DATE '300000-01-01'), (DATE '5881580-07-10'), (NULL)) t(d)"
+        ).to_numpy(con)
+        assert out["d"].dtype == np.dtype("datetime64[D]")
+        assert out["d"].astype("int64").tolist() == out["days"].tolist()
+        assert out["days"].tolist()[-1] is None
 
     def test_decimal_becomes_float64_at_its_scale(self, con: duckdb.frame.Connection) -> None:
         # numpy trades exactness for vectors, as the previous package did; exact Decimals come from the rows.
@@ -118,8 +129,9 @@ class TestTemporalInfinities:
         rows = plan.rows(con)
         assert rows[0] == (datetime.date.max, datetime.date.min)
         out = plan.to_numpy(con)
-        assert out["pos"][0] == np.datetime64("9999-12-31", "us")
-        assert out["neg"][0] == np.datetime64("0001-01-01", "us")
+        assert out["pos"].dtype == out["neg"].dtype == np.dtype("datetime64[D]")
+        assert out["pos"][0] == np.datetime64("9999-12-31", "D")
+        assert out["neg"][0] == np.datetime64("0001-01-01", "D")
 
     def test_infinite_timestamps_agree_with_the_row_path(self, con: duckdb.frame.Connection) -> None:
         plan = duckdb.frame.sql("SELECT 'infinity'::TIMESTAMP AS pos, '-infinity'::TIMESTAMP AS neg")
@@ -154,7 +166,7 @@ class TestEmptyResults:
             "SELECT TIMESTAMPTZ '2024-01-01' AS ts, DATE '2024-01-01' AS d, INTERVAL 1 DAY AS iv WHERE FALSE"
         ).to_numpy(con)
         assert out["ts"].dtype == np.dtype("datetime64[us]")
-        assert out["d"].dtype == np.dtype("datetime64[us]")
+        assert out["d"].dtype == np.dtype("datetime64[D]")
         assert out["iv"].dtype == np.dtype("timedelta64[us]")
 
 

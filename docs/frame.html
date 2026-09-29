@@ -272,7 +272,7 @@ plan.show(con)              <span class="c"># print the first ten as a table; pr
 
   <p class="lead-in">arrays</p>
   <pre><code>plan.to_numpy(con)      <span class="c"># {column: ndarray}; columns holding NULLs come back masked</span></code></pre>
-  <p>Columns convert from the engine's own vectors, never through rows. A column holding NULLs comes back as a masked array; one without is a plain ndarray, so a clean result costs nothing extra. ENUM comes back as strings with <code>None</code> for NULL, and TIMESTAMPTZ as <code>datetime64</code> instants in UTC. DECIMAL and HUGEINT become float64 on this path; when the exact values matter, fetch rows, which keeps <code>Decimal</code> and Python's int. An empty result keeps every column's dtype.</p>
+  <p>Columns convert from the engine's own vectors, never through rows. A column holding NULLs comes back as a masked array; one without is a plain ndarray, so a clean result costs nothing extra. ENUM comes back as strings with <code>None</code> for NULL, and TIMESTAMPTZ as <code>datetime64</code> instants in UTC. DATE comes back as <code>datetime64[D]</code>, day-precise like the type, so every date fits and the array registers back as a DATE. DECIMAL and HUGEINT become float64 on this path; when the exact values matter, fetch rows, which keeps <code>Decimal</code> and Python's int. An empty result keeps every column's dtype.</p>
 
   <p class="lead-in">stopping a query</p>
   <p>A Ctrl&#8209;C while a query runs cancels it and raises <code>KeyboardInterrupt</code>. From another thread, <code>con.interrupt()</code> cancels whatever the connection is running; the query fails with <code>InterruptError</code>.</p>

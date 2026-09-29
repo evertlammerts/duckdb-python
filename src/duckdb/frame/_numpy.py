@@ -101,12 +101,13 @@ def _convert_column(np: Any, view: _duckdb.ChunkView, column: int, count: int) -
     if type_id == _DATE:
         days = np.frombuffer(view.data(column), dtype="int32").copy()
         if mask is not None:
-            # NULL slots hold undefined day counts; zeroed first, or extreme garbage overflows datetime64.
+            # NULL slots hold undefined day counts; zeroed so masked positions stay a predictable 1970-01-01.
             days[mask] = 0
         days[days == _DATE_INF] = _DATE_CLAMP[0]
         days[days == -_DATE_INF] = _DATE_CLAMP[1]
-        # DATE lands as datetime64[us], as the previous duckdb package had it.
-        return days.astype("datetime64[D]").astype("datetime64[us]"), mask, "date", "us"
+        # Day-precise like the type: every DATE fits, where a finer unit overflows far from the epoch, and the array
+        # registers back as a DATE.
+        return days.astype("datetime64[D]"), mask, "date", "D"
 
     unit = _TS_UNIT.get(type_id)
     if unit is not None:
@@ -169,7 +170,7 @@ def _empty_column(np: Any, type_id: int, enum_values: Any) -> tuple[Any, Any, st
     if dtype is not None:
         return np.empty(0, dtype=dtype), None, "numeric", None
     if type_id == _DATE:
-        return np.empty(0, dtype="datetime64[us]"), None, "date", "us"
+        return np.empty(0, dtype="datetime64[D]"), None, "date", "D"
     unit = _TS_UNIT.get(type_id)
     if unit is not None:
         kind = "datetimetz" if type_id == _TS_TZ else "datetime"

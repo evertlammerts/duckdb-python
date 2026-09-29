@@ -2920,14 +2920,14 @@ class TestNumpyWithoutPandas:
 
 
 class TestNumpyRoundTrip:
-    """What `to_numpy()` produces registers back; after one trip the dict is a fixed point but for DATE."""
+    """What `to_numpy()` produces registers back; after one trip the dict is a fixed point."""
 
     QUERY = (
         "SELECT * FROM (VALUES (1, 1.5, 'a', true, TIMESTAMP '2020-01-01 01:02:03', INTERVAL 90 MINUTE, "
         "uuid '00000000-0000-0000-0000-000000000001', '\\x00ab'::BLOB, 7::TINYINT, "
-        "TIMESTAMP_NS '2020-01-01 00:00:00.000000001', 12.5::DECIMAL(4,1)), "
-        "(NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)) "
-        "t(i, f, s, b, ts, iv, u, bl, ti, tns, dec)"
+        "TIMESTAMP_NS '2020-01-01 00:00:00.000000001', DATE '2020-01-02', 12.5::DECIMAL(4,1)), "
+        "(NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)) "
+        "t(i, f, s, b, ts, iv, u, bl, ti, tns, d, dec)"
     )
 
     def test_a_fetched_dict_registers_back_with_its_values_and_nulls(self, con: duckdb.frame.Connection) -> None:
@@ -2938,16 +2938,22 @@ class TestNumpyRoundTrip:
         # DECIMAL leaves as float64, so it comes back as a DOUBLE of the same value.
         assert back == [(*row[:-1], None if row[-1] is None else float(str(row[-1]))) for row in original]
         types = dict(table("back").schema(con))
-        assert (types["dec"], types["i"], types["ti"], types["tns"]) == ("DOUBLE", "INTEGER", "TINYINT", "TIMESTAMP_NS")
+        assert (types["dec"], types["i"], types["ti"], types["tns"], types["d"]) == (
+            "DOUBLE",
+            "INTEGER",
+            "TINYINT",
+            "TIMESTAMP_NS",
+            "DATE",
+        )
         again = sql("SELECT * FROM back").to_numpy(con)
         assert again.keys() == fetched.keys()
         for name, array in fetched.items():
             assert again[name].dtype == array.dtype, name
             assert again[name].tolist() == array.tolist(), name
 
-    def test_a_date_comes_back_as_a_timestamp(self, con: duckdb.frame.Connection) -> None:
+    def test_a_date_comes_back_as_a_date(self, con: duckdb.frame.Connection) -> None:
         fetched = sql("SELECT DATE '2020-01-02' AS d").to_numpy(con)
-        assert typed(con, fetched) == [(datetime.datetime(2020, 1, 2), "TIMESTAMP")]
+        assert typed(con, fetched) == [(datetime.date(2020, 1, 2), "DATE")]
 
 
 class Answering(Source):
