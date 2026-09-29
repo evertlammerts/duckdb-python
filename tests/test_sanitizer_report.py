@@ -31,7 +31,8 @@ def stack(*frames: str) -> list[str]:
 def report(kind: str, size: int, frames: list[str]) -> str:
     body = "\n".join(f"    {frame}" for frame in frames)
     header = f"{kind} leak of {size} byte(s) in 1 object(s) allocated from:"
-    return f"==1==ERROR: LeakSanitizer: detected memory leaks\n\n{header}\n{body}\n\n"
+    summary = f"SUMMARY: AddressSanitizer: {size} byte(s) leaked in 1 allocation(s)."
+    return f"==1==ERROR: LeakSanitizer: detected memory leaks\n\n{header}\n{body}\n\n{summary}\n"
 
 
 class TestOwner:
@@ -64,6 +65,17 @@ class TestOwner:
 
 
 class TestParsing:
+    def test_frames_as_ubuntus_runtime_prints_them(self) -> None:
+        # A runtime with debug info prints a source line, and a library with a build id prints it between modules.
+        asan = (
+            "#0 0x7f0f in malloc ../../../../src/libsanitizer/asan/asan_malloc_linux.cpp:69 "
+            "(/usr/lib/gcc/x86_64-linux-gnu/13/libasan.so+0xfd11)"
+        )
+        ffi = "#1 0x7f1f  (/lib/libffi.so.8+0x7b15) (BuildId: c914) (/lib/libffi.so.8+0x7b15)"
+        ext = "#1 0x7f2f  (/venv/duckdb/_duckdb.abi3.so+0x1234) (BuildId: a1b2) (/venv/duckdb/_duckdb.abi3.so+0x1234)"
+        assert owner([asan, ffi]) == "other"
+        assert owner([asan, ext]) == "extension"
+
     def test_each_leak_record_keeps_its_own_frames(self) -> None:
         text = report("Direct", 64, stack(ASAN, NEW, EXT)) + report("Indirect", 8, stack(ASAN, PYALLOC, EVAL))
         found = leaks(text)
@@ -75,10 +87,25 @@ class TestParsing:
             "==2==ERROR: AddressSanitizer: heap-use-after-free on address 0x6020\n"
             "src/_duckdb/pyconv.cpp:12:5: runtime error: signed integer overflow\n"
             "==3==ERROR: LeakSanitizer: detected memory leaks\n"
+            "SUMMARY: AddressSanitizer: 64 byte(s) leaked in 1 allocation(s).\n"
         )
         assert errors(text) == [
             "==2==ERROR: AddressSanitizer: heap-use-after-free on address 0x6020",
             "src/_duckdb/pyconv.cpp:12:5: runtime error: signed integer overflow",
+        ]
+
+    def test_the_runtimes_own_failures_are_errors(self) -> None:
+        # These carry no ERROR: prefix, and the process dies with them.
+        text = (
+            'AddressSanitizer: CHECK failed: asan_interceptors.cpp:458 "((real___cxa_throw)) != (0)" (0x0, 0x0)\n'
+            "    #0 0xfff6 in CheckUnwind ../../src/libsanitizer/asan/asan_rtl.cpp:69 (/usr/lib/libasan.so+0xf2970)\n"
+            "AddressSanitizer:DEADLYSIGNAL\n"
+            "==4==LeakSanitizer has encountered a fatal error.\n"
+        )
+        assert errors(text) == [
+            'AddressSanitizer: CHECK failed: asan_interceptors.cpp:458 "((real___cxa_throw)) != (0)" (0x0, 0x0)',
+            "AddressSanitizer:DEADLYSIGNAL",
+            "==4==LeakSanitizer has encountered a fatal error.",
         ]
 
 
@@ -110,6 +137,10 @@ class TestVerdict:
     ) -> None:
         frames = ["#0 0x7f00 in malloc", "#1 0x7f03 in duckdb_python::Registry::Add src/_duckdb/registry.cpp:88"]
         (tmp_path / "asan.17").write_text(report("Direct", 64, frames))
+        assert self.judge(monkeypatch, tmp_path) == 1
+
+    def test_a_failure_of_the_runtime_itself_fails(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        (tmp_path / "asan.18").write_text("AddressSanitizer: CHECK failed: asan_interceptors.cpp:458\n")
         assert self.judge(monkeypatch, tmp_path) == 1
 
     def test_a_memory_error_fails(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

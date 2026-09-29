@@ -352,15 +352,15 @@ jobs:
           FORMAT="'    #%n %p %F %L (%m+%o)'"
           # Python's own allocator would put the buffer inside a pool, where an over-read stays unseen.
           # The probe's exit status says nothing, a runtime that aborts exits 1 too; its report is what counts.
-          LD_PRELOAD="$(gcc -print-file-name=libasan.so)" PYTHONMALLOC=malloc \
+          LD_PRELOAD="$(gcc -print-file-name=libasan.so) $(gcc -print-file-name=libstdc++.so)" PYTHONMALLOC=malloc \
             ASAN_OPTIONS="detect_leaks=0:halt_on_error=0:log_path=$RUNNER_TEMP/probe/asan:stack_trace_format=$FORMAT" \
             "$RUNNER_TEMP/suite/bin/python" -c \
             "import ctypes, duckdb; ctypes.memmove(ctypes.create_string_buffer(64), ctypes.create_string_buffer(8), 64)" \
             || echo "the probe exited $?"
           head -n 6 "$RUNNER_TEMP"/probe/asan.* 2>/dev/null || echo "the probe wrote no report"
           grep -q "ERROR: AddressSanitizer: heap-buffer-overflow" "$RUNNER_TEMP"/probe/asan.*
-          # The format took: here no frame has debug info, so each names its module twice, once only by default.
-          grep -qE "\([^()]+\+0x[0-9a-f]+\) \([^()]+\+0x[0-9a-f]+\)" "$RUNNER_TEMP"/probe/asan.*
+          # The format took: a frame without debug info names its module twice, where the default names it once.
+          grep -qE "\([^()]+\+0x[0-9a-f]+\).*\([^()]+\+0x[0-9a-f]+\)" "$RUNNER_TEMP"/probe/asan.*
 
       - name: The test suite under the sanitizers
         id: suite
@@ -370,8 +370,9 @@ jobs:
           # Every frame names its module, which the report script needs to tell who a leak belongs to.
           FORMAT="'    #%n %p %F %L (%m+%o)'"
           # The interpreter is not instrumented, so the runtime is preloaded, and Python allocates through malloc
-          # so that its objects are checked too.
-          export LD_PRELOAD="$(gcc -print-file-name=libasan.so)" PYTHONMALLOC=malloc
+          # so that its objects are checked too. libstdc++ comes along because ASan looks up its __cxa_throw at
+          # start, before the extension loads it, and the first C++ exception would then abort the process.
+          export LD_PRELOAD="$(gcc -print-file-name=libasan.so) $(gcc -print-file-name=libstdc++.so)" PYTHONMALLOC=malloc
           export ASAN_OPTIONS="detect_leaks=1:halt_on_error=0:log_path=$LOGS/asan:stack_trace_format=$FORMAT"
           export UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=0:log_path=$LOGS/ubsan:stack_trace_format=$FORMAT"
           # Run from elsewhere so the source tree cannot shadow the install.

@@ -27,6 +27,8 @@ PYTHON = re.compile(r"/(python3[^/]*|libpython3[^/]*)$")
 INTERPRETER = re.compile(r"_PyEval_EvalFrameDefault|PyImport_|marshal_loads|_PyRun_")
 #: A module's initialisation running, so the allocation happens once per process however long it runs.
 IMPORT = re.compile(r" in PyModule_ExecDef\b")
+#: The sanitizer lines a leak report is made of; any other is an error, the runtime's own failures included.
+LEAK_REPORT = re.compile(r"ERROR: LeakSanitizer: detected memory leaks|SUMMARY: AddressSanitizer: \d+ byte\(s\) leaked")
 
 
 @dataclass
@@ -81,10 +83,13 @@ def leaks(text: str) -> list[Leak]:
 
 
 def errors(text: str) -> list[str]:
-    """Every AddressSanitizer or UBSan error report in a log, each as its first line."""
-    lines = text.splitlines()
-    heads = [line for line in lines if "ERROR: AddressSanitizer" in line or "runtime error:" in line]
-    return [line.strip() for line in heads]
+    """Every sanitizer message in a log that is not part of a leak report, and every UBSan runtime error."""
+    return [
+        line.strip()
+        for line in text.splitlines()
+        if not FRAME.match(line)
+        and ("runtime error:" in line or ("Sanitizer" in line and not LEAK_REPORT.search(line)))
+    ]
 
 
 def main() -> int:
