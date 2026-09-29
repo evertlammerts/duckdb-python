@@ -121,7 +121,8 @@ def ctrl_c_after(seconds: float, rescue: Callable[[], None]) -> Iterator[None]:
 
     Python's own Ctrl-C handler is installed for the block, which a process started with SIGINT ignored, as a
     background job is, lacks. Use it inside `pytest.raises`: leaving it is a Python call, so a Ctrl-C still pending
-    once the rescue has stopped the work is raised here and caught, not in pytest's own code, which it would abort.
+    once the rescue has stopped the work is raised here and caught, not in pytest's own code, where it would stop
+    the whole test session.
     """
     previous = signal.signal(signal.SIGINT, signal.default_int_handler)
     # Sent to the process, as a terminal sends Ctrl-C, so the OS may hand it to one of the engine's threads.
@@ -190,11 +191,13 @@ class TestPublicInterrupt:
         con = _duckdb.Database(":memory:").connect()
         result = con.execute("SELECT i FROM range(100_000_000_000) t(i) WHERE i % 50_000_000 = 0")
         started = time.monotonic()
-        with pytest.raises(KeyboardInterrupt), ctrl_c_after(0.3, con.interrupt):
-            result.fetch_all()
-        assert time.monotonic() - started < 3, "the interrupt did not land while the fetch ran"
-        con.interrupt()
-        result.close()
+        try:
+            with pytest.raises(KeyboardInterrupt), ctrl_c_after(0.3, con.interrupt):
+                result.fetch_all()
+            assert time.monotonic() - started < 3, "the interrupt did not land while the fetch ran"
+        finally:
+            con.interrupt()
+            result.close()
         assert con.execute("SELECT 1").fetch_all() == [(1,)]
 
 
