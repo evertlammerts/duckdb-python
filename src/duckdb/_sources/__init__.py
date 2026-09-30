@@ -101,7 +101,6 @@ def adapt(obj: object) -> Source:
     An Arrow stream capsule and a pyarrow RecordBatchReader are read once. A pyarrow Table or RecordBatch, a polars
     DataFrame or LazyFrame, a pandas DataFrame, a numpy array or a dict, list or tuple of them, a pyarrow Dataset
     or Scanner, and anything else exporting `__arrow_c_stream__` or `__arrow_c_array__`, are read as often as asked.
-    A `Source` of one's own is registered as it is.
     """
     from .arrow import ArrowArraySource, ArrowCapsuleSource, ArrowStreamSource
     from .numpy import NumpySource
@@ -109,8 +108,6 @@ def adapt(obj: object) -> Source:
     from .polars import LazyFrameSource, PolarsFrameSource
     from .pyarrow import PyArrowDatasetSource, PyArrowReaderSource, PyArrowScannerSource, PyArrowTableSource
 
-    if isinstance(obj, Source):
-        return obj
     capsule = _duckdb.capsule_name(obj)
     if capsule == STREAM_CAPSULE:
         return ArrowCapsuleSource(obj)

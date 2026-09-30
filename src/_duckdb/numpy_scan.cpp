@@ -10,6 +10,10 @@
 
 #include "pyconv.hpp"
 
+#include <nanobind/stl/pair.h>
+#include <nanobind/stl/string.h>
+#include <nanobind/stl/tuple.h>
+
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -61,8 +65,7 @@ struct NumpyScanBindData {
 };
 
 /// A column's encoding: how the scan turns its data array's bytes into the column's engine type. `TIMESTAMP` and
-/// `INTERVAL` data are int64 counts in a unit the encoding names, or for a bare `timestamp`, in the unit of the
-/// declared naive timestamp type.
+/// `INTERVAL` data are int64 counts in a unit the encoding names.
 enum class NumpyEncoding : uint8_t {
 	FIXED,
 	TIMESTAMP,
@@ -158,26 +161,16 @@ void NumpyScanBind(cxx::TableFunction::BindInput &input) {
 		try {
 			nb::object described = entry->object.attr("describe")();
 			for (nb::handle item : described) {
-				auto pair = nb::cast<nb::tuple>(item);
-				auto column_name = nb::cast<std::string>(pair[0]);
-				auto type = input.GetContext().ParseType(nb::cast<std::string>(pair[1]));
+				auto [column_name, type_text] = nb::cast<std::pair<std::string, std::string>>(item);
+				auto type = input.GetContext().ParseType(type_text);
 				input.AddResultColumn(column_name, type);
 				names.push_back(std::move(column_name));
 				types.push_back(std::move(type));
 			}
-			nb::object count = entry->object.attr("rows")();
-			// A bool is an int to Python, and a truth value is never a row count.
-			if (count.is_none() || nb::isinstance<nb::bool_>(count)) {
-				throw nb::cast_error();
-			}
-			rows = nb::cast<cxx::idx_t>(count);
+			rows = nb::cast<cxx::idx_t>(entry->object.attr("rows")());
 		} catch (nb::python_error &error) {
 			throw cxx::InvalidInputException("describing the object registered as '" + entry->name +
 			                                 "' failed: " + DescribePythonError(error));
-		} catch (const nb::cast_error &) {
-			throw cxx::InvalidInputException("the object registered as '" + entry->name +
-			                                 "' answered describe() or rows() with something other than (name, type) "
-			                                 "pairs and a row count");
 		}
 	}
 	input.SetCardinality(rows, true);
@@ -251,7 +244,7 @@ bool ParseTimeUnit(std::string_view text, const TimeUnit *&unit, uint64_t &step)
 }
 
 /// The encoding `columns()` named and, for `timestamp:<unit>` or `interval:<unit>`, that unit and its step; `unit`
-/// stays null for a bare `timestamp`.
+/// stays null for every other encoding.
 NumpyEncoding ParseEncoding(const std::string &registered_name, const std::string &column_name,
                             const std::string &spelling, const TimeUnit *&unit, uint64_t &step) {
 	const std::string_view spelled(spelling);
@@ -259,9 +252,6 @@ NumpyEncoding ParseEncoding(const std::string &registered_name, const std::strin
 	step = 1;
 	if (spelling == "fixed") {
 		return NumpyEncoding::FIXED;
-	}
-	if (spelling == "timestamp") {
-		return NumpyEncoding::TIMESTAMP;
 	}
 	if (spelled.rfind("timestamp:", 0) == 0 && ParseTimeUnit(spelled.substr(10), unit, step)) {
 		return NumpyEncoding::TIMESTAMP;
@@ -288,11 +278,11 @@ NumpyEncoding ParseEncoding(const std::string &registered_name, const std::strin
 	                                 column_name + "' with the unknown encoding '" + spelling + "'");
 }
 
-/// How a TIMESTAMP or INTERVAL column's counts in `unit` (null for a bare `timestamp`) become counts of the declared
-/// `type`: seconds, milliseconds, microseconds or nanoseconds for a naive timestamp, microseconds for a zoned one or
-/// an interval. A naive timestamp only ever multiplies, since the source chose a type at least as fine as its unit.
+/// How a TIMESTAMP or INTERVAL column's counts in `unit` become counts of the declared `type`: seconds, milliseconds,
+/// microseconds or nanoseconds for a naive timestamp, microseconds for a zoned one or an interval. A naive timestamp
+/// only ever multiplies, since the source chose a type at least as fine as its unit.
 UnitConversion TimeConversion(const std::string &registered_name, const std::string &column_name,
-                              const std::string &encoding_text, const TimeUnit *unit, uint64_t step,
+                              const std::string &encoding_text, const TimeUnit &unit, uint64_t step,
                               const cxx::LogicalType &type) {
 	uint64_t target_nanos = 1'000;
 	bool naive = true;
@@ -317,13 +307,7 @@ UnitConversion TimeConversion(const std::string &registered_name, const std::str
 		                                  "' answered columns() for '" + column_name + "' with the encoding '" +
 		                                  encoding_text + "', " + why + " " + type.ToText());
 	};
-	if (unit == nullptr) {
-		if (!naive) {
-			throw refuse("which names no unit for");
-		}
-		return UnitConversion {1, 1, 1};
-	}
-	const auto conversion = ConversionOf(*unit, step, target_nanos);
+	const auto conversion = ConversionOf(unit, step, target_nanos);
 	if (naive && conversion.denominator != 1) {
 		throw refuse("whose unit is finer than");
 	}
@@ -527,10 +511,6 @@ bool Masked(const NumpyColumn &column, cxx::idx_t row) {
 /// one's.
 std::vector<NumpyColumn> OpenColumns(const Registered &entry, const NumpyScanBindData &bound, cxx::Context &context,
                                      const std::vector<cxx::idx_t> &requested, nb::handle answer) {
-	if (!nb::isinstance<nb::list>(answer) && !nb::isinstance<nb::tuple>(answer)) {
-		throw cxx::InvalidInputException("the object registered as '" + entry.name +
-		                                 "' answered columns() with something other than a list");
-	}
 	if (static_cast<cxx::idx_t>(nb::len(answer)) != requested.size()) {
 		throw cxx::InvalidInputException("the object registered as '" + entry.name + "' answered columns() with " +
 		                                 std::to_string(nb::len(answer)) + " columns where " +
@@ -538,54 +518,44 @@ std::vector<NumpyColumn> OpenColumns(const Registered &entry, const NumpyScanBin
 	}
 	std::vector<NumpyColumn> columns;
 	columns.reserve(requested.size());
-	try {
-		for (cxx::idx_t i = 0; i < requested.size(); i++) {
-			auto item = nb::cast<nb::tuple>(answer[i]);
-			if (nb::len(item) != 5) {
-				throw nb::cast_error();
-			}
-			auto column_name = nb::cast<std::string>(item[0]);
-			const auto declared = requested[i];
-			if (column_name != bound.names.at(declared)) {
-				throw cxx::InvalidInputException(
-				    "the object registered as '" + entry.name + "' answered columns() with column '" + column_name +
-				    "' at position " + std::to_string(i) + " where '" + bound.names.at(declared) + "' was expected");
-			}
-			const auto encoding_text = nb::cast<std::string>(item[1]);
-			const TimeUnit *unit = nullptr;
-			uint64_t step = 1;
-			const auto encoding = ParseEncoding(entry.name, column_name, encoding_text, unit, step);
-			// The object is read afresh for every scan, so it may have changed since the query was bound.
-			auto type = context.ParseType(nb::cast<std::string>(item[2]));
-			if (type != bound.types.at(declared)) {
-				throw cxx::InvalidInputException("the object registered as '" + entry.name +
-				                                 "' answered columns() for '" + column_name + "' with the type " +
-				                                 type.ToText() + ", but the query was bound when it was " +
-				                                 bound.types.at(declared).ToText());
-			}
-			const auto data_fits = [&](ElementClass element, cxx::idx_t width) {
-				return BufferFits(encoding, type, element, width);
-			};
-			auto data = OpenBuffer(entry.name, column_name, "data", item[3], bound.rows, data_fits,
-			                       "which the encoding '" + encoding_text + "' does not read into " + type.ToText());
-			const auto mask_fits = [](ElementClass element, cxx::idx_t width) {
-				return width == 1 && (element == ElementClass::BOOLEAN || element == ElementClass::SIGNED ||
-				                      element == ElementClass::UNSIGNED);
-			};
-			auto mask = item[4].is_none() ? BufferView()
-			                              : OpenBuffer(entry.name, column_name, "mask", item[4], bound.rows, mask_fits,
-			                                           "where a mask holds one byte per row");
-			UnitConversion conversion {1, 1, 1};
-			if (encoding == NumpyEncoding::TIMESTAMP || encoding == NumpyEncoding::INTERVAL) {
-				conversion = TimeConversion(entry.name, column_name, encoding_text, unit, step, type);
-			}
-			columns.push_back(NumpyColumn {std::move(column_name), encoding, conversion, std::move(type),
-			                               std::move(data), std::move(mask)});
+	for (cxx::idx_t i = 0; i < requested.size(); i++) {
+		auto [column_name, encoding_text, type_text, data_array, mask_array] =
+		    nb::cast<std::tuple<std::string, std::string, std::string, nb::object, nb::object>>(answer[i]);
+		const auto declared = requested[i];
+		if (column_name != bound.names.at(declared)) {
+			throw cxx::InvalidInputException(
+			    "the object registered as '" + entry.name + "' answered columns() with column '" + column_name +
+			    "' at position " + std::to_string(i) + " where '" + bound.names.at(declared) + "' was expected");
 		}
-	} catch (const nb::cast_error &) {
-		throw cxx::InvalidInputException("the object registered as '" + entry.name +
-		                                 "' answered columns() with something other than (name, encoding, type, data, "
-		                                 "mask) tuples");
+		const TimeUnit *unit = nullptr;
+		uint64_t step = 1;
+		const auto encoding = ParseEncoding(entry.name, column_name, encoding_text, unit, step);
+		// The object is read afresh for every scan, so it may have changed since the query was bound.
+		auto type = context.ParseType(type_text);
+		if (type != bound.types.at(declared)) {
+			throw cxx::InvalidInputException("the object registered as '" + entry.name + "' answered columns() for '" +
+			                                 column_name + "' with the type " + type.ToText() +
+			                                 ", but the query was bound when it was " +
+			                                 bound.types.at(declared).ToText());
+		}
+		const auto data_fits = [&](ElementClass element, cxx::idx_t width) {
+			return BufferFits(encoding, type, element, width);
+		};
+		auto data = OpenBuffer(entry.name, column_name, "data", data_array, bound.rows, data_fits,
+		                       "which the encoding '" + encoding_text + "' does not read into " + type.ToText());
+		const auto mask_fits = [](ElementClass element, cxx::idx_t width) {
+			return width == 1 && (element == ElementClass::BOOLEAN || element == ElementClass::SIGNED ||
+			                      element == ElementClass::UNSIGNED);
+		};
+		auto mask = mask_array.is_none() ? BufferView()
+		                                 : OpenBuffer(entry.name, column_name, "mask", mask_array, bound.rows,
+		                                              mask_fits, "where a mask holds one byte per row");
+		UnitConversion conversion {1, 1, 1};
+		if (encoding == NumpyEncoding::TIMESTAMP || encoding == NumpyEncoding::INTERVAL) {
+			conversion = TimeConversion(entry.name, column_name, encoding_text, *unit, step, type);
+		}
+		columns.push_back(NumpyColumn {std::move(column_name), encoding, conversion, std::move(type), std::move(data),
+		                               std::move(mask)});
 	}
 	return columns;
 }

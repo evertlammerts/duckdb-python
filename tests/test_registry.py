@@ -512,7 +512,7 @@ class TestChainedStream:
                 parts = [self.obj, self.obj, FailingExport("boom in the third part")]
                 return _duckdb.chain_streams(self.obj, iter(parts)), False
 
-        con.register("chained", Chained(good))
+        con._register_source("chained", Chained(good))
         with pytest.raises(
             exceptions.InvalidInputError, match=r"registered as 'chained' failed: ValueError: boom in the third part"
         ):
@@ -580,27 +580,27 @@ class TestArrowRelease:
 
     def test_a_stream_read_to_the_end_is_released(self, con: duckdb.frame.Connection) -> None:
         source = Streaming(self.NUMBERS)
-        con.register("t", source)
+        con._register_source("t", source)
         assert rows(con, "SELECT count(*), sum(n) FROM t") == [(15, 15)]
         assert source.all_released()
 
     def test_a_stream_the_query_stops_reading_early_is_released(self, con: duckdb.frame.Connection) -> None:
         # pyarrow frees an exhausted stream's generator on its own, so only an unfinished read shows the release.
         source = Streaming(self.NUMBERS)
-        con.register("t", source)
+        con._register_source("t", source)
         assert rows(con, "SELECT n FROM t LIMIT 1") == [(0,)]
         assert source.all_released()
 
     def test_a_stream_that_fails_while_read_is_released(self, con: duckdb.frame.Connection) -> None:
         source = Streaming(self.NUMBERS, fail_at=1)
-        con.register("t", source)
+        con._register_source("t", source)
         with pytest.raises(exceptions.InvalidInputError, match="boom in batch 1"):
             rows(con, "SELECT * FROM t")
         assert source.all_released()
 
     def test_a_stream_refused_when_the_scan_opens_is_released(self, con: duckdb.frame.Connection) -> None:
         source = Streaming(pa.schema([("m", pa.int64())]), declared=self.NUMBERS)
-        con.register("t", source)
+        con._register_source("t", source)
         with pytest.raises(exceptions.InvalidInputError, match="answered with column 'm' at position 0 where 'n'"):
             rows(con, "SELECT * FROM t")
         assert source.all_released()
@@ -623,7 +623,7 @@ class TestArrowRelease:
                 return self.obj, False
 
         source = Kept(data.__arrow_c_stream__())
-        con.register("s", source)
+        con._register_source("s", source)
         with pytest.raises(exceptions.InvalidInputError, match="answered with column 'n' at position 0 where 'wrong'"):
             rows(con, "SELECT * FROM s")
         source.declared = data.schema
@@ -633,7 +633,7 @@ class TestArrowRelease:
 
     def test_a_stream_only_peeked_for_its_schema_is_released(self, con: duckdb.frame.Connection) -> None:
         source = Streaming(self.NUMBERS, peeked=True)
-        con.register("t", source)
+        con._register_source("t", source)
         assert table("t").schema(con) == [("n", "BIGINT")]
         assert source.all_released()
         assert rows(con, "SELECT sum(n) FROM t") == [(15,)]
@@ -641,7 +641,7 @@ class TestArrowRelease:
 
     def test_a_schema_the_engine_cannot_import_releases_its_stream(self, con: duckdb.frame.Connection) -> None:
         source = Streaming(pa.schema([("h", pa.float16())]), peeked=True)
-        con.register("t", source)
+        con._register_source("t", source)
         with pytest.raises(exceptions.NotSupportedError, match="Unsupported Internal Arrow Type"):
             rows(con, "SELECT * FROM t")
         assert source.all_released()
@@ -663,7 +663,7 @@ class TestArrowRelease:
                 generators.append(weakref.ref(generator))
                 return _duckdb.chain_streams(good, generator), False
 
-        con.register("t", Chained(None))
+        con._register_source("t", Chained(None))
         with pytest.raises(exceptions.InvalidInputError, match="boom in the second part"):
             rows(con, "SELECT * FROM t")
         gc.collect()
@@ -675,24 +675,23 @@ class TestArrowRelease:
     ) -> None:
         values = pa.array([1, 2, 3])
 
-        class HalfReleased(Source):
-            def __arrow_c_schema__(self) -> object:
-                return pa.schema([("value", pa.int64())]).__arrow_c_schema__()
+        class HalfReleased:
+            type = pa.int64()
 
-            def stream(self, columns: Sequence[int] | None, filters: Sequence[object]) -> tuple[object, bool]:
+            def __arrow_c_array__(self, requested_schema: object = None) -> tuple[object, object]:
                 schema, array = values.__arrow_c_array__()
                 other_schema, _ = values.__arrow_c_array__()
                 pa.Array._import_from_c_capsule(other_schema, array)
-                return (schema, array), False
+                return schema, array
 
-        con.register("t", HalfReleased(None))
+        con.register("t", HalfReleased())
         with pytest.raises(exceptions.InvalidInputError, match="'arrow_array' capsule of the object registered as 't'"):
             rows(con, "SELECT * FROM t")
         assert rows(con, "SELECT 42") == [(42,)]
 
     @pytest.mark.parametrize("refused", [False, True])
     def test_a_single_array_is_released(self, con: duckdb.frame.Connection, refused: bool) -> None:
-        con.register("t", OneArray("other" if refused else "value"))
+        con._register_source("t", OneArray("other" if refused else "value"))
         gc.collect()
         before = pa.total_allocated_bytes()
         for _ in range(3):
@@ -726,7 +725,7 @@ class Recording(Source):
 class TestProjection:
     def test_only_the_columns_a_query_uses_are_asked_for(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
         source = Recording(numbers)
-        con.register("t", source)
+        con._register_source("t", source)
         assert rows(con, "SELECT s FROM t WHERE n = 3") == [("3",)]
         assert rows(con, "SELECT * FROM t LIMIT 1") == [(0, "0")]
         assert rows(con, "SELECT n FROM t WHERE n = 9") == [(9,)]
@@ -736,7 +735,7 @@ class TestProjection:
 
     def test_the_requested_order_is_the_output_order(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
         source = Recording(numbers)
-        con.register("t", source)
+        con._register_source("t", source)
         assert rows(con, "SELECT s, n FROM t WHERE n = 4") == [("4", 4)]
         assert rows(con, "SELECT s, n FROM t WHERE s = '5'") == [("5", 5)]
         # The engine may ask for the columns in any order; the source answers in that order and the rows are right.
@@ -744,13 +743,13 @@ class TestProjection:
 
     def test_a_count_needs_no_columns_but_still_scans(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
         source = Recording(numbers)
-        con.register("t", source)
+        con._register_source("t", source)
         assert rows(con, "SELECT count(*) FROM t") == [(10,)]
         assert len(source.asked) == 1
 
     def test_a_source_that_cannot_narrow_is_picked_from(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
         source = Recording(numbers, narrows=False)
-        con.register("t", source)
+        con._register_source("t", source)
         assert rows(con, "SELECT s FROM t WHERE n = 3") == [("3",)]
         assert rows(con, "SELECT s FROM t LIMIT 1") == [("0",)]
         assert rows(con, "SELECT n FROM t WHERE n = 9") == [(9,)]
@@ -760,7 +759,7 @@ class TestProjection:
         self, con: duckdb.frame.Connection, numbers: pa.Table
     ) -> None:
         source = Recording(numbers, narrows=False)
-        con.register("t", source)
+        con._register_source("t", source)
         assert rows(con, "SELECT s, n FROM t WHERE s = '5'") == [("5", 5)]
         assert rows(con, "SELECT n, s FROM t WHERE n = 6") == [(6, "6")]
         assert all(asked is None or sorted(asked) == [0, 1] for asked in source.asked)
@@ -776,20 +775,9 @@ class TestProjection:
                 message = "no stream today"
                 raise ValueError(message)
 
-        con.register("t", Broken(numbers))
+        con._register_source("t", Broken(numbers))
         expected = "exporting a stream from the object registered as 't' failed: ValueError: no stream today"
         with pytest.raises(exceptions.InvalidInputError, match=expected):
-            rows(con, "SELECT * FROM t")
-
-    def test_a_source_must_answer_with_a_pair(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
-        class Odd(Recording):
-            def stream(self, columns: Sequence[int] | None, filters: Sequence[object]) -> object:  # type: ignore[override]
-                return object.__getattribute__(self.obj, "__arrow_c_stream__")()
-
-        con.register("t", Odd(numbers))
-        with pytest.raises(
-            exceptions.InvalidInputError, match=r"did not answer stream\(\) with a \(capsule, projected\)"
-        ):
             rows(con, "SELECT * FROM t")
 
     def test_a_source_answering_the_wrong_width_is_refused(
@@ -799,7 +787,7 @@ class TestProjection:
             def stream(self, columns: Sequence[int] | None, filters: Sequence[object]) -> tuple[object, bool]:
                 return self.obj.select([0]).__arrow_c_stream__(), False
 
-        con.register("t", Lying(numbers))
+        con._register_source("t", Lying(numbers))
         with pytest.raises(exceptions.InvalidInputError, match="answered with 1 columns where it declared 2"):
             rows(con, "SELECT s FROM t")
 
@@ -807,7 +795,7 @@ class TestProjection:
             def stream(self, columns: Sequence[int] | None, filters: Sequence[object]) -> tuple[object, bool]:
                 return self.obj.__arrow_c_stream__(), True
 
-        con.register("t", Short(numbers))
+        con._register_source("t", Short(numbers))
         with pytest.raises(exceptions.InvalidInputError, match="answered with 2 columns where 1 were requested"):
             rows(con, "SELECT s FROM t")
 
@@ -820,7 +808,7 @@ class TestProjection:
                     return self.obj.__arrow_c_stream__(), False
                 return self.obj.select(sorted(columns)).__arrow_c_stream__(), True
 
-        con.register("t", Sorting(wide))
+        con._register_source("t", Sorting(wide))
         with pytest.raises(exceptions.InvalidInputError, match="answered with column 'n' at position 0 where 'x'"):
             rows(con, "SELECT x, s, n FROM t WHERE x = 0")
 
@@ -828,14 +816,14 @@ class TestProjection:
             def stream(self, columns: Sequence[int] | None, filters: Sequence[object]) -> tuple[object, bool]:
                 return self.obj.select([2, 1, 0]).__arrow_c_stream__(), False
 
-        con.register("t", Swapping(wide))
+        con._register_source("t", Swapping(wide))
         with pytest.raises(exceptions.InvalidInputError, match="answered with column 'x' at position 0 where 'n'"):
             rows(con, "SELECT * FROM t")
 
     def test_duplicate_names_project_by_position(self, con: duckdb.frame.Connection) -> None:
         columns = [pa.array([1]), pa.array([2]), pa.array([3]), pa.array([4])]
         source = Recording(pa.table(columns, names=["a_1", "a", "a", "a_2"]))
-        con.register("dup", source)
+        con._register_source("dup", source)
         assert rows(con, "SELECT a_2 FROM dup") == [(3,)]
         assert source.asked == [[2]]
 
@@ -869,36 +857,21 @@ class TestCardinality:
             def rows(self) -> int | None:
                 return None
 
-        con.register("t", Unknown(numbers))
+        con._register_source("t", Unknown(numbers))
         assert "~1 row" in table("t").on(con).explain()
         assert rows(con, "SELECT count(*) FROM t") == [(10,)]
 
-    def test_a_source_whose_count_fails_or_lies(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
+    def test_a_source_whose_count_fails(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
         class Failing(Recording):
             def rows(self) -> int | None:
                 message = "no idea"
                 raise RuntimeError(message)
 
-        con.register("t", Failing(numbers))
+        con._register_source("t", Failing(numbers))
         with pytest.raises(
             exceptions.InvalidInputError, match="counting the rows of the object registered as 't' failed"
         ):
             rows(con, "SELECT * FROM t")
-
-        class Wrong(Recording):
-            answer: object = None
-
-            def rows(self) -> int | None:
-                return self.answer  # type: ignore[return-value]
-
-        for answer in ("many", True, -1):
-            wrong = Wrong(numbers)
-            wrong.answer = answer
-            con.register("t", wrong)
-            with pytest.raises(
-                exceptions.InvalidInputError, match=r"answered rows\(\) with something other than a count"
-            ):
-                rows(con, "SELECT * FROM t")
 
     def test_a_length_that_is_not_a_row_count_is_not_trusted(
         self, con: duckdb.frame.Connection, numbers: pa.Table
@@ -1177,12 +1150,12 @@ class TestNamesAndShadowing:
         with pytest.raises(TypeError, match="a bare 'arrow_schema' capsule is not an Arrow stream"):
             con.register("wrong", numbers.schema.__arrow_c_schema__())
 
-    def test_a_source_handing_back_the_wrong_capsule_is_refused(
+    def test_an_object_handing_back_the_wrong_capsule_is_refused(
         self, con: duckdb.frame.Connection, numbers: pa.Table
     ) -> None:
-        class WrongKind(Recording):
-            def stream(self, columns: Sequence[int] | None, filters: Sequence[object]) -> tuple[object, bool]:
-                return self.obj.schema.__arrow_c_schema__(), False
+        class WrongKind(WithSchemaAttribute):
+            def __arrow_c_stream__(self, requested_schema: object = None) -> object:
+                return self.numbers.schema.__arrow_c_schema__()
 
         con.register("wrong", WrongKind(numbers))
         with pytest.raises(exceptions.InvalidInputError, match="did not export an 'arrow_array_stream' capsule but"):
@@ -1507,7 +1480,7 @@ class TestFilters:
         self, con: duckdb.frame.Connection, numbers: pa.Table
     ) -> None:
         source = Recording(numbers)
-        con.register("t", source)
+        con._register_source("t", source)
         assert rows(con, "SELECT s FROM t WHERE n > 7 ORDER BY n") == [("8",), ("9",)]
         assert "Filter" in table("t").filter(col("n") > 7).on(con).explain()
 
@@ -1515,7 +1488,7 @@ class TestFilters:
         self, con: duckdb.frame.Connection, numbers: pa.Table
     ) -> None:
         source = Filtering(numbers)
-        con.register("t", source)
+        con._register_source("t", source)
         assert rows(con, "SELECT s FROM t WHERE n > 7 AND s <> '9'") == [("8",)]
         assert source.offered == ['("n" > 7)', "(\"s\" != '9')"]
         assert source.applied == [['("n" > 7)', "(\"s\" != '9')"]]
@@ -1525,14 +1498,14 @@ class TestFilters:
         self, con: duckdb.frame.Connection, numbers: pa.Table
     ) -> None:
         source = Filtering(numbers)
-        con.register("t", source)
+        con._register_source("t", source)
         assert rows(con, "SELECT s FROM t WHERE n = 4") == [("4",)]
         assert source.applied == [['("n" = 4)']]
         assert rows(con, "SELECT count(*) FROM t WHERE n > 4") == [(5,)]
 
     def test_each_reference_carries_its_own_predicates(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
         source = Filtering(numbers)
-        con.register("t", source)
+        con._register_source("t", source)
         query = "SELECT a.n, b.n FROM t a JOIN t b ON a.n = b.n - 1 WHERE a.n < 2 AND b.n > 1 ORDER BY a.n"
         assert rows(con, query) == [(1, 2)]
         assert sorted(source.applied) == [['("n" < 2)'], ['("n" > 1)']]
@@ -1541,7 +1514,7 @@ class TestFilters:
         self, con: duckdb.frame.Connection, numbers: pa.Table
     ) -> None:
         source = Filtering(numbers)
-        con.register("t", source)
+        con._register_source("t", source)
         with con._execute("SELECT count(*) FROM t WHERE n > $1", [7]) as result:
             assert result.fetch_all() == [(2,)]
         with con._execute("SELECT count(*) FROM t WHERE n > $1", [3]) as result:
@@ -1555,7 +1528,7 @@ class TestFilters:
             def accepts(self, predicate: Expr) -> bool:
                 return True
 
-        con.register("t", Lying(numbers))
+        con._register_source("t", Lying(numbers))
         assert rows(con, "SELECT count(*) FROM t WHERE n > 7") == [(10,)]
 
     def test_a_failing_answer_fails_the_query(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
@@ -1564,24 +1537,15 @@ class TestFilters:
                 message = "no opinion"
                 raise RuntimeError(message)
 
-        con.register("t", Broken(numbers))
+        con._register_source("t", Broken(numbers))
         with pytest.raises(exceptions.InvalidInputError, match="offering a filter to the source registered as 't'"):
             rows(con, "SELECT s FROM t WHERE n > 7")
         assert rows(con, "SELECT count(*) FROM t") == [(10,)]
 
-    def test_an_answer_that_is_not_a_bool_is_refused(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
-        class Vague(Recording):
-            def accepts(self, predicate: Expr) -> bool:
-                return "yes"  # type: ignore[return-value]
-
-        con.register("t", Vague(numbers))
-        with pytest.raises(exceptions.InvalidInputError, match="something other than True or False"):
-            rows(con, "SELECT s FROM t WHERE n > 7")
-
     def test_the_dbapi_face_pushes_too(self, numbers: pa.Table) -> None:
         source = Filtering(numbers)
         with dbapi.connect() as connection:
-            connection.register("t", source)
+            connection._register_source("t", source)
             cursor = connection.cursor()
             cursor.execute("SELECT s FROM t WHERE n IN (3, 4) ORDER BY n")
             assert cursor.fetchall() == [("3",), ("4",)]
@@ -1601,7 +1565,7 @@ class TestFilters:
                 return self.obj.__arrow_c_array__(), False
 
         source = Noting(pa.array([1, 2, 3]))
-        con.register("bare", source)
+        con._register_source("bare", source)
         assert rows(con, "SELECT value FROM bare WHERE value > 1 ORDER BY value") == [(2,), (3,)]
         [offered] = source.offered
         assert isinstance(offered, Binary)
@@ -1633,7 +1597,7 @@ class TestFilters:
                 }
             )
         )
-        con.register("t", source)
+        con._register_source("t", source)
         rows(
             con,
             "SELECT count(*) FROM t WHERE money > 1.50 AND raw = '\\x61'::BLOB AND clock < TIME '04:00:00' "
@@ -1666,7 +1630,7 @@ class TestFilters:
             }
         )
         source = Noting(edge)
-        con.register("edge", source)
+        con._register_source("edge", source)
         assert rows(con, "SELECT count(*) FROM edge WHERE d >= DATE 'infinity' OR ts <= TIMESTAMP '-infinity'") == [
             (0,)
         ]
@@ -1679,7 +1643,7 @@ class TestFilters:
         source = adapt(reader_over(numbers))
         assert isinstance(source, PyArrowReaderSource)
         assert source.accepts(col("n") > 7) is False
-        con.register("once", source)
+        con._register_source("once", source)
         assert rows(con, "SELECT count(*) FROM once WHERE n > 7") == [(2,)]
 
 

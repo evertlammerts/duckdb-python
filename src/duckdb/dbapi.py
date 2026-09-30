@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from . import _duckdb
-from ._sources import adapt
+from ._sources import Source, adapt
 from .exceptions import (
     DatabaseError,
     DataError,
@@ -374,7 +374,10 @@ class Connection:
         if not isinstance(name, str):
             message = f"a registered name is a string, not {name!r}"  # type: ignore[unreachable]
             raise TypeError(message)
-        source = adapt(obj)
+        self._register_source(name, adapt(obj))
+
+    def _register_source(self, name: str, source: Source) -> None:
+        """Register a source as `name` as it is, without adapting it."""
         self._engine().register_object(name, source, source.one_shot, source.native)
 
     def unregister(self, name: str) -> None:

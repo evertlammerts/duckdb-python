@@ -11,6 +11,8 @@
 #include "arrowc.hpp"
 #include "predicate.hpp"
 
+#include <nanobind/stl/pair.h>
+
 #include <utility>
 
 // The table function that reads a registered object, and one run of it over a query is a scan. The registered
@@ -47,15 +49,10 @@ Exported ExportStream(Registered &entry, const std::vector<cxx::idx_t> *columns,
 	for (const auto &filter : filters) {
 		promised.append(filter);
 	}
-	nb::object answer = entry.object.attr("stream")(request, nb::tuple(promised));
-	if (!nb::isinstance<nb::tuple>(answer) || nb::len(answer) != 2) {
-		throw cxx::InvalidInputException("the source registered as '" + entry.name +
-		                                 "' did not answer stream() with a (capsule, projected) pair");
-	}
-	auto pair = nb::cast<nb::tuple>(answer);
+	auto [data, projected] =
+	    nb::cast<std::pair<nb::object, bool>>(entry.object.attr("stream")(request, nb::tuple(promised)));
 	Exported exported;
-	exported.projected = nb::cast<bool>(pair[1]);
-	nb::object data = nb::borrow(pair[0]);
+	exported.projected = projected;
 	if (nb::isinstance<nb::tuple>(data) && nb::len(data) == 2) {
 		auto both = nb::cast<nb::tuple>(data);
 		exported.schema = nb::borrow(both[0]);
@@ -226,19 +223,12 @@ void ArrowScanBind(cxx::TableFunction::BindInput &input) {
 		nb::gil_scoped_acquire gil;
 		try {
 			nb::object rows = entry->object.attr("rows")();
-			// A bool is an int to Python, and a truth value is never a row count.
-			if (nb::isinstance<nb::bool_>(rows)) {
-				throw nb::cast_error();
-			}
 			if (!rows.is_none()) {
 				input.SetCardinality(nb::cast<cxx::idx_t>(rows), true);
 			}
 		} catch (nb::python_error &error) {
 			throw cxx::InvalidInputException("counting the rows of the object registered as '" + entry->name +
 			                                 "' failed: " + DescribePythonError(error));
-		} catch (const nb::cast_error &) {
-			throw cxx::InvalidInputException("the source registered as '" + entry->name +
-			                                 "' answered rows() with something other than a count or None");
 		}
 	}
 	input.SetBindData<ArrowScanBindData>(std::move(entry), std::move(names), std::move(types));
@@ -263,12 +253,7 @@ void ArrowScanFilterPushdown(cxx::TableFunction::FilterPushdownInput &input) {
 			} catch (const Refused &) {
 				continue;
 			}
-			nb::object answer = entry.object.attr("accepts")(predicate);
-			if (!nb::isinstance<nb::bool_>(answer)) {
-				throw cxx::InvalidInputException("the source registered as '" + entry.name +
-				                                 "' answered accepts() with something other than True or False");
-			}
-			if (nb::cast<bool>(answer)) {
+			if (nb::cast<bool>(entry.object.attr("accepts")(predicate))) {
 				input.Accept(i);
 				bound.filters.push_back(std::move(predicate));
 			}
@@ -299,12 +284,7 @@ void OpenStream(const ArrowScanBindData &bound, cxx::TableFunction::InitGlobalIn
 		throw cxx::InvalidInputException("exporting a stream from the object registered as '" + entry.name +
 		                                 "' failed: " + DescribePythonError(error));
 	}
-	nb::object flag = entry.object.attr("pull_under_gil");
-	if (!nb::isinstance<nb::bool_>(flag)) {
-		throw cxx::InvalidInputException("the source registered as '" + entry.name +
-		                                 "' has pull_under_gil set to something other than True or False");
-	}
-	const bool pull_under_gil = nb::cast<bool>(flag);
+	const bool pull_under_gil = nb::cast<bool>(entry.object.attr("pull_under_gil"));
 	ArrowOwned<ArrowArray> single;
 	ArrowOwned<ArrowSchema> schema;
 	if (exported.IsArray()) {

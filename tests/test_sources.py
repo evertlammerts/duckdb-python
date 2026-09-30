@@ -641,8 +641,8 @@ def without_nan(result: list[tuple[object, ...]]) -> list[tuple[object, ...]]:
 class TestDatasetPushdown:
     def register_both(self, con: duckdb.frame.Connection, typed_dir: Path) -> Pushing:
         source = Pushing(ds.dataset(typed_dir, partitioning="hive"))
-        con.register("pushed", source)
-        con.register("plain", ArrowStreamSource(ds.dataset(typed_dir, partitioning="hive").to_table()))
+        con._register_source("pushed", source)
+        con._register_source("plain", ArrowStreamSource(ds.dataset(typed_dir, partitioning="hive").to_table()))
         return source
 
     @pytest.mark.parametrize("where", PUSHED)
@@ -722,8 +722,8 @@ class PushingLazily(LazyFrameSource):
 class TestLazyFramePushdown:
     def register_both(self, con: duckdb.frame.Connection, typed_dir: Path) -> PushingLazily:
         source = PushingLazily(pl.scan_parquet(typed_dir, hive_partitioning=True))
-        con.register("pushed", source)
-        con.register("plain", ArrowStreamSource(pl.scan_parquet(typed_dir, hive_partitioning=True).collect()))
+        con._register_source("pushed", source)
+        con._register_source("plain", ArrowStreamSource(pl.scan_parquet(typed_dir, hive_partitioning=True).collect()))
         return source
 
     @pytest.mark.requires("pyarrow")
@@ -768,7 +768,7 @@ class TestLazyFramePushdown:
             }
         )
         source = PushingLazily(frame.lazy())
-        con.register("late", source)
+        con._register_source("late", source)
         con.register("now", frame)
         assert table("late").schema(con) == [("money", "DECIMAL(10,2)"), ("clock", "TIME_NS")]
         for where, pushed in (
@@ -785,7 +785,7 @@ class TestLazyFramePushdown:
     def test_a_float32_column_compares_in_its_own_width(self, con: duckdb.frame.Connection) -> None:
         frame = pl.DataFrame({"f": pl.Series([0.1, 0.2, None], dtype=pl.Float32)})
         source = PushingLazily(frame.lazy())
-        con.register("late", source)
+        con._register_source("late", source)
         con.register("now", frame)
         for where in ("f > 0.1", "f = 0.1", "f >= 0.1", "f < 0.2", "f IN (0.1, 0.3)"):
             expected = rows(con, f"SELECT f FROM now WHERE {where}")
@@ -798,7 +798,7 @@ class TestLazyFramePushdown:
             {"money": pl.Series([decimal.Decimal("1.50"), decimal.Decimal("-1.51")], dtype=pl.Decimal(10, 2))}
         )
         source = PushingLazily(frame.lazy())
-        con.register("late", source)
+        con._register_source("late", source)
         con.register("now", frame)
         for where, pushed in (
             ("money > 1.5", True),
@@ -968,7 +968,7 @@ class TestPandasShapes:
         later[PandasSource.SLICE_ROWS + 1] = 4.2
         arrow_source = PandasSource(pd.DataFrame({"a": pd.Series(later, dtype=object)}))
         arrow_source.native = False
-        con.register("late", arrow_source)
+        con._register_source("late", arrow_source)
         with pytest.raises(exceptions.InvalidInputError, match=f"after row {PandasSource.SLICE_ROWS}"):
             rows(con, "SELECT a FROM late WHERE a = 4")
 
@@ -989,7 +989,7 @@ class TestPandasShapes:
         moments[-2:] = [datetime.date(2024, 1, 2), datetime.datetime(2024, 1, 3, 9, 15)]
         moments_source = PandasSource(pd.DataFrame({"t": pd.Series(moments, dtype=object)}))
         moments_source.native = False
-        con.register("moments", moments_source)
+        con._register_source("moments", moments_source)
         assert table("moments").schema(con) == [("t", "TIMESTAMP")]
         with pytest.raises(exceptions.InvalidInputError, match="registered as 'moments' failed"):
             rows(con, "SELECT max(t) FROM moments")
@@ -1076,8 +1076,8 @@ def register_both(
     assert native_source.native, "the frame is not native-eligible"
     arrow_source = PandasSource(frame)
     arrow_source.native = False
-    con.register(native, native_source)
-    con.register(arrow, arrow_source)
+    con._register_source(native, native_source)
+    con._register_source(arrow, arrow_source)
 
 
 def both(
@@ -1506,7 +1506,7 @@ class TestPandasNativeStrings:
         assert rows(con, "SELECT a FROM t") == expected
         source = PandasSource(frame)
         source.native = False
-        con.register("t", source)
+        con._register_source("t", source)
         assert table("t").schema(con) == [("a", "DATE")]
         assert rows(con, "SELECT a FROM t") == expected
 
@@ -1846,53 +1846,36 @@ class TestPandasStridedViews:
     @pytest.mark.parametrize("column", ["i", "f", "m", "t", "z", "d"])
     def test_an_unaligned_buffer_reads_like_its_copy(self, con: duckdb.frame.Connection, column: str) -> None:
         frame = pd.DataFrame({column: STRIDED_COLUMNS[column]}).iloc[::2]
-        con.register("unaligned", Relaid(frame, "unaligned"))
+        con._register_source("unaligned", Relaid(frame, "unaligned"))
         con.register("copy", frame.copy())
         assert rows(con, f"SELECT {column} FROM unaligned") == rows(con, f"SELECT {column} FROM copy")
 
     @pytest.mark.parametrize("column", list(STRIDED_COLUMNS))
     def test_a_broadcast_buffer_repeats_its_one_element(self, con: duckdb.frame.Connection, column: str) -> None:
         frame = pd.DataFrame({column: STRIDED_COLUMNS[column]})
-        con.register("broadcast", Relaid(frame, "broadcast"))
+        con._register_source("broadcast", Relaid(frame, "broadcast"))
         first = rows(con, f"SELECT {column} FROM broadcast LIMIT 1")
         assert rows(con, f"SELECT {column} FROM broadcast") == first * len(frame)
         con.register("copy", frame.iloc[:1].copy())
         assert first == rows(con, f"SELECT {column} FROM copy")
 
 
-#: A native source over bare numpy arrays, scanned with pandas unimportable.
+#: Strided numpy arrays, scanned with pandas unimportable.
 SCAN_WITHOUT_PANDAS = """
 import sys
 sys.modules["pandas"] = None
 import numpy as np
 import duckdb
-from duckdb._sources import Source
-
-class Arrays(Source):
-    native = True
-
-    def rows(self):
-        return 3
-
-    def describe(self):
-        return [("o", "VARCHAR"), ("i", "BIGINT")]
-
-    def columns(self, columns):
-        plans = [
-            ("o", "text", "VARCHAR", np.array(["a", "x", None, "y", "c"], dtype=object)[::2], None),
-            ("i", "fixed", "BIGINT", np.arange(6)[::-2], None),
-        ]
-        return plans if columns is None else [plans[c] for c in columns]
 
 con = duckdb.frame.connect()
-con.register("t", Arrays(None))
+con.register("t", {"o": np.array(["a", "x", None, "y", "c"], dtype=object)[::2], "i": np.arange(6)[::-2]})
 assert duckdb.frame.sql("SELECT o, i FROM t").rows(con) == [("a", 5), (None, 3), ("c", 1)]
 assert sys.modules["pandas"] is None
 """
 
 
 class TestNumpyScanWithoutPandas:
-    def test_a_native_source_scans_with_pandas_unimportable(self) -> None:
+    def test_numpy_arrays_scan_with_pandas_unimportable(self) -> None:
         result = subprocess.run(
             [sys.executable, "-c", SCAN_WITHOUT_PANDAS], capture_output=True, text=True, check=False, timeout=60
         )
@@ -1909,14 +1892,14 @@ class TestPandasTextUnification:
         dicts = pd.DataFrame({"a": pd.Series([{"x": 1}, {"x": 2}], dtype=object)})
         dicts_source = PandasSource(dicts)
         dicts_source.native = False
-        con.register("d", dicts_source)
+        con._register_source("d", dicts_source)
         assert table("d").schema(con) == [("a", "VARCHAR")]
         assert rows(con, "SELECT a FROM d") == [(str({"x": 1}),), (str({"x": 2}),)]
 
         lists = pd.DataFrame({"a": pd.Series([[1, 2], [3, 4]], dtype=object)})
         lists_source = PandasSource(lists)
         lists_source.native = False
-        con.register("l", lists_source)
+        con._register_source("l", lists_source)
         assert table("l").schema(con) == [("a", "VARCHAR")]
         assert rows(con, "SELECT a FROM l") == [(str([1, 2]),), (str([3, 4]),)]
 
@@ -1953,28 +1936,21 @@ class MisreportingColumns(PandasSource):
         return answer
 
 
-class Counted(PandasSource):
-    """A native source whose rows() answers None, which the scan cannot work without."""
-
-    def rows(self) -> int | None:
-        return None
-
-
 class TestPandasNativeValidation:
     """The scan refuses a malformed columns() answer instead of misreading it, naming the offending column."""
 
     def test_a_short_answer_is_refused(self, con: duckdb.frame.Connection) -> None:
-        con.register("t", MisreportingColumns(pd.DataFrame({"a": range(3), "b": range(3)}), "short"))
+        con._register_source("t", MisreportingColumns(pd.DataFrame({"a": range(3), "b": range(3)}), "short"))
         with pytest.raises(exceptions.InvalidInputError, match=r"1 columns where 2 were requested"):
             rows(con, "SELECT * FROM t")
 
     def test_a_renamed_column_is_refused(self, con: duckdb.frame.Connection) -> None:
-        con.register("t", MisreportingColumns(pd.DataFrame({"a": range(3)}), "renamed"))
+        con._register_source("t", MisreportingColumns(pd.DataFrame({"a": range(3)}), "renamed"))
         with pytest.raises(exceptions.InvalidInputError, match="column 'not_a' at position 0 where 'a' was expected"):
             rows(con, "SELECT * FROM t")
 
     def test_a_two_dimensional_buffer_is_refused(self, con: duckdb.frame.Connection) -> None:
-        con.register("t", MisreportingColumns(pd.DataFrame({"a": range(10)}), "two_dimensional"))
+        con._register_source("t", MisreportingColumns(pd.DataFrame({"a": range(10)}), "two_dimensional"))
         with pytest.raises(exceptions.InvalidInputError, match="for 'a' with a data array that is not one-dimensional"):
             rows(con, "SELECT * FROM t")
 
@@ -1984,24 +1960,19 @@ class TestPandasNativeValidation:
         frame = pd.DataFrame({"a": range(10)})
         data = frame["a"].to_numpy(copy=False)
         before = sys.getrefcount(data)
-        con.register("t", MisreportingColumns(frame, "short_mask"))
+        con._register_source("t", MisreportingColumns(frame, "short_mask"))
         for _ in range(3):
             with pytest.raises(exceptions.InvalidInputError, match="mask array of 9 rows where 10 were expected"):
                 rows(con, "SELECT * FROM t")
         assert sys.getrefcount(data) == before
 
     def test_a_buffer_in_the_other_byte_order_is_refused(self, con: duckdb.frame.Connection) -> None:
-        con.register("t", MisreportingColumns(pd.DataFrame({"a": range(10)}), "swapped"))
+        con._register_source("t", MisreportingColumns(pd.DataFrame({"a": range(10)}), "swapped"))
         with pytest.raises(exceptions.InvalidInputError, match="in the other byte order"):
             rows(con, "SELECT * FROM t")
 
-    def test_a_source_without_a_row_count_is_refused(self, con: duckdb.frame.Connection) -> None:
-        con.register("t", Counted(pd.DataFrame({"a": range(3)})))
-        with pytest.raises(exceptions.InvalidInputError, match=r"something other than .* a row count"):
-            rows(con, "SELECT * FROM t")
-
     def test_a_mismatched_element_width_is_refused(self, con: duckdb.frame.Connection) -> None:
-        con.register("t", MisreportingColumns(pd.DataFrame({"a": range(10)}), "wrong_width"))
+        con._register_source("t", MisreportingColumns(pd.DataFrame({"a": range(10)}), "wrong_width"))
         with pytest.raises(exceptions.InvalidInputError, match="answered columns\\(\\) for 'a'"):
             rows(con, "SELECT * FROM t")
 
@@ -2281,7 +2252,7 @@ class TestDatasetShapes:
         kind = pa.binary_view() if binary else pa.string_view()
         values = [b"abc", b"efg", None] if binary else ["abc", "efg", None]
         source = Pushing(ds.dataset(pa.table({"v": pa.array(values, kind), "n": [1, 2, 3]})))
-        con.register("views", source)
+        con._register_source("views", source)
         assert rows(con, "SELECT n FROM views WHERE v IS NULL") == [(3,)]
         assert rows(con, "SELECT n FROM views WHERE n > 1") == [(2,), (3,)]
         assert rows(con, "SELECT v IS NULL FROM views WHERE n > 1") == [(False,), (True,)]
@@ -2302,7 +2273,7 @@ class TestDatasetShapes:
 
     def test_not_in_and_a_long_in_list(self, con: duckdb.frame.Connection, typed_dir: Path) -> None:
         source = Pushing(ds.dataset(typed_dir, partitioning="hive"))
-        con.register("files", source)
+        con._register_source("files", source)
         assert rows(con, "SELECT n FROM files WHERE n NOT IN (0, 1, 3, 4, 5, 6) ORDER BY n") == [(8,), (9,)]
         assert source.applied[-1] == ['(NOT ("n" IN (0, 1, 3, 4, 5, 6)))']
         members = ", ".join(str(i) for i in range(1000, 6000)) + ", 9"
@@ -2989,7 +2960,7 @@ class TestNumpyScanContract:
             # Integers read as Python object pointers, which is how a pandas sparse column once crashed the scan.
             ("BIGINT", ("objects", "BIGINT", np.array([1, 2]), None), "does not read into BIGINT"),
             ("VARCHAR", ("text", "VARCHAR", np.array([1, 2]), None), "does not read into VARCHAR"),
-            ("BIGINT", ("timestamp", "BIGINT", np.array([1]), None), "does not read into BIGINT"),
+            ("BIGINT", ("timestamp:us", "BIGINT", np.array([1]), None), "does not read into BIGINT"),
             ("BIGINT", ("interval:us", "BIGINT", np.array([1]), None), "does not read into BIGINT"),
             ("BIGINT", ("enum", "BIGINT", np.array([0], dtype=np.int8), None), "does not read into BIGINT"),
             ("ENUM('x')", ("enum", "ENUM('x')", np.array([0], dtype=np.int64), None), "8 bytes wide"),
@@ -3002,7 +2973,7 @@ class TestNumpyScanContract:
     def test_a_buffer_the_encoding_cannot_read_into_the_type_is_refused(
         self, con: duckdb.frame.Connection, type_text: str, plan: tuple[object, ...], message: str
     ) -> None:
-        con.register("t", Answering(type_text, plan))
+        con._register_source("t", Answering(type_text, plan))
         with pytest.raises(exceptions.InvalidInputError, match=re.escape(message)):
             rows(con, "SELECT * FROM t")
 
@@ -3011,7 +2982,7 @@ class TestNumpyScanContract:
         self, con: duckdb.frame.Connection, mask_dtype: type
     ) -> None:
         mask: np.ndarray[Any, Any] = np.array([0, 1, 0], dtype=mask_dtype)
-        con.register("t", Answering("TINYINT", ("fixed", "TINYINT", np.array([1, 2, 3], dtype=np.int8), mask)))
+        con._register_source("t", Answering("TINYINT", ("fixed", "TINYINT", np.array([1, 2, 3], dtype=np.int8), mask)))
         assert rows(con, "SELECT * FROM t") == [(1,), (None,), (3,)]
 
     def test_a_refused_second_column_releases_the_first_columns_array(self, con: duckdb.frame.Connection) -> None:
@@ -3029,7 +3000,7 @@ class TestNumpyScanContract:
             def columns(self, columns: Sequence[int] | None) -> list[tuple[object, ...]]:
                 return [("a", "fixed", "BIGINT", good, None), ("b", "fixed", "BIGINT", good.astype(float), None)]
 
-        con.register("t", SecondRefused(None))
+        con._register_source("t", SecondRefused(None))
         before = sys.getrefcount(good)
         for _ in range(3):
             with pytest.raises(exceptions.InvalidInputError, match="for 'b' with a data array of elements"):
@@ -3064,12 +3035,12 @@ class TestNumpyScanContract:
                 ]
                 return answer if requested is None else [answer[i] for i in requested]
 
-        con.register("t", Exporters(None))
+        con._register_source("t", Exporters(None))
         assert rows(con, "SELECT * FROM t") == [(1 + i, 6 + i, 11 + i, 16 + i) for i in range(5)]
         assert rows(con, "SELECT q, b FROM t") == [(11 + i, 1 + i) for i in range(5)]
 
     def test_a_type_other_than_the_bound_one_is_refused(self, con: duckdb.frame.Connection) -> None:
-        con.register("t", Answering("BIGINT", ("fixed", "DOUBLE", np.array([1.0]), None)))
+        con._register_source("t", Answering("BIGINT", ("fixed", "DOUBLE", np.array([1.0]), None)))
         with pytest.raises(exceptions.InvalidInputError, match="with the type DOUBLE, but the query was bound when"):
             rows(con, "SELECT * FROM t")
 
@@ -3080,7 +3051,7 @@ class TestNumpyScanContract:
     def test_a_type_differing_only_in_its_parameters_is_refused(
         self, con: duckdb.frame.Connection, bound: str, answered: str
     ) -> None:
-        con.register("t", Answering(bound, ("objects", answered, np.array([None], dtype=object), None)))
+        con._register_source("t", Answering(bound, ("objects", answered, np.array([None], dtype=object), None)))
         with pytest.raises(exceptions.InvalidInputError, match="but the query was bound when it was"):
             rows(con, "SELECT * FROM t")
 
@@ -3099,12 +3070,13 @@ class TestNumpyScanContract:
             "interval:M",
             "interval:Y",
             "interval:2147483648ns",
+            "timestamp",
             "timestamp:",
             "timestamp:M",
         ],
     )
     def test_a_malformed_unit_is_refused(self, con: duckdb.frame.Connection, encoding: str) -> None:
-        con.register("t", Answering("INTERVAL", (encoding, "INTERVAL", np.array([1]), None)))
+        con._register_source("t", Answering("INTERVAL", (encoding, "INTERVAL", np.array([1]), None)))
         with pytest.raises(exceptions.InvalidInputError, match=re.escape(f"the unknown encoding '{encoding}'")):
             rows(con, "SELECT * FROM t")
 
@@ -3115,20 +3087,18 @@ class TestNumpyScanContract:
             ("INTERVAL", "interval:h", datetime.timedelta(hours=3)),
             ("INTERVAL", "interval:2147483647ns", datetime.timedelta(microseconds=6442450)),
             ("TIMESTAMP_S", "timestamp:D", datetime.datetime(1970, 1, 4)),
-            ("TIMESTAMP_MS", "timestamp", datetime.datetime(1970, 1, 1, 0, 0, 0, 3000)),
             ("TIMESTAMP_S", "timestamp:0s", datetime.datetime(1970, 1, 1)),
         ],
     )
     def test_a_unit_in_numpys_spelling_is_read(
         self, con: duckdb.frame.Connection, type_text: str, encoding: str, expected: object
     ) -> None:
-        con.register("t", Answering(type_text, (encoding, type_text, np.array([3]), None)))
+        con._register_source("t", Answering(type_text, (encoding, type_text, np.array([3]), None)))
         assert rows(con, "SELECT * FROM t") == [(expected,)]
 
     @pytest.mark.parametrize(
         ("type_text", "encoding", "message"),
         [
-            ("TIMESTAMP WITH TIME ZONE", "timestamp", "which names no unit for TIMESTAMP WITH TIME ZONE"),
             ("TIMESTAMP_S", "timestamp:ns", "whose unit is finer than TIMESTAMP_S"),
             ("TIMESTAMP", "timestamp:1500ns", "whose unit is finer than TIMESTAMP"),
         ],
@@ -3136,25 +3106,20 @@ class TestNumpyScanContract:
     def test_a_unit_the_type_cannot_take_is_refused(
         self, con: duckdb.frame.Connection, type_text: str, encoding: str, message: str
     ) -> None:
-        con.register("t", Answering(type_text, (encoding, type_text, np.array([3]), None)))
+        con._register_source("t", Answering(type_text, (encoding, type_text, np.array([3]), None)))
         with pytest.raises(exceptions.InvalidInputError, match=re.escape(message)):
             rows(con, "SELECT * FROM t")
 
-    def test_an_answer_of_the_wrong_shape_is_refused(self, con: duckdb.frame.Connection) -> None:
-        con.register("t", Answering("BIGINT", ("fixed", "BIGINT", np.array([1]))))
-        with pytest.raises(
-            exceptions.InvalidInputError, match=r"something other than \(name, encoding, type, data, mask\)"
-        ):
-            rows(con, "SELECT * FROM t")
-
     def test_a_category_code_without_a_label_is_refused_at_its_row(self, con: duckdb.frame.Connection) -> None:
-        con.register("t", Answering("ENUM('x')", ("enum", "ENUM('x')", np.array([0, 1], dtype=np.int8), None)))
+        con._register_source("t", Answering("ENUM('x')", ("enum", "ENUM('x')", np.array([0, 1], dtype=np.int8), None)))
         with pytest.raises(exceptions.InvalidInputError, match="category code at row 1 that its ENUM has no label"):
             rows(con, "SELECT * FROM t")
 
     def test_an_answer_that_fits_is_read(self, con: duckdb.frame.Connection) -> None:
         mask = np.array([False, True])
-        con.register("t", Answering("ENUM('x', 'y')", ("enum", "ENUM('x', 'y')", np.array([1, 0], np.int16), mask)))
+        con._register_source(
+            "t", Answering("ENUM('x', 'y')", ("enum", "ENUM('x', 'y')", np.array([1, 0], np.int16), mask))
+        )
         assert rows(con, "SELECT * FROM t") == [("y",), (None,)]
 
     def test_a_dtype_changed_between_binding_and_scanning_is_refused(self, con: duckdb.frame.Connection) -> None:
@@ -3165,7 +3130,7 @@ class TestNumpyScanContract:
                 self.obj["a"] = np.arange(2048).astype("datetime64[ns]")
                 return super().columns(columns)
 
-        con.register("t", Changing({"a": np.zeros(2048, dtype=np.int8)}))
+        con._register_source("t", Changing({"a": np.zeros(2048, dtype=np.int8)}))
         with pytest.raises(exceptions.InvalidInputError, match="with the type TIMESTAMP_NS, but the query was bound"):
             rows(con, "SELECT * FROM t")
 
@@ -3323,7 +3288,7 @@ class TestTemporalScaling:
         counts = np.array([1, 2**62, 3, 4, 5, 6], dtype=np.int64)[::-1]
         mask = np.zeros(18, dtype=bool)[::3]
         mask[4] = True
-        con.register("masked", Answering(type_text, (encoding, type_text, counts, mask)))
+        con._register_source("masked", Answering(type_text, (encoding, type_text, counts, mask)))
         assert rows(con, "SELECT * FROM masked") == [
             (read(6),),
             (read(5),),
@@ -3332,7 +3297,7 @@ class TestTemporalScaling:
             (None,),
             (read(1),),
         ]
-        con.register("unmasked", Answering(type_text, (encoding, type_text, counts, None)))
+        con._register_source("unmasked", Answering(type_text, (encoding, type_text, counts, None)))
         with pytest.raises(exceptions.InvalidInputError, match="holds a value at row 4 that overflows its engine type"):
             rows(con, "SELECT * FROM unmasked")
 

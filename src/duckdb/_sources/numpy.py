@@ -5,10 +5,9 @@ The table function in `numpy_scan.cpp` reads each column from a `ScanColumn`: a 
 the scan turns its bytes into that type. The encodings are `"fixed"` (fixed-width numbers or booleans copied as they
 are, a raw NaN also missing for FLOAT and DOUBLE without a mask), `"timestamp:<unit>"` and `"interval:<unit>"`
 (int64 counts of a timestamp, naive or normalized to UTC as its engine type says, or of a duration, in a unit
-spelled as numpy spells it inside a datetime64 or timedelta64 dtype's brackets, such as `ns` or `2ns`), a bare
-`"timestamp"` (counts in the unit of the column's naive timestamp type), `"enum"` (categorical codes),
-`"ucs4"` and `"bytes"` (numpy's fixed-width `U` and `S` strings) and `"text"` or `"objects"` (Python objects, read
-one at a time as text or converted to the engine type).
+spelled as numpy spells it inside a datetime64 or timedelta64 dtype's brackets, such as `ns` or `2ns`), `"enum"`
+(categorical codes), `"ucs4"` and `"bytes"` (numpy's fixed-width `U` and `S` strings) and `"text"` or `"objects"`
+(Python objects, read one at a time as text or converted to the engine type).
 
 `ColumnReading` holds the one decision made about a column: its engine type, which is what a query is bound
 against, and how to produce its `ScanColumn`, which is done only when a query's scan starts and only for the
