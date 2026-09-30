@@ -25,7 +25,7 @@ import decimal
 import uuid as uuid_module
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from . import Source, _unique_names
+from . import NumpyScanSource, _unique_names
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -283,7 +283,7 @@ def _classify_sample(sample: list[object]) -> tuple[str, str]:
     return "objects", _SIMPLE_FAMILY_TYPES[family]
 
 
-class NumpySource(Source):
+class NumpySource(NumpyScanSource):
     """A numpy array, or a dict, list or tuple of one-dimensional numpy arrays, read off the arrays' own buffers.
 
     A one-dimensional array is one column and a two-dimensional one of shape (n, k) is k columns of n rows, named
@@ -291,8 +291,6 @@ class NumpySource(Source):
     text, a repeat getting a numbered suffix. The mask of a numpy masked array marks missing values. The object is
     read as it is at each query, so a change to it after registration shows in the next one.
     """
-
-    native = True
 
     def __init__(self, obj: object) -> None:
         super().__init__(obj)
@@ -345,15 +343,13 @@ class NumpySource(Source):
                 raise ValueError(message)
         return arrays
 
-    def rows(self) -> int | None:
+    def rows(self) -> int:
         return len(self._arrays()[0][1])
 
     def describe(self) -> list[tuple[str, str]]:
-        """Column names and engine types, which a query is bound against."""
         return [(name, _numpy_reading(name, array).type_text) for name, array in self._arrays()]
 
     def columns(self, columns: Sequence[int] | None) -> list[tuple[str, str, str, object, object | None]]:
-        """The name and `ScanColumn` of each requested column, all of them when None."""
         arrays = self._arrays()
         chosen = arrays if columns is None else [arrays[i] for i in columns]
         return [(name, *_numpy_reading(name, array).prepare()) for name, array in chosen]

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from . import Source, _is
+from . import ArrowScanSource, _is
 from .arrow import ArrowStreamSource
 
 if TYPE_CHECKING:
@@ -39,7 +39,7 @@ class PyArrowReaderSource(ArrowStreamSource):
         return None
 
 
-class PyArrowDatasetSource(Source):
+class PyArrowDatasetSource(ArrowScanSource):
     """A pyarrow Dataset, or anything with its `scanner()` and `schema`: scanned afresh per read, narrowed by name.
 
     A predicate the pyarrow translator models is applied by the scanner, which prunes partitions and row groups by
@@ -81,7 +81,7 @@ class PyArrowDatasetSource(Source):
         return reader.__arrow_c_stream__(), columns is not None
 
 
-class PyArrowScannerSource(Source):
+class PyArrowScannerSource(ArrowScanSource):
     """A pyarrow Scanner: its projection and filter are its own, so it always yields every column it was given."""
 
     pull_under_gil = False

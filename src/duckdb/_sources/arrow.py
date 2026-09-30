@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from . import Source, _from
+from . import ArrowScanSource, _from
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from .._expressions import Expr
 
 
-class ArrowStreamSource(Source):
+class ArrowStreamSource(ArrowScanSource):
     """Anything with `__arrow_c_stream__`, every column; its schema comes from `__arrow_c_schema__` or `schema`."""
 
     def __init__(self, obj: object) -> None:
@@ -32,7 +32,7 @@ class ArrowStreamSource(Source):
         return _known_length(self.obj)
 
 
-class ArrowArraySource(Source):
+class ArrowArraySource(ArrowScanSource):
     """Anything with `__arrow_c_array__` and no stream: one array, read as often as asked.
 
     A struct array is a table of its fields; any other array is one column, named `value` unless the array names it.
@@ -51,7 +51,7 @@ class ArrowArraySource(Source):
         return self.obj.__arrow_c_array__(), False
 
 
-class ArrowCapsuleSource(Source):
+class ArrowCapsuleSource(ArrowScanSource):
     """A bare stream capsule: read once, every column, its schema peeked by the scan."""
 
     one_shot = True

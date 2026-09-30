@@ -23,12 +23,12 @@ import pytest
 
 import duckdb
 from duckdb import exceptions
-from duckdb._sources import Source, adapt
+from duckdb._sources import NumpyScanSource, adapt
 from duckdb._sources.arrow import ArrowArraySource, ArrowStreamSource
 from duckdb._sources.numpy import SAMPLE_ROWS, NumpySource, _classify_objects
-from duckdb._sources.pandas import PandasSource
+from duckdb._sources.pandas import PandasArrowSource, PandasSource
 from duckdb._sources.polars import LazyFrameSource, PolarsFrameSource
-from duckdb._sources.pyarrow import PyArrowDatasetSource, PyArrowScannerSource
+from duckdb._sources.pyarrow import PyArrowDatasetSource, PyArrowScannerSource, PyArrowTableSource
 from duckdb.frame import col, sql, table
 
 # polars publishes no free-threaded build and pyarrow none for Windows on ARM64; a test needing one is marked requires.
@@ -193,7 +193,7 @@ class TestDatasets:
         assert table("years").schema(con) == [("n", "BIGINT"), ("year", "INTEGER")]
         assert rows(con, "SELECT year, n FROM years ORDER BY year") == [(2020, 20), (2021, 21)]
         assert rows(con, "SELECT year FROM years ORDER BY year") == [(2020,), (2021,)]
-        capsule, projected = adapt(ds.dataset(tmp_path, partitioning="hive")).stream([1], ())
+        capsule, projected = PyArrowDatasetSource(ds.dataset(tmp_path, partitioning="hive")).stream([1], ())
         assert projected
         assert columns_of(capsule) == ["year"]
 
@@ -237,24 +237,23 @@ class TestProjection:
         lazy = pl.DataFrame({"i": range(5), "s": ["a", "b", "c", "d", "e"], "unused": [0] * 5}).lazy()
         con.register("lf", lazy.map_batches(peek))
         assert rows(con, "SELECT s FROM lf WHERE i = 2") == [("c",)]
-        capsule, projected = adapt(lazy).stream([1], ())
+        capsule, projected = LazyFrameSource(lazy).stream([1], ())
         assert projected
         assert columns_of(capsule) == ["s"]
 
     def test_pandas_converts_only_the_requested_columns(self) -> None:
         frame = pd.DataFrame({"i": [1, 2], "s": ["a", "b"], "o": pd.Series([object(), object()], dtype=object)})
-        source = adapt(frame)
-        capsule, projected = source.stream([1, 0], ())
+        capsule, projected = PandasArrowSource(frame).stream([1, 0], ())
         assert projected
         assert columns_of(capsule) == ["s", "i"]
 
     def test_tables_and_scanners(self, parquet_dir: Path) -> None:
         table_ = pa.table({"a": [1], "b": [2], "c": [3]})
-        capsule, projected = adapt(table_).stream([2, 0], ())
+        capsule, projected = PyArrowTableSource(table_).stream([2, 0], ())
         assert projected
         assert columns_of(capsule) == ["c", "a"]
         scanner = ds.dataset(parquet_dir).scanner(columns=["s", "n"])
-        capsule, projected = adapt(scanner).stream([1], ())
+        capsule, projected = PyArrowScannerSource(scanner).stream([1], ())
         assert not projected
         assert columns_of(capsule) == ["s", "n"]
 
@@ -495,10 +494,9 @@ class TestPandas:
     def test_a_frame_is_converted_a_slice_at_a_time(
         self, con: duckdb.frame.Connection, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(PandasSource, "SLICE_ROWS", 1000)
+        monkeypatch.setattr(PandasArrowSource, "SLICE_ROWS", 1000)
         frame = pd.DataFrame({"i": range(10_500), "s": [str(i) for i in range(10_500)]})
-        source = adapt(frame)
-        assert isinstance(source, PandasSource)
+        source = PandasArrowSource(frame)
         schema, forced = source._schema(frame)
         assert [batch.num_rows for batch in source._batches(frame, schema, forced)] == [1000] * 10 + [500]
         con.register("df", frame)
@@ -509,15 +507,14 @@ class TestPandas:
         values: list[object] = ["text"] * 5000
         values[4999] = 12
         frame = pd.DataFrame({"o": pd.Series(values, dtype=object)})
-        native_rows, arrow_rows = both(con, frame, "SELECT o, typeof(o) FROM {} WHERE o <> 'text'")
-        assert native_rows == arrow_rows == [("12", "VARCHAR")]
+        numpy_rows, arrow_rows = both(con, frame, "SELECT o, typeof(o) FROM {} WHERE o <> 'text'")
+        assert numpy_rows == arrow_rows == [("12", "VARCHAR")]
 
-    def test_without_pyarrow_a_native_frame_still_registers(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_without_pyarrow_a_numpy_backed_frame_still_registers(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import sys
 
         monkeypatch.setitem(sys.modules, "pyarrow", None)
-        source = adapt(pd.DataFrame({"a": [1]}))
-        assert source.native
+        assert isinstance(adapt(pd.DataFrame({"a": [1]})), PandasSource)
 
     @pytest.mark.requires("pyarrow")
     def test_without_pyarrow_a_pyarrow_backed_column_says_so(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -701,7 +698,7 @@ class TestDatasetPushdown:
 
     def test_a_scanner_keeps_refusing(self, con: duckdb.frame.Connection, typed_dir: Path) -> None:
         scanner = ds.dataset(typed_dir, partitioning="hive").scanner(columns=["n"], filter=ds.field("n") >= 7)
-        assert adapt(scanner).accepts(col("n") > 8) is False
+        assert PyArrowScannerSource(scanner).accepts(col("n") > 8) is False
         con.register("part", scanner)
         assert rows(con, "SELECT n FROM part WHERE n > 8") == [(9,)]
 
@@ -812,7 +809,7 @@ class TestLazyFramePushdown:
 
     def test_an_eager_frame_keeps_refusing(self, con: duckdb.frame.Connection) -> None:
         frame = pl.DataFrame({"n": [1, 2, 3]})
-        assert adapt(frame).accepts(col("n") > 1) is False
+        assert PolarsFrameSource(frame).accepts(col("n") > 1) is False
         con.register("eager", frame)
         assert rows(con, "SELECT n FROM eager WHERE n > 1 ORDER BY n") == [(2,), (3,)]
 
@@ -963,32 +960,30 @@ class TestPandasShapes:
         with pytest.raises(exceptions.InvalidInputError, match="cannot hold exactly"):
             rows(con, "SELECT a FROM df WHERE a = 3")
         # Forced onto the Arrow path: its slice-at-a-time conversion only knows a value fails somewhere in the
-        # slice, not which row, unlike the native scan's per-row check.
-        later: list[object] = list(range(PandasSource.SLICE_ROWS + 10))
-        later[PandasSource.SLICE_ROWS + 1] = 4.2
-        arrow_source = PandasSource(pd.DataFrame({"a": pd.Series(later, dtype=object)}))
-        arrow_source.native = False
+        # slice, not which row, unlike the numpy scan's per-row check.
+        later: list[object] = list(range(PandasArrowSource.SLICE_ROWS + 10))
+        later[PandasArrowSource.SLICE_ROWS + 1] = 4.2
+        arrow_source = PandasArrowSource(pd.DataFrame({"a": pd.Series(later, dtype=object)}))
         con._register_source("late", arrow_source)
-        with pytest.raises(exceptions.InvalidInputError, match=f"after row {PandasSource.SLICE_ROWS}"):
+        with pytest.raises(exceptions.InvalidInputError, match=f"after row {PandasArrowSource.SLICE_ROWS}"):
             rows(con, "SELECT a FROM late WHERE a = 4")
 
     @pytest.mark.requires("pyarrow")
     def test_a_later_slice_of_a_text_column_reads_as_text_on_both_paths(self, con: duckdb.frame.Connection) -> None:
-        many = PandasSource.SLICE_ROWS + 4
+        many = PandasArrowSource.SLICE_ROWS + 4
         words: list[object] = ["a"] * many
         words[-4:] = [111, 222, 333, 444]
         frame = pd.DataFrame({"s": pd.Series(words, dtype=object)})
-        native_rows, arrow_rows = both(con, frame, "SELECT s FROM {} WHERE s <> 'a'")
-        assert native_rows == arrow_rows == [("111",), ("222",), ("333",), ("444",)]
+        numpy_rows, arrow_rows = both(con, frame, "SELECT s FROM {} WHERE s <> 'a'")
+        assert numpy_rows == arrow_rows == [("111",), ("222",), ("333",), ("444",)]
 
     @pytest.mark.requires("pyarrow")
     def test_a_later_slice_typed_differently_fails_a_typed_column(self, con: duckdb.frame.Connection) -> None:
         # Forced onto the Arrow path: a date mixed with a datetime is TIMESTAMP on the numpy scan either way.
-        many = PandasSource.SLICE_ROWS + 4
+        many = PandasArrowSource.SLICE_ROWS + 4
         moments: list[object] = [datetime.datetime(2024, 1, 1, 12)] * many
         moments[-2:] = [datetime.date(2024, 1, 2), datetime.datetime(2024, 1, 3, 9, 15)]
-        moments_source = PandasSource(pd.DataFrame({"t": pd.Series(moments, dtype=object)}))
-        moments_source.native = False
+        moments_source = PandasArrowSource(pd.DataFrame({"t": pd.Series(moments, dtype=object)}))
         con._register_source("moments", moments_source)
         assert table("moments").schema(con) == [("t", "TIMESTAMP")]
         with pytest.raises(exceptions.InvalidInputError, match="registered as 'moments' failed"):
@@ -1069,14 +1064,13 @@ class TestPandasShapes:
 
 
 def register_both(
-    con: duckdb.frame.Connection, frame: pd.DataFrame, *, native: str = "native", arrow: str = "arrow"
+    con: duckdb.frame.Connection, frame: pd.DataFrame, *, numpy: str = "numpy", arrow: str = "arrow"
 ) -> None:
-    """`frame` registered twice: once served by the native scan, once forced through the Arrow path."""
-    native_source = PandasSource(frame)
-    assert native_source.native, "the frame is not native-eligible"
-    arrow_source = PandasSource(frame)
-    arrow_source.native = False
-    con._register_source(native, native_source)
+    """`frame` registered twice: once read by the numpy scan, once forced through the Arrow path."""
+    numpy_source = adapt(frame)
+    assert isinstance(numpy_source, PandasSource), "the frame does not go to the numpy scan"
+    arrow_source = PandasArrowSource(frame)
+    con._register_source(numpy, numpy_source)
     con._register_source(arrow, arrow_source)
 
 
@@ -1085,19 +1079,18 @@ def both(
 ) -> tuple[list[tuple[object, ...]], list[tuple[object, ...]]]:
     """`query`, with `{}` standing for the table name, run against `frame` on both paths."""
     register_both(con, frame)
-    return rows(con, query.format("native")), rows(con, query.format("arrow"))
+    return rows(con, query.format("numpy")), rows(con, query.format("arrow"))
 
 
-class TestPandasNativeClassification:
-    def test_a_plain_frame_is_native(self) -> None:
+class TestPandasScanChoice:
+    def test_a_plain_frame_is_read_by_the_numpy_scan(self) -> None:
         frame = pd.DataFrame({"i": range(3), "f": [1.0, 2.0, 3.0], "o": pd.Series(["a", "b", "c"], dtype=object)})
-        assert PandasSource(frame).native
+        assert isinstance(adapt(frame), PandasSource)
 
     @pytest.mark.requires("pyarrow")
-    def test_a_pyarrow_backed_string_column_is_not_native(self) -> None:
+    def test_a_pyarrow_backed_string_column_sends_the_frame_through_pyarrow(self) -> None:
         frame = pd.DataFrame({"i": range(3), "s": pd.array(["a", "b", "c"], dtype="string[pyarrow]")})
-        source = PandasSource(frame)
-        assert not source.native
+        assert isinstance(adapt(frame), PandasArrowSource)
 
     @pytest.mark.requires("pyarrow")
     def test_a_pyarrow_backed_column_sends_the_whole_frame_through_the_arrow_path(
@@ -1109,7 +1102,7 @@ class TestPandasNativeClassification:
         assert "Python Arrow Scan" in table("t").on(con).explain()
 
 
-class TestPandasNativeFixed:
+class TestPandasNumpyScanFixed:
     def test_a_masked_float_keeps_a_real_nan(self, con: duckdb.frame.Connection) -> None:
         """Only a plain float column marks missing values by NaN; under a mask, a NaN is a value."""
         data = np.array([1.0, np.nan, 3.0, 4.0])
@@ -1143,16 +1136,16 @@ class TestPandasNativeFixed:
         self, con: duckdb.frame.Connection, dtype: str, type_text: str
     ) -> None:
         frame = pd.DataFrame({"a": pd.Series(range(10), dtype=dtype)})
-        native_rows, arrow_rows = both(con, frame, "SELECT a, typeof(a) FROM {} ORDER BY a")
-        assert native_rows == arrow_rows
-        assert native_rows[0][1] == type_text
+        numpy_rows, arrow_rows = both(con, frame, "SELECT a, typeof(a) FROM {} ORDER BY a")
+        assert numpy_rows == arrow_rows
+        assert numpy_rows[0][1] == type_text
 
     @pytest.mark.requires("pyarrow")
     def test_plain_bool_matches_the_arrow_path(self, con: duckdb.frame.Connection) -> None:
         frame = pd.DataFrame({"a": [i % 2 == 0 for i in range(10)]})
-        native_rows, arrow_rows = both(con, frame, "SELECT a, typeof(a) FROM {}")
-        assert native_rows == arrow_rows
-        assert native_rows[0][1] == "BOOLEAN"
+        numpy_rows, arrow_rows = both(con, frame, "SELECT a, typeof(a) FROM {}")
+        assert numpy_rows == arrow_rows
+        assert numpy_rows[0][1] == "BOOLEAN"
 
     @pytest.mark.requires("pyarrow")
     @pytest.mark.parametrize(
@@ -1162,16 +1155,16 @@ class TestPandasNativeFixed:
         self, con: duckdb.frame.Connection, dtype: str
     ) -> None:
         frame = pd.DataFrame({"a": pd.array([*range(9), None], dtype=dtype)})
-        native_rows, arrow_rows = both(con, frame, "SELECT a FROM {}")
-        assert native_rows == arrow_rows
-        assert native_rows[-1] == (None,)
+        numpy_rows, arrow_rows = both(con, frame, "SELECT a FROM {}")
+        assert numpy_rows == arrow_rows
+        assert numpy_rows[-1] == (None,)
 
     @pytest.mark.requires("pyarrow")
     def test_nullable_boolean_matches_the_arrow_path(self, con: duckdb.frame.Connection) -> None:
         frame = pd.DataFrame({"a": pd.array([True, None, pd.NA, np.nan, True], dtype="boolean")})
-        native_rows, arrow_rows = both(con, frame, "SELECT a FROM {}")
-        assert native_rows == [(True,), (None,), (None,), (None,), (True,)]
-        assert native_rows == arrow_rows
+        numpy_rows, arrow_rows = both(con, frame, "SELECT a FROM {}")
+        assert numpy_rows == [(True,), (None,), (None,), (None,), (True,)]
+        assert numpy_rows == arrow_rows
 
     def test_nullable_narrow_dtypes_use_the_mask_not_a_nan_sentinel(self, con: duckdb.frame.Connection) -> None:
         frame = pd.DataFrame({"i": pd.array([1, None, 3], dtype="Int8"), "u": pd.array([1, None, 3], dtype="UInt8")})
@@ -1182,8 +1175,8 @@ class TestPandasNativeFixed:
     def test_columns_of_a_shared_2d_block_stay_contiguous(self, con: duckdb.frame.Connection) -> None:
         block = np.arange(12, dtype=np.int64).reshape(4, 3)
         frame = pd.DataFrame(block, columns=["a", "b", "c"])
-        native_rows, arrow_rows = both(con, frame[["a", "c"]], "SELECT a, c FROM {} ORDER BY a")
-        assert native_rows == arrow_rows == [(0, 2), (3, 5), (6, 8), (9, 11)]
+        numpy_rows, arrow_rows = both(con, frame[["a", "c"]], "SELECT a, c FROM {} ORDER BY a")
+        assert numpy_rows == arrow_rows == [(0, 2), (3, 5), (6, 8), (9, 11)]
 
     @pytest.mark.parametrize("dtype", [">i4", ">u8", ">f8"])
     def test_a_column_stored_in_the_other_byte_order_reads_as_the_numpy_source_reads_it(
@@ -1203,12 +1196,12 @@ class TestPandasNativeFixed:
     @pytest.mark.requires("pyarrow")
     def test_float64_nan_and_infinities(self, con: duckdb.frame.Connection) -> None:
         frame = pd.DataFrame({"a": [1.0, float("nan"), float("inf"), float("-inf")]})
-        native_rows, arrow_rows = both(con, frame, "SELECT a FROM {}")
-        assert native_rows == [(1.0,), (None,), (float("inf"),), (float("-inf"),)]
-        assert without_nan(native_rows) == without_nan(arrow_rows)
+        numpy_rows, arrow_rows = both(con, frame, "SELECT a FROM {}")
+        assert numpy_rows == [(1.0,), (None,), (float("inf"),), (float("-inf"),)]
+        assert without_nan(numpy_rows) == without_nan(arrow_rows)
 
 
-class TestPandasNativeTemporal:
+class TestPandasNumpyScanTemporal:
     """`"timestamp"` and `"interval"` columns: datetime64 and timedelta64, naive and zoned."""
 
     @pytest.mark.requires("pyarrow")
@@ -1220,10 +1213,10 @@ class TestPandasNativeTemporal:
         self, con: duckdb.frame.Connection, unit: str, type_text: str
     ) -> None:
         frame = pd.DataFrame({"t": pd.to_datetime(["2020-01-02 03:04:05", None]).astype(f"datetime64[{unit}]")})
-        native_rows, arrow_rows = both(con, frame, "SELECT t, typeof(t) FROM {}")
-        assert native_rows == arrow_rows
-        assert native_rows[0] == (datetime.datetime(2020, 1, 2, 3, 4, 5), type_text)
-        assert native_rows[1] == (None, type_text)
+        numpy_rows, arrow_rows = both(con, frame, "SELECT t, typeof(t) FROM {}")
+        assert numpy_rows == arrow_rows
+        assert numpy_rows[0] == (datetime.datetime(2020, 1, 2, 3, 4, 5), type_text)
+        assert numpy_rows[1] == (None, type_text)
 
     @pytest.mark.requires("pyarrow")
     @pytest.mark.parametrize("unit", ["s", "ms", "us"])
@@ -1231,16 +1224,14 @@ class TestPandasNativeTemporal:
         frame = pd.DataFrame(
             {"t": pd.to_datetime(["2020-01-02 03:04:05"]).tz_localize("UTC").astype(f"datetime64[{unit}, UTC]")}
         )
-        native_rows, arrow_rows = both(con, frame, "SELECT t, typeof(t) FROM {}")
-        assert native_rows == arrow_rows
-        assert native_rows == [
-            (datetime.datetime(2020, 1, 2, 3, 4, 5, tzinfo=datetime.UTC), "TIMESTAMP WITH TIME ZONE")
-        ]
+        numpy_rows, arrow_rows = both(con, frame, "SELECT t, typeof(t) FROM {}")
+        assert numpy_rows == arrow_rows
+        assert numpy_rows == [(datetime.datetime(2020, 1, 2, 3, 4, 5, tzinfo=datetime.UTC), "TIMESTAMP WITH TIME ZONE")]
 
     def test_a_nanosecond_aware_column_still_reads_as_timestamp_with_time_zone(
         self, con: duckdb.frame.Connection
     ) -> None:
-        # The engine also has a nanosecond TIMESTAMP_TZ_NS, which the Arrow path picks for this dtype; the native
+        # The engine also has a nanosecond TIMESTAMP_TZ_NS, which the Arrow path picks for this dtype; the numpy
         # scan always normalizes an aware column to microseconds, so the two paths deliberately part ways here.
         frame = pd.DataFrame(
             {"t": pd.to_datetime(["2020-01-02 03:04:05"]).tz_localize("UTC").astype("datetime64[ns, UTC]")}
@@ -1254,26 +1245,26 @@ class TestPandasNativeTemporal:
     @pytest.mark.parametrize("zone", ["Europe/Berlin", "Asia/Kathmandu"])
     def test_a_non_utc_zone_keeps_its_instant(self, con: duckdb.frame.Connection, zone: str) -> None:
         frame = pd.DataFrame({"t": pd.to_datetime(["2020-06-02 03:04:05"]).tz_localize(zone)})
-        native_rows, arrow_rows = both(con, frame, "SELECT t FROM {}")
-        assert native_rows == arrow_rows
+        numpy_rows, arrow_rows = both(con, frame, "SELECT t FROM {}")
+        assert numpy_rows == arrow_rows
         utc = pd.to_datetime(["2020-06-02 03:04:05"]).tz_localize(zone).tz_convert("UTC")[0].to_pydatetime()
-        assert native_rows == [(utc,)]
+        assert numpy_rows == [(utc,)]
 
     @pytest.mark.requires("pyarrow")
     @pytest.mark.parametrize("year", [1680, 2260])
     def test_years_far_from_the_epoch_at_microsecond_resolution(self, con: duckdb.frame.Connection, year: int) -> None:
         frame = pd.DataFrame({"t": pd.to_datetime([f"{year}-01-02 03:04:05.123456"])})
-        native_rows, arrow_rows = both(con, frame, "SELECT t FROM {}")
-        assert native_rows == arrow_rows
-        assert native_rows == [(datetime.datetime(year, 1, 2, 3, 4, 5, 123456),)]
+        numpy_rows, arrow_rows = both(con, frame, "SELECT t FROM {}")
+        assert numpy_rows == arrow_rows
+        assert numpy_rows == [(datetime.datetime(year, 1, 2, 3, 4, 5, 123456),)]
 
     @pytest.mark.requires("pyarrow")
     def test_a_strided_datetime_series_reads_correctly(self, con: duckdb.frame.Connection) -> None:
         strided = pd.date_range("2020-01-01", periods=100, freq="h")[::23]
         frame = pd.DataFrame({"t": pd.Series(strided)})
-        native_rows, arrow_rows = both(con, frame, "SELECT t FROM {}")
-        assert native_rows == arrow_rows
-        assert [row[0] for row in native_rows] == list(strided.to_pydatetime())
+        numpy_rows, arrow_rows = both(con, frame, "SELECT t FROM {}")
+        assert numpy_rows == arrow_rows
+        assert [row[0] for row in numpy_rows] == list(strided.to_pydatetime())
 
     def test_an_object_column_of_fixed_offset_datetimes(self, con: duckdb.frame.Connection) -> None:
         early = datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone(datetime.timedelta(hours=-19)))
@@ -1308,16 +1299,16 @@ class TestPandasNativeTemporal:
         assert rows(con, "SELECT d FROM t") == [(huge,)]
 
 
-class TestPandasNativeCategorical:
+class TestPandasNumpyScanCategorical:
     """`"enum"` columns: pandas Categorical, string and non-string."""
 
     @pytest.mark.requires("pyarrow")
     def test_string_categories_with_and_without_null(self, con: duckdb.frame.Connection) -> None:
-        # The native scan reads a categorical as ENUM; the Arrow path (pyarrow dictionary) reads it as VARCHAR
+        # The numpy scan reads a categorical as ENUM; the Arrow path (pyarrow dictionary) reads it as VARCHAR
         # already, so only the values, not typeof(), are compared here.
         frame = pd.DataFrame({"c": pd.Categorical(["x", "y", None, "x"])})
-        native_rows, arrow_rows = both(con, frame, "SELECT c FROM {}")
-        assert native_rows == arrow_rows == [("x",), ("y",), (None,), ("x",)]
+        numpy_rows, arrow_rows = both(con, frame, "SELECT c FROM {}")
+        assert numpy_rows == arrow_rows == [("x",), ("y",), (None,), ("x",)]
         con.register("t", frame)
         assert table("t").schema(con) == [("c", "ENUM('x', 'y')")]
 
@@ -1336,8 +1327,8 @@ class TestPandasNativeCategorical:
     @pytest.mark.requires("pyarrow")
     def test_integer_categories_are_read_through_their_own_kind(self, con: duckdb.frame.Connection) -> None:
         frame = pd.DataFrame({"c": pd.Categorical([1, 2, 1])})
-        native_rows, arrow_rows = both(con, frame, "SELECT c, typeof(c) FROM {}")
-        assert native_rows == arrow_rows == [(1, "BIGINT"), (2, "BIGINT"), (1, "BIGINT")]
+        numpy_rows, arrow_rows = both(con, frame, "SELECT c, typeof(c) FROM {}")
+        assert numpy_rows == arrow_rows == [(1, "BIGINT"), (2, "BIGINT"), (1, "BIGINT")]
 
     def test_integer_categories_with_a_null(self, con: duckdb.frame.Connection) -> None:
         frame = pd.DataFrame({"c": pd.Categorical([1, 2, None])})
@@ -1367,8 +1358,8 @@ class TestPandasNativeCategorical:
         n = 4096
         categories = [f"v{i % 5}" for i in range(n)]
         frame = pd.DataFrame({"c": pd.Categorical(categories)})
-        native_rows, arrow_rows = both(con, frame, "SELECT c FROM {}")
-        assert native_rows == arrow_rows == [(c,) for c in categories]
+        numpy_rows, arrow_rows = both(con, frame, "SELECT c FROM {}")
+        assert numpy_rows == arrow_rows == [(c,) for c in categories]
 
     def test_category_order_is_preserved_in_the_enum(self, con: duckdb.frame.Connection) -> None:
         frame = pd.DataFrame({"c": pd.Categorical(["b", "a"], categories=["z", "a", "b"])})
@@ -1376,7 +1367,7 @@ class TestPandasNativeCategorical:
         assert table("t").schema(con) == [("c", "ENUM('z', 'a', 'b')")]
 
 
-class TestPandasNativeStrings:
+class TestPandasNumpyScanStrings:
     """`"text"` columns: Python-backed string arrays and plain object columns of strings."""
 
     @pytest.mark.requires("pyarrow")
@@ -1504,8 +1495,7 @@ class TestPandasNativeStrings:
         con.register("t", frame)
         assert table("t").schema(con) == [("a", "DATE")]
         assert rows(con, "SELECT a FROM t") == expected
-        source = PandasSource(frame)
-        source.native = False
+        source = PandasArrowSource(frame)
         con._register_source("t", source)
         assert table("t").schema(con) == [("a", "DATE")]
         assert rows(con, "SELECT a FROM t") == expected
@@ -1596,11 +1586,11 @@ class TestPandasNumpyScalars:
         self, con: duckdb.frame.Connection, missing: np.generic, present: np.generic
     ) -> None:
         frame = pd.DataFrame({"v": pd.Series([missing, present, missing], dtype=object)})
-        native_rows, arrow_rows = both(con, frame, "SELECT count(v), count(*), bool_or(v IS NULL) FROM {}")
-        assert native_rows == arrow_rows == [(1, 3, True)]
+        numpy_rows, arrow_rows = both(con, frame, "SELECT count(v), count(*), bool_or(v IS NULL) FROM {}")
+        assert numpy_rows == arrow_rows == [(1, 3, True)]
 
     def test_a_half_precision_nan_is_null(self, con: duckdb.frame.Connection) -> None:
-        # Native only: pyarrow types float16 objects as halffloat, which the engine's Arrow importer does not read.
+        # Numpy scan only: pyarrow types float16 objects as halffloat, which the engine's Arrow importer does not read.
         frame = pd.DataFrame({"v": pd.Series([np.float16("nan"), np.float16(1.5)], dtype=object)})
         con.register("t", frame)
         assert rows(con, "SELECT v, typeof(v) FROM t") == [(None, "DOUBLE"), (1.5, "DOUBLE")]
@@ -1608,14 +1598,14 @@ class TestPandasNumpyScalars:
     @pytest.mark.requires("pyarrow")
     def test_a_column_of_nothing_but_nat_is_all_null(self, con: duckdb.frame.Connection) -> None:
         frame = pd.DataFrame({"v": pd.Series([np.datetime64("NaT", "ns")] * 3, dtype=object)})
-        native_rows, arrow_rows = both(con, frame, "SELECT count(v), count(*) FROM {}")
-        assert native_rows == arrow_rows == [(0, 3)]
+        numpy_rows, arrow_rows = both(con, frame, "SELECT count(v), count(*) FROM {}")
+        assert numpy_rows == arrow_rows == [(0, 3)]
 
     @pytest.mark.requires("pyarrow")
     def test_nat_among_text_is_null_not_the_text_nat(self, con: duckdb.frame.Connection) -> None:
         frame = pd.DataFrame({"v": pd.Series(["a", np.datetime64("NaT", "ns"), 1], dtype=object)})
-        native_rows, arrow_rows = both(con, frame, "SELECT v FROM {}")
-        assert native_rows == arrow_rows == [("a",), (None,), ("1",)]
+        numpy_rows, arrow_rows = both(con, frame, "SELECT v FROM {}")
+        assert numpy_rows == arrow_rows == [("a",), (None,), ("1",)]
 
     @pytest.mark.requires("pyarrow")
     def test_nanosecond_datetimes_read_as_timestamp_ns(self, con: duckdb.frame.Connection) -> None:
@@ -1627,13 +1617,13 @@ class TestPandasNumpyScalars:
         frame = pd.DataFrame({"v": pd.Series(values, dtype=object)})
         register_both(con, frame)
         expected = [(1_577_836_800_000_000_001, "TIMESTAMP_NS"), (-1, "TIMESTAMP_NS"), (None, "TIMESTAMP_NS")]
-        assert epoch_ns(con, "native") == epoch_ns(con, "arrow") == expected
+        assert epoch_ns(con, "numpy") == epoch_ns(con, "arrow") == expected
 
     def test_nanosecond_datetimes_mixed_with_python_datetimes(self, con: duckdb.frame.Connection) -> None:
         values = [np.datetime64("2020-01-01T00:00:00.000000001", "ns"), datetime.datetime(2020, 1, 1, 0, 0, 1)]
         frame = pd.DataFrame({"v": pd.Series(values, dtype=object)})
-        con.register("native", frame)
-        assert epoch_ns(con, "native") == [
+        con.register("numpy", frame)
+        assert epoch_ns(con, "numpy") == [
             (1_577_836_800_000_000_001, "TIMESTAMP_NS"),
             (1_577_836_801_000_000_000, "TIMESTAMP_NS"),
         ]
@@ -1747,16 +1737,16 @@ class TestPandasNumpyScalars:
     def test_nanosecond_timedeltas_truncate_to_microseconds(self, con: duckdb.frame.Connection) -> None:
         values = [np.timedelta64(1500, "ns"), np.timedelta64(-1500, "ns"), np.timedelta64(2_000_000_000, "ns")]
         frame = pd.DataFrame({"v": pd.Series(values, dtype=object)})
-        native_rows, arrow_rows = both(con, frame, "SELECT v, typeof(v) FROM {}")
+        numpy_rows, arrow_rows = both(con, frame, "SELECT v, typeof(v) FROM {}")
         expected = [
             (datetime.timedelta(microseconds=1), "INTERVAL"),
             (datetime.timedelta(microseconds=-1), "INTERVAL"),
             (datetime.timedelta(seconds=2), "INTERVAL"),
         ]
-        assert native_rows == arrow_rows == expected
+        assert numpy_rows == arrow_rows == expected
 
     def test_mixed_units_in_one_column(self, con: duckdb.frame.Connection) -> None:
-        # Native only: pyarrow refuses to mix numpy units within one object column.
+        # Numpy scan only: pyarrow refuses to mix numpy units within one object column.
         durations = [np.timedelta64(2, "s"), np.timedelta64(1500, "ns"), np.timedelta64(3, "D")]
         instants = [np.datetime64(1, "s"), np.datetime64(1, "ns")]
         con.register("d", pd.DataFrame({"v": pd.Series(durations, dtype=object)}))
@@ -1788,7 +1778,7 @@ STRIDED_COLUMNS = {
 
 
 class Relaid(PandasSource):
-    """A native source handing the scan each data array relaid in memory, the values unchanged, as `layout` says."""
+    """A pandas source handing the numpy scan each data array relaid in memory, values unchanged, as `layout` says."""
 
     def __init__(self, obj: object, layout: str) -> None:
         super().__init__(obj)
@@ -1811,7 +1801,7 @@ class Relaid(PandasSource):
 
 
 class TestPandasStridedViews:
-    """A row-stepped view hands over strided buffers, which the native scan reads in place."""
+    """A row-stepped view hands over strided buffers, which the numpy scan reads in place."""
 
     @pytest.mark.requires("pyarrow")
     @pytest.mark.parametrize("step", [2, -1, -3])
@@ -1822,7 +1812,7 @@ class TestPandasStridedViews:
         con.register("copy", view.copy())
         expected = rows(con, f"SELECT {column} FROM copy")
         assert len(expected) == len(range(7)[::step])
-        assert rows(con, f"SELECT {column} FROM native") == rows(con, f"SELECT {column} FROM arrow") == expected
+        assert rows(con, f"SELECT {column} FROM numpy") == rows(con, f"SELECT {column} FROM arrow") == expected
 
     def test_an_empty_reversed_view(self, con: duckdb.frame.Connection) -> None:
         con.register("t", pd.DataFrame({"i": pd.Series([], dtype="int64")}).iloc[::-1])
@@ -1884,21 +1874,19 @@ class TestNumpyScanWithoutPandas:
 
 @pytest.mark.requires("pyarrow")
 class TestPandasTextUnification:
-    """The Arrow path stringifies a mixed object column the same way the native scan reads it as text."""
+    """The Arrow path stringifies a mixed object column the same way the numpy scan reads it as text."""
 
     def test_consistent_dicts_and_lists_of_ints_read_as_text_on_the_arrow_path(
         self, con: duckdb.frame.Connection
     ) -> None:
         dicts = pd.DataFrame({"a": pd.Series([{"x": 1}, {"x": 2}], dtype=object)})
-        dicts_source = PandasSource(dicts)
-        dicts_source.native = False
+        dicts_source = PandasArrowSource(dicts)
         con._register_source("d", dicts_source)
         assert table("d").schema(con) == [("a", "VARCHAR")]
         assert rows(con, "SELECT a FROM d") == [(str({"x": 1}),), (str({"x": 2}),)]
 
         lists = pd.DataFrame({"a": pd.Series([[1, 2], [3, 4]], dtype=object)})
-        lists_source = PandasSource(lists)
-        lists_source.native = False
+        lists_source = PandasArrowSource(lists)
         con._register_source("l", lists_source)
         assert table("l").schema(con) == [("a", "VARCHAR")]
         assert rows(con, "SELECT a FROM l") == [(str([1, 2]),), (str([3, 4]),)]
@@ -1906,12 +1894,12 @@ class TestPandasTextUnification:
     def test_bytes_mixed_with_str_reads_as_text_on_both_paths(self, con: duckdb.frame.Connection) -> None:
         values: list[object] = [b"abc", "text"]
         frame = pd.DataFrame({"a": pd.Series(values, dtype=object)})
-        native_rows, arrow_rows = both(con, frame, "SELECT a FROM {}")
-        assert native_rows == arrow_rows == [(str(v),) for v in values]
+        numpy_rows, arrow_rows = both(con, frame, "SELECT a FROM {}")
+        assert numpy_rows == arrow_rows == [(str(v),) for v in values]
 
 
 class MisreportingColumns(PandasSource):
-    """A native source whose columns() reply can be broken in a chosen way, to exercise the scan's own checks."""
+    """A pandas source whose columns() reply can be broken in a chosen way, to exercise the numpy scan's own checks."""
 
     def __init__(self, obj: object, break_as: str) -> None:
         super().__init__(obj)
@@ -1936,7 +1924,7 @@ class MisreportingColumns(PandasSource):
         return answer
 
 
-class TestPandasNativeValidation:
+class TestPandasNumpyScanValidation:
     """The scan refuses a malformed columns() answer instead of misreading it, naming the offending column."""
 
     def test_a_short_answer_is_refused(self, con: duckdb.frame.Connection) -> None:
@@ -1977,7 +1965,7 @@ class TestPandasNativeValidation:
             rows(con, "SELECT * FROM t")
 
 
-class TestPandasNativeShapes:
+class TestPandasNumpyScanShapes:
     def test_duplicate_labels_are_renamed(self, con: duckdb.frame.Connection) -> None:
         original = ["a_1", "a", "a"]
         frame = pd.DataFrame([[1, 2, 3]], columns=original)
@@ -2060,7 +2048,7 @@ class Rendered:
         return "x"
 
 
-class TestPandasNativeParallel:
+class TestPandasNumpyScanParallel:
     def test_several_engine_threads_read_one_frame(self, con: duckdb.frame.Connection) -> None:
         """A column of objects reads as text through str(), so the rendering sees which threads fill ranges."""
         con.run("SET threads = 4")
@@ -2148,7 +2136,7 @@ class TestPandasNativeParallel:
             timer.cancel()
 
 
-class TestPandasNativeLifetime:
+class TestPandasNumpyScanLifetime:
     def test_a_mutated_frame_reads_the_new_state(self, con: duckdb.frame.Connection) -> None:
         frame = pd.DataFrame({"a": [1, 2, 3]})
         con.register("t", frame)
@@ -2927,24 +2915,22 @@ class TestNumpyRoundTrip:
         assert typed(con, fetched) == [(datetime.date(2020, 1, 2), "DATE")]
 
 
-class Answering(Source):
+class Answering(NumpyScanSource):
     """A source read by the numpy scan that describes one column as `type_text` and answers `columns()` with `plan`."""
 
-    native = True
-
-    def __init__(self, type_text: str, plan: tuple[object, ...]) -> None:
+    def __init__(self, type_text: str, plan: tuple[str, str, object, object | None]) -> None:
         super().__init__(None)
         self.type_text = type_text
         self.plan = plan
 
-    def rows(self) -> int | None:
-        data = self.plan[2] if len(self.plan) > 2 else []
+    def rows(self) -> int:
+        data = self.plan[2]
         return len(data) if isinstance(data, np.ndarray) else 0
 
     def describe(self) -> list[tuple[str, str]]:
         return [("a", self.type_text)]
 
-    def columns(self, columns: Sequence[int] | None) -> list[tuple[object, ...]]:
+    def columns(self, columns: Sequence[int] | None) -> list[tuple[str, str, str, object, object | None]]:
         return [("a", *self.plan)]
 
 
@@ -2971,7 +2957,7 @@ class TestNumpyScanContract:
         ],
     )
     def test_a_buffer_the_encoding_cannot_read_into_the_type_is_refused(
-        self, con: duckdb.frame.Connection, type_text: str, plan: tuple[object, ...], message: str
+        self, con: duckdb.frame.Connection, type_text: str, plan: tuple[str, str, object, object | None], message: str
     ) -> None:
         con._register_source("t", Answering(type_text, plan))
         with pytest.raises(exceptions.InvalidInputError, match=re.escape(message)):
@@ -2988,16 +2974,14 @@ class TestNumpyScanContract:
     def test_a_refused_second_column_releases_the_first_columns_array(self, con: duckdb.frame.Connection) -> None:
         good = np.arange(10)
 
-        class SecondRefused(Source):
-            native = True
-
-            def rows(self) -> int | None:
+        class SecondRefused(NumpyScanSource):
+            def rows(self) -> int:
                 return len(good)
 
             def describe(self) -> list[tuple[str, str]]:
                 return [("a", "BIGINT"), ("b", "BIGINT")]
 
-            def columns(self, columns: Sequence[int] | None) -> list[tuple[object, ...]]:
+            def columns(self, columns: Sequence[int] | None) -> list[tuple[str, str, str, object, object | None]]:
                 return [("a", "fixed", "BIGINT", good, None), ("b", "fixed", "BIGINT", good.astype(float), None)]
 
         con._register_source("t", SecondRefused(None))
@@ -3020,17 +3004,15 @@ class TestNumpyScanContract:
             "n": ("BIGINT", np.arange(16, 21)),
         }
 
-        class Exporters(Source):
-            native = True
-
-            def rows(self) -> int | None:
+        class Exporters(NumpyScanSource):
+            def rows(self) -> int:
                 return 5
 
             def describe(self) -> list[tuple[str, str]]:
                 return [(name, type_text) for name, (type_text, _) in columns.items()]
 
-            def columns(self, requested: Sequence[int] | None) -> list[tuple[object, ...]]:
-                answer: list[tuple[object, ...]] = [
+            def columns(self, requested: Sequence[int] | None) -> list[tuple[str, str, str, object, object | None]]:
+                answer: list[tuple[str, str, str, object, object | None]] = [
                     (name, "fixed", type_text, data, None) for name, (type_text, data) in columns.items()
                 ]
                 return answer if requested is None else [answer[i] for i in requested]
@@ -3330,11 +3312,11 @@ def on_both_transports(
     con: duckdb.frame.Connection, frame: pd.DataFrame, query: str
 ) -> tuple[list[tuple[object, ...]], list[tuple[object, ...]]]:
     """`query`, `{}` standing for the table, on `frame` read by the numpy scan and on it plus an Arrow-backed column."""
-    con.register("native", frame)
+    con.register("numpy", frame)
     con.register("arrow", with_arrow_column(frame))
-    assert "Python Numpy Scan" in table("native").on(con).explain()
+    assert "Python Numpy Scan" in table("numpy").on(con).explain()
     assert "Python Arrow Scan" in table("arrow").on(con).explain()
-    return rows(con, query.format("native")), rows(con, query.format("arrow"))
+    return rows(con, query.format("numpy")), rows(con, query.format("arrow"))
 
 
 @pytest.mark.requires("pyarrow")
@@ -3355,9 +3337,11 @@ class TestPandasObjectPolicy:
         self, con: duckdb.frame.Connection, values: list[object], expected_type: str, expected: list[tuple[object]]
     ) -> None:
         frame = pd.DataFrame({"v": pd.Series(values, dtype=object)})
-        native, arrow = on_both_transports(con, frame, "SELECT v FROM {} WHERE v IS NOT NULL AND v::VARCHAR <> 's'")
-        assert native == arrow == expected
-        assert dict(table("native").schema(con))["v"] == dict(table("arrow").schema(con))["v"] == expected_type
+        numpy_rows, arrow_rows = on_both_transports(
+            con, frame, "SELECT v FROM {} WHERE v IS NOT NULL AND v::VARCHAR <> 's'"
+        )
+        assert numpy_rows == arrow_rows == expected
+        assert dict(table("numpy").schema(con))["v"] == dict(table("arrow").schema(con))["v"] == expected_type
 
     @pytest.mark.parametrize(
         ("later", "expected"),
@@ -3375,11 +3359,11 @@ class TestPandasObjectPolicy:
         self, con: duckdb.frame.Connection, later: list[object], expected: list[tuple[object]]
     ) -> None:
         # The first slice mixes a float32 NaN into strings, which reaches pyarrow only after becoming None.
-        first: list[object] = ["a", np.float32("nan")] + ["a"] * (PandasSource.SLICE_ROWS - 2)
+        first: list[object] = ["a", np.float32("nan")] + ["a"] * (PandasArrowSource.SLICE_ROWS - 2)
         frame = pd.DataFrame({"v": pd.Series([*first, *later], dtype=object)})
         query = "SELECT v FROM {} WHERE v IS NULL OR v <> 'a' ORDER BY v NULLS FIRST"
-        native, arrow = on_both_transports(con, frame, query)
-        assert native == arrow == [(None,), *expected]
+        numpy_rows, arrow_rows = on_both_transports(con, frame, query)
+        assert numpy_rows == arrow_rows == [(None,), *expected]
 
     @pytest.mark.parametrize("value", [7, 2**60 + 1], ids=["small", "past exact doubles"])
     @pytest.mark.parametrize(
@@ -3390,14 +3374,18 @@ class TestPandasObjectPolicy:
     ) -> None:
         # pyarrow reads these markers as values, not as missing ones.
         frame = pd.DataFrame({"v": pd.Series([marker] + [value] * 2000, dtype=object)})
-        native, arrow = on_both_transports(con, frame, "SELECT typeof(v), count(v), max(v) FROM {} GROUP BY ALL")
-        assert native == arrow == [("BIGINT", 2000, value)]
+        numpy_rows, arrow_rows = on_both_transports(
+            con, frame, "SELECT typeof(v), count(v), max(v) FROM {} GROUP BY ALL"
+        )
+        assert numpy_rows == arrow_rows == [("BIGINT", 2000, value)]
 
     def test_float32_objects_keep_their_own_type_on_each_transport(self, con: duckdb.frame.Connection) -> None:
         frame = pd.DataFrame({"v": pd.Series([np.float32("nan")] + [np.float32(1.5)] * 2000, dtype=object)})
-        native, arrow = on_both_transports(con, frame, "SELECT typeof(v), count(v), max(v) FROM {} GROUP BY ALL")
-        assert native == [("DOUBLE", 2000, 1.5)]
-        assert arrow == [("FLOAT", 2000, 1.5)]
+        numpy_rows, arrow_rows = on_both_transports(
+            con, frame, "SELECT typeof(v), count(v), max(v) FROM {} GROUP BY ALL"
+        )
+        assert numpy_rows == [("DOUBLE", 2000, 1.5)]
+        assert arrow_rows == [("FLOAT", 2000, 1.5)]
 
     def test_a_str_subclass_is_read_as_the_string_it_holds(self, con: duckdb.frame.Connection) -> None:
         class Shouting(str):
@@ -3405,21 +3393,21 @@ class TestPandasObjectPolicy:
                 return "SHOUTING"
 
         frame = pd.DataFrame({"v": pd.Series(["a", 7, Shouting("hi")] + ["a"] * 1998, dtype=object)})
-        native, arrow = on_both_transports(con, frame, "SELECT v FROM {} WHERE v <> 'a' ORDER BY v")
-        assert native == arrow == [("7",), ("hi",)]
+        numpy_rows, arrow_rows = on_both_transports(con, frame, "SELECT v FROM {} WHERE v <> 'a' ORDER BY v")
+        assert numpy_rows == arrow_rows == [("7",), ("hi",)]
 
     def test_an_empty_frame_reads_as_an_empty_text_column(self, con: duckdb.frame.Connection) -> None:
         frame = pd.DataFrame({"v": pd.Series([], dtype=object)})
-        native, arrow = on_both_transports(con, frame, "SELECT v FROM {}")
-        assert native == arrow == []
-        assert dict(table("native").schema(con))["v"] == dict(table("arrow").schema(con))["v"] == "VARCHAR"
+        numpy_rows, arrow_rows = on_both_transports(con, frame, "SELECT v FROM {}")
+        assert numpy_rows == arrow_rows == []
+        assert dict(table("numpy").schema(con))["v"] == dict(table("arrow").schema(con))["v"] == "VARCHAR"
 
     def test_repeated_index_labels_do_not_hide_a_value_outside_the_sample(self, con: duckdb.frame.Connection) -> None:
         values: list[object] = [None] * 3000
         values[1] = 7
         frame = pd.DataFrame({"v": pd.Series(values, dtype=object, index=[0] * 3000)})
-        native, arrow = on_both_transports(con, frame, "SELECT v, typeof(v) FROM {} WHERE v IS NOT NULL")
-        assert native == arrow == [(7, "BIGINT")]
+        numpy_rows, arrow_rows = on_both_transports(con, frame, "SELECT v, typeof(v) FROM {} WHERE v IS NOT NULL")
+        assert numpy_rows == arrow_rows == [(7, "BIGINT")]
 
     def test_a_frame_changed_between_queries_is_decided_again(self, con: duckdb.frame.Connection) -> None:
         frame = with_arrow_column(pd.DataFrame({"v": pd.Series([None] * 2001, dtype=object)}))
@@ -3431,7 +3419,7 @@ class TestPandasObjectPolicy:
 
     def test_a_query_skipping_a_column_that_cannot_convert_still_reads(self, con: duckdb.frame.Connection) -> None:
         # The integers are sampled, the fraction comes in a later slice, and BIGINT cannot hold it exactly.
-        numbers: list[object] = [1] * (PandasSource.SLICE_ROWS + 1)
+        numbers: list[object] = [1] * (PandasArrowSource.SLICE_ROWS + 1)
         numbers[-1] = 1.5
         frame = with_arrow_column(
             pd.DataFrame({"n": pd.Series(numbers, dtype=object), "s": ["a"] * len(numbers)}).astype({"s": object})
@@ -3448,23 +3436,23 @@ class TestPandasCategoricalsKeepTheirOwnRules:
 
     def test_a_categorical_of_mixed_objects_is_text_on_both_transports(self, con: duckdb.frame.Connection) -> None:
         frame = pd.DataFrame({"v": pd.Series(pd.Categorical([1, "a", 1]))})
-        native, arrow = on_both_transports(con, frame, "SELECT v, typeof(v) FROM {}")
-        assert native == arrow == [("1", "VARCHAR"), ("a", "VARCHAR"), ("1", "VARCHAR")]
+        numpy_rows, arrow_rows = on_both_transports(con, frame, "SELECT v, typeof(v) FROM {}")
+        assert numpy_rows == arrow_rows == [("1", "VARCHAR"), ("a", "VARCHAR"), ("1", "VARCHAR")]
 
-    def test_a_categorical_of_strings_is_an_enum_natively_and_text_through_arrow(
+    def test_a_categorical_of_strings_is_an_enum_on_the_numpy_scan_and_text_through_arrow(
         self, con: duckdb.frame.Connection
     ) -> None:
         frame = pd.DataFrame({"v": pd.Series(pd.Categorical(["a", None, "b"]))})
-        native, arrow = on_both_transports(con, frame, "SELECT v, typeof(v) FROM {}")
-        assert native == [("a", "ENUM('a', 'b')"), (None, "ENUM('a', 'b')"), ("b", "ENUM('a', 'b')")]
-        assert arrow == [("a", "VARCHAR"), (None, "VARCHAR"), ("b", "VARCHAR")]
+        numpy_rows, arrow_rows = on_both_transports(con, frame, "SELECT v, typeof(v) FROM {}")
+        assert numpy_rows == [("a", "ENUM('a', 'b')"), (None, "ENUM('a', 'b')"), ("b", "ENUM('a', 'b')")]
+        assert arrow_rows == [("a", "VARCHAR"), (None, "VARCHAR"), ("b", "VARCHAR")]
 
     def test_a_categorical_with_an_unused_category_of_another_type_still_fails_through_arrow(
         self, con: duckdb.frame.Connection
     ) -> None:
         frame = pd.DataFrame({"v": pd.Series(pd.Categorical([1, 2], categories=[1, 2, "x"]))})
-        con.register("native", frame)
-        assert rows(con, "SELECT v, typeof(v) FROM native") == [(1, "BIGINT"), (2, "BIGINT")]
+        con.register("numpy", frame)
+        assert rows(con, "SELECT v, typeof(v) FROM numpy") == [(1, "BIGINT"), (2, "BIGINT")]
         con.register("arrow", with_arrow_column(frame))
         with pytest.raises(exceptions.InvalidInputError, match="reading the schema"):
             rows(con, "SELECT v FROM arrow")

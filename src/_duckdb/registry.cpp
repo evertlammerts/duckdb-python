@@ -43,15 +43,15 @@ void ReplaceRegisteredName(cxx::ReplacementScan::Input &input) {
 	if (!entry) {
 		return;
 	}
-	input.SetFunctionName(entry->native ? kNumpyScanFunction : kArrowScanFunction);
+	input.SetFunctionName(entry->numpy_scan ? kNumpyScanFunction : kArrowScanFunction);
 	auto context = input.GetContext();
 	input.AddArgument(context.CreateValue(cxx::varchar_t(name.GetPart(0))));
 }
 
 } // namespace
 
-Registered::Registered(std::string name, nb::object object, bool one_shot, bool native)
-    : name(std::move(name)), object(std::move(object)), one_shot(one_shot), native(native) {
+Registered::Registered(std::string name, nb::object object, bool one_shot, bool numpy_scan)
+    : name(std::move(name)), object(std::move(object)), one_shot(one_shot), numpy_scan(numpy_scan) {
 }
 
 Registered::~Registered() {
@@ -59,7 +59,7 @@ Registered::~Registered() {
 	object.reset();
 }
 
-void Registry::Add(const std::string &name, nb::object object, bool one_shot, bool native) {
+void Registry::Add(const std::string &name, nb::object object, bool one_shot, bool numpy_scan) {
 	// The replaced entry, if any, is dropped outside the lock: its destructor takes the GIL, which a thread waiting
 	// for this lock may hold.
 	std::shared_ptr<Registered> replaced;
@@ -67,7 +67,7 @@ void Registry::Add(const std::string &name, nb::object object, bool one_shot, bo
 		std::lock_guard<std::mutex> guard(lock);
 		auto &slot = by_name[Fold(name)];
 		replaced = std::move(slot);
-		slot = std::make_shared<Registered>(name, std::move(object), one_shot, native);
+		slot = std::make_shared<Registered>(name, std::move(object), one_shot, numpy_scan);
 	}
 }
 

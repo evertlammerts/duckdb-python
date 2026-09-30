@@ -1,14 +1,9 @@
-"""The Python objects that register as tables, each behind a source that exports Arrow for a scan.
+"""The Python objects that register as tables, each behind a source that one of two scans reads.
 
-There are two scans: the Arrow scan reads an Arrow C stream from the Arrow, pyarrow and polars sources in
-`arrow.py`, `pyarrow.py` and `polars.py`, and the numpy scan reads numpy arrays natively off their own buffers
-through the sources in `numpy.py` and `pandas.py`; the pandas source hands a DataFrame with a pyarrow-backed column
-to the Arrow scan instead.
-
-A source exposes `__arrow_c_schema__`, when the object can say its schema without producing data, `accepts`, which
-says whether a scan will apply a predicate itself, `stream(columns, filters)`, which exports an Arrow stream
-capsule holding either exactly the requested columns, in that order, or every column; it says which, and
-`pull_under_gil`, which says whether the scan must hold the GIL while pulling from that stream. Nothing here
+An `ArrowScanSource` is read by the Arrow scan, from an Arrow C stream it exports: the Arrow, pyarrow and polars
+sources in `arrow.py`, `pyarrow.py` and `polars.py`, and a pandas DataFrame with a pyarrow-backed column, in
+`pandas.py`. A `NumpyScanSource` is read by the numpy scan, off numpy buffers: the numpy source in `numpy.py` and
+every other pandas DataFrame. Which scan reads a registered name follows from the kind of its source. Nothing here
 imports pyarrow, polars or pandas at module level: a family is recognised by its class's module and name, or by the
 methods it carries, and its library is imported only inside the source that needs it.
 """
@@ -30,16 +25,9 @@ ARROW_CAPSULES = (STREAM_CAPSULE, "arrow_schema", "arrow_array")
 
 
 class Source:
-    """What the scan talks to. `one_shot` sources are read once; every other source is read as often as asked."""
+    """An object wrapped for a scan. `one_shot` sources are read once; every other source is read as often as asked."""
 
     one_shot = False
-    #: Whether the exported stream needs the scan to hold the GIL while it pulls the next array. A source whose
-    #: stream is pure C, C++ or Rust, or takes the GIL itself where it runs Python, sets this False, and its pulls
-    #: then run on engine threads with no GIL held.
-    pull_under_gil = True
-    #: Whether the registered name resolves to the numpy scan rather than the Arrow scan: numpy arrays, and a pandas
-    #: frame whose columns are all numpy- or Python-object-backed.
-    native = False
 
     def __init__(self, obj: object) -> None:
         self.obj: Any = obj
@@ -47,6 +35,18 @@ class Source:
     def rows(self) -> int | None:
         """How many rows a scan will produce, when the object knows without reading itself; None otherwise."""
         return None
+
+
+class ArrowScanSource(Source):
+    """A source the Arrow scan reads, through the Arrow stream `stream()` exports.
+
+    It may expose `__arrow_c_schema__`, when the object can say its schema without producing data.
+    """
+
+    #: Whether the exported stream needs the scan to hold the GIL while it pulls the next array. A source whose
+    #: stream is pure C, C++ or Rust, or takes the GIL itself where it runs Python, sets this False, and its pulls
+    #: then run on engine threads with no GIL held.
+    pull_under_gil = True
 
     def accepts(self, predicate: Expr) -> bool:
         """Whether every scan will apply `predicate`, a `duckdb._expressions` tree over the object's columns, itself.
@@ -69,6 +69,22 @@ class Source:
         stream or array whose top level is not a struct is read as one column.
         """
         return self.obj.__arrow_c_stream__(), False
+
+
+class NumpyScanSource(Source):
+    """A source the numpy scan reads, off the numpy arrays `columns()` hands it; `numpy.py` describes those arrays."""
+
+    def rows(self) -> int:
+        """How many rows every column holds, which the scan divides among its threads."""
+        raise NotImplementedError
+
+    def describe(self) -> list[tuple[str, str]]:
+        """Column names and engine types, which a query is bound against."""
+        raise NotImplementedError
+
+    def columns(self, columns: Sequence[int] | None) -> list[tuple[str, str, str, object, object | None]]:
+        """The name and `ScanColumn` of each requested column, in the requested order, all of them when None."""
+        raise NotImplementedError
 
 
 def _from(obj: object, library: str) -> bool:
@@ -104,7 +120,7 @@ def adapt(obj: object) -> Source:
     """
     from .arrow import ArrowArraySource, ArrowCapsuleSource, ArrowStreamSource
     from .numpy import NumpySource
-    from .pandas import PandasSource
+    from .pandas import PandasArrowSource, PandasSource, has_pyarrow_columns
     from .polars import LazyFrameSource, PolarsFrameSource
     from .pyarrow import PyArrowDatasetSource, PyArrowReaderSource, PyArrowScannerSource, PyArrowTableSource
 
@@ -120,7 +136,7 @@ def adapt(obj: object) -> Source:
     if _is(obj, "polars", "LazyFrame"):
         return LazyFrameSource(obj)
     if _is(obj, "pandas", "DataFrame"):
-        return PandasSource(obj)
+        return PandasArrowSource(obj) if has_pyarrow_columns(obj) else PandasSource(obj)
     if isinstance(obj, (dict, list, tuple)) or _from(obj, "numpy"):
         return NumpySource(obj)
     if exports and _is(obj, "pyarrow", "Table", "RecordBatch"):

@@ -168,8 +168,7 @@ public:
 	}
 
 	/// The columns a statement would produce and the parameters it expects, asked of DuckDB rather than guessed.
-	std::pair<std::vector<std::pair<std::string, std::string>>,
-	          std::vector<std::pair<std::string, std::string>>>
+	std::pair<std::vector<std::pair<std::string, std::string>>, std::vector<std::pair<std::string, std::string>>>
 	Bind(const std::string &sql) {
 		auto held = Live();
 		auto &live = *held.engine;
@@ -179,8 +178,7 @@ public:
 			throw cxx::InvalidInputException("Invalid Input Error: no statement to bind");
 		}
 		if (statements.Next()) {
-			throw cxx::InvalidInputException(
-			    "Invalid Input Error: bind takes exactly one statement");
+			throw cxx::InvalidInputException("Invalid Input Error: bind takes exactly one statement");
 		}
 		nb::gil_scoped_release release;
 		const auto signature = live.Bind(statement);
@@ -188,22 +186,21 @@ public:
 	}
 
 	/// Register a Python callable as a scalar SQL function on this database.
-	void CreateScalarFunction(const std::string &name, nb::object callable,
-	                          const std::vector<std::string> &parameters, const std::string &returns,
-	                          cxx::FunctionNullHandling nulls, cxx::FunctionStability level) {
+	void CreateScalarFunction(const std::string &name, nb::object callable, const std::vector<std::string> &parameters,
+	                          const std::string &returns, cxx::FunctionNullHandling nulls,
+	                          cxx::FunctionStability level) {
 		auto held = Live();
 		auto &owner = Database::From(held.database);
-		RegisterScalarFunction(*held.engine, name, callable, parameters, returns, nulls, level,
-		                       connection.Module());
+		RegisterScalarFunction(*held.engine, name, callable, parameters, returns, nulls, level, connection.Module());
 		// DuckDB borrows the callable only once registration succeeds, so only then must the database keep it.
 		owner.KeepCallable(std::move(callable));
 	}
 
-	/// Register a Python object as the table `name`; a one-shot object is a stream, readable once, and a native
-	/// object is read through the numpy scan rather than the Arrow scan.
-	void RegisterObject(const std::string &name, nb::object object, bool one_shot, bool native) {
+	/// Register a Python object as the table `name`; a one-shot object is a stream, readable once, and `numpy_scan`
+	/// says the numpy scan reads it rather than the Arrow scan.
+	void RegisterObject(const std::string &name, nb::object object, bool one_shot, bool numpy_scan) {
 		auto held = Live();
-		Database::From(held.database).Objects().Add(name, std::move(object), one_shot, native);
+		Database::From(held.database).Objects().Add(name, std::move(object), one_shot, numpy_scan);
 	}
 
 	bool UnregisterObject(const std::string &name) {
@@ -334,16 +331,17 @@ NB_MODULE(_duckdb, m) {
 	    .value("CONSISTENT_WITHIN_QUERY", cxx::FunctionStability::CONSISTENT_WITHIN_QUERY);
 
 	nb::class_<Database>(m, "Database", nb::type_slots(kDatabaseSlots))
-	    .def("__init__",
-	         // A handle so None is accepted, matching the type stub and how Connection::execute takes parameters.
-	         [state](Database *self, const std::string &path, nb::handle options) {
-		         std::vector<std::pair<std::string, std::string>> settings;
-		         if (!options.is_none()) {
-			         settings = nb::cast<std::vector<std::pair<std::string, std::string>>>(options);
-		         }
-		         new (self) Database(state, path, settings);
-	         },
-	         nb::arg("path") = std::string(":memory:"), nb::arg("options") = nb::none())
+	    .def(
+	        "__init__",
+	        // A handle so None is accepted, matching the type stub and how Connection::execute takes parameters.
+	        [state](Database *self, const std::string &path, nb::handle options) {
+		        std::vector<std::pair<std::string, std::string>> settings;
+		        if (!options.is_none()) {
+			        settings = nb::cast<std::vector<std::pair<std::string, std::string>>>(options);
+		        }
+		        new (self) Database(state, path, settings);
+	        },
+	        nb::arg("path") = std::string(":memory:"), nb::arg("options") = nb::none())
 	    .def("connect", &Database::Connect);
 
 	nb::class_<Connection>(m, "Connection", nb::type_slots(ChildSlots<Connection>()))
@@ -352,7 +350,7 @@ NB_MODULE(_duckdb, m) {
 	    .def("create_scalar_function", &Connection::CreateScalarFunction, nb::arg("name"), nb::arg("callable"),
 	         nb::arg("parameters"), nb::arg("returns"), nb::arg("null_handling"), nb::arg("stability"))
 	    .def("register_object", &Connection::RegisterObject, nb::arg("name"), nb::arg("obj"), nb::arg("one_shot"),
-	         nb::arg("native"))
+	         nb::arg("numpy_scan"))
 	    .def("unregister_object", &Connection::UnregisterObject, nb::arg("name"))
 	    .def("registered_kind", &Connection::RegisteredKind, nb::arg("name"))
 	    .def("interrupt", &Connection::Interrupt)
@@ -382,12 +380,13 @@ NB_MODULE(_duckdb, m) {
 	    .def("validity", &ChunkView::Validity, nb::arg("column"), nb::keep_alive<0, 1>())
 	    .def("decimal_scale", &ChunkView::DecimalScale, nb::arg("column"))
 	    .def("enum_values", &ChunkView::EnumValues, nb::arg("column"))
-	    .def("values",
-	         [state](ChunkView &self, cxx::idx_t column) { return self.Values(column, state->conversion); },
-	         nb::arg("column"));
+	    .def(
+	        "values", [state](ChunkView &self, cxx::idx_t column) { return self.Values(column, state->conversion); },
+	        nb::arg("column"));
 
-	m.def("library_version", []() { return cxx::LibraryVersion(); },
-	      "The DuckDB version this extension module is linked against.");
+	m.def(
+	    "library_version", []() { return cxx::LibraryVersion(); },
+	    "The DuckDB version this extension module is linked against.");
 	m.def(
 	    "capsule_name",
 	    [](nb::handle object) -> std::optional<std::string> {
@@ -397,7 +396,8 @@ NB_MODULE(_duckdb, m) {
 		    const char *name = PyCapsule_GetName(object.ptr());
 		    return std::string(name ? name : "");
 	    },
-	    nb::arg("object"), "The name a capsule carries, which for Arrow data says what it holds; None for anything else.");
+	    nb::arg("object"),
+	    "The name a capsule carries, which for Arrow data says what it holds; None for anything else.");
 	m.def("chain_streams", &ChainStreams, nb::arg("schema"), nb::arg("parts"),
 	      "Several exports read as one stream, each part with the schema of `schema`; the caller guarantees that, "
 	      "nothing checks it.");

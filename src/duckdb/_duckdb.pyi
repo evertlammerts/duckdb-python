@@ -101,11 +101,10 @@ class Connection:
     ) -> None:
         """Register a Python callable as a scalar SQL function; the type texts reach DuckDB's parser unchanged."""
 
-    def register_object(self, name: str, obj: object, one_shot: bool, native: bool) -> None:
+    def register_object(self, name: str, obj: object, one_shot: bool, numpy_scan: bool) -> None:
         """Make `obj` readable as the table `name` on this database.
 
-        A one-shot object is a stream, read once. A native object is read through the numpy scan rather than the
-        Arrow scan.
+        A one-shot object is a stream, read once. `numpy_scan` says the numpy scan reads it rather than the Arrow scan.
         """
 
     def unregister_object(self, name: str) -> bool:

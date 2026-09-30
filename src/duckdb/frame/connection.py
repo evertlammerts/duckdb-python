@@ -9,7 +9,7 @@ import weakref
 from typing import TYPE_CHECKING, Any
 
 from .. import _duckdb
-from .._sources import Source, adapt
+from .._sources import NumpyScanSource, Source, adapt
 from ..exceptions import Error, InterfaceError, InvalidInputError
 
 if TYPE_CHECKING:
@@ -234,7 +234,7 @@ class Connection:
 
     def _register_source(self, name: str, source: Source) -> None:
         """Register a source as `name` as it is, without adapting it."""
-        self._engine().register_object(name, source, source.one_shot, source.native)
+        self._engine().register_object(name, source, source.one_shot, isinstance(source, NumpyScanSource))
         # A new name changes what a later query resolves it to.
         self._catalog.changed()
 

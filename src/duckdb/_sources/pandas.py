@@ -1,13 +1,16 @@
-"""The pandas source: read natively off its own buffers, or through pyarrow a slice at a time.
+"""The pandas sources: a DataFrame read off its own buffers, or through pyarrow a slice at a time.
 
-A pandas DataFrame whose columns are all numpy- or Python-object-backed is read natively: `describe()` names its
-columns and their engine types for `numpy_scan.cpp`'s bind, and `columns()` answers each requested column as an
-encoding, an engine type, a data array and a mask array or None, straight off the DataFrame's own buffers. A DataFrame
-with a pyarrow-backed column (an `ArrowExtensionArray`, which includes `ArrowStringArray`, the default for strings
-when pyarrow is installed) is read through pyarrow instead, converted a slice of rows at a time so the DataFrame is
-never copied whole. Either way, an object column's engine type is judged from the same sample of its values spread
-evenly over the column, classified in `numpy.py`: the sample unifies under one family there for a typed reading, or
-falls back to text, which both paths then apply to every value alike.
+`adapt` picks one at registration. A DataFrame whose columns are all numpy- or Python-object-backed is a
+`PandasSource`: `describe()` names its columns and their engine types for `numpy_scan.cpp`'s bind, and `columns()`
+answers each requested column as an encoding, an engine type, a data array and a mask array or None, straight off
+the DataFrame's own buffers. A DataFrame with a pyarrow-backed column (an `ArrowExtensionArray`, which includes
+`ArrowStringArray`, the default for strings when pyarrow is installed) is a `PandasArrowSource`, converted to Arrow a
+slice of rows at a time so the DataFrame is never copied whole. Either way, an object column's engine type is judged
+from the same sample of its values spread evenly over the column, classified in `numpy.py`: the sample unifies under
+one family there for a typed reading, or falls back to text, which both sources then apply to every value alike.
+
+Both leave the index out, as the previous client did. Column labels become their text, and a label repeating another
+gets a numbered suffix, as the engine names a repeated Arrow field.
 """
 
 from __future__ import annotations
@@ -15,7 +18,7 @@ from __future__ import annotations
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
-from . import Source, _unique_names
+from . import ArrowScanSource, NumpyScanSource, _unique_names
 from .numpy import (
     SAMPLE_ROWS,
     ColumnReading,
@@ -39,57 +42,43 @@ if TYPE_CHECKING:
     from .._expressions import Expr
 
 
-class PandasSource(Source):
-    """A pandas DataFrame, read natively when every column is numpy- or Python-object-backed, through pyarrow otherwise.
+class PandasSource(NumpyScanSource):
+    """A pandas DataFrame read by the numpy scan, off the DataFrame's own buffers."""
 
-    A pyarrow-backed column (an `ArrowExtensionArray`, which includes `ArrowStringArray`, the default for strings
-    when pyarrow is installed) sends the whole DataFrame through the Arrow path below, converted a slice of rows at a
-    time so the DataFrame is never copied whole; `native` is False for such a DataFrame. Otherwise `describe()` and
-    `columns()` serve `numpy_scan.cpp`'s table function directly off the DataFrame's own buffers.
+    def rows(self) -> int:
+        return len(self.obj)
 
-    The index is left out, as the previous client did. Column labels become their text, and a label repeating
-    another gets a numbered suffix, as the engine names a repeated Arrow field.
-    """
+    def describe(self) -> list[tuple[str, str]]:
+        frame = _named(self.obj, None)
+        return [(name, _column_reading(name, frame[name]).type_text) for name in frame.columns]
 
-    #: Rows converted per slice on the Arrow path; the memory held at any time is one slice's worth of Arrow.
+    def columns(self, columns: Sequence[int] | None) -> list[tuple[str, str, str, object, object | None]]:
+        frame = _named(self.obj, columns)
+        return [(name, *_column_reading(name, frame[name]).prepare()) for name in frame.columns]
+
+
+class PandasArrowSource(ArrowScanSource):
+    """A pandas DataFrame read by the Arrow scan, converted through pyarrow a slice of rows at a time."""
+
+    #: Rows converted per slice; the memory held at any time is one slice's worth of Arrow.
     SLICE_ROWS = 1 << 16
 
     def __init__(self, obj: object) -> None:
         super().__init__(obj)
-        self.native = _is_native_pandas_frame(obj)
-        if not self.native:
-            try:
-                self.pyarrow  # noqa: B018
-            except ImportError as error:
-                message = (
-                    "registering a pandas DataFrame with a pyarrow-backed column needs pyarrow, which converts it to "
-                    "Arrow"
-                )
-                raise TypeError(message) from error
+        try:
+            self.pyarrow  # noqa: B018
+        except ImportError as error:
+            message = (
+                "registering a pandas DataFrame with a pyarrow-backed column needs pyarrow, which converts it to Arrow"
+            )
+            raise TypeError(message) from error
 
     @cached_property
     def pyarrow(self) -> Any:  # noqa: ANN401
-        """pyarrow, imported only once the Arrow path is taken."""
+        """pyarrow, imported only once a DataFrame is read through it."""
         import pyarrow
 
         return pyarrow
-
-    def _named(self, columns: Sequence[int] | None) -> DataFrame:
-        """The DataFrame as it is now, or the requested columns of it, under the text names; a view sharing its data."""
-        names = _unique_names([str(label) for label in self.obj.columns])
-        frame = self.obj if columns is None else self.obj.iloc[:, list(columns)]
-        chosen = names if columns is None else [names[i] for i in columns]
-        return frame.set_axis(chosen, axis=1)
-
-    def describe(self) -> list[tuple[str, str]]:
-        """Column names and engine types, which a query is bound against."""
-        frame = self._named(None)
-        return [(name, _column_reading(name, frame[name]).type_text) for name in frame.columns]
-
-    def columns(self, columns: Sequence[int] | None) -> list[tuple[str, str, str, object, object | None]]:
-        """The name and `ScanColumn` of each requested column, all of them when None."""
-        frame = self._named(columns)
-        return [(name, *_column_reading(name, frame[name]).prepare()) for name in frame.columns]
 
     def _schema(self, frame: DataFrame) -> tuple[Schema, dict[str, str]]:
         """The Arrow schema of the DataFrame `frame`, and which columns convert as `"text"` or checked `"exact"`.
@@ -158,20 +147,20 @@ class PandasSource(Source):
             raise ValueError(message)
 
     def __arrow_c_schema__(self) -> object:
-        return self._schema(self._named(None))[0].__arrow_c_schema__()
+        return self._schema(_named(self.obj, None))[0].__arrow_c_schema__()
 
     def rows(self) -> int | None:
         return len(self.obj)
 
     def stream(self, columns: Sequence[int] | None, filters: Sequence[Expr]) -> tuple[object, bool]:
-        frame = self._named(columns)
+        frame = _named(self.obj, columns)
         schema, rules = self._schema(frame)
         reader = self.pyarrow.RecordBatchReader.from_batches(schema, self._batches(frame, schema, rules))
         return reader.__arrow_c_stream__(), columns is not None
 
 
-def _is_native_pandas_frame(obj: DataFrame) -> bool:
-    """Whether every column of `obj` is numpy- or Python-object-backed rather than pyarrow-backed."""
+def has_pyarrow_columns(obj: DataFrame) -> bool:
+    """Whether a column of `obj` is pyarrow-backed rather than numpy- or Python-object-backed."""
     try:
         import pandas as pd
     except ImportError as error:
@@ -186,10 +175,18 @@ def _is_native_pandas_frame(obj: DataFrame) -> bool:
     for _, column in obj.items():  # noqa: PERF102
         array = column.array
         if isinstance(array, pd.arrays.ArrowExtensionArray):
-            return False
+            return True
         if string_array is not None and isinstance(array, string_array):
-            return False
-    return True
+            return True
+    return False
+
+
+def _named(frame: DataFrame, columns: Sequence[int] | None) -> DataFrame:
+    """`frame` as it is now, or the requested columns of it, under the text names; a view sharing its data."""
+    names = _unique_names([str(label) for label in frame.columns])
+    selected = frame if columns is None else frame.iloc[:, list(columns)]
+    chosen = names if columns is None else [names[i] for i in columns]
+    return selected.set_axis(chosen, axis=1)
 
 
 def _row_sample(frame: DataFrame, sample_rows: int) -> DataFrame:

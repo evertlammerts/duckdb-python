@@ -24,7 +24,7 @@ import pyarrow.compute as pc
 import duckdb
 from duckdb import _duckdb, dbapi, exceptions
 from duckdb._expressions import Binary, Col
-from duckdb._sources import Source, adapt
+from duckdb._sources import ArrowScanSource, adapt
 from duckdb._sources.arrow import ArrowCapsuleSource
 from duckdb._sources.pyarrow import PyArrowReaderSource, PyArrowTableSource
 from duckdb.frame import col, sql, table
@@ -504,7 +504,7 @@ class TestChainedStream:
     def test_a_failing_part_fails_the_query_with_the_sources_name(self, con: duckdb.frame.Connection) -> None:
         good = pa.table({"n": [1, 2]})
 
-        class Chained(Source):
+        class Chained(ArrowScanSource):
             def __arrow_c_schema__(self) -> object:
                 return self.obj.schema.__arrow_c_schema__()
 
@@ -519,7 +519,7 @@ class TestChainedStream:
             rows(con, "SELECT * FROM chained")
 
 
-class Streaming(Source):
+class Streaming(ArrowScanSource):
     """A source exporting a fresh generator-backed stream per call, keeping a weak reference to each generator.
 
     pyarrow frees a stream's generator when the stream is released, so a dead reference means a released stream.
@@ -558,7 +558,7 @@ class Streaming(Source):
         return bool(self.generators) and all(ref() is None for ref in self.generators)
 
 
-class OneArray(Source):
+class OneArray(ArrowScanSource):
     """A source handing over one freshly allocated pyarrow array per call through `__arrow_c_array__`."""
 
     def __init__(self, name: str = "value") -> None:
@@ -610,7 +610,7 @@ class TestArrowRelease:
     ) -> None:
         data = pa.table({"n": [1, 2, 3]})
 
-        class Kept(Source):
+        class Kept(ArrowScanSource):
             """A read-once source that hands over the same stored stream every time."""
 
             one_shot = True
@@ -650,7 +650,7 @@ class TestArrowRelease:
         good = pa.table({"n": [1, 2]})
         generators: list[weakref.ref[object]] = []
 
-        class Chained(Source):
+        class Chained(ArrowScanSource):
             def __arrow_c_schema__(self) -> object:
                 return good.schema.__arrow_c_schema__()
 
@@ -704,7 +704,7 @@ class TestArrowRelease:
         assert pa.total_allocated_bytes() == before
 
 
-class Recording(Source):
+class Recording(ArrowScanSource):
     """A source over a pyarrow table that remembers which columns each scan asked for."""
 
     def __init__(self, table_: pa.Table, *, narrows: bool = True) -> None:
@@ -1016,31 +1016,32 @@ class TestRowsAndTypes:
             rows(con, "SELECT * FROM python_arrow_scan('ghost')")
 
 
-class TestNativeRouting:
-    """A registered name resolves to the numpy scan or the Arrow scan, by the source's `native`."""
+class TestScanRouting:
+    """A registered name resolves to the numpy scan or the Arrow scan, by the kind of its source."""
 
-    def test_a_native_pandas_frame_routes_to_the_frame_scan(self, con: duckdb.frame.Connection) -> None:
+    def test_a_numpy_backed_pandas_frame_routes_to_the_numpy_scan(self, con: duckdb.frame.Connection) -> None:
         con.register("df", pd.DataFrame({"a": range(3)}))
         assert "Python Numpy Scan" in table("df").on(con).explain()
         assert rows(con, "SELECT count(*) FROM python_numpy_scan('df')") == [(3,)]
         with pytest.raises(exceptions.InvalidInputError, match="nothing is registered as 'ghost'"):
             rows(con, "SELECT * FROM python_numpy_scan('ghost')")
+        # Calling the Arrow scan directly on it reaches it, but the source exports no Arrow.
+        with pytest.raises(exceptions.InvalidInputError, match="reading the schema of the object registered as 'df'"):
+            rows(con, "SELECT * FROM python_arrow_scan('df')")
 
-    def test_a_non_native_source_routes_to_the_arrow_scan(
-        self, con: duckdb.frame.Connection, numbers: pa.Table
-    ) -> None:
+    def test_an_arrow_source_routes_to_the_arrow_scan(self, con: duckdb.frame.Connection, numbers: pa.Table) -> None:
         con.register("numbers", numbers)
         assert "Python Arrow Scan" in table("numbers").on(con).explain()
-        # Calling the numpy scan directly on a non-native entry reaches it, but the source has no describe().
+        # Calling the numpy scan directly on it reaches it, but the source has no describe().
         message = "describing the object registered as 'numbers' failed"
         with pytest.raises(exceptions.InvalidInputError, match=message):
             rows(con, "SELECT * FROM python_numpy_scan('numbers')")
 
-    def test_registered_kind_is_unaffected_by_native(self, con: duckdb.frame.Connection) -> None:
+    def test_registered_kind_is_unaffected_by_the_scan(self, con: duckdb.frame.Connection) -> None:
         con.register("df", pd.DataFrame({"a": range(3)}))
         assert con._engine().registered_kind("df") == "object"
 
-    def test_replacing_a_native_registration_with_a_non_native_one_switches_the_scan(
+    def test_replacing_a_registration_with_one_for_the_other_scan_switches_the_scan(
         self, con: duckdb.frame.Connection, numbers: pa.Table
     ) -> None:
         con.register("t", pd.DataFrame({"a": range(3)}))
@@ -1441,7 +1442,7 @@ class TestEncodedLayouts:
         assert rows(con, "SELECT i FROM part") == [(4,), (5,), (6,)]
 
 
-class Filtering(Source):
+class Filtering(ArrowScanSource):
     """A source over a pyarrow table that applies through pyarrow every predicate the translator models."""
 
     def __init__(self, table_: pa.Table) -> None:
@@ -1552,7 +1553,7 @@ class TestFilters:
         assert source.applied == [['("n" IN (3, 4))']]
 
     def test_a_nameless_column_is_offered_by_its_arrow_name(self, con: duckdb.frame.Connection) -> None:
-        class Noting(Source):
+        class Noting(ArrowScanSource):
             def __init__(self, array: pa.Array) -> None:
                 super().__init__(array)
                 self.offered: list[Expr] = []

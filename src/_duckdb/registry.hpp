@@ -26,7 +26,7 @@ namespace duckdb_python {
 /// The registry owns the object for as long as the name is registered; a plan bound over the name holds its own
 /// reference, so an unregister cannot pull the object from under a query already bound.
 struct Registered {
-	Registered(std::string name, nb::object object, bool one_shot, bool native);
+	Registered(std::string name, nb::object object, bool one_shot, bool numpy_scan);
 	/// Freed from engine threads too, so the Python reference is dropped under the GIL.
 	~Registered();
 
@@ -35,7 +35,7 @@ struct Registered {
 	/// A stream: it can be read once, so a second query over it is refused rather than silently empty.
 	bool one_shot;
 	/// Whether the replacement scan resolves this name to the numpy scan rather than the Arrow scan.
-	bool native;
+	bool numpy_scan;
 	std::mutex read_lock;
 	bool read = false;
 };
@@ -45,7 +45,7 @@ class Registry {
 public:
 	/// Register `object` as `name`, replacing an earlier registration of that name. Names compare case-insensitively,
 	/// as SQL identifiers do.
-	void Add(const std::string &name, nb::object object, bool one_shot, bool native);
+	void Add(const std::string &name, nb::object object, bool one_shot, bool numpy_scan);
 	/// Forget `name`; false when it was not registered.
 	bool Remove(const std::string &name);
 	std::shared_ptr<Registered> ByName(const std::string &name);

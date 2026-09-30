@@ -74,7 +74,7 @@ def test_the_package_works_with_every_optional_dependency_absent() -> None:
 
 
 def test_a_pandas_frame_registers_and_queries_with_pyarrow_absent() -> None:
-    """Without pyarrow every pandas frame is native, so the package reads one straight off its numpy columns."""
+    """Without pyarrow every pandas frame goes to the numpy scan, which reads it straight off its numpy columns."""
     probe = (
         "import sys\n"
         "sys.modules['pyarrow'] = None\n"

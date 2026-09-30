@@ -14,8 +14,8 @@
 
 namespace duckdb_python {
 
-/// The table function that reads a registered object natively, named by the replacement scan for an entry whose
-/// source answered native.
+/// The table function that reads a registered object off numpy buffers, named by the replacement scan for an entry
+/// registered for the numpy scan.
 inline constexpr const char *kNumpyScanFunction = "python_numpy_scan";
 
 /// Registers the table function on the connection's database: bind resolves the name against `registry` and reads

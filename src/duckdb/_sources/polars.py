@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from .. import _duckdb
-from . import Source
+from . import ArrowScanSource
 from .arrow import ArrowStreamSource
 
 if TYPE_CHECKING:
@@ -49,7 +49,7 @@ class PolarsFrameSource(ArrowStreamSource):
         return stream, columns is not None
 
 
-class LazyFrameSource(Source):
+class LazyFrameSource(ArrowScanSource):
     """A polars LazyFrame: a plan, filtered and narrowed as the query asks and collected once per scan, never held.
 
     The schema is the plan's prediction; a step whose declared output differs from what it produces, such as a
