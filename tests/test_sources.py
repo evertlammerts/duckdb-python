@@ -36,6 +36,7 @@ with contextlib.suppress(ModuleNotFoundError):
     import polars as pl
 with contextlib.suppress(ModuleNotFoundError):
     import pyarrow as pa
+    import pyarrow.compute as pc
     import pyarrow.dataset as ds
     import pyarrow.parquet as pq
 
@@ -44,6 +45,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from duckdb._expressions import Expr
+
+    ColumnsAnswer = list[tuple[str, str, str | None, object, object | None]]
 
 
 @pytest.fixture
@@ -1784,8 +1787,8 @@ class Relaid(PandasSource):
         super().__init__(obj)
         self.layout = layout
 
-    def columns(self, columns: Sequence[int] | None) -> list[tuple[str, str, str, object, object | None]]:
-        answer: list[tuple[str, str, str, object, object | None]] = []
+    def columns(self, columns: Sequence[int] | None) -> ColumnsAnswer:
+        answer: ColumnsAnswer = []
         for name, encoding, type_text, data, mask in super().columns(columns):
             assert isinstance(data, np.ndarray)
             if self.layout == "unaligned":
@@ -1905,7 +1908,7 @@ class MisreportingColumns(PandasSource):
         super().__init__(obj)
         self.break_as = break_as
 
-    def columns(self, columns: Sequence[int] | None) -> list[tuple[str, str, str, object, object | None]]:
+    def columns(self, columns: Sequence[int] | None) -> ColumnsAnswer:
         answer = super().columns(columns)
         if self.break_as == "short":
             return answer[:-1]
@@ -2165,6 +2168,252 @@ class TestPandasNumpyScanLifetime:
         frame = pd.DataFrame({"n": range(n)})
         con.register("t", frame)
         assert rows(con, "SELECT count(*) FROM t a JOIN t b USING (n)") == [(n,)]
+
+
+def chunked_like(values: list[object], arrow_type: pa.DataType) -> pa.ChunkedArray:
+    """`values` as a chunked array of `arrow_type` in uneven chunks, one of them empty, so reads cross boundaries."""
+    chunks = [pa.array([], arrow_type)]
+    start = 0
+    for size in uneven_sizes(len(values)):
+        if start >= len(values):
+            break
+        chunks.append(pa.array(values[start : start + size], arrow_type))
+        start += size
+    return pa.chunked_array(chunks, arrow_type)
+
+
+def arrow_backed(**columns: pa.ChunkedArray) -> pd.DataFrame:
+    return pd.DataFrame({name: pd.Series(pd.arrays.ArrowExtensionArray(data)) for name, data in columns.items()})
+
+
+N_ARROW = 5000
+#: Each kind's values, with nulls among them; `arrow_column` gives each its Arrow type.
+ARROW_VALUES: dict[str, list[Any]] = {
+    "string": [None if i % 7 == 0 else f"s{i}" * (i % 3) for i in range(N_ARROW)],
+    "large_string": [None if i % 7 == 0 else f"s{i}" for i in range(N_ARROW)],
+    "string_view": [None if i % 7 == 0 else f"a string past the inline limit {i}" for i in range(N_ARROW)],
+    "int64": [None if i % 5 == 0 else i for i in range(N_ARROW)],
+    "bool": [None if i % 5 == 0 else i % 3 == 0 for i in range(N_ARROW)],
+    "timestamp_tz": [
+        None if i % 9 == 0 else datetime.datetime(2020, 1, 1) + datetime.timedelta(seconds=i) for i in range(N_ARROW)
+    ],
+    "timestamp_ns": [None if i % 9 == 0 else 10**18 + i for i in range(N_ARROW)],
+    "date32": [None if i % 9 == 0 else 19_000 + i for i in range(N_ARROW)],
+    "duration": [None if i % 9 == 0 else i * 1_000 for i in range(N_ARROW)],
+    "decimal": [None if i % 7 == 0 else decimal.Decimal(i) / 100 for i in range(N_ARROW)],
+    "binary": [None if i % 7 == 0 else bytes([i % 256]) * (i % 4) for i in range(N_ARROW)],
+    "list": [None if i % 6 == 0 else list(range(i % 4)) for i in range(N_ARROW)],
+    "large_list": [None if i % 6 == 0 else [f"x{j}" for j in range(i % 3)] for i in range(N_ARROW)],
+    "fixed_size_list": [None if i % 6 == 0 else [i, -i] for i in range(N_ARROW)],
+    "struct": [None if i % 6 == 0 else {"a": i, "b": None if i % 4 == 0 else f"b{i}"} for i in range(N_ARROW)],
+    "map": [None if i % 8 == 0 else [(f"k{i}", i)] for i in range(N_ARROW)],
+    "list_of_structs": [None if i % 6 == 0 else [{"a": j} for j in range(i % 3)] for i in range(N_ARROW)],
+    "dictionary": [None if i % 10 == 0 else f"c{i % 4}" for i in range(N_ARROW)],
+    "uuid": [None if i % 7 == 0 else uuid.UUID(int=i).bytes for i in range(N_ARROW)],
+    "null": [None] * N_ARROW,
+}
+
+
+def arrow_column(kind: str) -> pa.ChunkedArray:
+    types = {
+        "string": pa.string(),
+        "large_string": pa.large_string(),
+        "string_view": pa.string_view(),
+        "int64": pa.int64(),
+        "bool": pa.bool_(),
+        "timestamp_tz": pa.timestamp("us", tz="Europe/Amsterdam"),
+        "timestamp_ns": pa.timestamp("ns"),
+        "date32": pa.date32(),
+        "duration": pa.duration("us"),
+        "decimal": pa.decimal128(12, 2),
+        "binary": pa.binary(),
+        "list": pa.list_(pa.int32()),
+        "large_list": pa.large_list(pa.string()),
+        "fixed_size_list": pa.list_(pa.int64(), 2),
+        "struct": pa.struct([("a", pa.int64()), ("b", pa.string())]),
+        "map": pa.map_(pa.string(), pa.int64()),
+        "list_of_structs": pa.list_(pa.struct([("a", pa.int64())])),
+        "dictionary": pa.dictionary(pa.int8(), pa.string()),
+        "uuid": pa.uuid(),
+        "null": pa.null(),
+    }
+    return chunked_like(ARROW_VALUES[kind], types[kind])
+
+
+class ChangingArrowColumn(PandasSource):
+    """A pandas source whose frame's column `a` is replaced by `replacement` once a scan asks for its columns."""
+
+    def __init__(self, obj: pd.DataFrame, replacement: pd.Series) -> None:
+        super().__init__(obj)
+        self.replacement = replacement
+
+    def columns(self, columns: Sequence[int] | None) -> ColumnsAnswer:
+        self.obj["a"] = self.replacement
+        return super().columns(columns)
+
+
+@pytest.mark.requires("pyarrow")
+class TestPandasNumpyScanArrowColumns:
+    """The numpy scan reads a pyarrow-backed column as its Arrow data, through core's Arrow importer."""
+
+    @pytest.mark.parametrize("kind", ARROW_VALUES)
+    def test_a_column_reads_as_the_arrow_scan_reads_the_same_data(
+        self, con: duckdb.frame.Connection, kind: str
+    ) -> None:
+        data = arrow_column(kind)
+        con._register_source("numpy_scanned", PandasSource(arrow_backed(v=data)))
+        con.register("arrow_scanned", pa.table({"v": data}))
+        through_arrow = rows(con, "SELECT v, typeof(v) FROM arrow_scanned")
+        assert rows(con, "SELECT v, typeof(v) FROM numpy_scanned") == through_arrow
+        assert len(through_arrow) == N_ARROW
+
+    def test_a_null_in_a_dictionary_column_stays_null_in_every_batch(self, con: duckdb.frame.Connection) -> None:
+        # The engine's dictionary import reads an uncounted null count, -1, as no nulls, so every batch needs its count.
+        values = [None if i % 10 == 0 else f"c{i % 4}" for i in range(N_ARROW)]
+        con._register_source(
+            "t", PandasSource(arrow_backed(v=pa.chunked_array([pa.array(values).dictionary_encode()])))
+        )
+        assert [row[0] for row in rows(con, "SELECT v FROM t")] == values
+
+    def test_a_run_end_encoded_column_reads_every_run(self, con: duckdb.frame.Connection) -> None:
+        values = [f"r{i // 1000}" if i % 3000 else None for i in range(N_ARROW)]
+        encoded = pa.chunked_array(
+            [pc.run_end_encode(pa.array(values[:4000])), pc.run_end_encode(pa.array(values[4000:]))]
+        )
+        con._register_source("t", PandasSource(arrow_backed(v=encoded)))
+        assert rows(con, "SELECT typeof(v) FROM t LIMIT 1") == [("VARCHAR",)]
+        assert [row[0] for row in rows(con, "SELECT v FROM t")] == values
+
+    def test_the_default_string_dtype_and_string_pyarrow_read_as_varchar(self, con: duckdb.frame.Connection) -> None:
+        frame = pd.DataFrame(
+            {
+                "inferred": pd.Series(["a", None, "c"]),
+                "declared": pd.Series(["x", "y", None], dtype="string[pyarrow]"),
+            }
+        )
+        assert isinstance(frame["inferred"].array, pd.arrays.ArrowStringArray)
+        con._register_source("t", PandasSource(frame))
+        assert rows(con, "SELECT inferred, declared, typeof(inferred), typeof(declared) FROM t") == [
+            ("a", "x", "VARCHAR", "VARCHAR"),
+            (None, "y", "VARCHAR", "VARCHAR"),
+            ("c", None, "VARCHAR", "VARCHAR"),
+        ]
+
+    def test_a_struct_column_stays_one_column(self, con: duckdb.frame.Connection) -> None:
+        struct = pa.chunked_array([pa.array([{"a": 1, "b": "x"}])])
+        con._register_source("t", PandasSource(arrow_backed(s=struct, n=pa.chunked_array([pa.array([7])]))))
+        assert rows(con, "SELECT * FROM t") == [({"a": 1, "b": "x"}, 7)]
+
+    def test_columns_chunked_differently_stay_aligned_across_threads(self, con: duckdb.frame.Connection) -> None:
+        con.run("SET threads = 4")
+        vector_size = int(con._engine().get_option("standard_vector_size"))
+        total = vector_size * 50 * 3 + 777
+        texts = [f"t{i}" for i in range(total)]
+        frame = arrow_backed(
+            a=chunked_like(list(range(total)), pa.int64()),
+            b=pa.chunked_array([pa.array(texts[:1]), pa.array(texts[1 : total - 3]), pa.array(texts[total - 3 :])]),
+        )
+        frame["n"] = np.arange(total)
+        con._register_source("t", PandasSource(frame))
+        assert rows(con, "SELECT a, b, n FROM t") == [(i, f"t{i}", i) for i in range(total)]
+
+    def test_projection_reorders_and_narrows_arrow_columns(self, con: duckdb.frame.Connection) -> None:
+        frame = arrow_backed(a=pa.chunked_array([pa.array([1, 2])]), b=pa.chunked_array([pa.array(["x", "y"])]))
+        frame["c"] = [1.5, 2.5]
+        con._register_source("t", PandasSource(frame))
+        assert rows(con, "SELECT b, c, a FROM t") == [("x", 1.5, 1), ("y", 2.5, 2)]
+        assert rows(con, "SELECT b FROM t WHERE a = 2") == [("y",)]
+        assert rows(con, "SELECT count(*) FROM t") == [(2,)]
+
+    @pytest.mark.parametrize("chunks", [0, 2])
+    def test_a_frame_of_no_rows(self, con: duckdb.frame.Connection, chunks: int) -> None:
+        empty = pa.chunked_array([pa.array([], pa.string())] * chunks, pa.string())
+        con._register_source("t", PandasSource(arrow_backed(s=empty)))
+        assert rows(con, "SELECT s FROM t") == []
+        assert rows(con, "DESCRIBE t")[0][:2] == ("s", "VARCHAR")
+
+    @pytest.mark.xfail(strict=True, reason="the engine's union import reads the members without the union's offset")
+    def test_a_sparse_union_column_reads_every_batch(self, con: duckdb.frame.Connection) -> None:
+        tags = pa.array([0, 1] * 3000, pa.int8())
+        members = [
+            pa.array([None if i % 10 == 0 else i for i in range(6000)]),
+            pa.array([f"s{i}" for i in range(6000)]),
+        ]
+        union = pa.UnionArray.from_sparse(tags, members, ["i", "s"])
+        con._register_source("t", PandasSource(arrow_backed(u=pa.chunked_array([union]))))
+        assert [row[0] for row in rows(con, "SELECT u FROM t")] == union.to_pylist()
+
+    def test_an_arrow_type_the_engine_does_not_import_is_refused_when_bound(self, con: duckdb.frame.Connection) -> None:
+        con._register_source("t", PandasSource(arrow_backed(h=pa.chunked_array([pa.array([1.5], pa.float16())]))))
+        with pytest.raises(exceptions.NotSupportedError, match="Unsupported Internal Arrow Type"):
+            rows(con, "SELECT h FROM t")
+
+    def test_an_arrow_type_changed_between_binding_and_scanning_is_refused(self, con: duckdb.frame.Connection) -> None:
+        frame = pd.DataFrame({"a": pd.array([1, 2], dtype="int64[pyarrow]")})
+        con._register_source("t", ChangingArrowColumn(frame, pd.Series(["x", "y"], dtype="string[pyarrow]")))
+        with pytest.raises(exceptions.InvalidInputError, match="with the type VARCHAR, but the query was bound when"):
+            rows(con, "SELECT a FROM t")
+
+    def test_an_arrow_stream_of_the_wrong_length_is_refused(self, con: duckdb.frame.Connection) -> None:
+        class Shortened(PandasSource):
+            def columns(self, columns: Sequence[int] | None) -> ColumnsAnswer:
+                name, encoding, type_text, _, mask = super().columns(columns)[0]
+                short = self.obj["a"].array.__arrow_array__().slice(1)
+                return [(name, encoding, type_text, short.__arrow_c_stream__(), mask)]
+
+        con._register_source("t", Shortened(pd.DataFrame({"a": pd.array([1, 2, 3], dtype="int64[pyarrow]")})))
+        with pytest.raises(exceptions.InvalidInputError, match="an Arrow stream of 2 rows where 3 were expected"):
+            rows(con, "SELECT a FROM t")
+
+    def test_an_arrow_stream_failing_midway_is_refused(self, con: duckdb.frame.Connection) -> None:
+        class Failing(PandasSource):
+            def columns(self, columns: Sequence[int] | None) -> ColumnsAnswer:
+                name, encoding, type_text, _, mask = super().columns(columns)[0]
+
+                def arrays() -> Iterator[pa.RecordBatch]:
+                    yield pa.record_batch({"a": [1]})
+                    message = "the producer broke"
+                    raise ValueError(message)
+
+                reader = pa.RecordBatchReader.from_batches(pa.schema({"a": pa.int64()}), arrays())
+                return [(name, encoding, type_text, reader.__arrow_c_stream__(), mask)]
+
+        con._register_source("t", Failing(pd.DataFrame({"a": pd.array([1, 2], dtype="int64[pyarrow]")})))
+        with pytest.raises(
+            exceptions.InvalidInputError, match=r"with an Arrow stream that failed: .*the producer broke"
+        ):
+            rows(con, "SELECT a FROM t")
+
+    def test_a_described_capsule_other_than_a_schema_is_refused(self, con: duckdb.frame.Connection) -> None:
+        class Misdescribed(PandasSource):
+            def describe(self) -> list[tuple[str, object]]:
+                return [("a", self.obj["a"].array.__arrow_array__().__arrow_c_stream__())]
+
+        con._register_source("t", Misdescribed(pd.DataFrame({"a": pd.array([1], dtype="int64[pyarrow]")})))
+        with pytest.raises(exceptions.InvalidInputError, match="an 'arrow_schema' capsule but a 'arrow_array_stream'"):
+            rows(con, "SELECT a FROM t")
+
+    def test_every_scan_releases_the_arrow_data(self, con: duckdb.frame.Connection) -> None:
+        gc.collect()
+        before = pa.total_allocated_bytes()
+        total = 300_000
+        frame = arrow_backed(
+            s=chunked_like([f"value {i}" for i in range(total)], pa.string()),
+            d=pa.chunked_array([pa.array([f"c{i % 5}" for i in range(total)]).dictionary_encode()]),
+        )
+        frame["n"] = np.arange(total)
+        con.run("SET threads = 4")
+        con._register_source("t", PandasSource(frame))
+        assert rows(con, "SELECT count(s), max(d) FROM t") == [(total, "c4")]
+        assert len(rows(con, "SELECT s, d FROM t LIMIT 3")) == 3
+        # The column opened before the refused one is released with it.
+        con._register_source("t", ChangingArrowColumn(frame.assign(a=frame["n"]), frame["s"]))
+        with pytest.raises(exceptions.InvalidInputError, match="but the query was bound when"):
+            rows(con, "SELECT s, a FROM t")
+        con.unregister("t")
+        del frame
+        gc.collect()
+        assert pa.total_allocated_bytes() == before
 
 
 @pytest.mark.requires("polars")
@@ -2927,10 +3176,10 @@ class Answering(NumpyScanSource):
         data = self.plan[2]
         return len(data) if isinstance(data, np.ndarray) else 0
 
-    def describe(self) -> list[tuple[str, str]]:
+    def describe(self) -> list[tuple[str, object]]:
         return [("a", self.type_text)]
 
-    def columns(self, columns: Sequence[int] | None) -> list[tuple[str, str, str, object, object | None]]:
+    def columns(self, columns: Sequence[int] | None) -> ColumnsAnswer:
         return [("a", *self.plan)]
 
 
@@ -2978,10 +3227,10 @@ class TestNumpyScanContract:
             def rows(self) -> int:
                 return len(good)
 
-            def describe(self) -> list[tuple[str, str]]:
+            def describe(self) -> list[tuple[str, object]]:
                 return [("a", "BIGINT"), ("b", "BIGINT")]
 
-            def columns(self, columns: Sequence[int] | None) -> list[tuple[str, str, str, object, object | None]]:
+            def columns(self, columns: Sequence[int] | None) -> ColumnsAnswer:
                 return [("a", "fixed", "BIGINT", good, None), ("b", "fixed", "BIGINT", good.astype(float), None)]
 
         con._register_source("t", SecondRefused(None))
@@ -3008,11 +3257,11 @@ class TestNumpyScanContract:
             def rows(self) -> int:
                 return 5
 
-            def describe(self) -> list[tuple[str, str]]:
+            def describe(self) -> list[tuple[str, object]]:
                 return [(name, type_text) for name, (type_text, _) in columns.items()]
 
-            def columns(self, requested: Sequence[int] | None) -> list[tuple[str, str, str, object, object | None]]:
-                answer: list[tuple[str, str, str, object, object | None]] = [
+            def columns(self, requested: Sequence[int] | None) -> ColumnsAnswer:
+                answer: ColumnsAnswer = [
                     (name, "fixed", type_text, data, None) for name, (type_text, data) in columns.items()
                 ]
                 return answer if requested is None else [answer[i] for i in requested]
@@ -3108,7 +3357,7 @@ class TestNumpyScanContract:
         class Changing(NumpySource):
             # Stands in for another thread replacing the column after the query was bound; this once overflowed
             # the scan's TINYINT vector with eight-byte timestamps.
-            def columns(self, columns: Sequence[int] | None) -> list[tuple[str, str, str, object, object | None]]:
+            def columns(self, columns: Sequence[int] | None) -> ColumnsAnswer:
                 self.obj["a"] = np.arange(2048).astype("datetime64[ns]")
                 return super().columns(columns)
 

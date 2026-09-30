@@ -48,11 +48,11 @@ class PandasSource(NumpyScanSource):
     def rows(self) -> int:
         return len(self.obj)
 
-    def describe(self) -> list[tuple[str, str]]:
+    def describe(self) -> list[tuple[str, object]]:
         frame = _named(self.obj, None)
-        return [(name, _column_reading(name, frame[name]).type_text) for name in frame.columns]
+        return [(name, _column_reading(name, frame[name]).engine_type) for name in frame.columns]
 
-    def columns(self, columns: Sequence[int] | None) -> list[tuple[str, str, str, object, object | None]]:
+    def columns(self, columns: Sequence[int] | None) -> list[tuple[str, str, str | None, object, object | None]]:
         frame = _named(self.obj, columns)
         return [(name, *_column_reading(name, frame[name]).prepare()) for name in frame.columns]
 
@@ -170,15 +170,17 @@ def has_pyarrow_columns(obj: DataFrame) -> bool:
         message = f"registering as a pandas DataFrame needs a pandas DataFrame, not {type(obj).__name__}"
         raise TypeError(message)
 
+    return any(_held_as_arrow(column.array) for _, column in obj.items())
+
+
+def _held_as_arrow(array: object) -> bool:
+    """Whether a pandas column's array holds its values as pyarrow data."""
+    import pandas as pd
+
     string_array = getattr(pd.arrays, "ArrowStringArray", None)
-    # A DataFrame's .values is the whole block as one array, not a per-column iterator like a dict's.
-    for _, column in obj.items():  # noqa: PERF102
-        array = column.array
-        if isinstance(array, pd.arrays.ArrowExtensionArray):
-            return True
-        if string_array is not None and isinstance(array, string_array):
-            return True
-    return False
+    return isinstance(array, pd.arrays.ArrowExtensionArray) or (
+        string_array is not None and isinstance(array, string_array)
+    )
 
 
 def _named(frame: DataFrame, columns: Sequence[int] | None) -> DataFrame:
@@ -233,8 +235,9 @@ def _sql_quote(text: str) -> str:
 def _column_reading(name: str, series: pd.Series) -> ColumnReading:
     """How the numpy scan reads one pandas column.
 
-    pandas' categorical and time zone dtypes and its nullable arrays, which pair a data array with a mask, are read
-    here; every other column is read as the numpy array holding its values, as the numpy source reads an array.
+    A pyarrow-backed column is read as its Arrow data. pandas' categorical and time zone dtypes and its nullable
+    arrays, which pair a data array with a mask, are read here; every other column is read as the numpy array holding
+    its values, as the numpy source reads an array.
     """
     import pandas as pd
 
@@ -254,6 +257,11 @@ def _column_reading(name: str, series: pd.Series) -> ColumnReading:
             type_text, lambda: ScanColumn(f"timestamp:{dtype.unit}", type_text, _utc_counts(series), None)
         )
     array = series.array
+    if _held_as_arrow(array):
+        chunked = array.__arrow_array__()
+        return ColumnReading(
+            chunked.type.__arrow_c_schema__(), lambda: ScanColumn("arrow", None, chunked.__arrow_c_stream__(), None)
+        )
     if hasattr(array, "_data") and hasattr(array, "_mask"):
         return _array_reading(name, array._data, array._mask)
     return _array_reading(name, _backing_array(series), None, _pandas_first_valid_position)

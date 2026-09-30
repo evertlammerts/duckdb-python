@@ -8,6 +8,7 @@
 
 #include "numpy_scan.hpp"
 
+#include "arrowc.hpp"
 #include "pyconv.hpp"
 
 #include <nanobind/stl/pair.h>
@@ -30,9 +31,11 @@
 // A registered object is a source from duckdb/_sources that answers two calls: describe() names its columns and their
 // engine types, and columns() answers each requested column as an encoding, an engine type, a numpy data array and a
 // numpy mask array or None. A pandas DataFrame and a numpy array are such sources. The encoding says how a row's bytes
-// turn into a vector element below. One run of this table function over a query is a scan, and its threads read the
-// object in ranges of rows they claim in turn. An object array can hold pandas' NA and NaT singletons, so they stay
-// among the missing markers this file checks for.
+// turn into a vector element below. A column held as Arrow is the exception: describe() gives an Arrow schema capsule
+// in place of its type, and columns() an Arrow stream capsule in place of its arrays, which core's Arrow importer
+// reads, so core decides its engine type as it does for any Arrow data. One run of this table function over a query is
+// a scan, and its threads read the object in ranges of rows they claim in turn. An object array can hold pandas' NA
+// and NaT singletons, so they stay among the missing markers this file checks for.
 
 namespace duckdb_python {
 namespace {
@@ -75,6 +78,7 @@ enum class NumpyEncoding : uint8_t {
 	OBJECTS,
 	UCS4,
 	BYTES,
+	ARROW,
 };
 
 /// Releases a buffer protocol view and frees the structure holding it; runs under the GIL, when opening a later
@@ -91,8 +95,38 @@ struct ReleaseBuffer {
 /// itself.
 using BufferView = std::unique_ptr<Py_buffer, ReleaseBuffer>;
 
+/// An Arrow array shared by the scan and every chunk imported from a view of it; the last share releases it, from
+/// whichever thread drops it, since the importer's chunks may outlive the scan. The arrays come from pyarrow, whose
+/// buffers over Python objects take the GIL themselves when freed.
+using SharedArray = std::shared_ptr<ArrowOwned<ArrowArray>>;
+
+/// Where an Arrow type records its nulls: in a validity bitmap, the first buffer; nowhere, for a union or a run-end
+/// encoded array, whose first buffer if any is not a bitmap; or in the type itself, the null type's every row.
+enum class ArrowNulls : uint8_t { BITMAP, NONE, EVERY_ROW };
+
+ArrowNulls NullsOfFormat(const char *format) {
+	const std::string_view spelled(format != nullptr ? format : "");
+	if (spelled == "n") {
+		return ArrowNulls::EVERY_ROW;
+	}
+	if (spelled == "+r" || spelled.rfind("+u", 0) == 0) {
+		return ArrowNulls::NONE;
+	}
+	return ArrowNulls::BITMAP;
+}
+
+/// An ARROW column's data: the one-column batch schema each thread's importer is resolved against, which building an
+/// importer only reads, where its type records nulls, and the stream's arrays, empty ones left out, with the first row
+/// of each and the row count after the last in `starts`.
+struct ArrowColumn {
+	ArrowOwned<ArrowSchema> schema;
+	ArrowNulls nulls = ArrowNulls::BITMAP;
+	std::vector<SharedArray> arrays;
+	std::vector<cxx::idx_t> starts;
+};
+
 /// One requested column, kept for the scan's life: the rule its bytes are read by, the engine type it fills, and
-/// views of its data array and, when it has one, its mask array.
+/// views of its data array and, when it has one, its mask array, or for an ARROW column its Arrow data.
 struct NumpyColumn {
 	std::string name;
 	NumpyEncoding encoding;
@@ -101,6 +135,7 @@ struct NumpyColumn {
 	cxx::LogicalType type;
 	BufferView data;
 	BufferView mask;
+	ArrowColumn arrow;
 };
 
 /// The Python objects an object column's cells are recognised by, looked up once per scan under the GIL.
@@ -138,12 +173,39 @@ struct NumpyScanState {
 	ScalarMarkers markers;
 };
 
-/// One thread's claimed range within the object, and the ordering position that range stands for.
+/// One thread's claimed range within the object, and the ordering position that range stands for. Each ARROW column
+/// has this thread's own importer, since an importer is single threaded, and the chunk its output vector references,
+/// kept until the next batch replaces it; both are empty for every other column.
 struct NumpyScanLocalState {
+	explicit NumpyScanLocalState(std::vector<std::optional<cxx::ArrowImporter>> importers)
+	    : importers(std::move(importers)), held(this->importers.size()) {
+	}
+
 	cxx::idx_t start = 0;
 	cxx::idx_t end = 0;
 	cxx::idx_t batch_index = 0;
+	std::vector<std::optional<cxx::ArrowImporter>> importers;
+	std::vector<std::optional<cxx::DataChunk>> held;
 };
+
+/// The engine type core imports the one Arrow column `schema` describes as, `schema` rewrapped as the one-column batch
+/// an importer reads. Always wrapped, since the column may itself be a struct.
+cxx::LogicalType ArrowColumnType(cxx::Context &context, ArrowSchema &schema, cxx::idx_t batch_rows) {
+	WrapAsBatch(schema);
+	cxx::ArrowImporter importer(context, schema, batch_rows);
+	return importer.GetSchema().GetFieldType(0);
+}
+
+/// A column's engine type as `describe()` gave it: its text, or an Arrow schema capsule for a column held as Arrow.
+cxx::LogicalType DescribedType(cxx::Context &context, const Registered &entry, nb::handle described,
+                               cxx::idx_t batch_rows) {
+	if (nb::isinstance<nb::str>(described)) {
+		return context.ParseType(nb::cast<std::string>(described));
+	}
+	auto schema =
+	    TakeFromCapsule<ArrowSchema>(described, kSchemaCapsule, "the object registered as '" + entry.name + "'");
+	return ArrowColumnType(context, schema.value, batch_rows);
+}
 
 /// Resolved once per query while bound, so a scan sees the object registered under the name when it binds.
 void NumpyScanBind(cxx::TableFunction::BindInput &input) {
@@ -156,13 +218,15 @@ void NumpyScanBind(cxx::TableFunction::BindInput &input) {
 	std::vector<std::string> names;
 	std::vector<cxx::LogicalType> types;
 	cxx::idx_t rows = 0;
+	const auto batch_rows = input.GetUserData<NumpyScanUserData>().batch_rows;
+	auto context = input.GetContext();
 	{
 		nb::gil_scoped_acquire gil;
 		try {
-			nb::object described = entry->object.attr("describe")();
-			for (nb::handle item : described) {
-				auto [column_name, type_text] = nb::cast<std::pair<std::string, std::string>>(item);
-				auto type = input.GetContext().ParseType(type_text);
+			nb::object description = entry->object.attr("describe")();
+			for (nb::handle item : description) {
+				auto [column_name, described] = nb::cast<std::pair<std::string, nb::object>>(item);
+				auto type = DescribedType(context, *entry, described, batch_rows);
 				input.AddResultColumn(column_name, type);
 				names.push_back(std::move(column_name));
 				types.push_back(std::move(type));
@@ -273,6 +337,9 @@ NumpyEncoding ParseEncoding(const std::string &registered_name, const std::strin
 	}
 	if (spelling == "bytes") {
 		return NumpyEncoding::BYTES;
+	}
+	if (spelling == "arrow") {
+		return NumpyEncoding::ARROW;
 	}
 	throw cxx::InvalidInputException("the object registered as '" + registered_name + "' answered columns() for '" +
 	                                 column_name + "' with the unknown encoding '" + spelling + "'");
@@ -429,6 +496,8 @@ bool BufferFits(NumpyEncoding encoding, const cxx::LogicalType &type, ElementCla
 		return id == cxx::LogicalTypeId::VARCHAR && element == ElementClass::UCS4 && itemsize > 0 && itemsize % 4 == 0;
 	case NumpyEncoding::BYTES:
 		return id == cxx::LogicalTypeId::BLOB && element == ElementClass::BYTES && itemsize > 0;
+	case NumpyEncoding::ARROW:
+		return false;
 	}
 	return false;
 }
@@ -506,11 +575,50 @@ bool Masked(const NumpyColumn &column, cxx::idx_t row) {
 	return column.mask && *Element(column.mask, row) != 0;
 }
 
+/// An ARROW column's stream capsule, drained into `arrow` and refused unless it holds `rows` rows; answers the engine
+/// type core imports the stream's schema as.
+cxx::LogicalType OpenArrow(const std::string &registered_name, const std::string &column_name, cxx::Context &context,
+                           nb::handle capsule, cxx::idx_t rows, cxx::idx_t batch_rows, ArrowColumn &arrow) {
+	const auto refuse = [&](const std::string &what) {
+		return cxx::InvalidInputException("the object registered as '" + registered_name +
+		                                  "' answered columns() for '" + column_name + "' with an Arrow stream " +
+		                                  what);
+	};
+	auto stream = TakeFromCapsule<ArrowArrayStream>(capsule, kStreamCapsule,
+	                                                "the object registered as '" + registered_name + "'");
+	if (stream.value.get_schema(&stream.value, &arrow.schema.value) != 0) {
+		throw refuse("whose schema could not be read: " + StreamError(stream.value));
+	}
+	auto type = ArrowColumnType(context, arrow.schema.value, batch_rows);
+	arrow.nulls = NullsOfFormat(arrow.schema.value.children[0]->format);
+	arrow.starts.push_back(0);
+	for (;;) {
+		ArrowOwned<ArrowArray> array;
+		if (stream.value.get_next(&stream.value, &array.value) != 0) {
+			throw refuse("that failed: " + StreamError(stream.value));
+		}
+		if (!array) {
+			break;
+		}
+		if (array.value.length == 0) {
+			continue;
+		}
+		arrow.starts.push_back(arrow.starts.back() + static_cast<cxx::idx_t>(array.value.length));
+		arrow.arrays.push_back(std::make_shared<ArrowOwned<ArrowArray>>(std::move(array)));
+	}
+	if (arrow.starts.back() != rows) {
+		throw refuse("of " + std::to_string(arrow.starts.back()) + " rows where " + std::to_string(rows) +
+		             " were expected");
+	}
+	return type;
+}
+
 /// `columns(requested)`'s answer, checked against the query's bound names and types and opened into `NumpyColumn`s;
 /// every view already opened is released before an error escapes, so a later column's refusal never leaks an earlier
 /// one's.
 std::vector<NumpyColumn> OpenColumns(const Registered &entry, const NumpyScanBindData &bound, cxx::Context &context,
-                                     const std::vector<cxx::idx_t> &requested, nb::handle answer) {
+                                     const std::vector<cxx::idx_t> &requested, nb::handle answer,
+                                     cxx::idx_t batch_rows) {
 	if (static_cast<cxx::idx_t>(nb::len(answer)) != requested.size()) {
 		throw cxx::InvalidInputException("the object registered as '" + entry.name + "' answered columns() with " +
 		                                 std::to_string(nb::len(answer)) + " columns where " +
@@ -520,7 +628,7 @@ std::vector<NumpyColumn> OpenColumns(const Registered &entry, const NumpyScanBin
 	columns.reserve(requested.size());
 	for (cxx::idx_t i = 0; i < requested.size(); i++) {
 		auto [column_name, encoding_text, type_text, data_array, mask_array] =
-		    nb::cast<std::tuple<std::string, std::string, std::string, nb::object, nb::object>>(answer[i]);
+		    nb::cast<std::tuple<std::string, std::string, nb::object, nb::object, nb::object>>(answer[i]);
 		const auto declared = requested[i];
 		if (column_name != bound.names.at(declared)) {
 			throw cxx::InvalidInputException(
@@ -530,13 +638,21 @@ std::vector<NumpyColumn> OpenColumns(const Registered &entry, const NumpyScanBin
 		const TimeUnit *unit = nullptr;
 		uint64_t step = 1;
 		const auto encoding = ParseEncoding(entry.name, column_name, encoding_text, unit, step);
+		ArrowColumn arrow;
 		// The object is read afresh for every scan, so it may have changed since the query was bound.
-		auto type = context.ParseType(type_text);
+		auto type = encoding == NumpyEncoding::ARROW
+		                ? OpenArrow(entry.name, column_name, context, data_array, bound.rows, batch_rows, arrow)
+		                : context.ParseType(nb::cast<std::string>(type_text));
 		if (type != bound.types.at(declared)) {
 			throw cxx::InvalidInputException("the object registered as '" + entry.name + "' answered columns() for '" +
 			                                 column_name + "' with the type " + type.ToText() +
 			                                 ", but the query was bound when it was " +
 			                                 bound.types.at(declared).ToText());
+		}
+		if (encoding == NumpyEncoding::ARROW) {
+			columns.push_back(NumpyColumn {std::move(column_name), encoding, UnitConversion {1, 1, 1}, std::move(type),
+			                               BufferView(), BufferView(), std::move(arrow)});
+			continue;
 		}
 		const auto data_fits = [&](ElementClass element, cxx::idx_t width) {
 			return BufferFits(encoding, type, element, width);
@@ -555,7 +671,7 @@ std::vector<NumpyColumn> OpenColumns(const Registered &entry, const NumpyScanBin
 			conversion = TimeConversion(entry.name, column_name, encoding_text, *unit, step, type);
 		}
 		columns.push_back(NumpyColumn {std::move(column_name), encoding, conversion, std::move(type), std::move(data),
-		                               std::move(mask)});
+		                               std::move(mask), ArrowColumn()});
 	}
 	return columns;
 }
@@ -593,7 +709,7 @@ void NumpyScanInitGlobal(cxx::TableFunction::InitGlobalInput &input) {
 		                                 "' failed: " + DescribePythonError(error));
 	}
 	auto context = input.GetContext();
-	auto columns = OpenColumns(entry, bound, context, requested, answer);
+	auto columns = OpenColumns(entry, bound, context, requested, answer, batch_rows);
 	ScalarMarkers markers;
 	// An array can hold pandas' singletons only once pandas is loaded, so an absent pandas leaves no marker to match
 	// and is never imported for one.
@@ -611,8 +727,19 @@ void NumpyScanInitGlobal(cxx::TableFunction::InitGlobalInput &input) {
 	input.SetGlobalState<NumpyScanState>(std::move(columns), bound.rows, range_rows, std::move(markers));
 }
 
+/// Runs on an engine thread: no Python here.
 void NumpyScanInitLocal(cxx::TableFunction::InitLocalInput &input) {
-	input.SetLocalState<NumpyScanLocalState>();
+	auto &global = input.GetGlobalState<NumpyScanState>();
+	const auto batch_rows = input.GetUserData<NumpyScanUserData>().batch_rows;
+	auto context = input.GetContext();
+	std::vector<std::optional<cxx::ArrowImporter>> importers(global.columns.size());
+	for (cxx::idx_t i = 0; i < global.columns.size(); i++) {
+		auto &column = global.columns[i];
+		if (column.encoding == NumpyEncoding::ARROW) {
+			importers[i].emplace(context, column.arrow.schema.value, batch_rows);
+		}
+	}
+	input.SetLocalState<NumpyScanLocalState>(std::move(importers));
 }
 
 /// A run of fixed-width elements, validity from the mask when there is one, else for FLOAT and DOUBLE from a raw
@@ -931,6 +1058,77 @@ void FillBytes(cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t start,
 	}
 }
 
+void ReleaseView(ArrowArray *view) {
+	delete static_cast<SharedArray *>(view->private_data);
+	view->release = nullptr;
+}
+
+/// How many of `count` rows from row `from` of `array`, whose type records nulls as `nulls` says, are null. Exact,
+/// never the -1 the Arrow C data interface allows for an uncounted array, since the engine's dictionary import reads -1
+/// as no nulls at all.
+int64_t NullsIn(const ArrowArray &array, ArrowNulls nulls, cxx::idx_t from, cxx::idx_t count) {
+	if (nulls == ArrowNulls::EVERY_ROW) {
+		return static_cast<int64_t>(count);
+	}
+	if (nulls == ArrowNulls::NONE || array.null_count == 0 || array.n_buffers == 0 || array.buffers[0] == nullptr) {
+		return 0;
+	}
+	const auto *bits = static_cast<const uint8_t *>(array.buffers[0]);
+	const auto first = static_cast<cxx::idx_t>(array.offset) + from;
+	cxx::idx_t valid = 0;
+	for (cxx::idx_t bit = first; bit < first + count; bit++) {
+		valid += (bits[bit / 8] >> (bit % 8)) & 1;
+	}
+	return static_cast<int64_t>(count - valid);
+}
+
+/// `count` rows from row `from` of `shared`'s array, as a one-column batch whose column shares the array's buffers,
+/// children and dictionary and holds a share of the array until released.
+ArrowOwned<ArrowArray> ViewOf(const SharedArray &shared, ArrowNulls nulls, cxx::idx_t from, cxx::idx_t count) {
+	const auto &array = shared->value;
+	ArrowOwned<ArrowArray> view;
+	view.value = array;
+	view.value.offset = array.offset + static_cast<int64_t>(from);
+	view.value.length = static_cast<int64_t>(count);
+	view.value.null_count = NullsIn(array, nulls, from, count);
+	view.value.private_data = new SharedArray(shared);
+	view.value.release = &ReleaseView;
+	WrapAsBatch(view.value);
+	return view;
+}
+
+/// Rows `start` to `start + count` of an ARROW column, imported by this thread's importer from views of the arrays
+/// holding them and referenced by `vector` without a copy. Rows spanning two arrays come out as one chunk, which the
+/// importer copies them into.
+void FillArrow(cxx::Vector &vector, NumpyScanLocalState &local, cxx::idx_t index, const NumpyColumn &column,
+               cxx::idx_t start, cxx::idx_t count, const std::string &registered_name) {
+	const auto &arrow = column.arrow;
+	auto &importer = *local.importers.at(index);
+	auto array = static_cast<cxx::idx_t>(std::upper_bound(arrow.starts.begin(), arrow.starts.end(), start) -
+	                                     arrow.starts.begin() - 1);
+	for (cxx::idx_t done = 0; done < count; array++) {
+		const auto from = start + done - arrow.starts[array];
+		const auto take = std::min(count - done, arrow.starts[array + 1] - arrow.starts[array] - from);
+		done += take;
+		auto view = ViewOf(arrow.arrays[array], arrow.nulls, from, take);
+		// Every piece is shorter than a batch, so the importer holds each back until the flush on the last.
+		importer.Append(view.value, true, done == count);
+		if (done < count && importer.NextChunk()) {
+			throw cxx::InvalidInputException("the Arrow column '" + column.name + "' of the object registered as '" +
+			                                 registered_name + "' was imported in more chunks than its batch");
+		}
+	}
+	auto chunk = importer.NextChunk();
+	if (!chunk || chunk.GetRowCount() != count) {
+		throw cxx::InvalidInputException("the Arrow column '" + column.name + "' of the object registered as '" +
+		                                 registered_name + "' was imported short of its batch of " +
+		                                 std::to_string(count) + " rows");
+	}
+	vector.Reference(chunk.GetVector(0));
+	vector.SetSize(count);
+	local.held.at(index) = std::move(chunk);
+}
+
 void NumpyScanExec(cxx::TableFunction::ExecInput &input) {
 	auto &global = input.GetGlobalState<NumpyScanState>();
 	auto &local = input.GetLocalState<NumpyScanLocalState>();
@@ -983,6 +1181,9 @@ void NumpyScanExec(cxx::TableFunction::ExecInput &input) {
 			break;
 		case NumpyEncoding::BYTES:
 			FillBytes(vector, column, local.start, emit);
+			break;
+		case NumpyEncoding::ARROW:
+			FillArrow(vector, local, i, column, local.start, emit, entry.name);
 			break;
 		}
 	}

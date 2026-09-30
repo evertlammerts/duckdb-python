@@ -6,8 +6,10 @@ the scan turns its bytes into that type. The encodings are `"fixed"` (fixed-widt
 are, a raw NaN also missing for FLOAT and DOUBLE without a mask), `"timestamp:<unit>"` and `"interval:<unit>"`
 (int64 counts of a timestamp, naive or normalized to UTC as its engine type says, or of a duration, in a unit
 spelled as numpy spells it inside a datetime64 or timedelta64 dtype's brackets, such as `ns` or `2ns`), `"enum"`
-(categorical codes), `"ucs4"` and `"bytes"` (numpy's fixed-width `U` and `S` strings) and `"text"` or `"objects"`
-(Python objects, read one at a time as text or converted to the engine type).
+(categorical codes), `"ucs4"` and `"bytes"` (numpy's fixed-width `U` and `S` strings), `"text"` or `"objects"`
+(Python objects, read one at a time as text or converted to the engine type), and `"arrow"`, for a column that is
+Arrow data rather than a numpy array: its data is an Arrow stream capsule, which core's Arrow importer reads and
+whose schema decides the engine type, as for any Arrow data.
 
 `ColumnReading` holds the one decision made about a column: its engine type, which is what a query is bound
 against, and how to produce its `ScanColumn`, which is done only when a query's scan starts and only for the
@@ -76,10 +78,13 @@ _INT128_MAX = 2**127 - 1
 
 
 class ScanColumn(NamedTuple):
-    """`columns()`'s answer for one column, after its name: encoding, engine type, data array, mask array or None."""
+    """`columns()`'s answer for one column, after its name: encoding, engine type, data array, mask array or None.
+
+    An `"arrow"` column has no engine type or mask here: its data, an Arrow stream capsule, carries both.
+    """
 
     encoding: str
-    type_text: str
+    type_text: str | None
     data: object
     mask: object | None
 
@@ -87,10 +92,11 @@ class ScanColumn(NamedTuple):
 class ColumnReading(NamedTuple):
     """A column's engine type, and a function producing the `ScanColumn` the scan reads it from.
 
+    `engine_type` is the type's text, or for an `"arrow"` column an Arrow schema capsule core resolves the type from.
     `prepare` may copy or convert the data, so describing a table to bind a query never calls it.
     """
 
-    type_text: str
+    engine_type: object
     prepare: Callable[[], ScanColumn]
 
 
@@ -346,10 +352,10 @@ class NumpySource(NumpyScanSource):
     def rows(self) -> int:
         return len(self._arrays()[0][1])
 
-    def describe(self) -> list[tuple[str, str]]:
-        return [(name, _numpy_reading(name, array).type_text) for name, array in self._arrays()]
+    def describe(self) -> list[tuple[str, object]]:
+        return [(name, _numpy_reading(name, array).engine_type) for name, array in self._arrays()]
 
-    def columns(self, columns: Sequence[int] | None) -> list[tuple[str, str, str, object, object | None]]:
+    def columns(self, columns: Sequence[int] | None) -> list[tuple[str, str, str | None, object, object | None]]:
         arrays = self._arrays()
         chosen = arrays if columns is None else [arrays[i] for i in columns]
         return [(name, *_numpy_reading(name, array).prepare()) for name, array in chosen]

@@ -78,11 +78,14 @@ class NumpyScanSource(Source):
         """How many rows every column holds, which the scan divides among its threads."""
         raise NotImplementedError
 
-    def describe(self) -> list[tuple[str, str]]:
-        """Column names and engine types, which a query is bound against."""
+    def describe(self) -> list[tuple[str, object]]:
+        """Column names and engine types, which a query is bound against.
+
+        A type is its text, or for a column read as Arrow an Arrow schema capsule core resolves the type from.
+        """
         raise NotImplementedError
 
-    def columns(self, columns: Sequence[int] | None) -> list[tuple[str, str, str, object, object | None]]:
+    def columns(self, columns: Sequence[int] | None) -> list[tuple[str, str, str | None, object, object | None]]:
         """The name and `ScanColumn` of each requested column, in the requested order, all of them when None."""
         raise NotImplementedError
 
