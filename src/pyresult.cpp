@@ -53,7 +53,7 @@ DuckDBPyResult::DuckDBPyResult(unique_ptr<QueryResult> submitted, bool stream_re
 
 void DuckDBPyResult::EnsureStream() {
 	if (submitted) {
-		stream = make_uniq<QueryResultStream>(std::move(submitted));
+		stream = make_uniq<QueryResultStream<ChunkFormat>>(std::move(submitted));
 	}
 }
 
