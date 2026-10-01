@@ -106,7 +106,7 @@ private:
 	//! The completed result, when the rows were retained or converted to Arrow
 	unique_ptr<QueryResult> result;
 	//! The open stream the rows are drained through
-	unique_ptr<QueryResultStream> stream;
+	unique_ptr<QueryResultStream<ChunkFormat>> stream;
 	//! A handle that can be drained but has not been consumed yet
 	unique_ptr<QueryResult> submitted;
 	//! Set only when the result was re-bound (promotion to Arrow de-duplicates column names

@@ -94,14 +94,15 @@ static void ConvertArrowTableToVector(const nb::object &table, Vector &out, Clie
 
 	// Prepare the inputs for the bind
 	vector<Value> children;
-	named_parameter_map_t named_params;
+	named_argument_map_t named_params;
 	vector<LogicalType> input_types;
 	vector<Identifier> input_names;
 
 	TableFunction dummy_table_function;
 	dummy_table_function.name = "ConvertArrowTableToVector";
+	BoundTableFunction bound_function(dummy_table_function);
 	TableFunctionBindInput bind_input(children, named_params, input_types, input_names, nullptr, nullptr,
-	                                  dummy_table_function, empty);
+	                                  bound_function, empty);
 	vector<LogicalType> return_types;
 	vector<Identifier> return_names;
 
