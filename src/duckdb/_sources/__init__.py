@@ -1,9 +1,9 @@
 """The Python objects that register as tables, each behind a source that one of two scans reads.
 
 An `ArrowScanSource` is read by the Arrow scan, from an Arrow C stream it exports: the Arrow, pyarrow and polars
-sources in `arrow.py`, `pyarrow.py` and `polars.py`, and a pandas DataFrame with a pyarrow-backed column, in
-`pandas.py`. A `NumpyScanSource` is read by the numpy scan, off numpy buffers: the numpy source in `numpy.py` and
-every other pandas DataFrame. Which scan reads a registered name follows from the kind of its source. Nothing here
+sources in `arrow.py`, `pyarrow.py` and `polars.py`. A `NumpyScanSource` is read by the numpy scan, column by column,
+off numpy buffers or, for a pandas column held as Arrow, off its Arrow data: the numpy source in `numpy.py` and the
+pandas source in `pandas.py`. Which scan reads a registered name follows from the kind of its source. Nothing here
 imports pyarrow, polars or pandas at module level: a family is recognised by its class's module and name, or by the
 methods it carries, and its library is imported only inside the source that needs it.
 """
@@ -123,7 +123,7 @@ def adapt(obj: object) -> Source:
     """
     from .arrow import ArrowArraySource, ArrowCapsuleSource, ArrowStreamSource
     from .numpy import NumpySource
-    from .pandas import PandasArrowSource, PandasSource, has_pyarrow_columns
+    from .pandas import PandasSource
     from .polars import LazyFrameSource, PolarsFrameSource
     from .pyarrow import PyArrowDatasetSource, PyArrowReaderSource, PyArrowScannerSource, PyArrowTableSource
 
@@ -139,7 +139,7 @@ def adapt(obj: object) -> Source:
     if _is(obj, "polars", "LazyFrame"):
         return LazyFrameSource(obj)
     if _is(obj, "pandas", "DataFrame"):
-        return PandasArrowSource(obj) if has_pyarrow_columns(obj) else PandasSource(obj)
+        return PandasSource(obj)
     if isinstance(obj, (dict, list, tuple)) or _from(obj, "numpy"):
         return NumpySource(obj)
     if exports and _is(obj, "pyarrow", "Table", "RecordBatch"):

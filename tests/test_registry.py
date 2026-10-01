@@ -1019,8 +1019,8 @@ class TestRowsAndTypes:
 class TestScanRouting:
     """A registered name resolves to the numpy scan or the Arrow scan, by the kind of its source."""
 
-    def test_a_numpy_backed_pandas_frame_routes_to_the_numpy_scan(self, con: duckdb.frame.Connection) -> None:
-        con.register("df", pd.DataFrame({"a": range(3)}))
+    def test_a_pandas_frame_routes_to_the_numpy_scan(self, con: duckdb.frame.Connection) -> None:
+        con.register("df", pd.DataFrame({"a": range(3), "s": pd.array(["x", "y", "z"], dtype="string[pyarrow]")}))
         assert "Python Numpy Scan" in table("df").on(con).explain()
         assert rows(con, "SELECT count(*) FROM python_numpy_scan('df')") == [(3,)]
         with pytest.raises(exceptions.InvalidInputError, match="nothing is registered as 'ghost'"):

@@ -112,12 +112,14 @@ DATETIME = _TypeSet(
     "DATETIME",
     "DATE",
     "TIME",
+    "TIME_NS",
     "TIME WITH TIME ZONE",
     "TIMESTAMP",
     "TIMESTAMP WITH TIME ZONE",
     "TIMESTAMP_S",
     "TIMESTAMP_MS",
     "TIMESTAMP_NS",
+    "TIMESTAMPTZ_NS",
     "INTERVAL",
 )
 #: DuckDB has no row identifier type, so nothing ever equals this.

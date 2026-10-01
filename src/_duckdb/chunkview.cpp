@@ -86,6 +86,7 @@ size_t ChunkView::ElementSize(cxx::idx_t column) const {
 	case Id::TIMESTAMP_MS:
 	case Id::TIMESTAMP_NS:
 	case Id::TIMESTAMP_TZ:
+	case Id::TIMESTAMP_TZ_NS:
 		return 8;
 	case Id::INTERVAL:
 	case Id::HUGEINT:

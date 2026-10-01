@@ -27,6 +27,7 @@ _USMALLINT = 29
 _UINTEGER = 30
 _UBIGINT = 31
 _TS_TZ = 32
+_TS_TZ_NS = 33
 _UHUGEINT = 49
 _HUGEINT = 50
 _ENUM = 104
@@ -45,7 +46,8 @@ _NUMERIC_DTYPE = {
     _DOUBLE: "float64",
 }
 
-_TS_UNIT = {_TS_S: "s", _TS_MS: "ms", _TS: "us", _TS_NS: "ns", _TS_TZ: "us"}
+_TS_UNIT = {_TS_S: "s", _TS_MS: "ms", _TS: "us", _TS_NS: "ns", _TS_TZ: "us", _TS_TZ_NS: "ns"}
+_TS_ZONED = (_TS_TZ, _TS_TZ_NS)
 
 #: DuckDB's infinite date and timestamp markers, and the instants they clamp to, matching what fetching rows gives.
 _DATE_INF = 2147483647
@@ -119,7 +121,7 @@ def _convert_column(np: Any, view: _duckdb.ChunkView, column: int, count: int) -
             raw[raw == _TS_INF] = _TS_CLAMP[unit][0]
             raw[raw == -_TS_INF] = _TS_CLAMP[unit][1]
         values = raw.view(f"datetime64[{unit}]")
-        return values, mask, ("datetimetz" if type_id == _TS_TZ else "datetime"), unit
+        return values, mask, ("datetimetz" if type_id in _TS_ZONED else "datetime"), unit
 
     if type_id == _INTERVAL:
         record = np.frombuffer(
@@ -173,7 +175,7 @@ def _empty_column(np: Any, type_id: int, enum_values: Any) -> tuple[Any, Any, st
         return np.empty(0, dtype="datetime64[D]"), None, "date", "D"
     unit = _TS_UNIT.get(type_id)
     if unit is not None:
-        kind = "datetimetz" if type_id == _TS_TZ else "datetime"
+        kind = "datetimetz" if type_id in _TS_ZONED else "datetime"
         return np.empty(0, dtype=f"datetime64[{unit}]"), None, kind, unit
     if type_id == _INTERVAL:
         return np.empty(0, dtype="timedelta64[us]"), None, "timedelta", None

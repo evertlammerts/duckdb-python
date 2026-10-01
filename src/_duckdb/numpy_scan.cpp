@@ -346,13 +346,14 @@ NumpyEncoding ParseEncoding(const std::string &registered_name, const std::strin
 }
 
 /// How a TIMESTAMP or INTERVAL column's counts in `unit` become counts of the declared `type`: seconds, milliseconds,
-/// microseconds or nanoseconds for a naive timestamp, microseconds for a zoned one or an interval. A naive timestamp
-/// only ever multiplies, since the source chose a type at least as fine as its unit.
+/// microseconds or nanoseconds for a naive timestamp, microseconds or nanoseconds for a zoned one, microseconds for
+/// an interval. A timestamp only ever multiplies, since the source chose a type at least as fine as its unit; only an
+/// interval may drop precision, the engine having none finer than microseconds.
 UnitConversion TimeConversion(const std::string &registered_name, const std::string &column_name,
                               const std::string &encoding_text, const TimeUnit &unit, uint64_t step,
                               const cxx::LogicalType &type) {
 	uint64_t target_nanos = 1'000;
-	bool naive = true;
+	bool exact = true;
 	switch (type.GetTypeId()) {
 	case cxx::LogicalTypeId::TIMESTAMP_SEC:
 		target_nanos = 1'000'000'000;
@@ -361,12 +362,14 @@ UnitConversion TimeConversion(const std::string &registered_name, const std::str
 		target_nanos = 1'000'000;
 		break;
 	case cxx::LogicalTypeId::TIMESTAMP_NS:
+	case cxx::LogicalTypeId::TIMESTAMP_TZ_NS:
 		target_nanos = 1;
 		break;
 	case cxx::LogicalTypeId::TIMESTAMP:
+	case cxx::LogicalTypeId::TIMESTAMP_TZ:
 		break;
 	default:
-		naive = false;
+		exact = false;
 		break;
 	}
 	const auto refuse = [&](const std::string &why) {
@@ -375,7 +378,7 @@ UnitConversion TimeConversion(const std::string &registered_name, const std::str
 		                                  encoding_text + "', " + why + " " + type.ToText());
 	};
 	const auto conversion = ConversionOf(unit, step, target_nanos);
-	if (naive && conversion.denominator != 1) {
+	if (exact && conversion.denominator != 1) {
 		throw refuse("whose unit is finer than");
 	}
 	return conversion;
@@ -482,7 +485,7 @@ bool BufferFits(NumpyEncoding encoding, const cxx::LogicalType &type, ElementCla
 	case NumpyEncoding::TIMESTAMP:
 		return int64 && (id == cxx::LogicalTypeId::TIMESTAMP_SEC || id == cxx::LogicalTypeId::TIMESTAMP_MS ||
 		                 id == cxx::LogicalTypeId::TIMESTAMP || id == cxx::LogicalTypeId::TIMESTAMP_NS ||
-		                 id == cxx::LogicalTypeId::TIMESTAMP_TZ);
+		                 id == cxx::LogicalTypeId::TIMESTAMP_TZ || id == cxx::LogicalTypeId::TIMESTAMP_TZ_NS);
 	case NumpyEncoding::INTERVAL:
 		return int64 && id == cxx::LogicalTypeId::INTERVAL;
 	case NumpyEncoding::ENUM_CODES:

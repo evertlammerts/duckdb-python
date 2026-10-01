@@ -76,6 +76,8 @@ class TestTypeObjects:
 
     def test_datetime_matches_timestamps(self) -> None:
         assert dbapi.DATETIME == "TIMESTAMP WITH TIME ZONE"
+        assert dbapi.DATETIME == "TIMESTAMPTZ_NS"
+        assert dbapi.DATETIME == "TIME_NS"
 
     def test_sets_do_not_overlap(self) -> None:
         assert dbapi.STRING != "BIGINT"

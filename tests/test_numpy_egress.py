@@ -72,6 +72,14 @@ class TestToNumpy:
         assert out["d"][0] == np.datetime64("2026-09-01", "D")
         assert out["ts"][0] == np.datetime64("2026-09-01T12:00:00", "us")
 
+    def test_a_nanosecond_timestamptz_keeps_its_nanoseconds(self, con: duckdb.frame.Connection) -> None:
+        out = duckdb.frame.sql(
+            "SELECT t FROM (VALUES (TIMESTAMPTZ_NS '2026-09-01 12:00:00.123456789+00'), (NULL)) v(t)"
+        ).to_numpy(con)
+        assert out["t"].dtype == np.dtype("datetime64[ns]")
+        assert out["t"][0] == np.datetime64("2026-09-01T12:00:00.123456789", "ns")
+        assert out["t"].mask.tolist() == [False, True]
+
     def test_dates_far_from_the_epoch_come_back_to_the_day(self, con: duckdb.frame.Connection) -> None:
         # The smallest and largest DATE and a year past datetime64[us], checked against the engine's own day count.
         out = duckdb.frame.sql(
@@ -163,9 +171,11 @@ class TestEmptyResults:
 
     def test_empty_temporals_keep_their_units(self, con: duckdb.frame.Connection) -> None:
         out = duckdb.frame.sql(
-            "SELECT TIMESTAMPTZ '2024-01-01' AS ts, DATE '2024-01-01' AS d, INTERVAL 1 DAY AS iv WHERE FALSE"
+            "SELECT TIMESTAMPTZ '2024-01-01' AS ts, TIMESTAMPTZ_NS '2024-01-01' AS tsn, DATE '2024-01-01' AS d, "
+            "INTERVAL 1 DAY AS iv WHERE FALSE"
         ).to_numpy(con)
         assert out["ts"].dtype == np.dtype("datetime64[us]")
+        assert out["tsn"].dtype == np.dtype("datetime64[ns]")
         assert out["d"].dtype == np.dtype("datetime64[D]")
         assert out["iv"].dtype == np.dtype("timedelta64[us]")
 
