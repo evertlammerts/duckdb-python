@@ -555,8 +555,10 @@ void EmitElements(cxx::Vector &vector, const LogicalType &type, cxx::idx_t first
 		std::vector<nb::object> values(hi - lo);
 		if (hi > lo) {
 			if (is_map) {
-				auto key_vector = vector.GetChild(0);
-				auto value_vector = vector.GetChild(1);
+				// A MAP's one child is its entries, a STRUCT(key, value); key and value sit under it.
+				auto map_entries_vector = vector.GetChild(0);
+				auto key_vector = map_entries_vector.GetChild(0);
+				auto value_vector = map_entries_vector.GetChild(1);
 				const auto key_type = type.GetMapKeyType();
 				const auto value_type = type.GetMapValueType();
 				EmitElements(key_vector, key_type, lo, hi, ctx, VectorSink {keys});

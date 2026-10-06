@@ -210,7 +210,7 @@ cxx::LogicalType DescribedType(cxx::Context &context, const Registered &entry, n
 /// Resolved once per query while bound, so a scan sees the object registered under the name when it binds.
 void NumpyScanBind(cxx::TableFunction::BindInput &input) {
 	auto &registry = *input.GetUserData<NumpyScanUserData>().registry;
-	const auto name = std::string(input.GetArgument(0).Get<cxx::varchar_t>());
+	const auto name = std::string(input.GetConstantArgument(0).Get<cxx::varchar_t>());
 	auto entry = registry.ByName(name);
 	if (!entry) {
 		throw cxx::InvalidInputException("nothing is registered as '" + name + "'");
