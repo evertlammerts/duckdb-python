@@ -40,7 +40,8 @@ def profiles(tmp_path: Path) -> Path:
 @pytest.fixture
 def pins(tmp_path: Path) -> Path:
     path = tmp_path / "requirements-bench.txt"
-    path.write_text(PINS_TEXT)
+    # Bytes, not text: text mode would write \r\n on Windows and the recorded hash covers the exact bytes.
+    path.write_bytes(PINS_TEXT.encode())
     return path
 
 

@@ -128,6 +128,8 @@ def transfer(url: str, timeout: int, consume: Callable[[HTTPResponse], T]) -> T:
             with cast("HTTPResponse", urllib.request.urlopen(request, timeout=timeout)) as response:
                 return consume(response)
         except urllib.error.HTTPError as error:
+            # Closed by hand: an HTTPError left to the collector warns, and 3.14 escalates that in tests.
+            error.close()
             # 429 and the 5xx family are worth retrying; any other status is a fact about the URL.
             if error.code < 500 and error.code != 429:
                 sys.exit(f"{url}: {error}")
