@@ -183,7 +183,7 @@ struct ArrowScanLocalState {
 /// see a table.
 void ArrowScanBind(cxx::TableFunction::BindInput &input) {
 	auto &registry = *input.GetUserData<ArrowScanUserData>().registry;
-	const auto name = std::string(input.GetArgument(0).Get<cxx::varchar_t>());
+	const auto name = std::string(input.GetConstantArgument(0).Get<cxx::varchar_t>());
 	auto entry = registry.ByName(name);
 	if (!entry) {
 		throw cxx::InvalidInputException("nothing is registered as '" + name + "'");

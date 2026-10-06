@@ -214,6 +214,19 @@ class TestBulkRowConversion:
         assert len(rows) == 15
         assert rows[1] == ([7, None, 14], {"k": "v7"})
 
+    def test_filtered_map_vectors_flatten_before_reading(self, con: _duckdb.Connection) -> None:
+        rows = con.execute(
+            "SELECT m FROM (SELECT MAP {'k' || i: i, 'n': NULL} AS m, i FROM range(100) t(i)) "
+            "WHERE i % 7 = 0 ORDER BY i"
+        ).fetch_all()
+        assert len(rows) == 15
+        assert rows[1] == ({"k7": 7, "n": None},)
+
+    def test_maps_slice_correctly_through_a_partial_fetch(self, con: _duckdb.Connection) -> None:
+        result = con.execute("SELECT MAP {'a': i, 'b': i + 1} AS m FROM range(4) t(i)")
+        assert result.fetch_rows(1) == [({"a": 0, "b": 1},)]
+        assert result.fetch_rows(0) == [({"a": 1, "b": 2},), ({"a": 2, "b": 3},), ({"a": 3, "b": 4},)]
+
     def test_wide_decimals_keep_value_and_scale(self, con: _duckdb.Connection) -> None:
         rows = con.execute(
             "SELECT 12345678901234567890.123456::DECIMAL(38,6) AS d, 1.250::DECIMAL(28,3) AS t, "
