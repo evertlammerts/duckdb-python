@@ -1,0 +1,90 @@
+name: Fetch the engine
+description: Download the resolved DuckDB engine (cached), install extensions through it, and export extra CMake defines.
+
+inputs:
+  engine:
+    description: Engine spec from the resolve job.
+    required: true
+  platform:
+    description: Archive platform of the build target; never derived from the helper interpreter.
+    required: true
+  python:
+    description: Interpreter request for the helper; must be native to the platform so ctypes can load the library.
+    required: false
+    default: "3.12"
+  install:
+    description: Space-separated extensions to INSTALL through the fetched engine.
+    required: false
+    default: ""
+  extra-defines:
+    description: Extra semicolon-separated CMake defines, exported verbatim.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    # Container jobs and host jobs resolve ~ differently, so HOME must keep their extension caches apart.
+    - id: paths
+      shell: bash
+      run: echo "home=$HOME" >> "$GITHUB_OUTPUT"
+
+    # The archive is cached, never the unpacked directory: fetch must extract on every path, because
+    # extraction stamps fresh mtimes (a stale-mtime engine looks up to date to an existing build dir)
+    # and verifies the library's version. Saved right after the fetch, not at job end: a job that
+    # fetches a second engine later (the CodSpeed engine job) would otherwise record that engine
+    # under this step's key.
+    # The directory is this action's own; cleared so a saved entry holds exactly this engine's archive
+    # even when an earlier step of the job fetched another engine.
+    - shell: bash
+      run: rm -rf .engine-archive
+
+    - id: engine-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: .engine-archive
+        key: engine-archive-${{ inputs.platform }}-${{ inputs.engine }}
+
+    # Through env, never interpolated, so the values reach the shell as data.
+    - shell: bash
+      env:
+        ENGINE: ${{ inputs.engine }}
+        PLATFORM: ${{ inputs.platform }}
+        PYTHON: ${{ inputs.python }}
+      run: |
+        uv run --python "$PYTHON" scripts/engine.py fetch --engine "$ENGINE" --platform "$PLATFORM" \
+          --archive-dir .engine-archive
+
+    - if: steps.engine-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: .engine-archive
+        key: engine-archive-${{ inputs.platform }}-${{ inputs.engine }}
+
+    # Keyed on the spec because the engine looks extensions up under its own version name.
+    - if: inputs.install != ''
+      id: extensions-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.duckdb/extensions
+        key: extensions-${{ runner.os }}-${{ runner.arch }}-${{ steps.paths.outputs.home }}-${{ inputs.engine }}-${{ inputs.install }}
+
+    # INSTALL of an already installed extension is a local no-op, so a cache hit never reaches the network.
+    - if: inputs.install != ''
+      shell: bash
+      env:
+        INSTALL: ${{ inputs.install }}
+        PYTHON: ${{ inputs.python }}
+      run: uv run --python "$PYTHON" scripts/engine.py install $INSTALL
+
+    - if: inputs.install != '' && steps.extensions-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ~/.duckdb/extensions
+        key: extensions-${{ runner.os }}-${{ runner.arch }}-${{ steps.paths.outputs.home }}-${{ inputs.engine }}-${{ inputs.install }}
+
+    - if: inputs.extra-defines != ''
+      shell: bash
+      env:
+        EXTRA_DEFINES: ${{ inputs.extra-defines }}
+      run: echo "SKBUILD_CMAKE_DEFINE=$EXTRA_DEFINES" >> "$GITHUB_ENV"

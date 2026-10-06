@@ -5,6 +5,9 @@ __pycache__/
 *.pyc
 .venv/
 .venv-*/
+/engine/
+/.engine-fetch-*/
+/.engine-archive/
 /engine-bundle/
 # debris from adopted compat tests run outside the harness's scratch cwd
 /test.db

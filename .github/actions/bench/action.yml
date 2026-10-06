@@ -1,0 +1,48 @@
+name: Measure instruction counts
+description: Build against one engine and run the benchmark suite under Callgrind, optionally writing a baseline file.
+
+inputs:
+  engine:
+    description: Engine spec to fetch and build against.
+    required: true
+  profiles:
+    description: Directory to write the callgrind dumps into.
+    required: true
+  regen-out:
+    description: Baseline file to write from this run; empty writes none.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/engine
+      with:
+        engine: ${{ inputs.engine }}
+        platform: linux-amd64
+
+    - shell: bash
+      run: command -v valgrind >/dev/null || { sudo apt-get update && sudo apt-get install -y valgrind; }
+
+    - uses: ./.github/actions/build-and-install
+
+    - shell: bash
+      env:
+        PROFILES: ${{ inputs.profiles }}
+        REGEN_OUT: ${{ inputs.regen-out }}
+      run: |
+        # After the build, so the pinned data libraries override whatever the build resolved.
+        uv pip install -r benchmarks/requirements-bench.txt
+        mkdir -p "$PROFILES"
+        # The venv python directly: valgrind must instrument the interpreter, not a uv wrapper.
+        valgrind --tool=callgrind --instr-atstart=no \
+          --callgrind-out-file="$PWD/$PROFILES/cg.%p.%n" \
+          "$PWD/.venv/bin/python" -m pytest benchmarks/ \
+          -m "gate or informational" --codspeed -o addopts= -p no:cacheprovider
+        if [ -n "$REGEN_OUT" ]; then
+          "$PWD/.venv/bin/python" -m pytest benchmarks/ -m gate \
+            --collect-only -q -o addopts= -p no:cacheprovider | grep '::' > gate_list.txt
+          test -s gate_list.txt
+          "$PWD/.venv/bin/python" benchmarks/compare_baseline.py regen \
+            --profiles "$PROFILES" --out "$REGEN_OUT" --gate-list gate_list.txt --git-commit "$GITHUB_SHA"
+        fi

@@ -91,6 +91,18 @@ def _pct(base: int, new: int) -> float:
     return 0.0 if base == 0 else (new - base) / base * 100.0
 
 
+def engine_identity() -> tuple[str, str]:
+    """The version and commit of the engine linked into this interpreter's duckdb package."""
+    import duckdb.frame
+
+    con = duckdb.frame.connect()
+    try:
+        row = duckdb.frame.sql("SELECT library_version, source_id FROM pragma_version()").rows(con)[0]
+        return str(row[0]), str(row[1])
+    finally:
+        con.close()
+
+
 # -- writing a baseline
 
 
@@ -123,12 +135,14 @@ def regen(args: argparse.Namespace) -> int:
             "threshold_pct": GATE_DEFAULT_THRESHOLD_PCT if marker == "gate" else None,
         }
 
+    engine_version, engine_commit = engine_identity()
     baseline = {
         "meta": {
             "schema_version": SCHEMA_VERSION,
             "generated_at_utc": datetime.now(UTC).isoformat(timespec="seconds"),
             "git_commit": args.git_commit,
-            "duckdb_engine_sha": args.engine_sha,
+            "duckdb_engine_version": engine_version,
+            "duckdb_engine_commit": engine_commit,
             "requirements_bench_sha256": _sha256(Path(args.pins)) if args.pins else "",
             "measurement": {"tool": "valgrind callgrind", "event": "Ir", "pythonhashseed": "0"},
             "bench_scale": os.environ.get("BENCH_SCALE", ""),  # counts are only comparable at the same scale
@@ -161,37 +175,48 @@ def compare(args: argparse.Namespace) -> int:
         return 2
     baseline_path = Path(args.baseline)
     if not baseline_path.exists():
+        if args.enforce:
+            print(f"FAILING: no baseline at {baseline_path} to enforce against.")
+            return 1
         # No committed baseline yet: report the run and never fail.
-        print(f"No baseline at {baseline_path} yet -- run the workflow with regen=true to create it.")
+        print(f"No baseline at {baseline_path} yet; the Engine delta job's artifact is the candidate to commit.")
         print(f"This run produced {len(new_counts)} benchmark instruction counts.")
         return 0
     baseline = json.loads(baseline_path.read_text())
     meta = baseline.get("meta", {})
     base_benches = baseline.get("benchmarks", {})
 
+    incomparable: list[str] = []
+
     # A baseline built at one BENCH_SCALE is only comparable to a run at the same scale.
     run_scale = os.environ.get("BENCH_SCALE", "")
     base_scale = meta.get("bench_scale", "")
     if run_scale != base_scale:
+        incomparable.append(f"BENCH_SCALE differs (run={run_scale!r}, baseline={base_scale!r})")
         print(
             f"WARNING: BENCH_SCALE differs (run={run_scale!r}, baseline={base_scale!r}) -> instruction counts are "
             "not comparable. Regenerate the baseline at this scale."
         )
 
-    # The counts only compare cleanly against the pinned data libraries the baseline was built with.
-    if args.pins:
-        cur = _sha256(Path(args.pins))
-        base_pins = meta.get("requirements_bench_sha256", "")
-        if cur and base_pins and cur != base_pins:
-            print(
-                "WARNING: benchmarks/requirements-bench.txt differs from the baseline's pins -> data-lib deltas "
-                "may not be pure binding. Regenerate the baseline with the current pins."
-            )
+    # The counts only compare cleanly against the pinned data libraries the baseline was built with; a pins
+    # state that cannot be checked is as incomparable as one that mismatches.
+    cur = _sha256(Path(args.pins)) if args.pins else ""
+    base_pins = str(meta.get("requirements_bench_sha256", ""))
+    if not cur:
+        incomparable.append("no pins file to check against the baseline's")
+    elif not base_pins:
+        incomparable.append("the baseline records no pins hash")
+    elif cur != base_pins:
+        incomparable.append("the bench pins differ from the baseline's")
+        print(
+            "WARNING: benchmarks/requirements-bench.txt differs from the baseline's pins -> data-lib deltas "
+            "may not be pure binding. Regenerate the baseline with the current pins."
+        )
 
     # The counts include DuckDB, so when its version differs from the baseline's a rise may not be ours.
-    engine_changed = bool(
-        args.engine_sha and meta.get("duckdb_engine_sha") and args.engine_sha != meta["duckdb_engine_sha"]
-    )
+    # Both sides self-report: the run reads its own engine, the baseline recorded its own at regen time.
+    base_engine = (str(meta.get("duckdb_engine_version", "")), str(meta.get("duckdb_engine_commit", "")))
+    engine_changed = any(base_engine) and engine_identity() != base_engine
 
     regressions: list[str] = []
     rows: list[tuple[str, str, str]] = []  # (status, uri, detail)
@@ -207,24 +232,33 @@ def compare(args: argparse.Namespace) -> int:
         detail = f"{base_ir} -> {ir} Ir  ({delta:+.2f}%, thr {thr:.1f}%, {marker})"
         if marker == "gate" and delta > thr:
             if engine_changed:
-                rows.append(("ENGINE?", uri, detail + "  [engine pin changed -> not enforced]"))
+                rows.append(("ENGINE?", uri, detail + "  [engine changed -> not enforced]"))
             else:
                 rows.append(("REGRESSION", uri, detail))
                 regressions.append(uri)
         else:
             rows.append(("ok" if marker == "gate" else "info", uri, detail))
-    rows.extend(
-        ("MISSING", uri, "in baseline, absent from run (rename/removal?)")
-        for uri in sorted(set(base_benches) - set(new_counts))
-    )
+    missing = sorted(set(base_benches) - set(new_counts))
+    rows.extend(("MISSING", uri, "in baseline, absent from run (rename/removal?)") for uri in missing)
 
     _print_report(meta, rows, engine_changed=engine_changed, enforce=args.enforce)
 
     if not args.enforce:
         return 0
+    # Enforcement means "this run is comparable and every gate ran"; anything less fails instead of passing quietly.
+    if incomparable:
+        print(f"\nFAILING: {'; '.join(incomparable)}.")
+        return 1
+    if not any(base_engine):
+        print("\nFAILING: the baseline records no engine, so an enforced run proves nothing.")
+        return 1
     if engine_changed:
-        print("\nNOT ENFORCING: the engine pin differs from the baseline; regenerate the baseline.")
-        return 0
+        print("\nFAILING: an enforced run must be on the baseline's own engine.")
+        return 1
+    missing_gates = [uri for uri in missing if base_benches[uri].get("marker") == "gate"]
+    if missing_gates:
+        print(f"\nFAILING: gate benchmark(s) in the baseline did not run: {', '.join(missing_gates)}")
+        return 1
     return 1 if regressions else 0
 
 
@@ -233,12 +267,13 @@ def _print_report(meta: dict, rows: list[tuple[str, str, str]], *, engine_change
     print("=" * 100)
     print(f"CodSpeed instruction-count baseline comparison  [{mode}]")
     print(
-        f"baseline: commit {meta.get('git_commit', '?')[:12]}  engine {str(meta.get('duckdb_engine_sha'))[:12]}"
+        f"baseline: commit {meta.get('git_commit', '?')[:12]}"
+        f"  engine {meta.get('duckdb_engine_version', '?')} ({meta.get('duckdb_engine_commit', '?')})"
         f"  generated {meta.get('generated_at_utc', '?')}"
     )
     if engine_changed:
         print(
-            "WARNING: the engine pin SHA differs from the baseline -> engine-inclusive deltas may reflect the "
+            "WARNING: the engine differs from the baseline's -> engine-inclusive deltas may reflect the "
             "engine bump, not the binding. Regenerate the baseline for this engine."
         )
     print("=" * 100)
@@ -250,11 +285,34 @@ def _print_report(meta: dict, rows: list[tuple[str, str, str]], *, engine_change
     print(f"Summary: {len(rows)} benchmarks, {n_reg} gate regression(s)" + ("" if enforce else "  (report-only)"))
 
 
+def baseline_engine(args: argparse.Namespace) -> int:
+    """Print the baseline's engine as a spec `scripts/engine.py fetch` accepts; print nothing without one.
+
+    Stdlib only on this path, so it runs before anything is built.
+    """
+    path = Path(args.baseline)
+    if not path.exists():
+        return 0
+    meta = json.loads(path.read_text()).get("meta", {})
+    version = str(meta.get("duckdb_engine_version", ""))
+    commit = str(meta.get("duckdb_engine_commit", ""))
+    if re.fullmatch(r"v\d+(\.\d+)*", version):
+        # A release: its tag is the whole spec, and it is fetched from the release channel.
+        print(version)
+        return 0
+    if version and commit:
+        print(f"{commit}/{version}")
+        return 0
+    # A baseline that cannot name its engine must not read as "no baseline": that would silently skip the gates.
+    print(f"{path} exists but records no fetchable engine", file=sys.stderr)
+    return 1
+
+
 # -- command line
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entry point: dispatch to the `regen` or `compare` subcommand."""
+    """CLI entry point: dispatch to a subcommand."""
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -263,7 +321,6 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--out", default="benchmarks/baseline.json")
     r.add_argument("--gate-list", help="file of gate node-ids (pytest -m gate --collect-only -q)")
     r.add_argument("--git-commit", default="")
-    r.add_argument("--engine-sha", default="", help="engine.pin SHA the run was built against")
     r.add_argument("--pins", default="benchmarks/requirements-bench.txt")
     r.add_argument("--cutoff", type=float, default=BINDING_FRACTION_CUTOFF)
     r.set_defaults(func=regen)
@@ -271,12 +328,15 @@ def main(argv: list[str] | None = None) -> int:
     c = sub.add_parser("compare", help="compare a valgrind run against baseline.json")
     c.add_argument("--profiles", required=True)
     c.add_argument("--baseline", default="benchmarks/baseline.json")
-    c.add_argument("--engine-sha", default="", help="engine.pin SHA the run was built against")
     c.add_argument(
         "--pins", default="benchmarks/requirements-bench.txt", help="warn if pins differ from the baseline's"
     )
     c.add_argument("--enforce", action="store_true", help="exit non-zero on a gate regression (default: report-only)")
     c.set_defaults(func=compare)
+
+    b = sub.add_parser("baseline-engine", help="print the baseline's engine spec; nothing when none is recorded")
+    b.add_argument("--baseline", default="benchmarks/baseline.json")
+    b.set_defaults(func=baseline_engine)
 
     args = p.parse_args(argv)
     return args.func(args)

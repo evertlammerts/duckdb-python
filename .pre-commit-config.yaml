@@ -1,10 +1,12 @@
 # Fast checks only: anything needing a built extension runs in CI, since a hook that waits on a build gets turned off.
+# third_party is DuckDB source, shipped verbatim; reformatting it would break the diff against upstream.
+exclude: ^third_party/
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
       - id: check-added-large-files
-        # DuckDB itself is never committed; it is built or downloaded.
+        # The engine library is never committed; it is downloaded.
         args: [--maxkb=512]
       - id: check-merge-conflict
       - id: check-yaml

@@ -1,101 +1,24 @@
-# Builds the DuckDB library once per platform and uploads it for the wheel jobs.
-# Neither committed nor downloaded: no released libduckdb yet carries the C API this needs, so it is built here.
-name: Engine bundle
+# Resolves which DuckDB engine this run builds against: the newest published build on the 2.0 line.
+# Resolved once per run, so every job fetches the same engine even if a new one is published mid-run.
+name: Engine
 
 on:
   workflow_call:
     outputs:
-      sha:
-        description: The engine SHA the bundles were built from.
-        value: ${{ jobs.pin.outputs.sha }}
-      version:
-        description: The version name the engine was built under.
-        value: ${{ jobs.pin.outputs.version }}
+      engine:
+        description: The engine spec every job passes to `scripts/engine.py fetch`.
+        value: ${{ jobs.resolve.outputs.engine }}
 
 jobs:
-  pin:
-    runs-on: ubuntu-latest
+  resolve:
+    runs-on: ubuntu-24.04
     outputs:
-      sha: ${{ steps.read.outputs.sha }}
-      version: ${{ steps.read.outputs.version }}
+      engine: ${{ steps.resolve.outputs.engine }}
     steps:
       - uses: actions/checkout@v4
-      - id: read
+      - uses: astral-sh/setup-uv@v5
+      - id: resolve
         run: |
-          echo "sha=$(grep -v '^#' engine.pin | sed -n 1p | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
-          echo "version=$(grep -v '^#' engine.pin | sed -n 2p | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
-
-  build:
-    needs: pin
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Runner labels follow the previous duckdb package's wheel matrix.
-          # No universal2: Intel and arm64 macOS each get their own wheel.
-          # Linux builds inside the manylinux image so the glibc floor matches the wheel tag, not the runner.
-          - { target: windows-amd64,  runner: windows-2022,    container: "", msvc_arch: x64 }
-          - { target: windows-arm64,  runner: windows-11-arm,  container: "", msvc_arch: ARM64 }
-          - { target: linux-x86_64,   runner: ubuntu-24.04,    container: "quay.io/pypa/manylinux_2_28_x86_64" }
-          - { target: linux-aarch64,  runner: ubuntu-24.04-arm, container: "quay.io/pypa/manylinux_2_28_aarch64" }
-          - { target: macos-arm64,    runner: macos-15,        container: "" }
-          - { target: macos-x86_64,   runner: macos-15-intel,  container: "" }
-    runs-on: ${{ matrix.runner }}
-    container: ${{ matrix.container }}
-    defaults:
-      run:
-        shell: bash
-    env:
-      # tpch is built in so the TPC-H tests have data instead of skipping.
-      # Declared here so it reaches the cache key: keyed on the commit alone, a bundle built without it was reused.
-      CORE_EXTENSIONS: "core_functions;json;parquet;icu;tpch"
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Restore cached engine bundle
-        id: cache
-        uses: actions/cache@v4
-        with:
-          path: engine-bundle
-          key: engine-${{ matrix.target }}-${{ needs.pin.outputs.sha }}-${{ needs.pin.outputs.version }}-${{ hashFiles('.github/workflows/engine.yml') }}
-
-      - name: Check out DuckDB at the pinned SHA
-        if: steps.cache.outputs.cache-hit != 'true'
-        uses: actions/checkout@v4
-        with:
-          repository: duckdb/duckdb
-          ref: ${{ needs.pin.outputs.sha }}
-          path: .duckdb
-          # No tags: the version comes from engine.pin, not from `git describe`.
-          fetch-depth: 1
-
-      # ccache does not help MSVC, and here it only makes a version change cheap: the cache above avoids full builds.
-      # The manylinux images carry ccache 3.7.7, which holds far fewer objects and prints stats this action cannot read.
-      - name: Set up ccache
-        if: steps.cache.outputs.cache-hit != 'true' && runner.os != 'Windows'
-        uses: hendrikmuhs/ccache-action@v1
-        with:
-          key: engine-${{ matrix.target }}
-          # 500MB is under a full DuckDB build; 1G keeps four targets clear of the 10GB cache limit.
-          max-size: 1G
-
-      - name: Build the engine bundle
-        if: steps.cache.outputs.cache-hit != 'true'
-        env:
-          # Selects the Visual Studio target architecture. Empty off Windows.
-          CMAKE_GENERATOR_PLATFORM: ${{ matrix.msvc_arch }}
-          # Match the floor the wheels are built against; see the note in wheels.yml.
-          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.target == 'macos-arm64' && '11.0' || '10.14' }}
-          CMAKE_C_COMPILER_LAUNCHER: ${{ runner.os != 'Windows' && 'ccache' || '' }}
-          CMAKE_CXX_COMPILER_LAUNCHER: ${{ runner.os != 'Windows' && 'ccache' || '' }}
-        run: |
-          PY=$(command -v python3 || command -v python)
-          "$PY" scripts/build_engine_bundle.py .duckdb engine-bundle --build-type Release \
-            --duckdb-version "${{ needs.pin.outputs.version }}"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: engine-${{ matrix.target }}
-          path: engine-bundle
-          retention-days: 7
+          spec=$(uv run scripts/engine.py resolve)
+          echo "engine=$spec" >> "$GITHUB_OUTPUT"
+          echo "DuckDB engine: \`$spec\`" >> "$GITHUB_STEP_SUMMARY"

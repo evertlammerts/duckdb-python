@@ -1,9 +1,0 @@
-# The DuckDB engine this client builds against: the commit, then the version
-# name core's nightly built that commit under. Both come from the same "Main"
-# run of duckdb/duckdb on the engine branch: the version is v<release>-alpha<run
-# number>, and it is not derivable from the commit. The engine looks up
-# extensions under that name (extensions.duckdb.org/<version>/<platform>/), so
-# a bundle built without it names itself v2.0.0-dev<count> and can INSTALL
-# nothing. CI rebuilds the bundle when either line changes.
-31adc8b766540e1dffbfdd3804632b59d237b342
-v2.0.0-alpha42839

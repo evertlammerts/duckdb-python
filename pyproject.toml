@@ -17,7 +17,19 @@ build-dir = "build/{wheel_tag}"
 # One abi3 wheel for 3.12 and up; nanobind has no stable ABI below that, so 3.11 gets a version-specific wheel.
 wheel.py-api = "cp312"
 wheel.packages = ["src/duckdb"]
-sdist.include = ["src", "CMakeLists.txt"]
+sdist.include = ["src", "CMakeLists.txt", "third_party", "scripts/engine.py"]
+
+[tool.uv]
+# Without these, uv reuses the wheel built on the previous engine after `scripts/engine.py fetch`.
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "CMakeLists.txt" },
+    { file = "src/**" },
+    { file = "engine/**" },
+    { file = "third_party/duckdb_cpp/**" },
+    { env = "DUCKDB_ROOT" },
+    { env = "SKBUILD_CMAKE_DEFINE" },
+]
 
 [dependency-groups]
 # Mirrors build-system.requires so --no-build-isolation can install them first.

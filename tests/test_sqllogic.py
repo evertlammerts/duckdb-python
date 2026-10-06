@@ -9,6 +9,7 @@ import pytest
 
 import duckdb
 
+from . import _sqllogic
 from ._sqllogic import as_text, close_enough, error_matches, placeholders, run_file
 from .test_feature_coverage import corpus
 
@@ -37,7 +38,7 @@ FLOORS = {
 def test_the_engine_corpus_rides_the_bridge(directory: str, tmp_path: Path) -> None:
     root = corpus()
     if root is None:
-        pytest.skip("no duckdb checkout at the pinned engine commit: set DUCKDB_SOURCE")
+        pytest.skip("no duckdb checkout at the engine's commit: set DUCKDB_SOURCE")
     outcomes = [run_file(path, tmp_path, root.parent.parent) for path in sorted((root / directory).rglob("*.test"))]
     ran = [o for o in outcomes if o.skipped is None]
     assert ran, f"nothing in {directory} could run"
@@ -121,6 +122,35 @@ def test_a_file_using_the_current_placeholder_spelling_runs_to_its_queries(tmp_p
     )
     outcome = run_file(file, tmp_path)
     assert (outcome.carried, outcome.matched, outcome.not_carried, outcome.mismatched) == (2, 1, [], [])
+
+
+def test_a_required_installed_extension_is_loaded_before_the_file_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # json is statically linked, so its LOAD succeeds with nothing installed; the require path is what is tested.
+    monkeypatch.setattr(_sqllogic, "INSTALLED", {"json"})
+    file = tmp_path / "require.test"
+    file.write_text("require json\n\nquery I\nSELECT 1\n----\n1\n")
+    outcome = run_file(file, tmp_path)
+    assert (outcome.skipped, outcome.carried, outcome.matched) == (None, 1, 1)
+
+
+def test_a_required_extension_that_cannot_load_skips_the_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_sqllogic, "INSTALLED", {"no_such_extension"})
+    file = tmp_path / "require.test"
+    file.write_text("require no_such_extension\n\nquery I\nSELECT 1\n----\n1\n")
+    outcome = run_file(file, tmp_path)
+    assert outcome.skipped is not None
+    assert outcome.skipped.startswith("require no_such_extension:")
+    assert outcome.queries == 0
+
+
+def test_a_require_with_qualifiers_is_an_unmet_requirement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_sqllogic, "INSTALLED", {"json"})
+    file = tmp_path / "require.test"
+    file.write_text("require json 64bit\n\nquery I\nSELECT 1\n----\n1\n")
+    outcome = run_file(file, tmp_path)
+    assert outcome.skipped == "require json 64bit"
 
 
 def test_an_expected_error_matches_as_the_engines_runner_matches_it() -> None:
