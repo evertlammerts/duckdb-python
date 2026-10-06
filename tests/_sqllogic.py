@@ -19,8 +19,10 @@ from duckdb.frame import sql
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-#: Extensions built into the DuckDB this package ships, so a file requiring one can still run.
-BUILT_IN = {"parquet", "json", "icu", "tpch", "core_functions"}
+#: Extensions built into the prebuilt DuckDB library, so a file requiring one can still run.
+BUILT_IN = {"parquet", "json", "icu", "core_functions"}
+#: Extensions `scripts/engine.py fetch --install` puts under ~/.duckdb; a file requiring one LOADs it or skips.
+INSTALLED = {"tpch"}
 #: Directives this runner does not read; a file using one is skipped whole.
 UNSUPPORTED = {
     "loop",
@@ -105,6 +107,10 @@ def records(text: str) -> Iterator[Record]:
             i += 1
             continue
         if kind == "require":
+            if words[1] in INSTALLED and len(words) == 2:
+                i += 1
+                yield Record("require", words[1:], "", [])
+                continue
             if words[1] not in BUILT_IN or len(words) > 2:
                 unmet = f"require {' '.join(words[1:])}"
                 raise LookupError(unmet)
@@ -382,6 +388,13 @@ def run_file(path: Path, tmp: Path, cwd: Path | None = None) -> Outcome:
     test_name = str(path.relative_to(cwd)) if cwd is not None and path.is_relative_to(cwd) else path.name
     try:
         for record in parsed:
+            if record.kind == "require":
+                try:
+                    con.run(f"LOAD {record.header[0]}")
+                except exceptions.Error as error:
+                    outcome.skipped = f"require {record.header[0]}: {str(error).splitlines()[0]}"
+                    return outcome
+                continue
             text = placeholders(record.sql, tmp, cwd or previous, test_name)
             if "${" in text or "{DATA_DIR}" in text:
                 outcome.skipped = "a ${variable} the runner does not read"

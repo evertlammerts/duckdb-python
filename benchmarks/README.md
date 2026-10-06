@@ -16,13 +16,31 @@ Every benchmark carries exactly one (registered in `conftest.py`):
 
 ## CI baseline flow
 
-Nightly, the suite runs under `valgrind --tool=callgrind` on Linux and
-`compare_baseline.py compare` diffs the instruction counts against the
-committed `benchmarks/baseline.json` (report-only). Provenance is the
-`engine.pin` SHA: when it differs from the baseline's, gate deltas are
-reported but not enforced. To refresh: dispatch the workflow with
-`regen=true`, download the `baseline` artifact, and commit it together with
-`requirements-bench.txt` (regenerate the pins per the header in that file).
+Nightly, two jobs each hold one side fixed (`.github/workflows/codspeed.yml`):
+
+- **Client delta**: the current code runs under `valgrind --tool=callgrind`
+  on the baseline's own engine, and `compare_baseline.py compare --enforce`
+  diffs the counts against the committed `benchmarks/baseline.json`. Every
+  delta is the client's, so a gate regression fails the job. Skipped while no
+  baseline is committed.
+- **Engine delta**: when the newest published engine differs from the
+  baseline's, the same code runs on both engines in one job; the difference
+  is the engine's, reported whole and never gated. The new-engine run is
+  uploaded as the `baseline` artifact: the candidate baseline. To adopt it,
+  download it and commit it as `benchmarks/baseline.json`, together with
+  `requirements-bench.txt` (regenerate the pins per the header in that file).
+  When the old engine can no longer be fetched or built against the pinned
+  C++ API, the job says so and still produces the candidate. Dispatching the
+  workflow with `regen` runs this job on an unchanged engine, which is how
+  the baseline is refreshed after an accepted client change, a gate rename,
+  or a pins bump.
+
+With no baseline committed, the first run takes the bootstrap path: the
+client job is skipped and the engine job measures the new engine alone and
+uploads the first candidate. A baseline records the engine version and commit
+it was measured on, read from the running build itself; `compare` reads its
+own the same way, and an enforced run fails rather than passes when the
+engines differ or a gate benchmark did not run.
 
 ## Local A/B (walltime)
 

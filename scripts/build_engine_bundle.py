@@ -1,6 +1,7 @@
-"""Assemble a DuckDB library and the C++ API headers into one directory the extension can be built against.
+"""Build a DuckDB checkout into a directory the build takes as DUCKDB_ROOT.
 
-Stands in for DuckDB's own scripts/package_cpp_api.py, which its tools/cpp README names but does not ship.
+The output mirrors an unpacked duckdb-shared-libs archive: the library and the C headers side by side.
+This is how an unreleased engine gets under the client; released engines come from scripts/engine.py fetch.
 """
 
 from __future__ import annotations
@@ -12,10 +13,15 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Only what duckdb_cpp.cpp pulls in; duckdb_v2.h itself includes nothing but libc headers.
-CPP_API_FILES = ("tools/cpp/duckdb_cpp.hpp", "tools/cpp/duckdb_cpp.cpp")
-HEADER_FILES = ("src/include/duckdb_v2.h", "src/include/duckdb_extension_v2.h")
-CMAKE_FILE = "tools/cpp/cmake/DuckDBCppApi.cmake"
+# The C headers the shared-libs archives carry.
+HEADER_FILES = (
+    "src/include/duckdb.h",
+    "src/include/duckdb_v2.h",
+    "src/include/duckdb_extension.h",
+    "src/include/duckdb_extension_v2.h",
+)
+# Absent from older checkouts, and nothing in the build reads it.
+OPTIONAL_HEADER_FILES = ("src/include/duckdb_static_extension.h",)
 
 # The runtime library, and on Windows also the import library needed to link.
 RUNTIME_NAMES = ("libduckdb.dylib", "libduckdb.so", "duckdb.dll")
@@ -51,7 +57,9 @@ def build_engine(src: Path, build_dir: Path, build_type: str, duckdb_version: st
         "-DENABLE_EXTENSION_AUTOLOADING=1",
         "-DENABLE_EXTENSION_AUTOINSTALL=1",
     ]
-    if core_extensions := os.environ.get("CORE_EXTENSIONS"):
+    # Default to what the published shared-libs archives link in, so the output behaves like one.
+    core_extensions = os.environ.get("CORE_EXTENSIONS", "autocomplete;core_functions;icu;json;parquet")
+    if core_extensions:
         configure.append(f"-DCORE_EXTENSIONS={core_extensions}")
     if duckdb_version:
         # DuckDB names itself by this and finds extensions under that name, so a checkout without tags installs none.
@@ -83,10 +91,10 @@ def exports_v2(lib: Path) -> bool | None:
 
 
 def main() -> int:
-    """Assemble the bundle. Returns a process exit code."""
+    """Assemble the engine directory. Returns a process exit code."""
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("source", type=Path, help="a DuckDB checkout")
-    ap.add_argument("output", type=Path, help="bundle directory to create")
+    ap.add_argument("output", type=Path, help="engine directory to create")
     ap.add_argument("--build-type", default="Release")
     ap.add_argument(
         "--duckdb-version", default=None, help="the version name the engine reports, as core's nightly named it"
@@ -94,8 +102,8 @@ def main() -> int:
     args = ap.parse_args()
 
     src, out = args.source.resolve(), args.output.resolve()
-    if not (src / "tools" / "cpp" / "duckdb_cpp.cpp").is_file():
-        sys.exit(f"{src} has no tools/cpp: not a DuckDB checkout with the C++ API")
+    if not (src / "src" / "include" / "duckdb_v2.h").is_file():
+        sys.exit(f"{src} has no src/include/duckdb_v2.h: not a DuckDB checkout with the V2 C API")
 
     build_dir = src / "build" / args.build_type.lower()
     build_engine(src, build_dir, args.build_type, args.duckdb_version)
@@ -115,24 +123,23 @@ def main() -> int:
 
     if out.exists():
         shutil.rmtree(out)
-    (out / "lib").mkdir(parents=True)
-    (out / "cmake").mkdir()
+    out.mkdir(parents=True)
 
-    for rel in CPP_API_FILES + HEADER_FILES:
-        shutil.copy2(src / rel, out / Path(rel).name)
-    shutil.copy2(src / CMAKE_FILE, out / "cmake" / Path(CMAKE_FILE).name)
+    # Plain copy, not copy2: preserved mtimes can predate a consumer's build objects, which ninja reads as up to date.
+    for rel in HEADER_FILES:
+        shutil.copy(src / rel, out / Path(rel).name)
+    for rel in OPTIONAL_HEADER_FILES:
+        if (src / rel).is_file():
+            shutil.copy(src / rel, out / Path(rel).name)
     # Copy the real file, not the symlink standing in for it.
-    shutil.copy2(runtime.resolve(), out / "lib" / runtime.name)
+    shutil.copy(runtime.resolve(), out / runtime.name)
     # Windows links against the import library and loads the DLL, so it needs both.
     if imp := find_first(build_dir, IMPORT_NAMES):
-        shutil.copy2(imp.resolve(), out / "lib" / imp.name)
+        shutil.copy(imp.resolve(), out / imp.name)
 
     sha = subprocess.run(["git", "-C", str(src), "rev-parse", "HEAD"], capture_output=True, text=True)
-    (out / "ENGINE_SHA").write_text((sha.stdout.strip() or "unknown") + "\n")
-    (out / "ENGINE_VERSION").write_text((args.duckdb_version or "unknown") + "\n")
-
     size = sum(f.stat().st_size for f in out.rglob("*") if f.is_file())
-    print(f"bundle: {out} ({size / 1e6:.0f}MB), engine {(out / 'ENGINE_SHA').read_text()[:12]}")
+    print(f"engine: {out} ({size / 1e6:.0f}MB), built from {sha.stdout.strip()[:12] or 'unknown'}")
     return 0
 
 

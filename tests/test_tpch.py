@@ -5,6 +5,7 @@ Derived from TPC-H. Not comparable to published TPC-H results.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -24,10 +25,14 @@ SCALE = 0.01  # small enough to stay fast, large enough that joins do work
 def tpch() -> Iterator[duckdb.frame.Connection]:
     con = duckdb.frame.connect()
     try:
-        # No INSTALL or LOAD: the tpch extension is built in, and asking by name would try to download one.
+        # An explicit LOAD never downloads; autoloading on dbgen would fetch tpch from the network mid-suite.
+        con.run("LOAD tpch")
         con.run(f"CALL dbgen(sf={SCALE})")
     except duckdb.exceptions.Error as error:  # pragma: no cover
-        pytest.skip(f"the engine was built without the tpch extension: {error}")
+        con.close()
+        if os.environ.get("CI"):
+            pytest.fail(f"tpch is installed at engine fetch in CI, so it cannot be missing: {error}")
+        pytest.skip(f"tpch is not installed; run `uv run scripts/engine.py fetch --install tpch` ({error})")
     yield con
     con.close()
 

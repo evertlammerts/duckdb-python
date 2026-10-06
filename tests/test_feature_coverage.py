@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+import duckdb.frame
+
 #: A method reaches this feature and a named test class proves it.
 VERB_TESTED = "verb-tested"
 #: A method reaches this feature and nothing here proves it yet.
@@ -47,7 +49,7 @@ FEATURES: dict[str, tuple[str, str, str | None]] = {
     "error": (ENGINE, "error message wording; the layer never rewrites engine messages", None),
     "explain": (VERB_TESTED, "explain()", "test_frame.TestInspection"),
     "export": (BRIDGE, "EXPORT DATABASE is a statement", None),
-    "extensions": (ENGINE, "extension loading; the bundle decides what is built in", None),
+    "extensions": (ENGINE, "extension loading; the prebuilt engine decides what is built in", None),
     "filter": (VERB_TESTED, "filter()", "test_frame.TestRows"),
     "function": (
         VERB_TESTED,
@@ -129,17 +131,17 @@ FEATURES: dict[str, tuple[str, str, str | None]] = {
 KINDS = {VERB_TESTED, VERB_UNTESTED, SQL_EXPR, BRIDGE, ENGINE}
 
 
-def pinned_engine() -> str:
-    """The engine commit in engine.pin: the first line that is not a comment."""
-    for line in (Path(__file__).resolve().parents[1] / "engine.pin").read_text().splitlines():
-        if line.strip() and not line.startswith("#"):
-            return line.strip()
-    msg = "engine.pin names no commit"
-    raise AssertionError(msg)
+def engine_commit() -> str:
+    """The commit the loaded engine was built from, as its own pragma_version reports it."""
+    con = duckdb.frame.connect()
+    try:
+        return str(duckdb.frame.sql("SELECT source_id FROM pragma_version()").rows(con)[0][0])
+    finally:
+        con.close()
 
 
 def corpus() -> Path | None:
-    """DuckDB's own test/sql directory, from a checkout at the pinned engine commit, if one is at hand.
+    """DuckDB's own test/sql directory, from a checkout at the loaded engine's commit, if one is at hand.
 
     A corpus from another commit tests the engine against expectations it was never built to meet, so an explicit
     DUCKDB_SOURCE at the wrong commit fails and the fallback checkout is only used when it matches.
@@ -147,17 +149,19 @@ def corpus() -> Path | None:
     explicit = os.environ.get("DUCKDB_SOURCE")
     candidates = [Path(explicit)] if explicit else []
     candidates.append(Path(__file__).resolve().parents[2] / "main" / "external" / "duckdb")
-    pinned = pinned_engine()
+    commit = ""
     for root in candidates:
         if not (root / "test" / "sql").is_dir():
             continue
+        commit = commit or engine_commit()
         head = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True, check=False
         ).stdout.strip()
-        if head == pinned:
+        # pragma_version reports the first ten characters of the commit.
+        if commit and head.startswith(commit):
             return root / "test" / "sql"
         if explicit and root == Path(explicit):
-            pytest.fail(f"DUCKDB_SOURCE is at {head[:10]} but engine.pin names {pinned[:10]}; the corpus must match")
+            pytest.fail(f"DUCKDB_SOURCE is at {head[:10]} but the engine was built from {commit!r}; they must match")
     return None
 
 
@@ -181,7 +185,7 @@ def test_every_verb_tested_claim_names_a_test_class_that_exists() -> None:
 def test_the_corpus_and_the_table_agree() -> None:
     root = corpus()
     if root is None:
-        pytest.skip("no duckdb checkout at the pinned engine commit: set DUCKDB_SOURCE")
+        pytest.skip("no duckdb checkout at the engine's commit: set DUCKDB_SOURCE")
     directories = {p.name for p in root.iterdir() if p.is_dir()}
     unclassified = sorted(directories - set(FEATURES))
     assert not unclassified, f"the engine tests features this table does not classify: {unclassified}"

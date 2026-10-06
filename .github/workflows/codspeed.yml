@@ -1,4 +1,4 @@
-# Nightly instruction counts under Callgrind, compared with the committed baseline. See benchmarks/README.md.
+# Nightly instruction counts under Callgrind, split so each job holds one side fixed. See benchmarks/README.md.
 name: CodSpeed
 
 on:
@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       regen:
-        description: Regenerate the baseline instead of comparing.
+        description: Produce a candidate baseline even when the engine is unchanged.
         required: false
         type: boolean
         default: false
@@ -16,79 +16,115 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Hash randomization moves instruction counts run to run; pinned so the only signal is the code.
+# Callgrind is about 100x slower, so the row counts shrink to fit the job budget.
+env:
+  PYTHONHASHSEED: "0"
+  CODSPEED_ENV: "1"
+  BENCH_SCALE: "10"
+
 jobs:
-  engine:
+  resolve:
     uses: ./.github/workflows/engine.yml
 
-  bench:
-    name: Instruction counts
-    needs: engine
+  baseline:
+    name: Read the baseline's engine
     runs-on: ubuntu-24.04
-    env:
-      # Hash randomization moves instruction counts run to run; pinned so the only signal is the code.
-      PYTHONHASHSEED: "0"
-      CODSPEED_ENV: "1"
-      # Callgrind is about 100x slower, so the row counts shrink to fit the job budget.
-      BENCH_SCALE: "10"
+    outputs:
+      engine: ${{ steps.read.outputs.engine }}
+    steps:
+      - uses: actions/checkout@v4
+      # Stdlib only, so the runner's own python serves before anything is built.
+      # The assignment stands alone so a failing script fails this step instead of writing an empty output.
+      - id: read
+        run: |
+          engine=$(python3 benchmarks/compare_baseline.py baseline-engine)
+          echo "engine=$engine" >> "$GITHUB_OUTPUT"
+
+  library:
+    # The client's side: current code on the baseline's own engine, so every delta is ours and the gates enforce.
+    name: Client delta on the baseline engine
+    needs: baseline
+    if: needs.baseline.outputs.engine != ''
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
 
-      - uses: actions/download-artifact@v4
+      - uses: ./.github/actions/bench
         with:
-          name: engine-linux-x86_64
-          path: engine-bundle
+          engine: ${{ needs.baseline.outputs.engine }}
+          profiles: profiles
 
-      - uses: ./.github/actions/engine-bundle
-      - uses: ./.github/actions/build-and-install
-
-      - name: Install the frozen bench pins
-        # After the build, so the pinned data libraries override whatever the build resolved.
-        run: uv pip install -r benchmarks/requirements-bench.txt
-
-      - name: Install valgrind
-        run: sudo apt-get update && sudo apt-get install -y valgrind
-
-      - name: Run the suite under Callgrind
-        # The venv python directly: valgrind must instrument the interpreter, not a uv wrapper.
-        run: |
-          mkdir -p profiles
-          valgrind --tool=callgrind --instr-atstart=no \
-            --callgrind-out-file="$PWD/profiles/cg.%p.%n" \
-            "$PWD/.venv/bin/python" -m pytest benchmarks/ \
-            -m "gate or informational" --codspeed -o addopts= -p no:cacheprovider
-
-      - name: Collect the gate list
-        run: |
-          "$PWD/.venv/bin/python" -m pytest benchmarks/ -m gate \
-            --collect-only -q -o addopts= -p no:cacheprovider \
-            | grep '::' > gate_list.txt
-          test -s gate_list.txt
-
-      - name: Compare against the committed baseline
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.regen) }}
+      - name: Compare against the committed baseline, gates enforced
         run: |
           "$PWD/.venv/bin/python" benchmarks/compare_baseline.py compare \
-            --profiles profiles \
-            --engine-sha "${{ needs.engine.outputs.sha }}"
-
-      - name: Regenerate the baseline
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.regen }}
-        run: |
-          "$PWD/.venv/bin/python" benchmarks/compare_baseline.py regen \
-            --profiles profiles \
-            --out baseline.json \
-            --gate-list gate_list.txt \
-            --git-commit "$GITHUB_SHA" \
-            --engine-sha "${{ needs.engine.outputs.sha }}"
+            --profiles profiles --enforce
 
       - uses: actions/upload-artifact@v4
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.regen }}
+        if: always()
+        with:
+          name: library-profiles
+          path: profiles/
+
+  engine:
+    # The engine's side: current code on the old and the new engine in one job. The difference is the engine's,
+    # reported whole and never gated; the new-engine run is uploaded as the candidate baseline to commit.
+    # A regen dispatch runs this job on an unchanged engine, to refresh the baseline after an accepted client
+    # change, a gate rename, or a pins bump.
+    name: Engine delta
+    needs: [resolve, baseline]
+    if: needs.baseline.outputs.engine != needs.resolve.outputs.engine || (github.event_name == 'workflow_dispatch' && inputs.regen)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Measure on the baseline engine
+        id: old
+        if: needs.baseline.outputs.engine != '' && needs.baseline.outputs.engine != needs.resolve.outputs.engine
+        # The pinned C++ API can have moved past this engine's C headers, or staging can have dropped it;
+        # the candidate from the new engine is still worth producing.
+        continue-on-error: true
+        uses: ./.github/actions/bench
+        with:
+          engine: ${{ needs.baseline.outputs.engine }}
+          profiles: profiles-old
+          regen-out: old.json
+
+      - name: Measure on the new engine
+        uses: ./.github/actions/bench
+        with:
+          engine: ${{ needs.resolve.outputs.engine }}
+          profiles: profiles-new
+          regen-out: baseline.json
+
+      # Uploaded before the delta report, so the candidate survives whatever that report runs into.
+      - uses: actions/upload-artifact@v4
         with:
           name: baseline
           path: baseline.json
 
+      - name: The engine's delta, old to new
+        if: steps.old.outcome == 'success'
+        run: |
+          "$PWD/.venv/bin/python" benchmarks/compare_baseline.py compare \
+            --profiles profiles-new --baseline old.json
+
+      - name: The baseline engine could not be measured
+        if: steps.old.outcome == 'failure'
+        env:
+          ENGINE: ${{ needs.baseline.outputs.engine }}
+        run: |
+          echo "The baseline engine ($ENGINE) could not be fetched, built, or measured; no old-to-new delta" \
+            "this run. The candidate baseline was still produced." \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: callgrind-profiles
-          path: profiles/
+          name: engine-profiles
+          path: |
+            profiles-old
+            profiles-new
+            old.json
