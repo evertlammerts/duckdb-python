@@ -31,6 +31,8 @@ from duckdb._sources.polars import LazyFrameSource, PolarsFrameSource
 from duckdb._sources.pyarrow import PyArrowDatasetSource, PyArrowScannerSource, PyArrowTableSource
 from duckdb.frame import col, sql, table
 
+from ._support import Failing
+
 # polars publishes no free-threaded build and pyarrow none for Windows on ARM64; a test needing one is marked requires.
 with contextlib.suppress(ModuleNotFoundError):
     import polars as pl
@@ -1223,6 +1225,31 @@ class TestPandasNumpyScanTemporal:
         assert back.astype("int64")[0] == instant.value
         assert back.mask.tolist() == [False, True]
 
+    @pytest.mark.parametrize(
+        "expression",
+        [
+            "year(t)",
+            "date_trunc('day', t)",
+            "t + INTERVAL 1 DAY",
+            "t < TIMESTAMPTZ '2021-01-01 00:00:00+00'",
+        ],
+    )
+    @pytest.mark.xfail(
+        strict=True,
+        raises=(exceptions.ProgrammingError, exceptions.ConversionError),
+        reason="the engine has no calendar functions or TIMESTAMPTZ comparison for TIMESTAMPTZ_NS; pure SQL, so each "
+        "gap is the engine's alone and flips this on its own",
+    )
+    def test_the_engine_gains_calendar_functions_for_timestamptz_ns(
+        self, con: duckdb.frame.Connection, expression: str
+    ) -> None:
+        assert rows(con, f"SELECT {expression} FROM (SELECT TIMESTAMPTZ_NS '2020-01-02 03:04:05+00' AS t)")
+
+    def test_a_nanosecond_aware_column_casts_to_date(self, con: duckdb.frame.Connection) -> None:
+        instant = pd.Timestamp("2020-01-02 03:04:05.123456789", tz="UTC")
+        con.register("ns", pd.DataFrame({"t": pd.Series([instant], dtype="datetime64[ns, UTC]")}))
+        assert rows(con, "SELECT t::DATE FROM ns") == [(datetime.date(2020, 1, 2),)]
+
     @pytest.mark.requires("pyarrow")
     @pytest.mark.parametrize("zone", ["Europe/Berlin", "Asia/Kathmandu"])
     def test_a_non_utc_zone_keeps_its_instant(self, con: duckdb.frame.Connection, zone: str) -> None:
@@ -1305,6 +1332,16 @@ class TestPandasNumpyScanCategorical:
         con.register("t", frame)
         assert table("t").schema(con) == [("c", "BIGINT")]
         assert rows(con, "SELECT c FROM t") == [(1,), (2,), (1,)]
+
+    def test_categories_of_two_kinds_read_as_text_however_rarely_one_is_used(
+        self, con: duckdb.frame.Connection
+    ) -> None:
+        values: list[object] = [1] * (2 * SAMPLE_ROWS)
+        # Row 1 falls between the rows a sample of this many values reads.
+        values[1] = "x"
+        con.register("t", pd.DataFrame({"c": pd.Categorical(values)}))
+        assert table("t").schema(con) == [("c", "VARCHAR")]
+        assert rows(con, "SELECT c FROM t LIMIT 3") == [("1",), ("x",), ("1",)]
 
     @pytest.mark.requires("pyarrow")
     def test_integer_categories_are_read_through_their_own_kind(self, con: duckdb.frame.Connection) -> None:
@@ -1559,8 +1596,9 @@ class TestPandasNumpyScalars:
             (np.datetime64("NaT", "us"), np.datetime64("2020-01-01", "us")),
             (np.timedelta64("NaT", "ns"), np.timedelta64(5, "ns")),
             (np.timedelta64("NaT", "us"), np.timedelta64(5, "us")),
+            (np.array(np.iinfo(np.int64).min, "datetime64[0M]")[()], np.zeros(1, "datetime64[0M]")[0]),
         ],
-        ids=repr,
+        ids=["float32", "float64", "datetime ns", "datetime us", "timedelta ns", "timedelta us", "zero step months"],
     )
     def test_a_missing_marker_is_null(
         self, con: duckdb.frame.Connection, missing: np.generic, present: np.generic
@@ -1683,11 +1721,23 @@ class TestPandasNumpyScalars:
             (datetime.timedelta(microseconds=5 * 10**12),),
         ]
 
-    def test_an_instant_past_the_nanosecond_range_is_refused(self, con: duckdb.frame.Connection) -> None:
+    def test_an_instant_past_the_nanosecond_range_is_held_in_microseconds(self, con: duckdb.frame.Connection) -> None:
         far = np.array(2 * 10**18, dtype="datetime64[10ns]")[()]
         con.register("u", pd.DataFrame({"v": pd.Series([far], dtype=object)}))
-        with pytest.raises(exceptions.InvalidInputError, match="cannot hold exactly"):
+        assert rows(con, "SELECT epoch_us(v), typeof(v) FROM u") == [(2 * 10**16, "TIMESTAMP")]
+
+    def test_an_instant_past_the_nanosecond_range_with_nanoseconds_is_refused(
+        self, con: duckdb.frame.Connection
+    ) -> None:
+        far = np.array(2 * 10**18 + 1, dtype="datetime64[10ns]")[()]
+        con.register("u", pd.DataFrame({"v": pd.Series([far], dtype=object)}))
+        with pytest.raises(exceptions.InvalidInputError, match="beyond the range of its engine type"):
             rows(con, "SELECT v FROM u")
+
+    def test_the_last_nanosecond_pandas_holds_is_read(self, con: duckdb.frame.Connection) -> None:
+        last = pd.Timestamp(2**63 - 2, unit="ns")
+        con.register("t", pd.DataFrame({"v": pd.Series([last], dtype=object)}))
+        assert epoch_ns(con, "t") == [(2**63 - 2, "TIMESTAMP_NS")]
 
     def test_microsecond_datetimes_still_read_as_timestamp(self, con: duckdb.frame.Connection) -> None:
         frame = pd.DataFrame({"v": pd.Series([np.datetime64("2020-01-01T00:00:00.000001", "us")], dtype=object)})
@@ -1699,7 +1749,7 @@ class TestPandasNumpyScalars:
     def test_a_datetime_finer_than_a_nanosecond_is_refused(self, con: duckdb.frame.Connection) -> None:
         frame = pd.DataFrame({"v": pd.Series([np.datetime64(1, "ps")], dtype=object)})
         con.register("t", frame)
-        with pytest.raises(exceptions.InvalidInputError, match="cannot hold exactly"):
+        with pytest.raises(exceptions.InvalidInputError, match="finer than the engine's nanoseconds"):
             rows(con, "SELECT v FROM t")
 
     def test_an_unsampled_nanosecond_datetime_is_refused_by_a_microsecond_column(
@@ -2831,7 +2881,9 @@ class TestNumpyDtypes:
 
     def test_a_scaled_datetime_past_int64_is_refused_at_its_row(self, con: duckdb.frame.Connection) -> None:
         con.register("t", np.array([1, 2**62], dtype="datetime64[h]"))
-        with pytest.raises(exceptions.InvalidInputError, match="holds a value at row 1 that overflows its engine type"):
+        with pytest.raises(
+            exceptions.InvalidInputError, match="holds a value at row 1 beyond the range of its engine type"
+        ):
             rows(con, "SELECT * FROM t")
 
     @pytest.mark.parametrize(
@@ -3321,7 +3373,9 @@ class TestNumpyScanContract:
         con._register_source(
             "t", Answering("TIMESTAMPTZ_NS", ("timestamp:D", "TIMESTAMPTZ_NS", np.array([10**6]), None))
         )
-        with pytest.raises(exceptions.InvalidInputError, match="holds a value at row 0 that overflows its engine type"):
+        with pytest.raises(
+            exceptions.InvalidInputError, match="holds a value at row 0 beyond the range of its engine type"
+        ):
             rows(con, "SELECT * FROM t")
 
     def test_a_category_code_without_a_label_is_refused_at_its_row(self, con: duckdb.frame.Connection) -> None:
@@ -3406,7 +3460,9 @@ class TestTemporalScaling:
         assert rows(con, "SELECT * FROM masked") == [(None,)]
         assert rows(con, "SELECT * FROM empty") == []
         con.register("one", np.array([1], dtype=unit))
-        with pytest.raises(exceptions.InvalidInputError, match="holds a value at row 0 that overflows its engine type"):
+        with pytest.raises(
+            exceptions.InvalidInputError, match="holds a value at row 0 beyond the range of its engine type"
+        ):
             rows(con, "SELECT * FROM one")
 
     @pytest.mark.parametrize(
@@ -3429,10 +3485,12 @@ class TestTemporalScaling:
     @pytest.mark.parametrize("raw", [-(2**62) - 1, 2**62])
     def test_one_past_either_signed_limit_is_refused(self, con: duckdb.frame.Connection, raw: int) -> None:
         con.register("dense", np.array([0, raw], dtype="timedelta64[2000ns]"))
-        with pytest.raises(exceptions.InvalidInputError, match="holds a value at row 1 that overflows its engine type"):
+        with pytest.raises(
+            exceptions.InvalidInputError, match="holds a value at row 1 beyond the range of its engine type"
+        ):
             rows(con, "SELECT * FROM dense")
         con.register("objects", objects(np.array(raw, dtype="timedelta64[2000ns]")[()]))
-        with pytest.raises(exceptions.InvalidInputError, match="cannot hold exactly"):
+        with pytest.raises(exceptions.InvalidInputError, match="beyond the range of its engine type"):
             rows(con, "SELECT * FROM objects")
 
     @pytest.mark.parametrize("raw", [-1, -999, 1, 999])
@@ -3453,13 +3511,16 @@ class TestTemporalScaling:
         expected = [(datetime.timedelta(microseconds=micros),)]
         assert rows(con, "SELECT * FROM dense") == rows(con, "SELECT * FROM objects") == expected
 
-    def test_a_zoned_timestamp_under_a_microsecond_before_the_epoch_truncates_to_the_epoch(
+    def test_a_zoned_timestamp_under_a_microsecond_before_the_epoch_floors_to_its_microsecond(
         self, con: duckdb.frame.Connection
     ) -> None:
         stamps = pd.Series(np.array([-1, -1001], dtype="datetime64[ns]")).dt.tz_localize("UTC")
         con.register("t", pd.DataFrame({"t": stamps}))
         epoch = datetime.datetime(1970, 1, 1, tzinfo=datetime.UTC)
-        assert rows(con, "SELECT * FROM t") == [(epoch,), (epoch - datetime.timedelta(microseconds=1),)]
+        assert rows(con, "SELECT * FROM t") == [
+            (epoch - datetime.timedelta(microseconds=1),),
+            (epoch - datetime.timedelta(microseconds=2),),
+        ]
 
     @pytest.mark.parametrize(
         ("dtype", "zero"),
@@ -3512,7 +3573,9 @@ class TestTemporalScaling:
             (read(1),),
         ]
         con._register_source("unmasked", Answering(type_text, (encoding, type_text, counts, None)))
-        with pytest.raises(exceptions.InvalidInputError, match="holds a value at row 4 that overflows its engine type"):
+        with pytest.raises(
+            exceptions.InvalidInputError, match="holds a value at row 4 beyond the range of its engine type"
+        ):
             rows(con, "SELECT * FROM unmasked")
 
     def test_an_object_datetime_in_picoseconds_reads_only_when_exact(self, con: duckdb.frame.Connection) -> None:
@@ -3521,7 +3584,7 @@ class TestTemporalScaling:
             (datetime.datetime(1970, 1, 1) + datetime.timedelta(microseconds=10**13), "TIMESTAMP_NS")
         ]
         con.register("inexact", objects(np.array(1, dtype="datetime64[ps]")[()]))
-        with pytest.raises(exceptions.InvalidInputError, match="cannot hold exactly"):
+        with pytest.raises(exceptions.InvalidInputError, match="finer than the engine's nanoseconds"):
             rows(con, "SELECT * FROM inexact")
 
     @pytest.mark.requires("pyarrow")
@@ -3529,8 +3592,8 @@ class TestTemporalScaling:
         # The lowest count arrives through Arrow; the SQL constructor refuses it.
         con.register("t", pa.table({"t": pa.array([-(2**63), -1, 2**63 - 2], type=pa.timestamp("ns"))}))
         assert rows(con, "SELECT * FROM t") == [
-            (datetime.datetime(1677, 9, 21, 0, 12, 43, 145225),),
-            (datetime.datetime(1970, 1, 1),),
+            (datetime.datetime(1677, 9, 21, 0, 12, 43, 145224),),
+            (datetime.datetime(1969, 12, 31, 23, 59, 59, 999999),),
             (datetime.datetime(2262, 4, 11, 23, 47, 16, 854775),),
         ]
 
@@ -3716,3 +3779,360 @@ class TestPandasCategoricalsKeepTheirOwnRules:
         frame = pd.DataFrame({"v": pd.Series(["a", None, "c"], dtype=dtype)})
         alone, beside = alone_and_beside(con, frame, "SELECT v, typeof(v) FROM {}")
         assert alone == beside == [("a", "VARCHAR"), (None, "VARCHAR"), ("c", "VARCHAR")]
+
+
+#: The first and last counts the engine holds as finite instants, in microseconds and in nanoseconds; each converts
+#: to a calendar date, which overflows earlier on the negative side than int64 does.
+FIRST_MICROS = -106_751_991 * 86_400_000_000
+FIRST_NANOS = -106_751 * 86_400_000_000_000
+LAST_COUNT = 2**63 - 2
+
+
+class TestTimestampRange:
+    """A count no finite timestamp of its engine type holds is refused.
+
+    Not read as an infinity, and not kept as a value the engine's own casts then fail on.
+    """
+
+    @pytest.mark.parametrize(
+        ("dtype", "count"),
+        [
+            ("datetime64[us]", 2**63 - 1),
+            ("datetime64[us]", -(2**63 - 1)),
+            ("datetime64[us]", FIRST_MICROS - 1),
+            ("datetime64[ns]", 2**63 - 1),
+            ("datetime64[ns]", FIRST_NANOS - 1),
+            ("datetime64[s]", LAST_COUNT // 10**6 + 1),
+            ("datetime64[s]", FIRST_MICROS // 10**6 - 1),
+            ("datetime64[ms]", LAST_COUNT // 10**3 + 1),
+            ("datetime64[ms]", FIRST_MICROS // 10**3 - 1),
+            ("datetime64[h]", LAST_COUNT // (3_600 * 10**6) + 1),
+        ],
+    )
+    def test_a_count_past_the_finite_range_is_refused(
+        self, con: duckdb.frame.Connection, dtype: str, count: int
+    ) -> None:
+        con.register("t", np.array([0, count], dtype=dtype))
+        with pytest.raises(exceptions.InvalidInputError, match="value at row 1 beyond the range of its engine type"):
+            rows(con, "SELECT * FROM t")
+
+    @pytest.mark.parametrize(
+        ("dtype", "count", "count_of", "expected"),
+        [
+            ("datetime64[us]", LAST_COUNT, "epoch_us", LAST_COUNT),
+            ("datetime64[us]", FIRST_MICROS, "epoch_us", FIRST_MICROS),
+            ("datetime64[ns]", LAST_COUNT, "epoch_ns", LAST_COUNT),
+            ("datetime64[ns]", FIRST_NANOS, "epoch_ns", FIRST_NANOS),
+            ("datetime64[s]", LAST_COUNT // 10**6, "epoch_us", LAST_COUNT // 10**6 * 10**6),
+            ("datetime64[s]", FIRST_MICROS // 10**6, "epoch_us", FIRST_MICROS),
+            ("datetime64[ms]", FIRST_MICROS // 10**3, "epoch_us", FIRST_MICROS),
+            ("datetime64[h]", LAST_COUNT // (3_600 * 10**6), "epoch_us", LAST_COUNT // (3_600 * 10**6) * 3_600 * 10**6),
+        ],
+    )
+    def test_the_last_finite_count_reads_and_casts(
+        self, con: duckdb.frame.Connection, dtype: str, count: int, count_of: str, expected: int
+    ) -> None:
+        con.register("t", np.array([count], dtype=dtype))
+        query = f"SELECT isinf(column0), {count_of}(column0), length(column0::VARCHAR) > 0 FROM t"
+        assert rows(con, query) == [(False, expected, True)]
+
+    @pytest.mark.parametrize("zone", [None, "UTC"])
+    def test_pandas_extremes_are_refused(self, con: duckdb.frame.Connection, zone: str | None) -> None:
+        extremes = pd.Series([pd.Timestamp.min, pd.Timestamp.max])
+        con.register("t", pd.DataFrame({"t": extremes if zone is None else extremes.dt.tz_localize(zone)}))
+        with pytest.raises(exceptions.InvalidInputError, match="value at row 0 beyond the range of its engine type"):
+            rows(con, "SELECT * FROM t")
+
+    def test_a_reserved_count_under_a_mask_is_missing(self, con: duckdb.frame.Connection) -> None:
+        con.register("t", np.ma.array(np.array([2**63 - 1, 5], dtype="datetime64[us]"), mask=[True, False]))
+        assert rows(con, "SELECT isinf(column0), epoch_us(column0) FROM t") == [(None, None), (False, 5)]
+
+    def test_a_zoned_count_past_microseconds_is_refused(self, con: duckdb.frame.Connection) -> None:
+        far = pd.Series(np.array([0, 2**62], dtype="datetime64[s]")).dt.tz_localize("UTC")
+        con.register("t", pd.DataFrame({"t": far}))
+        with pytest.raises(exceptions.InvalidInputError, match="value at row 1 beyond the range of its engine type"):
+            rows(con, "SELECT * FROM t")
+
+
+class TestObjectTimestampsKeepTheirUnit:
+    """A pandas or numpy timestamp in an object column reads in its own unit, as a typed column of it would."""
+
+    @pytest.mark.requires("pyarrow")
+    @pytest.mark.parametrize(
+        ("stamp", "expected_type"),
+        [
+            (pd.Timestamp("2020-01-02 03:04:05.123456789"), "TIMESTAMP_NS"),
+            (pd.Timestamp("2020-01-02 03:04:05.123456789", tz="Europe/Amsterdam"), "TIMESTAMPTZ_NS"),
+        ],
+        ids=["naive", "aware"],
+    )
+    def test_a_pandas_timestamp_keeps_its_nanoseconds(
+        self, con: duckdb.frame.Connection, stamp: pd.Timestamp, expected_type: str
+    ) -> None:
+        frame = pd.DataFrame({"v": pd.Series([stamp, None], dtype=object)})
+        alone, beside = alone_and_beside(con, frame, "SELECT epoch_ns(v), typeof(v) FROM {}")
+        assert alone == beside == [(stamp.value, expected_type), (None, expected_type)]
+
+    @pytest.mark.parametrize(
+        ("values", "expected_type"),
+        [
+            ([pd.Timestamp("2020-01-02 03:04:05").as_unit("s")], "TIMESTAMP"),
+            ([pd.Timestamp("2020-01-02 03:04:05.5").as_unit("ms")], "TIMESTAMP"),
+            ([np.datetime64("2020-01-02T03", "h")], "TIMESTAMP"),
+            ([np.datetime64("2020-01-02T03:04:05.123", "ms")], "TIMESTAMP"),
+            ([pd.Timestamp("2020-01-02").as_unit("s"), datetime.datetime(2020, 1, 2, 0, 0, 0, 1)], "TIMESTAMP"),
+            ([datetime.datetime(2020, 1, 2), pd.Timestamp("2020-01-02 00:00:00.000000001")], "TIMESTAMP_NS"),
+            ([datetime.date(2020, 1, 2), np.datetime64("2020-01-02T03:04:05", "s")], "TIMESTAMP"),
+        ],
+        ids=["pandas s", "pandas ms", "numpy h", "numpy ms", "s with us", "us with ns", "date with s"],
+    )
+    def test_a_column_is_microseconds_unless_sampled_nanoseconds_need_more(
+        self, con: duckdb.frame.Connection, values: list[object], expected_type: str
+    ) -> None:
+        con.register("t", pd.DataFrame({"v": pd.Series(values, dtype=object)}))
+        assert table("t").schema(con) == [("v", expected_type)]
+        assert rows(con, "SELECT epoch_ns(v) FROM t") == [(pd.Timestamp(v).value,) for v in values]
+
+    def test_a_microsecond_cell_the_coarse_sample_missed_reads_exactly(self, con: duckdb.frame.Connection) -> None:
+        # 2000 rows outrun the sample stride, so the sample sees only whole seconds and must not pick a type that
+        # refuses the finer cell.
+        values: list[object] = [pd.Timestamp("2020-01-02 03:04:05").as_unit("s")] * 2000
+        values[1] = datetime.datetime(2020, 1, 2, 3, 4, 5, 123456)
+        con.register("t", pd.DataFrame({"v": pd.Series(values, dtype=object)}))
+        assert table("t").schema(con) == [("v", "TIMESTAMP")]
+        assert rows(con, "SELECT v FROM t WHERE v != TIMESTAMP '2020-01-02 03:04:05'") == [
+            (datetime.datetime(2020, 1, 2, 3, 4, 5, 123456),)
+        ]
+
+    def test_a_reserved_count_is_refused(self, con: duckdb.frame.Connection) -> None:
+        con.register("t", objects(np.datetime64(2**63 - 1, "ns")))
+        with pytest.raises(exceptions.InvalidInputError, match="beyond the range of its engine type"):
+            rows(con, "SELECT * FROM t")
+
+    def test_a_pandas_timedelta_drops_nanoseconds_like_its_typed_column(self, con: duckdb.frame.Connection) -> None:
+        values = [pd.Timedelta(n, "ns") for n in (1500, -1500, 999, -999)]
+        con.register("objects", pd.DataFrame({"v": pd.Series(values, dtype=object)}))
+        con.register("typed", pd.DataFrame({"v": pd.Series(values, dtype="timedelta64[ns]")}))
+        assert rows(con, "SELECT v FROM objects") == rows(con, "SELECT v FROM typed")
+
+
+class TestObjectZones:
+    """A value whose time zone awareness differs from its column's sampled type is refused.
+
+    Converting it would need the session's time zone, which neither the value nor the column names.
+    """
+
+    @pytest.mark.parametrize(
+        ("common", "straggler"),
+        [
+            (
+                datetime.datetime(2020, 1, 2, 3, 4, 5),
+                datetime.datetime(2020, 1, 2, 3, 4, 5, tzinfo=datetime.timezone(datetime.timedelta(hours=5))),
+            ),
+            (datetime.datetime(2020, 1, 2, 3, 4, 5, tzinfo=datetime.UTC), datetime.datetime(2020, 1, 2, 3, 4, 5)),
+            (datetime.datetime(2020, 1, 2, 3, 4, 5, tzinfo=datetime.UTC), datetime.date(2020, 1, 2)),
+            (pd.Timestamp("2020-01-02 03:04:05.000000001"), pd.Timestamp("2020-01-02", tz="UTC")),
+            (datetime.time(3, 4, 5, tzinfo=datetime.UTC), datetime.datetime(2020, 1, 2, 3, 4, 5, tzinfo=datetime.UTC)),
+        ],
+        ids=[
+            "aware among naive",
+            "naive among aware",
+            "date among aware",
+            "pandas aware among naive",
+            "aware timestamp among aware times",
+        ],
+    )
+    def test_an_unsampled_value_of_the_other_kind_is_refused(
+        self, con: duckdb.frame.Connection, common: object, straggler: object
+    ) -> None:
+        values = [common] * (2 * SAMPLE_ROWS)
+        values[1] = straggler
+        con.register("t", pd.DataFrame({"v": pd.Series(values, dtype=object)}))
+        with pytest.raises(
+            exceptions.InvalidInputError,
+            match=r"at row 1, and converting it to its sampled type .* would assume a time",
+        ):
+            rows(con, "SELECT v FROM t")
+
+    def test_an_aware_time_keeps_its_offset(self, con: duckdb.frame.Connection) -> None:
+        values = [
+            datetime.time(12, 0, tzinfo=datetime.timezone(datetime.timedelta(hours=2))),
+            datetime.time(13, 30, tzinfo=datetime.UTC),
+            None,
+        ]
+        con.register("t", pd.DataFrame({"v": pd.Series(values, dtype=object)}))
+        read = rows(con, "SELECT v, typeof(v) FROM t")
+        assert read == [(value, "TIME WITH TIME ZONE") for value in values]
+        offsets = [value.utcoffset() for value, _ in read if isinstance(value, datetime.time)]
+        assert offsets == [datetime.timedelta(hours=2), datetime.timedelta(0)]
+
+    def test_naive_and_aware_times_together_are_text(self, con: duckdb.frame.Connection) -> None:
+        values = [datetime.time(12, 0), datetime.time(12, 0, tzinfo=datetime.UTC)]
+        con.register("t", pd.DataFrame({"v": pd.Series(values, dtype=object)}))
+        assert table("t").schema(con) == [("v", "VARCHAR")]
+
+
+class TestPandasPeriods:
+    def test_a_period_column_is_refused(self, con: duckdb.frame.Connection) -> None:
+        con.register("t", pd.DataFrame({"p": pd.period_range("2020-01-01", periods=2, freq="D")}))
+        message = r"column 'p' has the pandas dtype period\[D\], and no engine type holds a period"
+        with pytest.raises(exceptions.InvalidInputError, match=message):
+            rows(con, "SELECT * FROM t")
+
+
+class TestCategoricalsReadAsTheirCategories:
+    """A categorical whose categories are not all text, or that has none, reads as its categories' own dtype."""
+
+    @pytest.mark.requires("pyarrow")
+    @pytest.mark.parametrize(
+        ("categorical", "expected_type"),
+        [
+            (pd.Categorical([None, None]), "DOUBLE"),
+            (pd.Categorical([None, None], categories=pd.Index([], dtype="int64")), "BIGINT"),
+            (pd.Categorical([3, None, 1]), "BIGINT"),
+            (pd.Categorical([True, None, False]), "BOOLEAN"),
+            (pd.Categorical([1.5, None]), "DOUBLE"),
+            (pd.Categorical(pd.to_datetime(["2020-01-01 00:00:00.123456789", None], format="ISO8601")), "TIMESTAMP_NS"),
+            (
+                pd.Categorical(
+                    pd.to_datetime(["2020-01-01 00:00:00.123456789", None], format="ISO8601").tz_localize("UTC")
+                ),
+                "TIMESTAMPTZ_NS",
+            ),
+            (pd.Categorical(pd.to_timedelta([1, None], unit="s")), "INTERVAL"),
+            (pd.Categorical([1, None], categories=pd.array([1, 3], dtype="Int64")), "BIGINT"),
+        ],
+        ids=["no categories", "no int64 categories", "int", "bool", "float", "datetime", "zoned", "duration", "Int64"],
+    )
+    def test_reads_as_its_categories_dtype(
+        self, con: duckdb.frame.Connection, categorical: pd.Categorical, expected_type: str
+    ) -> None:
+        frame = pd.DataFrame({"v": categorical})
+        alone, beside = alone_and_beside(con, frame, "SELECT v::VARCHAR, typeof(v) FROM {}")
+        assert alone == beside
+        assert {row[1] for row in alone} == {expected_type}
+        numpy_rows, arrow_rows = against_pyarrow(con, frame, "SELECT v::VARCHAR, typeof(v) FROM {}")
+        assert numpy_rows == arrow_rows
+
+    @pytest.mark.parametrize(
+        ("categorical", "expected"),
+        [
+            (pd.Categorical([datetime.date(2020, 1, 2), None]), ("DATE", datetime.date(2020, 1, 2))),
+            (
+                pd.Categorical(
+                    [datetime.datetime(2020, 1, 2, 3, tzinfo=datetime.UTC), None],
+                    categories=pd.Index([datetime.datetime(2020, 1, 2, 3, tzinfo=datetime.UTC)], dtype=object),
+                ),
+                ("TIMESTAMP WITH TIME ZONE", datetime.datetime(2020, 1, 2, 3, tzinfo=datetime.UTC)),
+            ),
+            (
+                pd.Categorical(
+                    [datetime.date(2020, 1, 2), None],
+                    categories=pd.Index([datetime.date(2020, 1, 2), "x"], dtype=object),
+                ),
+                ("DATE", datetime.date(2020, 1, 2)),
+            ),
+            (pd.Categorical([None, None], categories=pd.Index([], dtype=object)), ("VARCHAR", None)),
+        ],
+        ids=["dates", "aware datetimes", "an unused category of another kind", "none"],
+    )
+    def test_object_categories_read_as_the_ones_in_use(
+        self, con: duckdb.frame.Connection, categorical: pd.Categorical, expected: tuple[str, object]
+    ) -> None:
+        con.register("t", pd.DataFrame({"v": categorical}))
+        assert table("t").schema(con) == [("v", expected[0])]
+        assert rows(con, "SELECT v FROM t") == [(expected[1],), (None,)]
+
+    @pytest.mark.requires("pyarrow")
+    def test_a_datetime_categorical_keeps_its_nanoseconds(self, con: duckdb.frame.Connection) -> None:
+        stamps = pd.to_datetime(["2020-01-01 00:00:00.123456789", None], format="ISO8601")
+        frame = pd.DataFrame({"v": pd.Categorical(stamps)})
+        alone, beside = alone_and_beside(con, frame, "SELECT epoch_ns(v) FROM {}")
+        assert alone == beside == [(stamps[0].value,), (None,)]
+
+    def test_an_integer_categorical_over_several_batches(self, con: duckdb.frame.Connection) -> None:
+        values = [None if i % 11 == 0 else i % 7 for i in range(5000)]
+        con.register("t", pd.DataFrame({"v": pd.Categorical(values)}))
+        expected = (sum(v for v in values if v is not None), values.count(None))
+        assert rows(con, "SELECT sum(v), count(*) - count(v) FROM t") == [expected]
+
+
+class TestObjectTimestampEdges:
+    def test_aware_values_of_mixed_units_keep_their_instants(self, con: duckdb.frame.Connection) -> None:
+        values = [
+            pd.Timestamp("2020-01-01 00:00:00.000000123", tz="UTC"),
+            datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone(datetime.timedelta(hours=2))),
+            pd.Timestamp("2020-01-01", tz="UTC").as_unit("s"),
+        ]
+        con.register("t", pd.DataFrame({"v": pd.Series(values, dtype=object)}))
+        assert table("t").schema(con) == [("v", "TIMESTAMPTZ_NS")]
+        assert rows(con, "SELECT epoch_ns(v) FROM t") == [(pd.Timestamp(v).value,) for v in values]
+
+
+class TestDecodedCategoricalsOverSeveralBatches:
+    @pytest.mark.parametrize(
+        "values",
+        [
+            [None if i % 11 == 0 else (i % 7) + 0.5 for i in range(5000)],
+            [None if i % 11 == 0 else pd.Timestamp("2020-01-01") + pd.Timedelta(i % 7, "ns") for i in range(5000)],
+            [None if i % 11 == 0 else (i % 7 if i % 2 else f"s{i % 7}") for i in range(5000)],
+        ],
+        ids=["float", "datetime", "objects"],
+    )
+    def test_every_row_reads_its_own_category(self, con: duckdb.frame.Connection, values: list[object]) -> None:
+        frame = pd.DataFrame({"v": pd.Categorical(values)})
+        con.register("t", frame)
+        read = [row[0] for row in rows(con, "SELECT v::VARCHAR FROM t")]
+        assert read == [None if value is None else str(value) for value in values]
+
+
+class TestObjectTimestampExactness:
+    def test_an_exact_finer_value_in_a_coarser_zoned_column_is_kept(self, con: duckdb.frame.Connection) -> None:
+        values: list[object] = [datetime.datetime(2020, 1, 1, tzinfo=datetime.UTC)] * (2 * SAMPLE_ROWS)
+        values[1] = pd.Timestamp(-1000, unit="ns", tz="UTC")
+        con.register("t", pd.DataFrame({"v": pd.Series(values, dtype=object)}))
+        assert table("t").schema(con) == [("v", "TIMESTAMP WITH TIME ZONE")]
+        assert rows(con, "SELECT epoch_ns(v) FROM t LIMIT 2") == [(1_577_836_800 * 10**9,), (-1000,)]
+
+    def test_the_last_nanosecond_reads_as_a_nanosecond_timestamp(self, con: duckdb.frame.Connection) -> None:
+        con.register("t", objects(np.datetime64(2**63 - 2, "ns")))
+        assert rows(con, "SELECT typeof(column0), epoch_ns(column0) FROM t") == [("TIMESTAMP_NS", 2**63 - 2)]
+
+    def test_a_failing_time_zone_is_reported_with_its_error(self, con: duckdb.frame.Connection) -> None:
+        values: list[object] = [datetime.datetime(2020, 1, 1)] * (2 * SAMPLE_ROWS)
+        values[1] = datetime.datetime(2020, 1, 1, tzinfo=Failing(RuntimeError, "boom"))
+        con.register("t", pd.DataFrame({"v": pd.Series(values, dtype=object)}))
+        with pytest.raises(exceptions.InvalidInputError, match="at row 1 that cannot be read: RuntimeError: boom"):
+            rows(con, "SELECT v FROM t")
+
+
+class TestCalendarUnitsInTheNanosecondSpan:
+    @pytest.mark.parametrize(
+        "late",
+        [np.datetime64("9999-01", "M"), np.datetime64(10**4, "Y"), np.datetime64("9999-01-01", "D")],
+        ids=["months", "years", "days"],
+    )
+    def test_a_date_past_the_span_keeps_the_column_in_microseconds(
+        self, con: duckdb.frame.Connection, late: np.datetime64
+    ) -> None:
+        con.register("t", objects(np.datetime64(1000, "ns"), late))
+        assert table("t").schema(con) == [("column0", "TIMESTAMP")]
+        assert rows(con, "SELECT epoch_us(column0) FROM t")[0] == (1,)
+
+
+class TestCalendarUnitBounds:
+    @pytest.mark.parametrize(
+        ("value", "expected_type"),
+        [(np.datetime64("2262-04", "M"), "TIMESTAMP_NS"), (np.datetime64("2300-01", "M"), "TIMESTAMP")],
+        ids=["inside", "past"],
+    )
+    def test_a_month_is_judged_by_its_first_day(
+        self, con: duckdb.frame.Connection, value: np.datetime64, expected_type: str
+    ) -> None:
+        con.register("t", objects(np.datetime64(1000, "ns"), value))
+        assert table("t").schema(con) == [("column0", expected_type)]
+
+    def test_a_count_of_months_past_any_date_is_refused(self, con: duckdb.frame.Connection) -> None:
+        con.register("t", objects(np.datetime64(1000, "ns"), np.datetime64(2**62, "M")))
+        with pytest.raises(exceptions.InvalidInputError, match="beyond the range of its engine type"):
+            rows(con, "SELECT * FROM t")

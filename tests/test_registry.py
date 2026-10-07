@@ -1323,6 +1323,54 @@ class TestTemporalAndBinaryTypes:
         with pytest.raises(exceptions.ConversionError, match="4611686018427387904 milliseconds since the epoch"):
             rows(con, "SELECT ms FROM far")
 
+    @pytest.mark.parametrize("unit", ["s", "ms"])
+    @pytest.mark.parametrize("target", ["VARCHAR", "TIMESTAMPTZ"])
+    @pytest.mark.xfail(
+        strict=True,
+        raises=exceptions.InternalError,
+        reason="the engine's cast of a coarse timestamp beyond microseconds throws an internal error",
+    )
+    def test_a_coarse_timestamp_beyond_microseconds_try_casts_to_null(
+        self, con: duckdb.frame.Connection, unit: str, target: str
+    ) -> None:
+        con.register("far", pa.table({"t": pa.array([2**62], pa.timestamp(unit))}))
+        assert rows(con, f"SELECT TRY_CAST(t AS {target}) FROM far") == [(None,)]
+        assert rows(con, "SELECT 42") == [(42,)]
+
+    @pytest.mark.parametrize(
+        ("unit", "count"),
+        [("us", -106_751_991 * 86_400_000_000 - 1), ("ns", -106_751 * 86_400_000_000_000 - 1)],
+        ids=["before 290309-12-22 BC", "before 1677-09-22"],
+    )
+    @pytest.mark.xfail(
+        strict=True,
+        raises=exceptions.InternalError,
+        reason="the engine's text form of a timestamp before its date range throws an internal error",
+    )
+    def test_a_timestamp_before_the_date_range_try_casts_to_null(
+        self, con: duckdb.frame.Connection, unit: str, count: int
+    ) -> None:
+        con.register("early", pa.table({"t": pa.array([count], pa.timestamp(unit))}))
+        assert rows(con, "SELECT TRY_CAST(t AS VARCHAR) FROM early") == [(None,)]
+        assert rows(con, "SELECT 42") == [(42,)]
+
+    @pytest.mark.parametrize(
+        ("extremes", "count", "bound"),
+        [
+            (pa.array([2**63 - 1, -(2**63 - 1)], pa.timestamp("ns")), "epoch_ns(t)", 2**63 - 1),
+            (pa.array([2**31 - 1, -(2**31 - 1)], pa.int32()).cast(pa.date32()), "t - DATE '1970-01-01'", 2**31 - 1),
+        ],
+        ids=["timestamp", "date"],
+    )
+    @pytest.mark.xfail(
+        strict=True, raises=AssertionError, reason="the engine's Arrow import reads its reserved counts as infinities"
+    )
+    def test_a_finite_extreme_does_not_read_as_infinity(
+        self, con: duckdb.frame.Connection, extremes: pa.Array, count: str, bound: int
+    ) -> None:
+        con.register("edge", pa.table({"t": extremes}))
+        assert rows(con, f"SELECT isinf(t), {count} FROM edge") == [(False, bound), (False, -bound)]
+
     def test_durations_and_intervals(self, con: duckdb.frame.Connection) -> None:
         con.register(
             "spans",

@@ -8,6 +8,8 @@
 
 #include "chunkview.hpp"
 
+#include "conversion/value_to_python.hpp"
+
 #include <utility>
 
 namespace duckdb_python {

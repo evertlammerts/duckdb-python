@@ -55,10 +55,20 @@ _FIXED_TYPES = {
 #: minutes are read into TIMESTAMP_S.
 _NAIVE_TIMESTAMP_TYPES = {"s": "TIMESTAMP_S", "ms": "TIMESTAMP_MS", "us": "TIMESTAMP", "ns": "TIMESTAMP_NS"}
 
+#: The units a timestamp is stored in, coarsest first.
+_TIMESTAMP_UNITS = ("s", "ms", "us", "ns")
+
+#: The datetime64 units that count whole days or more, which read as a DATE.
+_CALENDAR_UNITS = ("D", "W", "M", "Y")
+
 #: The first and last instants a TIMESTAMP casts to TIMESTAMP_NS, which is how the scan reads a Python datetime;
 #: the cast refuses every instant of 1677-09-21, although TIMESTAMP_NS itself starts during that day.
 _NANOSECOND_FIRST = datetime.datetime(1677, 9, 22)
 _NANOSECOND_LAST = datetime.datetime(2262, 4, 11, 23, 47, 16, 854775)
+
+#: The same span as nanosecond counts, for a numpy value, which counts finer than a datetime.
+_NANOSECONDS_FIRST = -106_751 * 86_400_000_000_000
+_NANOSECONDS_LAST = 2**63 - 2
 
 _SUB_NANOSECOND_UNITS = ("ps", "fs", "as")
 
@@ -120,7 +130,10 @@ def _missing(value: object) -> bool:
     if cls.__module__ == "numpy":
         import numpy as np
 
-        return isinstance(value, (np.floating, np.datetime64, np.timedelta64)) and bool(value != value)
+        if isinstance(value, (np.datetime64, np.timedelta64)):
+            # NaT is the least count; comparing a zero-step value with itself overflows numpy's unit arithmetic.
+            return int(value.view("i8")) == np.iinfo(np.int64).min
+        return isinstance(value, np.floating) and bool(value != value)
     return cls.__module__.startswith("pandas") and cls.__name__ in ("NAType", "NaTType")
 
 
@@ -173,14 +186,20 @@ _FAMILY_TYPES: tuple[tuple[type, str], ...] = (
     (int, "number"),
     (float, "number"),
     (decimal.Decimal, "decimal"),
-    (datetime.time, "time"),
     (datetime.timedelta, "interval"),
     (bytes, "bytes"),
     (uuid_module.UUID, "uuid"),
 )
 
 #: A singleton family's engine type, for the families that need no further bookkeeping to pick one.
-_SIMPLE_FAMILY_TYPES = {"bool": "BOOLEAN", "time": "TIME", "interval": "INTERVAL", "bytes": "BLOB", "uuid": "UUID"}
+_SIMPLE_FAMILY_TYPES = {
+    "bool": "BOOLEAN",
+    "time": "TIME",
+    "time_tz": "TIME WITH TIME ZONE",
+    "interval": "INTERVAL",
+    "bytes": "BLOB",
+    "uuid": "UUID",
+}
 
 
 def _value_family(value: object) -> str | None:
@@ -190,35 +209,87 @@ def _value_family(value: object) -> str | None:
         import numpy as np
 
         if isinstance(value, np.datetime64):
-            return "naive_ns"
+            return "date" if np.datetime_data(value.dtype)[0] in _CALENDAR_UNITS else "naive"
         if isinstance(value, np.timedelta64):
             return "interval"
         return None
     if isinstance(value, datetime.datetime):
-        return "aware" if value.tzinfo is not None else "naive"
+        # Aware only when its time zone gives an offset, as Python defines it.
+        return "aware" if value.utcoffset() is not None else "naive"
     if isinstance(value, datetime.date):
         return "date"
+    if isinstance(value, datetime.time):
+        return "time_tz" if value.tzinfo is not None else "time"
     for cls, family in _FAMILY_TYPES:
         if isinstance(value, cls):
             return family
     return None
 
 
+def _timestamp_unit(value: object) -> str:
+    """The unit a timestamp value counts in, which for a Python datetime is microseconds.
+
+    A numpy or pandas value counts in its own unit, hours and minutes as seconds and anything finer than a nanosecond
+    as nanoseconds.
+    """
+    if type(value).__module__ == "numpy":
+        import numpy as np
+
+        unit = np.datetime_data(value.dtype)[0]  # type: ignore[attr-defined]
+        return unit if unit in _TIMESTAMP_UNITS else "s" if unit in ("h", "m") else "ns"
+    own = getattr(value, "unit", None)
+    return own if own in _TIMESTAMP_UNITS else "us"
+
+
+def _within_nanoseconds(value: object) -> bool:
+    """Whether a date or timestamp value lies in the span TIMESTAMP_NS holds."""
+    # A pandas Timestamp is judged by its own count, which keeps the nanoseconds a datetime bound would not, as the
+    # UTC instant when it is aware.
+    value = getattr(value, "asm8", value)
+    if type(value).__module__ == "numpy":
+        import numpy as np
+
+        moment: Any = value
+        unit, step = np.datetime_data(moment.dtype)
+        if step == 0:
+            # A step of zero makes every count the epoch.
+            return True
+        if unit in ("M", "Y"):
+            # numpy compares months and years with nanoseconds by wrapping arithmetic, so they are compared as days.
+            if abs(int(moment.view("i8")) * step) > _CALENDAR_LIMIT:
+                return False
+            moment = moment.astype("datetime64[D]")
+        try:
+            return bool(np.datetime64(_NANOSECONDS_FIRST, "ns") <= moment <= np.datetime64(_NANOSECONDS_LAST, "ns"))
+        except OverflowError:
+            # numpy compares in the finer unit: one under a nanosecond spans less than nanoseconds do, and a coarser
+            # count that overflows nanoseconds lies past them.
+            return unit in _SUB_NANOSECOND_UNITS
+    if isinstance(value, datetime.datetime):
+        if value.utcoffset() is not None:
+            try:
+                value = value.astimezone(datetime.UTC)
+            except OverflowError:
+                return False
+        instant = value.replace(tzinfo=None)
+    elif isinstance(value, datetime.date):
+        instant = datetime.datetime.combine(value, datetime.time())
+    else:
+        return True
+    return _NANOSECOND_FIRST <= instant <= _NANOSECOND_LAST
+
+
 def _significant_values(sample: list[object]) -> list[object]:
     """`sample` with missing markers dropped and numpy scalars unwrapped through `.item()`.
 
-    A datetime64 or timedelta64 that `.item()` would turn into a bare int, as it does for a nanosecond unit, stays
-    wrapped so it is still read as a time.
+    A datetime64 or timedelta64 stays wrapped, so it is read in its own unit.
     """
     import numpy as np
 
     def unwrap(value: object) -> object:
-        if not isinstance(value, np.generic):
+        if not isinstance(value, np.generic) or isinstance(value, (np.datetime64, np.timedelta64)):
             return value
-        item = value.item()
-        if isinstance(item, int) and isinstance(value, (np.datetime64, np.timedelta64)):
-            return value
-        return item
+        return value.item()
 
     return [unwrap(v) for v in sample if not _missing(v)]
 
@@ -234,6 +305,7 @@ def _classify_sample(sample: list[object]) -> tuple[str, str]:
         return "text", "VARCHAR"
 
     temporal: set[str] = set()
+    finest = 0
     beyond_nanoseconds = False
     other: set[str] = set()
     has_float = False
@@ -243,12 +315,11 @@ def _classify_sample(sample: list[object]) -> tuple[str, str]:
         family = _value_family(value)
         if family is None:
             return "text", "VARCHAR"
-        if family in ("date", "naive", "naive_ns", "aware"):
+        if family in ("date", "naive", "aware"):
             temporal.add(family)
-            if family != "aware" and isinstance(value, datetime.date):
-                midnight = datetime.time()
-                instant = value if isinstance(value, datetime.datetime) else datetime.datetime.combine(value, midnight)
-                beyond_nanoseconds = beyond_nanoseconds or not _NANOSECOND_FIRST <= instant <= _NANOSECOND_LAST
+            if family != "date":
+                finest = max(finest, _TIMESTAMP_UNITS.index(_timestamp_unit(value)))
+            beyond_nanoseconds = beyond_nanoseconds or not _within_nanoseconds(value)
             continue
         other.add(family)
         if isinstance(value, float):
@@ -263,15 +334,16 @@ def _classify_sample(sample: list[object]) -> tuple[str, str]:
     if len(other) + bool(temporal) > 1 or ("aware" in temporal and temporal != {"aware"}):
         return "text", "VARCHAR"
 
+    # A sampled value past TIMESTAMP_NS's span needs microseconds, which refuse a value finer than that.
+    unit = _TIMESTAMP_UNITS[finest]
+    if unit == "ns" and beyond_nanoseconds:
+        unit = "us"
     if "aware" in temporal:
-        return "objects", "TIMESTAMP WITH TIME ZONE"
-    if "naive_ns" in temporal and not beyond_nanoseconds:
-        return "objects", "TIMESTAMP_NS"
-    if "naive_ns" in temporal:
-        # A sampled value past TIMESTAMP_NS's range needs the wider type, which refuses a sub-microsecond value.
-        return "objects", "TIMESTAMP"
+        return "objects", "TIMESTAMPTZ_NS" if unit == "ns" else "TIMESTAMP WITH TIME ZONE"
     if "naive" in temporal:
-        return "objects", "TIMESTAMP"
+        # Microseconds even for a coarse sample: the sample proves nothing about the rows it skipped, and a second
+        # or millisecond count is exact in microseconds anyway.
+        return "objects", "TIMESTAMP_NS" if unit == "ns" else "TIMESTAMP"
     if "date" in temporal:
         return "objects", "DATE"
 

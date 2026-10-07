@@ -10,12 +10,14 @@
 
 #include <nanobind/nanobind.h>
 
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <utility>
+#include <vector>
 
 #include "duckdb_cpp.hpp"
-#include "pyconv.hpp"
+#include "conversion/conversion.hpp"
 
 namespace duckdb_python {
 
@@ -34,6 +36,52 @@ class ModuleState {
 public:
 	cxx::Environment environment;
 	ConversionContext conversion;
+
+	/// A connection to a private one-thread database, opened on first use, that values written into SQL text are
+	/// converted on by the same rules as query parameters. Its session is in UTC, so a zoned value's text names its
+	/// offset the same way whatever zone the process runs in.
+	///
+	/// Each conversion holds one of its own until its lease ends, however that ends, and no lock is held meanwhile:
+	/// converting calls Python code, which may convert another value on this thread or wait for another thread to.
+	class LiteralLease {
+	public:
+		explicit LiteralLease(ModuleState &state) : state(state) {
+			nb::ft_lock_guard guard(state.literal_lock);
+			if (!state.literal_instance) {
+				// Returning a connection then never allocates, so it cannot throw from a destructor.
+				state.literal_idle.reserve(LITERAL_IDLE_KEPT);
+				auto instance = state.environment.CreateInstance();
+				instance.SetOption("threads", "1");
+				instance.Attach(":memory:", true);
+				state.literal_instance.emplace(std::move(instance));
+			}
+			if (state.literal_idle.empty()) {
+				connection.emplace(state.literal_instance->Connect());
+				connection->SetOption("TimeZone", "UTC");
+			} else {
+				connection.emplace(std::move(state.literal_idle.back()));
+				state.literal_idle.pop_back();
+			}
+		}
+
+		~LiteralLease() {
+			nb::ft_lock_guard guard(state.literal_lock);
+			if (state.literal_idle.size() < LITERAL_IDLE_KEPT) {
+				state.literal_idle.push_back(std::move(*connection));
+			}
+		}
+
+		LiteralLease(const LiteralLease &) = delete;
+		LiteralLease &operator=(const LiteralLease &) = delete;
+
+		cxx::Connection &operator*() {
+			return *connection;
+		}
+
+	private:
+		ModuleState &state;
+		std::optional<cxx::Connection> connection;
+	};
 
 	nb::handle InterfaceError() {
 		return Exceptions().interface_error;
@@ -68,6 +116,12 @@ private:
 
 	nb::ft_mutex exceptions_lock;
 	std::optional<ExceptionClasses> exceptions;
+	// As many idle connections as nested or parallel conversions commonly need; more are opened when wanted.
+	static constexpr std::size_t LITERAL_IDLE_KEPT = 4;
+	nb::ft_mutex literal_lock;
+	// Declared after the environment, so they are closed before it, the connections before their database.
+	std::optional<cxx::Instance> literal_instance;
+	std::vector<cxx::Connection> literal_idle;
 };
 
 /// References a running call holds itself, so a close on another thread cannot free what it is still using.

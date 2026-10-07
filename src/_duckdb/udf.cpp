@@ -8,6 +8,9 @@
 
 #include "udf.hpp"
 
+#include "conversion/python_to_declared_type.hpp"
+#include "conversion/value_to_python.hpp"
+
 #include <utility>
 
 namespace duckdb_python {
@@ -20,14 +23,17 @@ namespace {
 /// database that registered the function owns it instead, and by the time that is dropped no query can still run.
 struct PyFunctionData {
 	PyFunctionData(nb::handle callable, std::string name, std::vector<cxx::LogicalType> parameter_types,
-	               bool skip_nulls, std::shared_ptr<ModuleState> module)
+	               TypeTree returns, bool skip_nulls, std::shared_ptr<ModuleState> module)
 	    : callable(callable), name(std::move(name)), parameter_types(std::move(parameter_types)),
-	      skip_nulls(skip_nulls), module(std::move(module)) {
+	      returns(std::move(returns)), skip_nulls(skip_nulls), module(std::move(module)) {
 	}
 
 	nb::handle callable;
 	std::string name;
 	std::vector<cxx::LogicalType> parameter_types;
+	// Described once here; engine threads only read it, and reading the type's children through the C API per row
+	// would serialize the type each time.
+	TypeTree returns;
 	bool skip_nulls;
 	std::shared_ptr<ModuleState> module;
 };
@@ -46,8 +52,7 @@ void PyScalarExec(cxx::ScalarFunction::ExecInput &input) {
 		columns.reserve(count);
 		for (cxx::idx_t a = 0; a < count; a++) {
 			auto argument = input.GetArg(a);
-			columns.push_back(
-			    VectorElements(argument, data.parameter_types.at(a), 0, rows, data.module->conversion));
+			columns.push_back(VectorElements(argument, data.parameter_types.at(a), 0, rows, data.module->conversion));
 		}
 		result.SetSize(rows);
 		for (cxx::idx_t r = 0; r < rows; r++) {
@@ -80,12 +85,17 @@ void PyScalarExec(cxx::ScalarFunction::ExecInput &input) {
 				continue;
 			}
 			try {
-				// SetValue casts to the column's type, so the declared return type is enforced here.
-				result.SetValue(r, PythonToValue(context, object, data.module->conversion));
+				result.SetValue(r, PythonToDeclaredType(context, object, data.returns, data.module->conversion));
+			} catch (const DeclaredTypeRefusal &refusal) {
+				throw cxx::InvalidInputException("the UDF '" + data.name + "' returned " + refusal.GetRawMessage());
 			} catch (const UnsupportedTypeException &error) {
 				throw cxx::InvalidInputException("the UDF '" + data.name + "' returned a value of type " +
-				                                 error.TypeName() +
-				                                 ", which cannot be converted to a DuckDB value");
+				                                 error.TypeName() + ", which cannot be converted to a DuckDB value");
+			} catch (const cxx::Exception &error) {
+				const auto &body = error.GetRawMessage();
+				throw cxx::InvalidInputException(
+				    "the UDF '" + data.name + "' returned a value that cannot be converted to its declared type " +
+				    data.returns.type.ToText() + ": " + (body.empty() ? error.what() : body));
 			}
 		}
 	} catch (const cxx::Exception &error) {
@@ -120,7 +130,7 @@ void RegisterScalarFunction(cxx::Connection &connection, const std::string &name
 		}
 		signature.SetReturnType(return_type);
 	});
-	function.SetUserData<PyFunctionData>(callable, name, std::move(parameter_types),
+	function.SetUserData<PyFunctionData>(callable, name, std::move(parameter_types), TypeTreeOf(std::move(return_type)),
 	                                     nulls == cxx::FunctionNullHandling::DEFAULT, std::move(module));
 	function.SetExecCallback(&PyScalarExec);
 	function.SetNullHandling(nulls);

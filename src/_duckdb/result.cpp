@@ -8,6 +8,8 @@
 
 #include "result.hpp"
 
+#include "conversion/value_to_python.hpp"
+
 #include <chrono>
 
 namespace duckdb_python {

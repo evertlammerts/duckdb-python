@@ -113,7 +113,7 @@ sql(<span class="s">"SELECT plus_one(3) AS v"</span>).types(con)   <span class="
         <tr><td><code>BLOB</code></td><td><code>bytes</code></td></tr>
         <tr><td><code>DATE</code></td><td><code>datetime.date</code></td></tr>
         <tr><td><code>TIME</code>, <code>TIMETZ</code></td><td><code>datetime.time</code>; <code>TIMETZ</code> carries its offset as <code>tzinfo</code></td></tr>
-        <tr><td><code>TIMESTAMP</code>, <code>TIMESTAMP_S</code>, <code>TIMESTAMP_MS</code>, <code>TIMESTAMP_NS</code></td><td>naive <code>datetime.datetime</code>; nanoseconds are cut to microseconds</td></tr>
+        <tr><td><code>TIMESTAMP</code>, <code>TIMESTAMP_S</code>, <code>TIMESTAMP_MS</code>, <code>TIMESTAMP_NS</code></td><td>naive <code>datetime.datetime</code>; nanoseconds are floored to the microsecond</td></tr>
         <tr><td><code>TIMESTAMPTZ</code></td><td>aware <code>datetime.datetime</code>, in UTC</td></tr>
         <tr><td><code>INTERVAL</code></td><td><code>datetime.timedelta</code>; a month counts as 30 days</td></tr>
         <tr><td><code>UUID</code></td><td><code>uuid.UUID</code></td></tr>
@@ -127,7 +127,7 @@ sql(<span class="s">"SELECT plus_one(3) AS v"</span>).types(con)   <span class="
   </div>
 
   <p class="lead-in">out</p>
-  <p>The value the function returns is read by its Python type first, then cast to <code>returns</code> by the engine's own cast, as <code>CAST</code> would.</p>
+  <p>The value the function returns is read by its Python type first, then cast to <code>returns</code> by the engine's own cast, as <code>CAST</code> would, except for dates and times and for structs. A date or timestamp that <code>returns</code> cannot hold exactly is refused rather than rounded, and a date or time without a time zone returned for a type with one, or the reverse, is refused, since the cast would assume a time zone. So is a timestamp with a time zone returned for a time of day, which it has only in a time zone chosen for it; a timestamp without one returned for a <code>TIME</code> drops its date. These hold at any depth. A list meets an element type holding a date, a time or a struct one element at a time. A dict meets a <code>STRUCT</code> as the engine's cast pairs them: by field name, ignoring case, or by position when the first name is empty; a field no declared name takes is dropped unread. A value returned for a <code>UNION</code> is read whole, as its own type, and the engine's cast puts it in a member as an implicit <code>CAST</code> does: the one it converts to most cheaply, and refused when there is none or two tie. So a dict goes in a struct member only with the same fields, none dropped or added, and an <code>int</code>, read as a <code>BIGINT</code>, does not go in an <code>INTEGER</code> member. A date or time inside is then held to the rules above in the member the cast chose, and the value refused if it breaks them; another member is never tried. So a timestamp without a time zone is refused for <code>UNION(z TIMESTAMPTZ, s VARCHAR)</code>, where the cast would assume one. A string is a string, not a date or time: text returned for <code>TIMESTAMPTZ</code> is read in the session's time zone, exactly as SQL's <code>CAST</code> reads the same text.</p>
   <div class="tablewrap">
     <table>
       <thead><tr><th>Returned</th><th>Read as</th></tr></thead>
@@ -141,6 +141,8 @@ sql(<span class="s">"SELECT plus_one(3) AS v"</span>).types(con)   <span class="
         <tr><td><code>datetime.datetime</code></td><td><code>TIMESTAMP</code>, or <code>TIMESTAMPTZ</code> when aware</td></tr>
         <tr><td><code>datetime.date</code> / <code>datetime.time</code></td><td><code>DATE</code> / <code>TIME</code>, or <code>TIMETZ</code> when the time has an offset</td></tr>
         <tr><td><code>datetime.timedelta</code></td><td><code>INTERVAL</code></td></tr>
+        <tr><td><code>pandas.Timestamp</code>, numpy <code>datetime64</code></td><td>a timestamp in its own unit, down to nanoseconds</td></tr>
+        <tr><td><code>pandas.Timedelta</code>, numpy <code>timedelta64</code></td><td><code>INTERVAL</code>, nanoseconds dropped toward zero</td></tr>
         <tr><td><code>decimal.Decimal</code></td><td><code>DECIMAL</code>, width and scale taken from the value</td></tr>
         <tr><td><code>uuid.UUID</code></td><td><code>UUID</code></td></tr>
         <tr><td><code>list</code>, <code>tuple</code></td><td>a list; the engine needs one element type, so <code>[1, "a"]</code> is refused</td></tr>
@@ -156,8 +158,8 @@ con.create_function(<span class="s">"as_date"</span>, <span class="k">lambda</sp
 sql(<span class="s">"SELECT as_date(5)"</span>).rows(con)     <span class="c"># [(datetime.date(2020, 1, 5),)]: the text is cast to DATE</span>
 
 con.create_function(<span class="s">"wide"</span>, <span class="k">lambda</span> x: <span class="s">2</span>**<span class="s">70</span>, [<span class="s">"BIGINT"</span>], <span class="s">"INTEGER"</span>)
-sql(<span class="s">"SELECT wide(1)"</span>).rows(con)        <span class="c"># InvalidInputError: Failed to cast value ... out of range for the destination type INT32</span></code></pre>
-  <p>A cast that fails fails the query, with the engine's message for that cast. Every result is cast to the declared type, so a function that means to return an <code>INTEGER</code> should declare <code>INTEGER</code> and let the cast check it.</p>
+sql(<span class="s">"SELECT wide(1)"</span>).rows(con)        <span class="c"># InvalidInputError: the UDF 'wide' returned a value that cannot be converted to its declared type INTEGER: Failed to cast value ...</span></code></pre>
+  <p>A cast that fails fails the query, naming the function and its declared type before the engine's message for that cast. Every result is cast to the declared type, so a function that means to return an <code>INTEGER</code> should declare <code>INTEGER</code> and let the cast check it.</p>
 
   <p class="lead-in">nested types</p>
   <pre><code>con.create_function(<span class="s">"total"</span>, <span class="k">lambda</span> xs: sum(xs), [<span class="s">"BIGINT[]"</span>], <span class="s">"BIGINT"</span>)
@@ -188,6 +190,7 @@ sql(<span class="s">"SELECT backfill(x) FROM (VALUES (1), (NULL)) t(x)"</span>).
   <p>Returning <code>None</code> makes the result NULL under either setting:</p>
   <pre><code>con.create_function(<span class="s">"odd_only"</span>, <span class="k">lambda</span> x: x <span class="k">if</span> x % <span class="s">2</span> <span class="k">else</span> <span class="k">None</span>, [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT"</span>)
 sql(<span class="s">"SELECT odd_only(i) FROM range(4) t(i)"</span>).rows(con)   <span class="c"># [(None,), (1,), (None,), (3,)]</span></code></pre>
+  <p>A <code>None</code> anywhere in a return is a NULL of the declared type at that place, and an empty list or dict an empty value of it, so <code>[ts, None]</code> returned for <code>TIMESTAMP[]</code> holds a NULL <code>TIMESTAMP</code>. Inside a value returned for a <code>UNION</code> the declared place is not fixed until the engine's cast picks the member, so a list or dict of only <code>None</code>s can steer that choice; name the member's type in the value, or return <code>None</code> whole.</p>
 </section>
 
 <section id="stability">

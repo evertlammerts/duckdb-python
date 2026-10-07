@@ -12,14 +12,19 @@ import time
 import weakref
 from typing import TYPE_CHECKING
 
+import numpy as np
+import pandas as pd
 import pytest
 
 import duckdb
 from duckdb import _duckdb, exceptions
+from duckdb._expressions.expr import render_literal
 from duckdb.frame import col, fn
 
+from ._support import Emptying, Failing
+
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
 
 @pytest.fixture
@@ -240,8 +245,46 @@ class TestFailure:
         with pytest.raises(exceptions.InvalidInputError) as info:
             rows(con, "SELECT big(1)")
         message = str(info.value)
-        assert message.startswith("Invalid Input Error: Failed to cast value")
+        assert message.startswith(
+            "Invalid Input Error: the UDF 'big' returned a value that cannot be converted to its declared type BIGINT: "
+            "Failed to cast value"
+        )
         assert message.count("Invalid Input Error:") == 1
+
+    @pytest.mark.parametrize("declared", ["TIMESTAMPTZ[]", "UNION(a TIMESTAMPTZ[], b DATE[])"], ids=["plain", "union"])
+    def test_a_python_error_while_converting_the_return_keeps_its_own_wording(
+        self, con: duckdb.frame.Connection, declared: str
+    ) -> None:
+        returned = datetime.datetime(2020, 1, 1, tzinfo=Failing(ValueError, "no offset today"))
+        con.create_function("f", lambda _: [returned], ["BIGINT"], declared)
+        with pytest.raises(exceptions.InvalidInputError) as info:
+            rows(con, "SELECT f(1)")
+        message = str(info.value)
+        assert "Python exception occurred while executing the UDF 'f'" in message
+        assert "ValueError: no offset today" in message
+
+    @pytest.mark.parametrize(
+        ("returned", "declared", "reason"),
+        [
+            (np.datetime64("1677-09-21T00:12:43.145224194"), "TIMESTAMP_NS", "beyond the range of its engine type"),
+            (
+                [datetime.datetime(2020, 1, 1, tzinfo=datetime.UTC), datetime.datetime(2020, 1, 1)],
+                "VARCHAR[]",
+                "a list holds values with and without a time zone",
+            ),
+            ({"x": 1}, "STRUCT(a INTEGER)", "STRUCT to STRUCT cast must have at least one matching member"),
+        ],
+        ids=["out of range", "zones mixed", "no field matches"],
+    )
+    def test_every_conversion_failure_names_the_function(
+        self, con: duckdb.frame.Connection, returned: object, declared: str, reason: str
+    ) -> None:
+        con.create_function("f", lambda _: returned, ["BIGINT"], declared)
+        with pytest.raises(exceptions.InvalidInputError) as info:
+            rows(con, "SELECT f(1)")
+        message = str(info.value)
+        assert message.startswith("Invalid Input Error: the UDF 'f' returned a value that cannot be converted")
+        assert reason in message
 
     def test_an_unconvertible_return_names_the_function_and_the_type(self, con: duckdb.frame.Connection) -> None:
         con.create_function("o", lambda x: object(), ["BIGINT"], "BIGINT")
@@ -261,7 +304,10 @@ class TestFailure:
         con.create_function("nan", lambda x: decimal.Decimal("NaN"), ["BIGINT"], "DOUBLE")
         with pytest.raises(exceptions.InvalidInputError) as info:
             rows(con, "SELECT nan(1)")
-        assert str(info.value) == "Invalid Input Error: cannot bind a non-finite Decimal"
+        assert str(info.value) == (
+            "Invalid Input Error: the UDF 'nan' returned a value that cannot be converted to its declared type DOUBLE: "
+            "cannot bind a non-finite Decimal"
+        )
 
     def test_parameter_binding_keeps_its_own_wording(self, con: duckdb.frame.Connection) -> None:
         with pytest.raises(exceptions.InvalidInputError) as info:
@@ -523,3 +569,745 @@ class TestClosedHandles:
         assert isinstance(result, list | exceptions.InterruptError | exceptions.InterfaceError), repr(result)
         with pytest.raises(exceptions.InterfaceError, match="connection is closed"):
             connection.execute("SELECT 1")
+
+
+class TestTemporalReturns:
+    """A return converts to the declared type in its own unit, and never by assuming a time zone."""
+
+    @pytest.mark.parametrize(
+        ("returned", "declared"),
+        [
+            (datetime.datetime(2020, 1, 1, 12), "TIMESTAMPTZ"),
+            (datetime.datetime(2020, 1, 1, 12, tzinfo=datetime.UTC), "TIMESTAMP"),
+            (datetime.date(2020, 1, 1), "TIMESTAMPTZ"),
+            (datetime.time(12, tzinfo=datetime.UTC), "TIME"),
+        ],
+        ids=["naive for zoned", "aware for naive", "date for zoned", "aware time for naive"],
+    )
+    def test_a_return_needing_a_time_zone_is_refused(
+        self, con: duckdb.frame.Connection, returned: object, declared: str
+    ) -> None:
+        con.create_function("f", lambda _: returned, ["BIGINT"], declared)
+        with pytest.raises(exceptions.InvalidInputError, match="converting between them would assume a time zone"):
+            rows(con, "SELECT f(1)")
+
+    @pytest.mark.parametrize(
+        ("returned", "declared"),
+        [
+            (datetime.datetime(2020, 1, 1, 12), "TIMETZ"),
+            (datetime.datetime(2020, 1, 1, 12, tzinfo=datetime.UTC), "TIME"),
+            (datetime.datetime(2020, 1, 1, 12, tzinfo=datetime.UTC), "TIMETZ"),
+            (datetime.date(2020, 1, 1), "TIMETZ"),
+            (datetime.time(12, tzinfo=datetime.UTC), "TIMESTAMP"),
+        ],
+        ids=[
+            "naive for a zoned time",
+            "aware for a time",
+            "aware for a zoned time",
+            "date for a zoned time",
+            "zoned time",
+        ],
+    )
+    def test_a_time_of_day_is_never_taken_in_a_time_zone(
+        self, con: duckdb.frame.Connection, returned: object, declared: str
+    ) -> None:
+        # A timestamp with a time zone has a time of day only in a zone chosen for it, which the value does not name.
+        con.create_function("f", lambda _: returned, ["BIGINT"], declared)
+        with pytest.raises(exceptions.InvalidInputError, match="converting between them would assume a time zone"):
+            rows(con, "SELECT f(1)")
+
+    def test_a_naive_return_drops_its_date_for_a_time(self, con: duckdb.frame.Connection) -> None:
+        con.create_function("f", lambda _: datetime.datetime(2020, 1, 1, 12, 30), ["BIGINT"], "TIME")
+        assert rows(con, "SELECT f(1)") == [(datetime.time(12, 30),)]
+
+    def test_an_aware_return_keeps_its_instant(self, con: duckdb.frame.Connection) -> None:
+        returned = datetime.datetime(2020, 1, 1, 12, tzinfo=datetime.timezone(datetime.timedelta(hours=2)))
+        con.create_function("f", lambda _: returned, ["BIGINT"], "TIMESTAMPTZ")
+        assert rows(con, "SELECT f(1)") == [(returned,)]
+
+    def test_text_returned_for_timestamptz_reads_in_the_session_zone(self, con: duckdb.frame.Connection) -> None:
+        # As SQL's CAST of the same text does; a reading fixed to UTC would silently disagree with it.
+        con._execute("SET TimeZone = 'Asia/Kolkata'").drain()
+        assert rows(con, "SELECT current_setting('TimeZone')") == [("Asia/Kolkata",)]
+        con.create_function("f", lambda _: "2020-01-01 12:00:00", ["BIGINT"], "TIMESTAMPTZ")
+        offset = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+        expected = datetime.datetime(2020, 1, 1, 12, tzinfo=offset)
+        assert rows(con, "SELECT f(1) = TIMESTAMPTZ '2020-01-01 12:00:00+05:30', f(1)") == [(True, expected)]
+
+    def test_a_pandas_timestamp_keeps_its_nanoseconds(self, con: duckdb.frame.Connection) -> None:
+        stamp = pd.Timestamp("2020-01-02 03:04:05.123456789")
+        con.create_function("f", lambda _: stamp, ["BIGINT"], "TIMESTAMP_NS")
+        assert rows(con, "SELECT epoch_ns(f(1))") == [(stamp.value,)]
+
+    def test_a_numpy_datetime_converts(self, con: duckdb.frame.Connection) -> None:
+        con.create_function("f", lambda _: np.datetime64("2020-01-02T03:04:05", "s"), ["BIGINT"], "TIMESTAMP")
+        assert rows(con, "SELECT f(1)") == [(datetime.datetime(2020, 1, 2, 3, 4, 5),)]
+
+    def test_an_argument_before_1970_floors_to_its_microsecond(self, con: duckdb.frame.Connection) -> None:
+        seen: list[object] = []
+
+        def record(argument: object) -> int:
+            seen.append(argument)
+            return 0
+
+        con.create_function("f", record, ["TIMESTAMP_NS"], "BIGINT")
+        rows(con, "SELECT f(TIMESTAMP_NS '1969-12-31 23:59:59.999999999')")
+        assert seen == [datetime.datetime(1969, 12, 31, 23, 59, 59, 999999)]
+
+
+class TestTemporalReturnsExactly:
+    """A returned date or timestamp is held exactly or refused, nested ones included, never rounded or rezoned."""
+
+    @pytest.mark.parametrize(
+        ("returned", "declared"),
+        [
+            ([datetime.datetime(2020, 1, 1, 12)], "TIMESTAMPTZ[]"),
+            ({"a": datetime.datetime(2020, 1, 1, 12, tzinfo=datetime.UTC)}, "STRUCT(a TIMESTAMP)"),
+        ],
+        ids=["list", "struct"],
+    )
+    def test_a_nested_return_needing_a_time_zone_is_refused(
+        self, con: duckdb.frame.Connection, returned: object, declared: str
+    ) -> None:
+        con.create_function("f", lambda _: returned, ["BIGINT"], declared)
+        with pytest.raises(exceptions.InvalidInputError, match="converting between them would assume a time zone"):
+            rows(con, "SELECT f(1)")
+
+    @pytest.mark.parametrize(
+        ("returned", "declared"),
+        [
+            (pd.Timestamp("2020-01-01 00:00:00.123456789"), "TIMESTAMP"),
+            (pd.Timestamp("2020-01-01 00:00:00.123456789", tz="UTC"), "TIMESTAMPTZ"),
+            (np.datetime64("2020-01-01T00:00:00.5", "ms"), "TIMESTAMP_S"),
+            (datetime.datetime(2020, 1, 1, 12), "DATE"),
+        ],
+        ids=["ns into us", "zoned ns into us", "ms into s", "datetime into date"],
+    )
+    def test_an_instant_its_type_cannot_hold_is_refused(
+        self, con: duckdb.frame.Connection, returned: object, declared: str
+    ) -> None:
+        con.create_function("f", lambda _: returned, ["BIGINT"], declared)
+        with pytest.raises(exceptions.InvalidInputError, match="which cannot hold it exactly"):
+            rows(con, "SELECT f(1)")
+
+    @pytest.mark.parametrize(
+        ("returned", "declared", "expected"),
+        [
+            (datetime.datetime(2020, 1, 1), "DATE", datetime.date(2020, 1, 1)),
+            (pd.Timestamp("2020-01-01 00:00:00.123456"), "TIMESTAMP", datetime.datetime(2020, 1, 1, 0, 0, 0, 123456)),
+            (np.datetime64("2020-01-01T00:00:01", "s"), "TIMESTAMP_NS", datetime.datetime(2020, 1, 1, 0, 0, 1)),
+            (
+                datetime.datetime(2020, 1, 1, 12, tzinfo=datetime.UTC),
+                "TIMESTAMPTZ_NS",
+                datetime.datetime(2020, 1, 1, 12, tzinfo=datetime.UTC),
+            ),
+        ],
+        ids=["midnight into date", "whole us", "s into ns", "zoned us into ns"],
+    )
+    def test_an_instant_its_type_holds_is_kept(
+        self, con: duckdb.frame.Connection, returned: object, declared: str, expected: object
+    ) -> None:
+        con.create_function("f", lambda _: returned, ["BIGINT"], declared)
+        assert rows(con, "SELECT f(1)") == [(expected,)]
+
+
+class TestNestedTemporalReturns:
+    """Each date or timestamp anywhere in a return is held exactly or refused; the rest is cast as CAST would."""
+
+    @pytest.mark.parametrize(
+        ("returned", "declared", "expected"),
+        [
+            (
+                pd.Timestamp(1000, unit="ns", tz="UTC"),
+                "TIMESTAMPTZ",
+                datetime.datetime(1970, 1, 1, 0, 0, 0, 1, datetime.UTC),
+            ),
+            (pd.Timestamp(-(10**9), unit="ns"), "TIMESTAMP_S", datetime.datetime(1969, 12, 31, 23, 59, 59)),
+            ([datetime.datetime(2020, 1, 1)], "DATE[]", [datetime.date(2020, 1, 1)]),
+            ([pd.Timestamp("2020-01-01 00:00:00.000001")], "TIMESTAMP[]", [datetime.datetime(2020, 1, 1, 0, 0, 0, 1)]),
+            ({"a": [datetime.datetime(2020, 1, 1)]}, "STRUCT(a DATE[])", {"a": [datetime.date(2020, 1, 1)]}),
+            ({1: datetime.datetime(2020, 1, 1)}, "MAP(INTEGER, DATE)", {1: datetime.date(2020, 1, 1)}),
+            ([1.7, None], "INTEGER[]", [2, None]),
+            (
+                [
+                    pd.Timestamp("2020-01-01", tz="UTC").as_unit("ns"),
+                    datetime.datetime(2020, 1, 1, tzinfo=datetime.UTC),
+                ],
+                "TIMESTAMPTZ[]",
+                [datetime.datetime(2020, 1, 1, tzinfo=datetime.UTC)] * 2,
+            ),
+            ([datetime.datetime(2020, 1, 1), None], "TIMESTAMP[]", [datetime.datetime(2020, 1, 1), None]),
+            ([None, None], "DATE[]", [None, None]),
+            ({"a": None}, "STRUCT(a TIMESTAMP)", {"a": None}),
+            (
+                {1: None, 2: datetime.datetime(2020, 1, 1)},
+                "MAP(INTEGER, TIMESTAMP)",
+                {1: None, 2: datetime.datetime(2020, 1, 1)},
+            ),
+            ([None, [datetime.datetime(2020, 1, 1)]], "TIMESTAMP[][]", [None, [datetime.datetime(2020, 1, 1)]]),
+        ],
+        ids=[
+            "zoned ns into us",
+            "ns into s",
+            "list",
+            "list of ns",
+            "struct",
+            "map",
+            "numbers cast",
+            "mixed units",
+            "a null element",
+            "only null elements",
+            "a null field",
+            "a null map value",
+            "a null inner list",
+        ],
+    )
+    def test_what_its_type_holds_is_kept(
+        self, con: duckdb.frame.Connection, returned: object, declared: str, expected: object
+    ) -> None:
+        con.create_function("f", lambda _: returned, ["BIGINT"], declared)
+        assert rows(con, "SELECT f(1)") == [(expected,)]
+
+    @pytest.mark.parametrize(
+        ("returned", "declared"),
+        [
+            ([pd.Timestamp("2020-01-01 00:00:00.000000001")], "TIMESTAMP[]"),
+            ([datetime.datetime(2020, 1, 1, 13)], "DATE[]"),
+            ({"a": datetime.datetime(2020, 1, 1, 13)}, "STRUCT(a DATE)"),
+            ({1: datetime.datetime(2020, 1, 1, 13)}, "MAP(INTEGER, DATE)"),
+            ([datetime.datetime(1500, 1, 1)], "TIMESTAMP_NS[]"),
+        ],
+        ids=["list of ns", "list", "struct", "map", "past nanoseconds"],
+    )
+    def test_what_its_type_cannot_hold_is_refused(
+        self, con: duckdb.frame.Connection, returned: object, declared: str
+    ) -> None:
+        con.create_function("f", lambda _: returned, ["BIGINT"], declared)
+        with pytest.raises(exceptions.InvalidInputError, match="which cannot hold it exactly"):
+            rows(con, "SELECT f(1)")
+
+    @pytest.mark.parametrize(
+        ("returned", "declared"),
+        [
+            ([datetime.datetime(2020, 1, 1)], "TIMESTAMPTZ[1]"),
+            ({"a": [datetime.date(2020, 1, 1)]}, "STRUCT(a TIMESTAMPTZ[1])"),
+        ],
+        ids=["array", "array in a struct"],
+    )
+    def test_a_list_for_an_array_needs_no_time_zone_either(
+        self, con: duckdb.frame.Connection, returned: object, declared: str
+    ) -> None:
+        con.create_function("f", lambda _: returned, ["BIGINT"], declared)
+        with pytest.raises(exceptions.InvalidInputError, match="converting between them would assume a time zone"):
+            rows(con, "SELECT f(1)")
+
+    @pytest.mark.parametrize(
+        ("shape", "declared"),
+        [
+            ("dict", "STRUCT(a TIMESTAMPTZ, b TIMESTAMPTZ)"),
+            ("dict", "MAP(VARCHAR, TIMESTAMPTZ)"),
+            ("dict", "UNION(s STRUCT(a TIMESTAMPTZ, b TIMESTAMPTZ))"),
+            ("list", "TIMESTAMPTZ[]"),
+            ("list", "UNION(a TIMESTAMPTZ[], v VARCHAR)"),
+        ],
+        ids=["struct", "map", "struct in a union", "list", "list in a union"],
+    )
+    def test_a_return_its_own_tzinfo_empties_converts_as_returned(
+        self, con: duckdb.frame.Connection, shape: str, declared: str
+    ) -> None:
+        # Only the list or dict holds its values, so emptying it while one converts would cut the rest or free them.
+        stamps = [datetime.datetime(2020 + i, 1, 1, tzinfo=datetime.UTC) for i in range(2)]
+        returned: object
+        expected: object
+        if shape == "list":
+            elements: list[datetime.datetime] = []
+            elements.extend(stamp.replace(tzinfo=Emptying(elements)) for stamp in stamps)
+            returned, expected = elements, stamps
+        else:
+            fields: dict[str, datetime.datetime] = {}
+            fields.update(
+                {key: stamp.replace(tzinfo=Emptying(fields)) for key, stamp in zip("ab", stamps, strict=True)}
+            )
+            returned, expected = fields, dict(zip("ab", stamps, strict=True))
+        con.create_function("f", lambda _: returned, ["BIGINT"], declared)
+        assert rows(con, "SELECT f(1)") == [(expected,)]
+
+    @pytest.mark.parametrize(
+        ("declared", "wrap"),
+        [
+            ("TIMESTAMPTZ[]", lambda stamp: [stamp]),
+            ("STRUCT(s TIMESTAMPTZ)", lambda stamp: {"s": stamp}),
+            ("MAP(VARCHAR, TIMESTAMPTZ)", lambda stamp: {"s": stamp}),
+            ("STRUCT(s TIMESTAMPTZ)[]", lambda stamp: [{"s": stamp}]),
+            ("UNION(t STRUCT(s TIMESTAMPTZ))", lambda stamp: {"s": stamp}),
+            ("UNION(t TIMESTAMPTZ[])", lambda stamp: [stamp]),
+            ("UNION(a TIMESTAMPTZ[], b DATE[])", lambda stamp: [stamp]),
+            ("UNION(a TIMESTAMPTZ[], i INT)", lambda stamp: [stamp]),
+            ("UNION(u UNION(t TIMESTAMPTZ[]))", lambda stamp: [stamp]),
+        ],
+        ids=[
+            "list",
+            "struct",
+            "map",
+            "list of structs",
+            "struct in a union",
+            "list in a union",
+            "a union of two list members",
+            "a union with another kind",
+            "a nested union",
+        ],
+    )
+    def test_each_date_is_read_once(
+        self, con: duckdb.frame.Connection, declared: str, wrap: Callable[[datetime.datetime], object]
+    ) -> None:
+        calls: list[object] = []
+
+        class Counting(datetime.tzinfo):
+            def utcoffset(self, moment: datetime.datetime | None) -> datetime.timedelta:
+                calls.append(moment)
+                return datetime.timedelta(0)
+
+            def dst(self, moment: datetime.datetime | None) -> None:
+                return None
+
+            def tzname(self, moment: datetime.datetime | None) -> str:
+                return "counting"
+
+        stamp = datetime.datetime(2020, 1, 1, tzinfo=Counting())
+        con.create_function("g", lambda _: stamp, ["BIGINT"], "TIMESTAMPTZ")
+        rows(con, "SELECT g(1)")
+        alone = len(calls)
+        calls.clear()
+        con.create_function("f", lambda _: wrap(stamp), ["BIGINT"], declared)
+        rows(con, "SELECT f(1)")
+        assert len(calls) == alone > 0
+
+    @pytest.mark.parametrize("declared", ["MAP(VARCHAR, TIMESTAMP)", "STRUCT(a TIMESTAMP)"])
+    def test_a_dict_subclass_is_read_by_its_entries(self, con: duckdb.frame.Connection, declared: str) -> None:
+        class Uncounted(dict[str, datetime.datetime]):
+            def __len__(self) -> int:
+                return 0
+
+        returned = Uncounted(a=datetime.datetime(2020, 1, 1))
+        con.create_function("f", lambda _: returned, ["BIGINT"], declared)
+        assert rows(con, "SELECT f(1)") == [({"a": datetime.datetime(2020, 1, 1)},)]
+
+
+class TestReturnedFieldsPairByName:
+    """A returned dict meets its declared STRUCT or MAP as the engine's cast pairs them: by field name."""
+
+    @pytest.mark.parametrize(
+        ("returned", "declared", "expected"),
+        [
+            (
+                {"b": datetime.datetime(2020, 1, 1), "a": datetime.datetime(2021, 1, 1)},
+                "STRUCT(a TIMESTAMP, b TIMESTAMP)",
+                {"a": datetime.datetime(2021, 1, 1), "b": datetime.datetime(2020, 1, 1)},
+            ),
+            (
+                {"b": datetime.datetime(2020, 1, 1), "a": 2},
+                "STRUCT(a INTEGER, b TIMESTAMP)",
+                {"a": 2, "b": datetime.datetime(2020, 1, 1)},
+            ),
+            ({"k": datetime.datetime(2020, 1, 1)}, "MAP(VARCHAR, DATE)", {"k": datetime.date(2020, 1, 1)}),
+        ],
+        ids=["reordered", "mixed types reordered", "text keys into a map"],
+    )
+    def test_fields_meet_their_namesakes(
+        self, con: duckdb.frame.Connection, returned: object, declared: str, expected: object
+    ) -> None:
+        con.create_function("f", lambda _: returned, ["BIGINT"], declared)
+        assert rows(con, "SELECT f(1)") == [(expected,)]
+
+    @pytest.mark.parametrize(
+        ("returned", "declared", "message"),
+        [
+            ({"k": np.datetime64(1, "ns")}, "MAP(VARCHAR, TIMESTAMP)", "which cannot hold it exactly"),
+            ({"k": datetime.datetime(2020, 1, 1, 5)}, "MAP(VARCHAR, DATE)", "which cannot hold it exactly"),
+            (
+                {"k": datetime.datetime(2020, 1, 1, tzinfo=datetime.UTC)},
+                "MAP(VARCHAR, TIMESTAMP)",
+                "converting between them would assume a time zone",
+            ),
+            (
+                {"k": datetime.datetime(2020, 1, 1)},
+                "MAP(VARCHAR, TIMESTAMPTZ)",
+                "converting between them would assume a time zone",
+            ),
+            (
+                {"b": datetime.datetime(2020, 1, 1, tzinfo=datetime.UTC), "a": datetime.datetime(2020, 1, 1)},
+                "STRUCT(a TIMESTAMPTZ, b TIMESTAMP)",
+                "converting between them would assume a time zone",
+            ),
+        ],
+        ids=["ns into a map", "time into a map of dates", "aware into a map", "naive into a map", "reordered zones"],
+    )
+    def test_what_a_namesake_cannot_hold_is_refused(
+        self, con: duckdb.frame.Connection, returned: object, declared: str, message: str
+    ) -> None:
+        con.create_function("f", lambda _: returned, ["BIGINT"], declared)
+        with pytest.raises(exceptions.InvalidInputError, match=message):
+            rows(con, "SELECT f(1)")
+
+
+class TestUnnamedAndCaseFoldedFields:
+    """A field named by the empty string pairs by position, as the engine's cast pairs it; other names fold case."""
+
+    @pytest.mark.parametrize(
+        ("returned", "declared", "message"),
+        [
+            ({"": datetime.datetime(2020, 1, 1, 5)}, "STRUCT(a DATE)", "which cannot hold it exactly"),
+            ({"": np.datetime64(1, "ns")}, "STRUCT(a TIMESTAMP)", "which cannot hold it exactly"),
+            (
+                {"": datetime.datetime(2020, 1, 1, 5, tzinfo=datetime.UTC), "b": 1},
+                "STRUCT(a TIMESTAMP, b INTEGER)",
+                "converting between them would assume a time zone",
+            ),
+            ({"": {"x": datetime.datetime(2020, 1, 1, 5)}}, "STRUCT(a STRUCT(x DATE))", "which cannot hold it exactly"),
+            ({"A": datetime.datetime(2020, 1, 1, 5)}, "STRUCT(a DATE)", "which cannot hold it exactly"),
+        ],
+        ids=["unnamed", "unnamed ns", "unnamed zoned beside a named", "unnamed nested", "case folded"],
+    )
+    def test_a_field_is_checked_against_the_field_it_meets(
+        self, con: duckdb.frame.Connection, returned: object, declared: str, message: str
+    ) -> None:
+        con.create_function("f", lambda _: returned, ["BIGINT"], declared)
+        with pytest.raises(exceptions.InvalidInputError, match=message):
+            rows(con, "SELECT f(1)")
+
+    def test_a_later_case_twin_is_dropped_as_the_engine_drops_it(self, con: duckdb.frame.Connection) -> None:
+        # The first field naming `a` takes it, and the cast drops the second unread.
+        returned = {"a": datetime.datetime(2020, 1, 1), "A": datetime.datetime(2021, 1, 1, 5)}
+        con.create_function("f", lambda _: returned, ["BIGINT"], "STRUCT(a DATE)")
+        assert rows(con, "SELECT f(1)") == [({"a": datetime.date(2020, 1, 1)},)]
+
+    def test_unnamed_fields_are_kept_in_order(self, con: duckdb.frame.Connection) -> None:
+        returned = {"": datetime.datetime(2020, 1, 1), "y": datetime.date(2021, 1, 1)}
+        con.create_function("f", lambda _: returned, ["BIGINT"], "STRUCT(a DATE, b DATE)")
+        assert rows(con, "SELECT f(1)") == [({"a": datetime.date(2020, 1, 1), "b": datetime.date(2021, 1, 1)},)]
+
+    def test_a_later_unnamed_field_is_dropped_as_the_engine_drops_it(self, con: duckdb.frame.Connection) -> None:
+        # Pairing is by name once the first field has one, and no declared field is named by the empty string.
+        returned = {"a": datetime.datetime(2020, 1, 1), "": datetime.datetime(2020, 1, 1, 12)}
+        con.create_function("f", lambda _: returned, ["BIGINT"], "STRUCT(a DATE, b DATE)")
+        assert rows(con, "SELECT f(1)") == [({"a": datetime.date(2020, 1, 1), "b": None},)]
+
+    def test_matching_fields_are_kept_with_the_declared_names(self, con: duckdb.frame.Connection) -> None:
+        returned = {"A": datetime.datetime(2020, 1, 1), "b": None}
+        con.create_function("f", lambda _: returned, ["BIGINT"], "STRUCT(a DATE, b TIMESTAMP, c INTEGER)")
+        assert rows(con, "SELECT f(1)") == [({"a": datetime.date(2020, 1, 1), "b": None, "c": None},)]
+
+
+class NeverIterated(list[object]):
+    """A list that fails when iterated, standing for one whose own `__iter__` runs code."""
+
+    def __iter__(self) -> Iterator[object]:
+        message = "a dropped field was iterated"
+        raise AssertionError(message)
+
+
+class TestDroppedFields:
+    """A returned field the declared STRUCT has no place for is never read, as the engine's cast never reads it.
+
+    The cast still checks the struct's shape.
+    """
+
+    @pytest.mark.parametrize(
+        "ignored",
+        [
+            [datetime.datetime(2020, 1, 1), datetime.datetime(2020, 1, 1, tzinfo=datetime.UTC)],
+            np.datetime64(1, "ns"),
+        ],
+        ids=["a list of both kinds", "nanoseconds"],
+    )
+    def test_a_dropped_field_is_not_read(self, con: duckdb.frame.Connection, ignored: object) -> None:
+        # Values the conversion would refuse, so a check that read them anyway would fail loudly.
+        returned = {"a": datetime.datetime(2020, 1, 1), "ignored": ignored}
+        con.create_function("f", lambda _: returned, ["BIGINT"], "STRUCT(a TIMESTAMP)")
+        assert rows(con, "SELECT f(1)") == [({"a": datetime.datetime(2020, 1, 1)},)]
+
+    @pytest.mark.parametrize(
+        ("returned", "declared", "expected"),
+        [
+            ({"k": {"b": 1, "ignored": object()}}, "MAP(VARCHAR, STRUCT(b INTEGER))", {"k": {"b": 1}}),
+            (
+                [{"a": datetime.datetime(2020, 1, 1), "ignored": object()}],
+                "STRUCT(a TIMESTAMP)[]",
+                [{"a": datetime.datetime(2020, 1, 1)}],
+            ),
+            (
+                {"s": {"a": datetime.datetime(2020, 1, 1), "ignored": {"c": [object()]}}},
+                "STRUCT(s STRUCT(a TIMESTAMP))",
+                {"s": {"a": datetime.datetime(2020, 1, 1)}},
+            ),
+        ],
+        ids=["in a map", "in a list", "in a nested struct"],
+    )
+    def test_a_dropped_field_deeper_is_not_read(
+        self, con: duckdb.frame.Connection, returned: object, declared: str, expected: object
+    ) -> None:
+        # The list and nested-struct shapes also pin that the declared description walks LIST and STRUCT parts.
+        con.create_function("f", lambda _: returned, ["BIGINT"], declared)
+        assert rows(con, "SELECT f(1)") == [(expected,)]
+
+    @pytest.mark.parametrize(
+        ("returned", "declared", "expected"),
+        [
+            (
+                {"a": datetime.datetime(2020, 1, 1), "ignored": NeverIterated([1])},
+                "STRUCT(a TIMESTAMP)",
+                {"a": datetime.datetime(2020, 1, 1)},
+            ),
+            (
+                {"s": {"a": datetime.datetime(2020, 1, 1), "ignored": NeverIterated([1])}},
+                "STRUCT(s STRUCT(a TIMESTAMP))",
+                {"s": {"a": datetime.datetime(2020, 1, 1)}},
+            ),
+            ({"b": 1, "ignored": NeverIterated([1])}, "STRUCT(b INTEGER)", {"b": 1}),
+            (
+                {"a": datetime.datetime(2020, 1, 1), "ignored": (NeverIterated([1]),)},
+                "STRUCT(a TIMESTAMP)",
+                {"a": datetime.datetime(2020, 1, 1)},
+            ),
+            (
+                {"a": datetime.datetime(2020, 1, 1), "ignored": [[NeverIterated([1])]]},
+                "STRUCT(a TIMESTAMP)",
+                {"a": datetime.datetime(2020, 1, 1)},
+            ),
+            (
+                [{"a": datetime.datetime(2020, 1, 1), "ignored": NeverIterated([1])}],
+                "STRUCT(a TIMESTAMP)[]",
+                [{"a": datetime.datetime(2020, 1, 1)}],
+            ),
+        ],
+        ids=["beside a date", "in a nested struct", "with no date", "in a tuple", "lists deep", "in a list of structs"],
+    )
+    def test_a_dropped_list_is_never_iterated(
+        self, con: duckdb.frame.Connection, returned: object, declared: str, expected: object
+    ) -> None:
+        con.create_function("f", lambda _: returned, ["BIGINT"], declared)
+        assert rows(con, "SELECT f(1)") == [(expected,)]
+
+    @pytest.mark.parametrize(
+        ("returned", "reason"),
+        [
+            ({"": datetime.datetime(2020, 1, 1), "x": object()}, "Cannot cast STRUCTs of different size"),
+            ({"x": object()}, "STRUCT to STRUCT cast must have at least one matching member"),
+        ],
+        ids=["unnamed with a field too many", "no field matches"],
+    )
+    def test_the_cast_still_checks_the_shape(self, con: duckdb.frame.Connection, returned: object, reason: str) -> None:
+        con.create_function("f", lambda _: returned, ["BIGINT"], "STRUCT(a TIMESTAMP)")
+        with pytest.raises(exceptions.InvalidInputError, match=reason):
+            rows(con, "SELECT f(1)")
+
+    def test_each_struct_of_a_list_meets_the_declared_one_on_its_own(self, con: duckdb.frame.Connection) -> None:
+        # The elements need not combine to one type first, as they would read whole.
+        con.create_function("f", lambda _: [{"b": 1}, {"b": "x"}], ["BIGINT"], "STRUCT(b VARCHAR)[]")
+        assert rows(con, "SELECT f(1)") == [([{"b": "1"}, {"b": "x"}],)]
+
+
+class TestUnionReturns:
+    """A returned value is cast to the UNION as the engine's cast does, which chooses the member.
+
+    A date or time inside is then held, in the member chosen, to the rules any declared type holds it to: no time zone
+    assumed, and a date or timestamp exactly or not at all. A value that fails them is refused, and no other member is
+    tried.
+    """
+
+    @pytest.mark.parametrize(
+        ("returned", "declared"),
+        [
+            (datetime.datetime(2020, 1, 1, 12), "UNION(t TIMESTAMP, z TIMESTAMPTZ)"),
+            (datetime.datetime(2020, 1, 1, 12, tzinfo=datetime.UTC), "UNION(t TIMESTAMP, z TIMESTAMPTZ)"),
+            (np.datetime64("2020-01-01T00:00:00.5", "ms"), "UNION(t TIMESTAMP, i INTEGER)"),
+            (np.datetime64("2020-01-01T00:00:00.5", "ms"), "UNION(a TIMESTAMP, b TIMESTAMP_S)"),
+            (datetime.datetime(2020, 1, 1, 0, 0, 0, 1), "UNION(m TIMESTAMP_MS, n TIMESTAMP_NS)"),
+            ([np.datetime64(1, "s")], "UNION(a TIMESTAMP[], b TIMESTAMP_MS[])"),
+            (
+                {"a": datetime.datetime(2020, 1, 1), "b": 1},
+                "UNION(z STRUCT(a TIMESTAMPTZ, b HUGEINT), t STRUCT(a TIMESTAMP, b HUGEINT))",
+            ),
+            ([datetime.datetime(2020, 1, 1)] * 3, "UNION(a TIMESTAMP[3], s VARCHAR)"),
+            (
+                [
+                    pd.Timestamp("2020-01-01", tz="UTC").as_unit("ns"),
+                    datetime.datetime(2020, 1, 1, tzinfo=datetime.UTC),
+                ],
+                "UNION(t TIMESTAMPTZ[])",
+            ),
+            ({"a": datetime.datetime(2020, 1, 1), "b": 1}, "UNION(t STRUCT(a TIMESTAMP, b HUGEINT))"),
+            ([np.datetime64(1, "s")], "UNION(t TIMESTAMP[])"),
+            ([datetime.datetime(2020, 1, 1)], "UNION(a TIMESTAMP[], b DATE[], s VARCHAR)"),
+            ({"a": datetime.datetime(2020, 1, 1)}, "UNION(w STRUCT(a TIMESTAMP, b INTEGER), s STRUCT(a TIMESTAMP))"),
+            ({1: datetime.datetime(2020, 1, 1)}, "UNION(m MAP(BIGINT, TIMESTAMP), s VARCHAR)"),
+            (datetime.time(12), "UNION(t TIME, z TIMETZ)"),
+            (datetime.time(12, tzinfo=datetime.UTC), "UNION(t TIME, z TIMETZ)"),
+            (datetime.datetime(2020, 1, 1), "UNION(u UNION(t TIMESTAMP))"),
+            ([datetime.datetime(2020, 1, 1)], "UNION(u UNION(t TIMESTAMP[]))"),
+            (datetime.datetime(2020, 1, 1), "UNION(z TIMESTAMPTZ, u UNION(s VARCHAR, t TIMESTAMP))"),
+            (datetime.datetime(2020, 1, 1), "UNION(u UNION(u TIMESTAMP, s VARCHAR))"),
+        ],
+        ids=[
+            "naive",
+            "aware",
+            "the one member of its kind",
+            "the unit it widens to exactly",
+            "a finer unit",
+            "a list in the unit it widens to",
+            "a struct beside one needing a time zone",
+            "an array of its length",
+            "a zoned list of two units at whole microseconds",
+            "a field widened",
+            "a list in another unit",
+            "its own type among several",
+            "a dict of its own type among several",
+            "a dict with other keys",
+            "a naive time",
+            "an aware time",
+            "nested, a date",
+            "nested, a list",
+            "nested, beside a member of the other kind",
+            "nested, a tag named as its member",
+        ],
+    )
+    def test_the_member_matches_the_casts_own_choice(
+        self, con: duckdb.frame.Connection, returned: object, declared: str
+    ) -> None:
+        # One oracle for every shape: the value lands in the member SQL's CAST of the same literal picks, and holds
+        # the same value there, so an engine bump that moves the choice moves both sides together.
+        con.create_function("f", lambda _: returned, ["BIGINT"], declared)
+        literal = f"CAST({render_literal(returned)} AS {declared})"
+        expected = rows(con, f"SELECT union_tag({literal}), {literal}")
+        assert rows(con, "SELECT union_tag(f(1)), f(1)") == expected
+
+    def test_an_unnamed_dict_takes_a_struct_member_by_position(self, con: duckdb.frame.Connection) -> None:
+        returned = {"": datetime.datetime(2020, 1, 1), "x": 1}
+        con.create_function("f", lambda _: returned, ["BIGINT"], "UNION(s STRUCT(a TIMESTAMP, b BIGINT), v VARCHAR)")
+        assert rows(con, "SELECT union_tag(f(1)), f(1)") == [("s", {"a": datetime.datetime(2020, 1, 1), "b": 1})]
+
+    @pytest.mark.parametrize(
+        ("returned", "declared"),
+        [
+            (np.datetime64(1, "ns"), "UNION(t TIMESTAMP)"),
+            ({"u": np.datetime64(1, "ns")}, "STRUCT(u UNION(t TIMESTAMP))"),
+            ([np.datetime64(1, "ns")], "UNION(t TIMESTAMP)[]"),
+            (np.datetime64(1, "ns"), "UNION(u UNION(t TIMESTAMP))"),
+        ],
+        ids=["nanoseconds", "in a struct", "in a list", "in a nested union"],
+    )
+    def test_a_member_that_cannot_hold_it_exactly_is_refused(
+        self, con: duckdb.frame.Connection, returned: object, declared: str
+    ) -> None:
+        con.create_function("f", lambda _: returned, ["BIGINT"], declared)
+        with pytest.raises(exceptions.InvalidInputError, match="which cannot hold it exactly"):
+            rows(con, "SELECT f(1)")
+
+    @pytest.mark.parametrize(
+        ("returned", "declared"),
+        [
+            (datetime.datetime(2020, 1, 1, 12), "UNION(z TIMESTAMPTZ, s VARCHAR)"),
+            ({"x": datetime.datetime(2020, 1, 1, 12)}, "UNION(s STRUCT(x TIMESTAMPTZ), v VARCHAR)"),
+            (datetime.datetime(2020, 1, 1, 12), "UNION(m TIMESTAMP_MS, z TIMESTAMPTZ)"),
+            ([datetime.datetime(2020, 1, 1, 12)], "UNION(t TIMESTAMP_MS[], z TIMESTAMPTZ[])"),
+            (datetime.datetime(2020, 1, 1, 12), "UNION(u UNION(z TIMESTAMPTZ), s VARCHAR)"),
+            (datetime.date(2020, 1, 1), "UNION(z TIMESTAMPTZ, s VARCHAR)"),
+        ],
+        ids=[
+            "naive",
+            "naive in a struct",
+            "naive beside a member it cannot fill exactly",
+            "a naive list",
+            "naive in a nested union",
+            "a date",
+        ],
+    )
+    def test_a_member_needing_a_time_zone_is_refused(
+        self, con: duckdb.frame.Connection, returned: object, declared: str
+    ) -> None:
+        # The engine's cast takes such a value into the zoned member, in the session's time zone.
+        con.create_function("f", lambda _: returned, ["BIGINT"], declared)
+        with pytest.raises(exceptions.InvalidInputError, match="converting between them would assume a time zone"):
+            rows(con, "SELECT f(1)")
+
+    @pytest.mark.parametrize(
+        ("returned", "declared", "message"),
+        [
+            (
+                {"a": datetime.datetime(2020, 1, 1)},
+                "UNION(t STRUCT(a TIMESTAMP, b INTEGER), v VARCHAR)",
+                "can't be implicitly cast",
+            ),
+            (
+                [datetime.datetime(2020, 1, 1), datetime.datetime(2020, 1, 1, tzinfo=datetime.UTC)],
+                "UNION(a TIMESTAMP[], b TIMESTAMPTZ[])",
+                "a list holds values with and without a time zone",
+            ),
+        ],
+        ids=["a dict missing a field of a struct member", "both kinds in one list"],
+    )
+    def test_a_value_the_cast_cannot_take_is_refused(
+        self, con: duckdb.frame.Connection, returned: object, declared: str, message: str
+    ) -> None:
+        con.create_function("f", lambda _: returned, ["BIGINT"], declared)
+        with pytest.raises(exceptions.InvalidInputError, match=message):
+            rows(con, "SELECT f(1)")
+
+    @pytest.mark.parametrize(
+        ("returned", "declared"),
+        [
+            (None, "UNION(t TIMESTAMP, v VARCHAR)"),
+            ({"u": None}, "STRUCT(u UNION(t TIMESTAMP))"),
+            ([None], "UNION(t TIMESTAMP)[]"),
+        ],
+        ids=["alone", "in a struct", "in a list"],
+    )
+    def test_a_none_is_a_null_of_the_declared_union(
+        self, con: duckdb.frame.Connection, returned: object, declared: str
+    ) -> None:
+        con.create_function("f", lambda _: returned, ["BIGINT"], declared)
+        expected = None if returned is None else {"u": None} if isinstance(returned, dict) else [None]
+        assert rows(con, "SELECT f(1)") == [(expected,)]
+
+    @pytest.mark.parametrize(
+        ("returned", "declared"),
+        [
+            ([datetime.datetime(2020, 1, 1)] * 3, "UNION(a TIMESTAMP[2])"),
+            ([datetime.datetime(2020, 1, 1)] * 2, "UNION(a TIMESTAMP[3], m TIMESTAMP_MS[])"),
+            ({"s": [datetime.datetime(2020, 1, 1)] * 3}, "UNION(t STRUCT(s TIMESTAMP[2]))"),
+            (["a", "b"], "UNION(a VARCHAR[3])"),
+            ({"s": ["a"]}, "UNION(t STRUCT(s VARCHAR[2]))"),
+        ],
+        ids=[
+            "alone",
+            "beside a member it cannot fill exactly",
+            "in a struct member",
+            "text",
+            "text in a struct member",
+        ],
+    )
+    def test_a_list_of_another_length_than_an_array_member_is_refused(
+        self, con: duckdb.frame.Connection, returned: object, declared: str
+    ) -> None:
+        # SQL's CAST refuses it; the cast of a value usually leaves the member NULL, which the client refuses, but
+        # on some platforms the engine's cast trips its own bounds check first and refuses by itself.
+        con.create_function("f", lambda _: returned, ["BIGINT"], declared)
+        refusals = "which the engine's cast to it leaves NULL|cannot be converted to its declared type"
+        with pytest.raises(exceptions.InvalidInputError, match=refusals):
+            rows(con, "SELECT f(1)")
+
+    @pytest.mark.parametrize(
+        ("returned", "declared"),
+        [
+            (datetime.datetime(2020, 1, 1), "UNION(a TIMESTAMP, b TIMESTAMP)"),
+            ([datetime.datetime(2020, 1, 1)] * 2, "UNION(t TIMESTAMP[2], u TIMESTAMP[])"),
+            ({"a": datetime.datetime(2020, 1, 1)}, "UNION(x STRUCT(a UNION(p TIMESTAMP, q TIMESTAMP)))"),
+        ],
+        ids=["two alike", "an array and a list", "in a struct in a union"],
+    )
+    def test_two_members_the_cast_ties_between_are_refused_as_ambiguous(
+        self, con: duckdb.frame.Connection, returned: object, declared: str
+    ) -> None:
+        con.create_function("f", lambda _: returned, ["BIGINT"], declared)
+        with pytest.raises(exceptions.InvalidInputError, match="The cast is ambiguous"):
+            rows(con, "SELECT f(1)")

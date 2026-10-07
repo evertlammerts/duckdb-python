@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import datetime
 import decimal
+import subprocess
+import sys
 import uuid
 
+import numpy as np
+import pandas as pd
 import pytest
 
 from duckdb import _duckdb, exceptions
@@ -18,12 +23,15 @@ from duckdb._expressions.expr import (
     lit,
     param,
     quote,
+    render_literal,
     row_number,
     sql_expr,
     sql_type_of,
     star,
     when,
 )
+
+from ._support import Emptying, NoOffset
 
 
 @pytest.fixture(scope="module")
@@ -319,6 +327,20 @@ class TestRichLiteralTypes:
         with pytest.raises(TypeError, match="non-finite"):
             (col("x") == decimal.Decimal("NaN")).fragment()
 
+    def test_a_null_inside_a_composite_renders_as_null_text(self) -> None:
+        # Written in, the SQL binder types the NULL from its siblings, however it pairs them.
+        assert render_literal([None, "x"]) == "[NULL, 'x']"
+        assert render_literal({"a": None, "b": 1}) == "{'a': NULL, 'b': 1}"
+
+    def test_a_literal_of_only_nulls_is_written_in_for_the_binder_to_type(self, con: _duckdb.Connection) -> None:
+        # sql_type_of gives [None] no type, so instead of binding it bare the list is written into the SQL, where
+        # the binder types the NULLs from whatever meets them.
+        with ParamSink() as sink:
+            rendered = (col("x") == lit([None])).fragment()
+        assert (rendered, sink.entries) == ('("x" = [NULL])', [])
+        bound = con.execute(f"SELECT {rendered} FROM (SELECT ['a'] AS x)").fetch_all()
+        assert bound == [(False,)]
+
 
 class TestFoundByWritingTheManual:
     """Two shortcuts that produced SQL DuckDB rejects, both caught by running the manual's examples."""
@@ -415,3 +437,271 @@ class TestEveryAdvertisedFunctionExecutes:
     def test_n_unique(self, con: _duckdb.Connection, data: str) -> None:
         # Not in the shortcut table: DISTINCT is syntax, not a function name.
         assert con.execute(f"SELECT {col('v').n_unique().fragment()} FROM {data}").fetch_all()[0][0] == 3
+
+
+class TestTemporalLiterals:
+    """A date or time written into the SQL means what it means bound as a parameter."""
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            datetime.timedelta(days=100_000, microseconds=1),
+            datetime.timedelta(microseconds=-1),
+            pd.Timedelta(-1500, "ns"),
+            datetime.time(12, 30, tzinfo=datetime.timezone(datetime.timedelta(hours=2))),
+            np.datetime64("2020-01-02T03:04:05", "s"),
+            np.datetime64("2020-01-02T03:04:05.123", "ms"),
+            np.datetime64("2020-01-02T03:04:05.123456000", "ns"),
+            np.datetime64("2020-03", "M"),
+            np.timedelta64(-1500, "ns"),
+            pd.Timestamp("2020-01-02 03:04:05").as_unit("s"),
+            pd.Timestamp("2020-01-02 03:04:05.5", tz="Europe/Amsterdam"),
+            np.timedelta64(7_200_000_000_000_000_000, "us"),
+            np.timedelta64(-(2**63) + 1, "us"),
+        ],
+        ids=str,
+    )
+    def test_written_in_and_bound_agree(self, con: _duckdb.Connection, value: object) -> None:
+        written = con.execute(f"SELECT typeof(v), v FROM (SELECT {render_literal(value)} AS v)").fetch_all()
+        bound = con.execute("SELECT typeof(v), v FROM (SELECT $1 AS v)", [value]).fetch_all()
+        assert written == bound
+        assert sql_type_of(value) == written[0][0]
+
+    @pytest.mark.parametrize(
+        ("value", "message"),
+        [
+            (
+                [datetime.datetime(2020, 1, 1), datetime.datetime(2020, 1, 1, tzinfo=datetime.UTC)],
+                "with and without a time zone",
+            ),
+            (pd.Timestamp("2020-01-02 03:04:05.123456789"), "has nanoseconds"),
+            (np.datetime64("2020-01-02T03:04:05.123456789", "ns"), "has nanoseconds"),
+        ],
+        ids=["zones mixed", "pandas ns", "numpy ns"],
+    )
+    def test_what_a_literal_cannot_hold_is_refused_as_a_parameter_would_be(
+        self, con: _duckdb.Connection, value: object, message: str
+    ) -> None:
+        with pytest.raises(exceptions.InvalidInputError, match=message):
+            render_literal(value)
+        with pytest.raises(exceptions.InvalidInputError, match=message):
+            con.execute("SELECT $1", [value])
+
+    @pytest.mark.parametrize(
+        "missing",
+        [
+            pd.NaT,
+            np.datetime64("NaT", "D"),
+            np.timedelta64("NaT", "ns"),
+            np.datetime64("NaT", ("s", 15)),
+            np.array(-(2**63), "datetime64[0M]")[()],
+        ],
+        ids=["pandas", "days", "nanoseconds", "stepped", "zero step"],
+    )
+    def test_a_missing_value_is_null(self, missing: object) -> None:
+        assert render_literal(missing) == "NULL"
+
+    @pytest.mark.parametrize(
+        ("value", "type_text"),
+        [(np.datetime64("2020-01-02", "D"), "DATE"), (np.datetime64("2020-01-01", "ns"), "TIMESTAMP")],
+        ids=["days", "nanoseconds"],
+    )
+    def test_a_numpy_scalar_reaches_its_parameter_unchanged(self, value: object, type_text: str) -> None:
+        with ParamSink() as sink:
+            compared = (col("x") > value).fragment()
+            called = fn("year", value).fragment()
+        assert (compared, called) == ('("x" > $1)', '"year"($2)')
+        assert [(kind, type_found) for kind, _, type_found in sink.entries] == [("literal", type_text)] * 2
+        assert all(bound is value for _, bound, _ in sink.entries)
+
+    def test_a_numpy_scalar_on_the_left_reaches_its_parameter_unchanged(self) -> None:
+        value: object = np.datetime64("2020-06-01", "ms")
+        with ParamSink() as sink:
+            rendered = (value > col("x")).fragment()
+        assert rendered == '("x" < $1)'
+        [(kind, bound, type_text)] = sink.entries
+        assert (kind, type_text) == ("literal", "TIMESTAMP_MS")
+        assert bound is value
+
+    @pytest.mark.parametrize("missing", [pd.NaT, np.timedelta64("NaT", "ns"), np.datetime64("NaT", "ms")], ids=str)
+    def test_a_missing_operand_is_written_in_as_null(self, con: _duckdb.Connection, missing: object) -> None:
+        with ParamSink() as sink:
+            rendered = (col("x") + missing).fragment()
+        assert (rendered, sink.entries) == ('("x" + NULL)', [])
+        assert con.execute(f"SELECT {rendered} FROM (SELECT TIMESTAMP '2020-01-01' AS x)").fetch_all() == [(None,)]
+
+    def test_a_list_of_both_kinds_is_refused_when_collected(self) -> None:
+        mixed = [datetime.datetime(2020, 1, 1), datetime.datetime(2020, 1, 1, tzinfo=datetime.UTC)]
+        with ParamSink(), pytest.raises(exceptions.InvalidInputError, match="with and without a time zone"):
+            lit(mixed).fragment()
+
+
+class TestNestedTemporalLiterals:
+    NAIVE = datetime.datetime(2020, 1, 1, 12)
+    AWARE = datetime.datetime(2020, 1, 1, 12, tzinfo=datetime.UTC)
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            [[NAIVE], [AWARE]],
+            [{"a": NAIVE}, {"a": AWARE}],
+            {1: NAIVE, 2: AWARE},
+            {NAIVE: 1, AWARE: 2},
+            [{"b": 1}, {"a": NAIVE}, {"a": AWARE}],
+            [{"a": AWARE}, {"b": 1}, {"a": NAIVE}],
+            [{"a": NAIVE}, {"A": AWARE}],
+            [[], [NAIVE], [AWARE]],
+            [{"a": None}, {"a": NAIVE}, {"a": AWARE}],
+            {1: [NAIVE], 2: [AWARE]},
+            [{NAIVE: 1}, {AWARE: 2}],
+            [{"a": [NAIVE]}, {"a": [None, AWARE]}],
+        ],
+        ids=[
+            "lists",
+            "structs",
+            "map values",
+            "map keys",
+            "a struct without the field first",
+            "a struct without the field between",
+            "field names differing in case",
+            "an empty list first",
+            "a null field first",
+            "lists in map values",
+            "keys of maps in a list",
+            "lists in struct fields",
+        ],
+    )
+    def test_both_kinds_at_one_place_are_refused_written_in_or_bound(
+        self, con: _duckdb.Connection, value: object
+    ) -> None:
+        assert sql_type_of(value) is None
+        with pytest.raises(exceptions.InvalidInputError, match="with and without a time zone"):
+            render_literal(value)
+        with pytest.raises(exceptions.InvalidInputError, match="with and without a time zone"):
+            con.execute("SELECT $1", [value])
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            [[], [NAIVE]],
+            [{"a": None}, {"a": NAIVE}],
+            [None, {"a": [None]}, {"a": [AWARE]}],
+            {datetime.date(2020, 1, 1): [], datetime.date(2020, 1, 2): [NAIVE]},
+        ],
+        ids=["empty list", "null field", "every depth", "map values"],
+    )
+    def test_a_missing_part_written_in_reads_as_bound(self, con: _duckdb.Connection, value: object) -> None:
+        written = con.execute(f"SELECT v::VARCHAR, typeof(v) FROM (SELECT {render_literal(value)} AS v)").fetch_all()
+        bound = con.execute("SELECT $1::VARCHAR, typeof($1)", [value]).fetch_all()
+        assert written == bound
+
+    def test_a_struct_keeps_each_field_as_it_is(self, con: _duckdb.Connection) -> None:
+        value = {"a": self.NAIVE, "b": self.AWARE}
+        assert con.execute(f"SELECT {render_literal(value)}").fetch_all() == [(value,)]
+
+    def test_a_datetime_whose_zone_gives_no_offset_is_naive(self) -> None:
+        # The one reading of each entry point is pinned by the agreement test; the type alone is decided here.
+        assert sql_type_of(datetime.datetime(2020, 1, 1, 12, tzinfo=NoOffset())) == "TIMESTAMP"
+
+    def test_a_tzinfo_that_empties_the_list_being_rendered_cannot_corrupt_the_text(self) -> None:
+        # The text honestly shows the list's remaining content; nothing crashes and nothing renders half-read.
+        values: list[datetime.datetime] = []
+        values.extend(datetime.datetime(2020 + i, 1, 1, tzinfo=Emptying(values)) for i in range(2))
+        assert render_literal(values) == "[]"
+
+    def test_a_value_a_deepcopy_cannot_take_is_refused_by_lit(self) -> None:
+        values: list[datetime.datetime] = []
+        values.append(datetime.datetime(2020, 1, 1, tzinfo=Emptying(values)))
+        with pytest.raises(TypeError, match="not plain data"):
+            lit(values)
+
+    def test_concurrent_temporal_literals_render_exactly(self) -> None:
+        # Each render borrows a pooled literal connection, so racing threads must neither mix values nor deadlock.
+        aware = [datetime.datetime(2020, 1, 1 + i, tzinfo=datetime.UTC) for i in range(8)]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            out = list(pool.map(render_literal, aware * 50))
+        assert out == [f"TIMESTAMP WITH TIME ZONE '2020-01-0{(i % 8) + 1} 00:00:00+00'" for i in range(400)]
+
+
+class TestNumpyLiteralRange:
+    @pytest.mark.parametrize(
+        "value",
+        [
+            np.array([2**62], "i8").view("datetime64[7D]")[0],
+            np.timedelta64(2**62, "D"),
+            np.datetime64(2**40, "M"),
+            np.datetime64(2**62, "s"),
+        ],
+        ids=["weeks", "days", "months", "seconds"],
+    )
+    def test_a_value_its_engine_type_cannot_hold_is_refused(self, value: object) -> None:
+        with pytest.raises(exceptions.InvalidInputError, match="beyond the range of its engine type"):
+            render_literal(value)
+
+
+# A time zone whose offset writes another value into SQL, on this thread and on another, and one whose offset fails.
+REENTRY = """
+import datetime as dt
+import threading
+from duckdb._expressions.expr import render_literal
+
+
+class Zone(dt.tzinfo):
+    def dst(self, moment):
+        return None
+
+    def tzname(self, moment):
+        return "zone"
+
+
+class Nested(Zone):
+    def __init__(self, depth):
+        self.depth = depth
+
+    def utcoffset(self, moment):
+        if self.depth:
+            render_literal(dt.datetime(2020, 1, 1, tzinfo=Nested(self.depth - 1)))
+        return dt.timedelta(0)
+
+
+class Elsewhere(Zone):
+    def utcoffset(self, moment):
+        found = []
+        worker = threading.Thread(target=lambda: found.append(render_literal(dt.date(2020, 1, 2))), daemon=True)
+        worker.start()
+        worker.join(20)
+        if found != ["DATE '2020-01-02'"]:
+            raise RuntimeError("the other thread did not finish")
+        return dt.timedelta(0)
+
+
+class Failing(Zone):
+    def utcoffset(self, moment):
+        raise ValueError("no offset")
+
+
+print(render_literal(dt.datetime(2020, 1, 1, tzinfo=Nested(6))))
+print(render_literal(dt.datetime(2020, 1, 1, tzinfo=Elsewhere())))
+for _ in range(6):
+    try:
+        render_literal(dt.datetime(2020, 1, 1, tzinfo=Failing()))
+    except ValueError as error:
+        print(error)
+print(render_literal(dt.date(2020, 1, 3)))
+"""
+
+
+class TestLiteralReentry:
+    """Writing a value into SQL may run Python code that writes another, on this thread or another, without waiting.
+
+    A conversion that fails leaves nothing held either.
+    """
+
+    def test_nested_concurrent_and_failing_conversions_all_finish(self) -> None:
+        # A child process, so a conversion that waits forever fails the test instead of hanging the run.
+        result = subprocess.run(
+            [sys.executable, "-c", REENTRY], capture_output=True, text=True, timeout=60, check=False
+        )
+        assert result.returncode == 0, result.stderr
+        written = "TIMESTAMP WITH TIME ZONE '2020-01-01 00:00:00+00'"
+        assert result.stdout.splitlines() == [written, written, *["no offset"] * 6, "DATE '2020-01-03'"]

@@ -1,5 +1,5 @@
 [build-system]
-requires = ["scikit-build-core>=0.10", "nanobind>=2.13"]
+requires = ["scikit-build-core>=1.1", "nanobind>=2.13"]
 build-backend = "scikit_build_core.build"
 
 [project]
@@ -34,7 +34,7 @@ cache-keys = [
 [dependency-groups]
 # Mirrors build-system.requires so --no-build-isolation can install them first.
 build = [
-    "scikit-build-core>=0.10",
+    "scikit-build-core>=1.1",
     "nanobind>=2.13",
 ]
 # numpy is what the egress tests need; pyarrow, polars and pandas are what the registry tests need. The package itself

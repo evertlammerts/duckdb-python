@@ -18,6 +18,7 @@ import string
 import uuid
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
+from .. import _duckdb, exceptions
 from .aggregates import AggregateMethods
 from .keywords import KEYWORDS
 
@@ -125,6 +126,45 @@ def _widen(types: list[str]) -> str | None:
     return None
 
 
+def _is_nat(value: object) -> bool:
+    """Whether `value` is pandas' or numpy's NaT, which stands for a missing value as None does."""
+    cls = type(value)
+    if cls.__name__ == "NaTType" and cls.__module__.startswith("pandas"):
+        return True
+    # numpy's NaT is the least count, in any unit and step.
+    return _is_numpy_temporal(value) and int(cast("Any", value).view("i8")) == -(2**63)
+
+
+def _is_numpy_temporal(value: object) -> bool:
+    """Whether `value` is a numpy datetime64 or timedelta64 scalar, recognised without importing numpy."""
+    cls = type(value)
+    return cls.__module__ == "numpy" and cls.__name__ in ("datetime64", "timedelta64")
+
+
+def _is_temporal(value: object) -> bool:
+    """Whether `value` is a date, time or duration of Python's, pandas' or numpy's, which the engine module converts."""
+    return isinstance(value, (datetime.date, datetime.time, datetime.timedelta)) or _is_numpy_temporal(value)
+
+
+def _conversion_type_of(value: object) -> str | None:
+    """The type a parameter binds as, by the engine module's own conversion.
+
+    Refused, the value is written in instead, where the same conversion refuses it again.
+    """
+    try:
+        return _duckdb.literal_type(value)
+    except exceptions.Error:
+        return None
+
+
+def _holds_temporal(value: object) -> bool:
+    if isinstance(value, (list, tuple)):
+        return any(_holds_temporal(item) for item in value)
+    if isinstance(value, dict):
+        return any(_holds_temporal(key) or _holds_temporal(item) for key, item in value.items())
+    return _is_temporal(value)
+
+
 def sql_type_of(value: object) -> str | None:
     """The SQL type to bind a Python value as, or None when it is ambiguous."""
     # Integer widths mirror DuckDB's own, so a bound value lands on the type an inline literal would have.
@@ -142,15 +182,22 @@ def sql_type_of(value: object) -> str | None:
         return "VARCHAR"
     if isinstance(value, bytes):
         return "BLOB"
-    # datetime before date: datetime subclasses date, so order decides.
+    if _is_nat(value):
+        return None
     if isinstance(value, datetime.datetime):
-        return "TIMESTAMP WITH TIME ZONE" if value.tzinfo else "TIMESTAMP"
+        # A pandas Timestamp or other subclass carries its own unit, which only the engine's conversion types.
+        if type(value) is datetime.datetime:
+            return "TIMESTAMP WITH TIME ZONE" if value.utcoffset() is not None else "TIMESTAMP"
+        return _conversion_type_of(value)
     if isinstance(value, datetime.date):
         return "DATE"
     if isinstance(value, datetime.time):
-        return "TIME WITH TIME ZONE" if value.tzinfo else "TIME"
+        # An aware time's offset may depend on a date, which only the conversion can refuse.
+        return "TIME" if value.tzinfo is None else _conversion_type_of(value)
     if isinstance(value, datetime.timedelta):
         return "INTERVAL"
+    if _is_numpy_temporal(value):
+        return _conversion_type_of(value)
     if isinstance(value, decimal.Decimal):
         return "DECIMAL"
     if isinstance(value, uuid.UUID):
@@ -184,15 +231,25 @@ def sql_type_of(value: object) -> str | None:
 def _needs_param(value: object) -> bool:
     """Whether a value is bound as a parameter rather than written into the SQL."""
     # Text and composites stay out of the SQL, decimals and dates bind exactly, and numbers inline as DuckDB types them.
-    return isinstance(
+    return _is_numpy_temporal(value) or isinstance(
         value,
         (str, bytes, list, tuple, dict, datetime.date, datetime.time, datetime.timedelta, decimal.Decimal, uuid.UUID),
     )
 
 
 def render_literal(value: object) -> str:
-    """A value written into the SQL text, only where that is safe."""
-    if value is None:
+    """A value written into the SQL text, only where that is safe.
+
+    A date, time or duration, alone or anywhere in a list or dict, is converted by the engine module as it would be
+    bound as a parameter, so it means the same written in, and is refused where a parameter would be.
+    """
+    if isinstance(value, (list, tuple, dict)) and _holds_temporal(value):
+        _duckdb.literal_type(value)
+    return _rendered(value)
+
+
+def _rendered(value: object) -> str:
+    if value is None or _is_nat(value):
         return "NULL"
     if isinstance(value, bool):
         return "TRUE" if value else "FALSE"
@@ -214,16 +271,8 @@ def render_literal(value: object) -> str:
         # One escape per byte: DuckDB reads exactly two hex digits after each, so one escape would cover only the first.
         escaped = "".join(f"\\x{byte:02x}" for byte in value)
         return f"'{escaped}'::BLOB"
-    # Reached only when no parameters are being collected; built from the value's own fields, so nothing needs escaping.
-    if isinstance(value, datetime.datetime):
-        keyword = "TIMESTAMPTZ" if value.tzinfo else "TIMESTAMP"
-        return f"{keyword} '{value.isoformat(sep=' ')}'"
-    if isinstance(value, datetime.date):
-        return f"DATE '{value.isoformat()}'"
-    if isinstance(value, datetime.time):
-        return f"TIME '{value.isoformat()}'"
-    if isinstance(value, datetime.timedelta):
-        return f"INTERVAL '{value.total_seconds()} seconds'"
+    if _is_temporal(value):
+        return _duckdb.temporal_literal(value)
     if isinstance(value, decimal.Decimal):
         if not value.is_finite():
             message = f"cannot render a non-finite Decimal: {value!r}"
@@ -239,13 +288,13 @@ def render_literal(value: object) -> str:
     if isinstance(value, uuid.UUID):
         return f"UUID '{value}'"
     if isinstance(value, (list, tuple)):
-        return "[" + ", ".join(render_literal(item) for item in value) + "]"
+        return "[" + ", ".join(_rendered(item) for item in value) + "]"
     if isinstance(value, dict):
         # Reached only when nothing is collecting parameters; text keys make a struct, anything else a map.
         if all(isinstance(k, str) for k in value):
-            entries = ", ".join(f"{render_literal(k)}: {render_literal(v)}" for k, v in value.items())
+            entries = ", ".join(f"{_rendered(k)}: {_rendered(v)}" for k, v in value.items())
             return "{" + entries + "}"
-        entries = ", ".join(f"{render_literal(k)}: {render_literal(v)}" for k, v in value.items())
+        entries = ", ".join(f"{_rendered(k)}: {_rendered(v)}" for k, v in value.items())
         return "MAP {" + entries + "}"
     message = f"cannot render a literal of type {type(value).__name__}: {value!r}"
     raise TypeError(message)
@@ -371,7 +420,7 @@ def _coerce(other: object) -> Expr | Any:
     """An Expr passes through, a literal wraps, a callable becomes a lambda, anything else defers to Python."""
     if isinstance(other, Expr):
         return other
-    if other is None or isinstance(other, LITERAL_TYPES):
+    if other is None or isinstance(other, LITERAL_TYPES) or _is_numpy_temporal(other):
         return Lit(other)
     if callable(other):
         return _as_lambda(other)
@@ -404,7 +453,7 @@ def _as_lambda(function: Callable[..., object]) -> Expr:
     except TypeError as reason:
         message = f"while building a SQL lambda from {label}: {reason}"
         raise TypeError(message) from reason
-    if not isinstance(body, Expr) and not (body is None or isinstance(body, LITERAL_TYPES)):
+    if not isinstance(body, Expr) and not (body is None or isinstance(body, LITERAL_TYPES) or _is_numpy_temporal(body)):
         message = (
             f"the lambda returned {body!r}, which is not an expression; it runs once, at build "
             f"time, on expressions rather than values, so its body must be built from them"
@@ -455,6 +504,10 @@ class FuncNamespaces:
 
 class Expr(AggregateMethods, FuncNamespaces):
     """One node of an expression tree."""
+
+    # numpy then hands an operator with a numpy scalar on its left back to the expression, which keeps the scalar,
+    # where numpy would convert it to a Python value first and lose its unit.
+    __array_ufunc__ = None
 
     def __init__(self) -> None:
         self._alias: str | None = None

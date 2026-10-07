@@ -14,14 +14,20 @@
 #include <nanobind/stl/unique_ptr.h>
 #include <nanobind/stl/vector.h>
 
+#include <algorithm>
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include "arrowc.hpp"
 #include "chunkview.hpp"
 #include "lifetime.hpp"
+#include "conversion/python_to_value.hpp"
+#include "conversion/sql_types.hpp"
+#include "conversion/untyped.hpp"
 #include "registry.hpp"
 #include "result.hpp"
 #include "udf.hpp"
@@ -57,7 +63,7 @@ public:
 	Database(std::shared_ptr<ModuleState> module, const std::string &path,
 	         const std::vector<std::pair<std::string, std::string>> &options)
 	    : module(std::move(module)), registry(std::make_shared<Registry>()),
-	      database(Open(this->module->environment, path, options)) {
+	      database(IsUntypedMarker(this->module->environment, path, options)) {
 		WithoutGil([&] { InstallRegistryScan(database, registry, this->module); });
 	}
 
@@ -90,8 +96,8 @@ public:
 	}
 
 private:
-	static cxx::Instance Open(cxx::Environment &environment, const std::string &path,
-	                          const std::vector<std::pair<std::string, std::string>> &options) {
+	static cxx::Instance IsUntypedMarker(cxx::Environment &environment, const std::string &path,
+	                                     const std::vector<std::pair<std::string, std::string>> &options) {
 		auto instance = environment.CreateInstance();
 		// A startup-only setting such as access_mode is accepted only before the first attach.
 		for (const auto &[name, value] : options) {
@@ -108,6 +114,68 @@ private:
 	std::shared_ptr<Registry> registry;
 	cxx::Instance database;
 };
+
+// A None or an empty container is an untyped value: it converts to the marker type, since the engine refuses a
+// value without one. Only when such a value survives conversion is the statement bound once more, and the parameter
+// takes the type the binder expects at its position; a value with its own type is never cast, and the engine matches
+// $name without case, so the pairing here does too. The expectation is only a hint: an unresolved parameter leaves
+// the binder silent about every one after it, and some expectations hold ANY or pair no field, so what the hint
+// cannot type cleanly goes to the engine as it is. Refused is only an untyped value at the statement's first free
+// position, where nothing could type it.
+void FillUntypedFromStatement(cxx::Connection &live, const cxx::SqlStatement &statement,
+                              std::vector<cxx::NamedParam> &bound, const std::vector<bool> &untyped) {
+	if (std::find(untyped.begin(), untyped.end(), true) == untyped.end()) {
+		return;
+	}
+	const auto signature = WithoutGil([&] { return live.Bind(statement); });
+	const auto &wanted = signature.parameters;
+	const auto count = wanted.GetFieldCount();
+	std::optional<cxx::idx_t> first_free;
+	for (cxx::idx_t j = 0; j < count; j++) {
+		if (wanted.GetFieldType(j).GetTypeId() == cxx::LogicalTypeId::UNKNOWN) {
+			first_free = j;
+			break;
+		}
+	}
+	for (std::size_t i = 0; i < bound.size(); i++) {
+		auto &param = bound[i];
+		if (!untyped[i]) {
+			continue;
+		}
+		const auto key = param.name.empty() ? std::to_string(i + 1) : param.name;
+		std::optional<cxx::idx_t> at;
+		for (cxx::idx_t j = 0; j < count; j++) {
+			if (EqualIgnoringCase(wanted.GetFieldName(j), key)) {
+				at = j;
+				break;
+			}
+		}
+		if (!at) {
+			// The engine's own count or name mismatch says more than a refusal here would.
+			continue;
+		}
+		const auto expected = wanted.GetFieldType(*at);
+		if (expected.GetTypeId() == cxx::LogicalTypeId::UNKNOWN) {
+			// A bare NULL means NULL whatever its type, so it binds as it is.
+			if (at == first_free && !param.value.IsNull()) {
+				throw cxx::InvalidInputException(
+				    "Invalid Input Error: the parameter $" + key +
+				    " holds an untyped value (None, or an empty list, tuple or dict) and "
+				    "the statement does not say its type; cast it to say its type, like $" +
+				    key + "::VARCHAR[]");
+			}
+			continue;
+		}
+		if (ContainsUnknownOrAny(expected)) {
+			continue;
+		}
+		if (param.value.IsNull()) {
+			param.value = cxx::Value::CreateNull(live, expected);
+			continue;
+		}
+		FillUntypedFromExpected(live, param.value, expected);
+	}
+}
 
 class Connection {
 public:
@@ -132,24 +200,45 @@ public:
 
 		auto &ctx = connection.Module()->conversion;
 		std::vector<cxx::NamedParam> bound;
+		std::vector<bool> untyped;
+		const auto convert = [&](nb::handle value) {
+			bool still = false;
+			auto converted = PythonToValue(live, value, ctx, TimestampPrecision::MICROSECONDS, &still);
+			untyped.push_back(still);
+			return converted;
+		};
 		const auto bind_named = [&](nb::handle name, nb::handle value) {
 			// Checked here because a failed nanobind cast surfaces as std::bad_cast, which names nothing.
 			if (!nb::isinstance<nb::str>(name)) {
 				throw cxx::InvalidInputException("Invalid Input Error: parameter names must be strings");
 			}
-			bound.push_back({nb::cast<std::string>(name), PythonToValue(live, value, ctx)});
+			bound.push_back({nb::cast<std::string>(name), convert(value)});
 		};
+		// Converting a value can run Python code that mutates the container passed in, so every shape is snapshotted
+		// before any value converts: what binds is what was passed.
 		if (nb::isinstance<nb::dict>(parameters)) {
+			std::vector<std::pair<nb::object, nb::object>> entries;
 			for (auto entry : nb::cast<nb::dict>(parameters)) {
-				bind_named(entry.first, entry.second);
+				entries.emplace_back(nb::borrow(entry.first), nb::borrow(entry.second));
+			}
+			for (const auto &[name, value] : entries) {
+				bind_named(name, value);
 			}
 		} else if (nb::isinstance(parameters, ctx.mapping_cls)) {
+			std::vector<std::pair<nb::object, nb::object>> entries;
 			for (nb::handle entry : parameters.attr("items")()) {
-				bind_named(entry[0], entry[1]);
+				entries.emplace_back(nb::borrow(entry[0]), nb::borrow(entry[1]));
+			}
+			for (const auto &[name, value] : entries) {
+				bind_named(name, value);
 			}
 		} else {
+			std::vector<nb::object> items;
 			for (nb::handle item : parameters) {
-				bound.push_back({std::string(), PythonToValue(live, item, ctx)});
+				items.push_back(nb::borrow(item));
+			}
+			for (const nb::object &item : items) {
+				bound.push_back({std::string(), convert(item)});
 			}
 		}
 
@@ -163,6 +252,7 @@ public:
 			throw cxx::InvalidInputException(
 			    "Invalid Input Error: execute takes exactly one statement when binding parameters");
 		}
+		FillUntypedFromStatement(live, statement, bound, untyped);
 		auto result = WithoutGil([&] { return live.Execute(statement, bound); });
 		return std::make_unique<Result>(std::move(held.database), connection.Module(), std::move(result));
 	}
@@ -398,6 +488,43 @@ NB_MODULE(_duckdb, m) {
 	    },
 	    nb::arg("object"),
 	    "The name a capsule carries, which for Arrow data says what it holds; None for anything else.");
+	m.def(
+	    "temporal_literal",
+	    [state](nb::handle value) {
+		    ModuleState::LiteralLease connection(*state);
+		    const auto bound = PythonToValue(*connection, value, state->conversion, TimestampPrecision::MICROSECONDS);
+		    if (bound.IsNull()) {
+			    return std::string("NULL");
+		    }
+		    const auto type = bound.GetLogicalType();
+		    if (type.GetTypeId() == cxx::LogicalTypeId::INTERVAL) {
+			    // The engine's own text for an interval of two billion hours or more does not parse back.
+			    const auto interval = bound.Get<cxx::interval_t>();
+			    return "INTERVAL '" + std::to_string(interval.months) + " months " + std::to_string(interval.days) +
+			           " days " + std::to_string(interval.micros) + " microseconds'";
+		    }
+		    std::string quoted;
+		    for (const char c : bound.ToText()) {
+			    quoted += c;
+			    if (c == '\'') {
+				    quoted += c;
+			    }
+		    }
+		    return type.ToText() + " '" + quoted + "'";
+	    },
+	    nb::arg("value"),
+	    "A date, time or duration as SQL text: converted as a query parameter is, then written as a literal of its "
+	    "engine type in the engine's own text for it; NULL for a missing value.");
+	m.def(
+	    "literal_type",
+	    [state](nb::handle value) {
+		    ModuleState::LiteralLease connection(*state);
+		    return PythonToValue(*connection, value, state->conversion, TimestampPrecision::MICROSECONDS)
+		        .GetLogicalType()
+		        .ToText();
+	    },
+	    nb::arg("value"),
+	    "The engine type `value` binds as when it is a query parameter, refusing what a parameter refuses.");
 	m.def("chain_streams", &ChainStreams, nb::arg("schema"), nb::arg("parts"),
 	      "Several exports read as one stream, each part with the schema of `schema`; the caller guarantees that, "
 	      "nothing checks it.");

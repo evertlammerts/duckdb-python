@@ -133,3 +133,9 @@ def capsule_name(object: object) -> str | None:
 
 def chain_streams(schema: object, parts: Iterable[object]) -> object:
     """Several exports read as one stream, each part with the schema of `schema`, which the caller guarantees."""
+
+def temporal_literal(value: object) -> str:
+    """A date, time or duration as SQL text, converted as a query parameter is; NULL for a missing value."""
+
+def literal_type(value: object) -> str:
+    """The engine type `value` binds as when it is a query parameter, refusing what a parameter refuses."""

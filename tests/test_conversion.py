@@ -249,3 +249,46 @@ class TestBulkRowConversion:
                 uuid.UUID("ffffffff-ffff-ffff-ffff-ffffffffffff"),
             )
         ]
+
+
+class TestNanosecondsFloor:
+    """A nanosecond timestamp comes back as the microsecond it lies in, so one before 1970 does not round up."""
+
+    @pytest.mark.parametrize(
+        ("sql", "expected"),
+        [
+            (
+                "SELECT TIMESTAMP_NS '1969-12-31 23:59:59.999999999'",
+                datetime.datetime(1969, 12, 31, 23, 59, 59, 999999),
+            ),
+            ("SELECT TIMESTAMP_NS '1960-01-01 00:00:00.000000499'", datetime.datetime(1960, 1, 1)),
+            (
+                "SELECT TIMESTAMP_NS '1969-12-31 23:59:59.999999'",
+                datetime.datetime(1969, 12, 31, 23, 59, 59, 999999),
+            ),
+            ("SELECT TIMESTAMP_NS '2020-01-01 00:00:00.123456789'", datetime.datetime(2020, 1, 1, 0, 0, 0, 123456)),
+            (
+                "SELECT TIMESTAMPTZ_NS '1969-12-31 23:59:59.999999999+00'",
+                datetime.datetime(1969, 12, 31, 23, 59, 59, 999999, tzinfo=datetime.UTC),
+            ),
+            (
+                "SELECT [TIMESTAMP_NS '1969-12-31 23:59:59.999999999']",
+                [datetime.datetime(1969, 12, 31, 23, 59, 59, 999999)],
+            ),
+            (
+                "SELECT union_value(t := TIMESTAMP_NS '1969-12-31 23:59:59.999999999')",
+                datetime.datetime(1969, 12, 31, 23, 59, 59, 999999),
+            ),
+        ],
+        ids=[
+            "just before 1970",
+            "half a microsecond into 1960",
+            "exact",
+            "after 1970",
+            "zoned",
+            "listed",
+            "in a union",
+        ],
+    )
+    def test_floors_to_its_microsecond(self, con: _duckdb.Connection, sql: str, expected: object) -> None:
+        assert scalar(con, sql) == expected

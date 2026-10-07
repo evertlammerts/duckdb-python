@@ -8,6 +8,8 @@
 
 #include "predicate.hpp"
 
+#include "conversion/value_to_python.hpp"
+
 namespace duckdb_python {
 namespace {
 

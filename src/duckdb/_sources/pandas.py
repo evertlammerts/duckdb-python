@@ -80,20 +80,21 @@ def _column_reading(name: str, series: pd.Series) -> ColumnReading:
 
     A pyarrow-backed column is read as its Arrow data. pandas' categorical and time zone dtypes and its nullable
     arrays, which pair a data array with a mask, are read here; every other column is read as the numpy array holding
-    its values, as the numpy source reads an array.
+    its values, as the numpy source reads an array. A period has no engine type and is refused.
     """
     import pandas as pd
 
     dtype = series.dtype
     if isinstance(dtype, pd.CategoricalDtype):
         categories = dtype.categories
-        if all(isinstance(c, str) for c in categories):
+        # An ENUM needs at least one label.
+        if len(categories) and all(isinstance(c, str) for c in categories):
             type_text = _enum_type_text(categories)
             return ColumnReading(type_text, lambda: ScanColumn("enum", type_text, series.cat.codes.to_numpy(), None))
-        encoding, type_text = _classify_sample(_used_categories(series))
-        return ColumnReading(
-            type_text, lambda: ScanColumn(encoding, type_text, _backing_array(series.astype(object)), None)
-        )
+        return _categorical_reading(name, series)
+    if isinstance(dtype, pd.PeriodDtype):
+        message = f"column '{name}' has the pandas dtype {dtype}, and no engine type holds a period"
+        raise TypeError(message)
     if isinstance(dtype, pd.DatetimeTZDtype):
         type_text = "TIMESTAMPTZ_NS" if dtype.unit == "ns" else "TIMESTAMP WITH TIME ZONE"
         return ColumnReading(
@@ -137,14 +138,49 @@ def _pandas_first_valid_position(data: np.ndarray[Any, Any]) -> int | None:
     return int(valid.argmax()) if valid.any() else None
 
 
-def _used_categories(series: pd.Series) -> list[object]:
-    """The distinct values a categorical series holds, which type it exactly with no row sample and no boxing.
+def _categorical_reading(name: str, series: pd.Series) -> ColumnReading:
+    """A categorical series whose categories are not all text, typed from its categories and decoded only when read.
 
-    Filtering leaves a category declared but unused, and one of another type than the values would otherwise turn
-    the column into text, so the declared categories are not enough.
+    Categories of one dtype give that dtype's engine type. Object categories are classified as a whole, over every
+    category a row uses, so no row sample decides the type and a category declared but unused does not count.
     """
+    import pandas as pd
+
+    categories = series.cat.categories
+    if categories.dtype == object:
+        encoding, type_text = _classify_sample(_used_categories(series))
+        return ColumnReading(
+            type_text, lambda: ScanColumn(encoding, type_text, _backing_array(series.astype(object)), None)
+        )
+    engine_type = _column_reading(name, pd.Series(categories[:0])).engine_type
+    return ColumnReading(engine_type, lambda: _decoded_reading(name, series).prepare())
+
+
+def _used_categories(series: pd.Series) -> list[object]:
+    """The distinct values a categorical series holds, which type it exactly with no row sample and no boxing."""
     used: list[object] = series.cat.remove_unused_categories().cat.categories.tolist()
     return used
+
+
+def _decoded_reading(name: str, series: pd.Series) -> ColumnReading:
+    """A categorical series decoded into a column of its categories' own dtype, each row the category its code names.
+
+    Integer and boolean categories take a missing code as their first category, or zero when there is none, marked
+    missing by a mask, since filling in pandas' own missing value would widen them to float or object.
+    """
+    import numpy as np
+    import pandas as pd
+
+    categories = series.cat.categories
+    codes = series.cat.codes.to_numpy()
+    if isinstance(categories.dtype, np.dtype) and categories.dtype.kind in "iub":
+        missing = codes < 0
+        if len(categories):
+            values = categories.to_numpy().take(np.where(missing, 0, codes))
+        else:
+            values = np.zeros(len(codes), dtype=categories.dtype)
+        return _array_reading(name, values, missing if missing.any() else None)
+    return _column_reading(name, pd.Series(categories.array.take(codes, allow_fill=True)))
 
 
 def _backing_array(series: pd.Series) -> np.ndarray[Any, Any]:

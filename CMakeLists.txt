@@ -61,7 +61,13 @@ find_package(nanobind CONFIG REQUIRED)
 nanobind_add_module(_duckdb STABLE_ABI FREE_THREADED NB_DOMAIN duckdb
   src/_duckdb/chunkview.cpp
   src/_duckdb/module.cpp
-  src/_duckdb/pyconv.cpp
+  src/_duckdb/conversion/conversion.cpp
+  src/_duckdb/conversion/sql_types.cpp
+  src/_duckdb/conversion/temporal.cpp
+  src/_duckdb/conversion/untyped.cpp
+  src/_duckdb/conversion/python_to_value.cpp
+  src/_duckdb/conversion/python_to_declared_type.cpp
+  src/_duckdb/conversion/value_to_python.cpp
   src/_duckdb/registry.cpp
   src/_duckdb/arrow_scan.cpp
   src/_duckdb/numpy_scan.cpp

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
 
+from ..exceptions import ConversionError
+
 if TYPE_CHECKING:
     from .. import _duckdb
 
@@ -50,6 +52,7 @@ _TS_UNIT = {_TS_S: "s", _TS_MS: "ms", _TS: "us", _TS_NS: "ns", _TS_TZ: "us", _TS
 _TS_ZONED = (_TS_TZ, _TS_TZ_NS)
 
 #: DuckDB's infinite date and timestamp markers, and the instants they clamp to, matching what fetching rows gives.
+#: Python's datetime bounds overflow nanoseconds, so there the clamps are the type's own finite ends.
 _DATE_INF = 2147483647
 _DATE_CLAMP = (2932896, -719162)
 _TS_INF = 9223372036854775807
@@ -57,6 +60,7 @@ _TS_CLAMP = {
     "s": (253402300799, -62135596800),
     "ms": (253402300799999, -62135596800000),
     "us": (253402300799999999, -62135596800000000),
+    "ns": (9223372036854775806, -9223286400000000000),
 }
 
 
@@ -116,10 +120,8 @@ def _convert_column(np: Any, view: _duckdb.ChunkView, column: int, count: int) -
         raw = np.frombuffer(view.data(column), dtype="int64").copy()
         if mask is not None:
             raw[mask] = 0
-        if unit != "ns":
-            # In nanoseconds the marker is already the last instant there is, and its negative is NaT + 1.
-            raw[raw == _TS_INF] = _TS_CLAMP[unit][0]
-            raw[raw == -_TS_INF] = _TS_CLAMP[unit][1]
+        raw[raw == _TS_INF] = _TS_CLAMP[unit][0]
+        raw[raw == -_TS_INF] = _TS_CLAMP[unit][1]
         values = raw.view(f"datetime64[{unit}]")
         return values, mask, ("datetimetz" if type_id in _TS_ZONED else "datetime"), unit
 
@@ -128,9 +130,11 @@ def _convert_column(np: Any, view: _duckdb.ChunkView, column: int, count: int) -
             view.data(column), dtype=np.dtype([("months", "<i4"), ("days", "<i4"), ("micros", "<i8")])
         )
         # Months count as 30 days, the same as fetching rows does.
-        total = (record["months"].astype("int64") * 30 + record["days"]) * 86_400_000_000 + record["micros"]
+        days = record["months"].astype("int64") * 30 + record["days"]
+        total = days * 86_400_000_000 + record["micros"]
         if mask is not None:
             total[mask] = 0
+        _check_intervals(np, record, days, mask)
         return total.view("timedelta64[us]"), mask, "timedelta", None
 
     if type_id == _DECIMAL:
@@ -164,6 +168,24 @@ def _convert_column(np: Any, view: _duckdb.ChunkView, column: int, count: int) -
         nones = np.array([v is None for v in values], dtype=bool)
         mask = nones if nones.any() else None
     return values, mask, "object", None
+
+
+def _check_intervals(np: Any, record: Any, days: Any, mask: Any) -> None:
+    """Refuses an interval whose microseconds pass int64, which numpy would wrap, or land on its NaT.
+
+    Only rows whose magnitude a float puts near the edge are counted exactly, so the common case stays vectorised.
+    """
+    near = np.abs(days.astype("float64") * 86_400_000_000 + record["micros"].astype("float64")) > 9.0e18
+    if mask is not None:
+        near &= ~mask
+    for row in np.flatnonzero(near):
+        months, day_count, micros = (int(record[field][row]) for field in ("months", "days", "micros"))
+        if not -(2**63) < (months * 30 + day_count) * 86_400_000_000 + micros < 2**63:
+            message = (
+                f"Conversion Error: interval of {months} months, {day_count} days and {micros} microseconds is "
+                "outside the range numpy's timedelta64[us] can represent"
+            )
+            raise ConversionError(message)
 
 
 def _empty_column(np: Any, type_id: int, enum_values: Any) -> tuple[Any, Any, str, Any]:

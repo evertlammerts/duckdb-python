@@ -9,7 +9,9 @@
 #include "numpy_scan.hpp"
 
 #include "arrowc.hpp"
-#include "pyconv.hpp"
+#include "conversion/conversion.hpp"
+#include "conversion/python_to_value.hpp"
+#include "conversion/temporal.hpp"
 
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/string.h>
@@ -125,6 +127,8 @@ struct ArrowColumn {
 	std::vector<cxx::idx_t> starts;
 };
 
+constexpr CountRange kEveryCount {std::numeric_limits<int64_t>::min(), std::numeric_limits<int64_t>::max()};
+
 /// One requested column, kept for the scan's life: the rule its bytes are read by, the engine type it fills, and
 /// views of its data array and, when it has one, its mask array, or for an ARROW column its Arrow data.
 struct NumpyColumn {
@@ -132,6 +136,8 @@ struct NumpyColumn {
 	NumpyEncoding encoding;
 	/// How a TIMESTAMP or INTERVAL column's counts become the engine's; unused otherwise.
 	UnitConversion conversion;
+	/// The counts a TIMESTAMP column's converted values must lie in; unused otherwise.
+	CountRange range = kEveryCount;
 	cxx::LogicalType type;
 	BufferView data;
 	BufferView mask;
@@ -148,8 +154,6 @@ struct ScalarMarkers {
 	nb::object numpy_floating;
 	nb::object numpy_datetime64;
 	nb::object numpy_timedelta64;
-	/// `numpy.datetime_data`, which names a datetime64 or timedelta64 dtype's unit and step count.
-	nb::object datetime_data;
 };
 
 /// One scan's columns, the row count they cover, and the claim counter every thread divides the object with.
@@ -239,72 +243,6 @@ void NumpyScanBind(cxx::TableFunction::BindInput &input) {
 	}
 	input.SetCardinality(rows, true);
 	input.SetBindData<NumpyScanBindData>(std::move(entry), std::move(names), std::move(types), rows);
-}
-
-/// A unit numpy spells after a datetime64 or timedelta64 step, as `nanos` nanoseconds or, for the last three, one
-/// `per_nano`-th of a nanosecond. Every unit of a nanosecond or more is a whole multiple, or a power-of-ten fraction,
-/// of every target unit, which is what keeps `UnitConversion`'s denominator above 1 only when its unit factor is 1.
-struct TimeUnit {
-	std::string_view code;
-	uint64_t nanos;
-	uint64_t per_nano;
-};
-
-constexpr TimeUnit kTimeUnits[] = {{"W", 604'800'000'000'000, 1},
-                                   {"D", 86'400'000'000'000, 1},
-                                   {"h", 3'600'000'000'000, 1},
-                                   {"m", 60'000'000'000, 1},
-                                   {"s", 1'000'000'000, 1},
-                                   {"ms", 1'000'000, 1},
-                                   {"us", 1'000, 1},
-                                   {"ns", 1, 1},
-                                   {"ps", 1, 1'000},
-                                   {"fs", 1, 1'000'000},
-                                   {"as", 1, 1'000'000'000}};
-
-/// The unit `code` names; null for a calendar or unknown code, and for a unit finer than a nanosecond unless
-/// `finer_than_nanos`.
-const TimeUnit *FindTimeUnit(std::string_view code, bool finer_than_nanos) {
-	for (const auto &unit : kTimeUnits) {
-		if (unit.code == code) {
-			return unit.per_nano == 1 || finer_than_nanos ? &unit : nullptr;
-		}
-	}
-	return nullptr;
-}
-
-UnitConversion ConversionOf(const TimeUnit &unit, uint64_t step, uint64_t target_nanos) {
-	const uint64_t whole = unit.per_nano * target_nanos;
-	const uint64_t common = std::gcd(unit.nanos, whole);
-	const uint64_t reduced = whole / common;
-	const uint64_t shared = std::gcd(step, reduced);
-	const UnitConversion conversion {step / shared, unit.nanos / common, reduced / shared};
-	// ScaleCount relies on both; a unit added to the table that broke them would convert wrongly without a sound.
-	if (conversion.denominator >= (uint64_t(1) << 40) || (conversion.denominator > 1 && conversion.unit != 1)) {
-		throw cxx::InvalidInputException("the time unit '" + std::string(unit.code) + "' has no exact conversion");
-	}
-	return conversion;
-}
-
-/// A unit as a datetime64 or timedelta64 dtype spells it inside its brackets: an optional step, from 0 to numpy's
-/// largest, 2147483647, with no sign or leading zero, then a code of a nanosecond or more.
-bool ParseTimeUnit(std::string_view text, const TimeUnit *&unit, uint64_t &step) {
-	const auto digits = text.find_first_not_of("0123456789");
-	if (digits == std::string_view::npos || (digits > 1 && text[0] == '0') || digits > 10) {
-		return false;
-	}
-	step = 1;
-	if (digits > 0) {
-		step = 0;
-		for (std::size_t i = 0; i < digits; i++) {
-			step = step * 10 + static_cast<uint64_t>(text[i] - '0');
-		}
-		if (step > 2'147'483'647) {
-			return false;
-		}
-	}
-	unit = FindTimeUnit(text.substr(digits), false);
-	return unit != nullptr;
 }
 
 /// The encoding `columns()` named and, for `timestamp:<unit>` or `interval:<unit>`, that unit and its step; `unit`
@@ -653,8 +591,8 @@ std::vector<NumpyColumn> OpenColumns(const Registered &entry, const NumpyScanBin
 			                                 bound.types.at(declared).ToText());
 		}
 		if (encoding == NumpyEncoding::ARROW) {
-			columns.push_back(NumpyColumn {std::move(column_name), encoding, UnitConversion {1, 1, 1}, std::move(type),
-			                               BufferView(), BufferView(), std::move(arrow)});
+			columns.push_back(NumpyColumn {std::move(column_name), encoding, UnitConversion {1, 1, 1}, kEveryCount,
+			                               std::move(type), BufferView(), BufferView(), std::move(arrow)});
 			continue;
 		}
 		const auto data_fits = [&](ElementClass element, cxx::idx_t width) {
@@ -670,11 +608,15 @@ std::vector<NumpyColumn> OpenColumns(const Registered &entry, const NumpyScanBin
 		                                 : OpenBuffer(entry.name, column_name, "mask", mask_array, bound.rows,
 		                                              mask_fits, "where a mask holds one byte per row");
 		UnitConversion conversion {1, 1, 1};
+		CountRange range = kEveryCount;
 		if (encoding == NumpyEncoding::TIMESTAMP || encoding == NumpyEncoding::INTERVAL) {
 			conversion = TimeConversion(entry.name, column_name, encoding_text, *unit, step, type);
 		}
-		columns.push_back(NumpyColumn {std::move(column_name), encoding, conversion, std::move(type), std::move(data),
-		                               std::move(mask), ArrowColumn()});
+		if (encoding == NumpyEncoding::TIMESTAMP) {
+			range = FiniteTimestampRange(type.GetTypeId());
+		}
+		columns.push_back(NumpyColumn {std::move(column_name), encoding, conversion, range, std::move(type),
+		                               std::move(data), std::move(mask), ArrowColumn()});
 	}
 	return columns;
 }
@@ -726,7 +668,6 @@ void NumpyScanInitGlobal(cxx::TableFunction::InitGlobalInput &input) {
 	markers.numpy_floating = numpy.attr("floating");
 	markers.numpy_datetime64 = numpy.attr("datetime64");
 	markers.numpy_timedelta64 = numpy.attr("timedelta64");
-	markers.datetime_data = numpy.attr("datetime_data");
 	input.SetGlobalState<NumpyScanState>(std::move(columns), bound.rows, range_rows, std::move(markers));
 }
 
@@ -775,6 +716,11 @@ void FillCounts(cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t start
                 const std::string &registered_name) {
 	const auto &conversion = column.conversion;
 	const bool interval = column.type.GetTypeId() == cxx::LogicalTypeId::INTERVAL;
+	const auto beyond_range = [&](cxx::idx_t row) {
+		return cxx::InvalidInputException("the object registered as '" + registered_name + "' failed: column '" +
+		                                  column.name + "' holds a value at row " + std::to_string(row) +
+		                                  " beyond the range of its engine type");
+	};
 	auto validity = vector.GetValidityMutable();
 	validity.SetAllValid(count);
 	if (!interval && conversion.step == 1 && conversion.unit == 1 && conversion.denominator == 1) {
@@ -783,6 +729,8 @@ void FillCounts(cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t start
 		for (cxx::idx_t i = 0; i < count; i++) {
 			if (dest[i] == std::numeric_limits<int64_t>::min() || Masked(column, start + i)) {
 				validity.SetInvalid(i);
+			} else if (dest[i] < column.range.first || dest[i] > column.range.last) {
+				throw beyond_range(start + i);
 			}
 		}
 		return;
@@ -794,10 +742,9 @@ void FillCounts(cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t start
 		int64_t scaled = 0;
 		if (raw == std::numeric_limits<int64_t>::min() || Masked(column, start + i)) {
 			validity.SetInvalid(i);
-		} else if (!ScaleCount(raw, conversion, false, scaled)) {
-			throw cxx::InvalidInputException("the object registered as '" + registered_name + "' failed: column '" +
-			                                 column.name + "' holds a value at row " + std::to_string(start + i) +
-			                                 " that overflows its engine type");
+		} else if (!ScaleCount(raw, conversion, false, scaled) ||
+		           (!interval && (scaled < column.range.first || scaled > column.range.last))) {
+			throw beyond_range(start + i);
 		}
 		if (interval) {
 			intervals[i] = cxx::interval_t {0, 0, scaled};
@@ -891,34 +838,6 @@ bool IsNoneLike(const ScalarMarkers &markers, PyObject *value) {
 	return false;
 }
 
-/// A numpy datetime64 or timedelta64 whose `.item()` is a bare int, as a TIMESTAMP_NS held exactly or an INTERVAL
-/// truncated to microseconds like a timedelta64 column; nullopt for anything else.
-std::optional<cxx::Value> NumpyTemporalValue(const ScalarMarkers &markers, cxx::Context &context, nb::handle value,
-                                             nb::object &item) {
-	const bool is_datetime = nb::isinstance(value, markers.numpy_datetime64);
-	if (!is_datetime && !nb::isinstance(value, markers.numpy_timedelta64)) {
-		return std::nullopt;
-	}
-	if (!nb::isinstance<nb::int_>(item)) {
-		return std::nullopt;
-	}
-	nb::tuple unit = nb::borrow<nb::tuple>(markers.datetime_data(value.attr("dtype")));
-	const auto *time_unit = FindTimeUnit(nb::cast<std::string>(unit[0]), true);
-	if (time_unit == nullptr) {
-		throw cxx::InvalidInputException("a calendar unit has no fixed length");
-	}
-	const auto conversion = ConversionOf(*time_unit, nb::cast<uint64_t>(unit[1]), is_datetime ? 1 : 1'000);
-	const int64_t raw = nb::cast<int64_t>(nb::int_(value.attr("view")("i8")));
-	int64_t scaled = 0;
-	if (!ScaleCount(raw, conversion, is_datetime, scaled)) {
-		throw cxx::InvalidInputException("the value overflows its engine type or is finer than a nanosecond");
-	}
-	if (is_datetime) {
-		return cxx::Value::Create(context, cxx::timestamp_ns_t {scaled});
-	}
-	return cxx::Value::Create(context, cxx::interval_t {0, 0, scaled});
-}
-
 /// A Python-object array of `str`, `None`, `pd.NA` or a float NaN: each string read as UTF-8 directly, and any
 /// other value, which only reaches this encoding through the sampling rule's mixed-type fallback, through `str()`.
 void FillText(const NumpyScanState &global, cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t start,
@@ -952,8 +871,8 @@ void FillText(const NumpyScanState &global, cxx::Vector &vector, const NumpyColu
 }
 
 /// An object column sampled to one engine type other than VARCHAR: each value converted with `PythonToValue` and
-/// cast to that type, with the cast checked to be lossless by casting back and comparing text, since the engine's
-/// own cast rounds rather than refuses a value such as a fractional double read into an integer column.
+/// cast to that type only when the cast loses nothing, since the engine's own cast rounds rather than refuses a
+/// value such as a fractional double read into an integer column.
 void FillObjects(const NumpyScanState &global, cxx::Context &context, cxx::Vector &vector, const NumpyColumn &column,
                  cxx::idx_t start, cxx::idx_t count, ConversionContext &conversion,
                  const std::string &registered_name) {
@@ -964,31 +883,43 @@ void FillObjects(const NumpyScanState &global, cxx::Context &context, cxx::Vecto
 			vector.SetNull(i);
 			continue;
 		}
-		std::optional<cxx::Value> cast;
+		const auto failed = [&](const std::string &why) {
+			return cxx::InvalidInputException("the object registered as '" + registered_name + "' failed: column '" +
+			                                  column.name + "' holds a value " + why);
+		};
+		// Lazy, so the common row that converts never pays for its own error text.
+		const auto row = [&] {
+			return std::to_string(start + i);
+		};
+		std::optional<cxx::Value> converted;
 		try {
 			nb::handle cell(value);
-			// PythonToValue understands only Python's own types, so a numpy scalar is unwrapped first.
-			nb::object item =
-			    nb::isinstance(cell, global.markers.numpy_generic) ? cell.attr("item")() : nb::borrow(cell);
-			auto temporal = NumpyTemporalValue(global.markers, context, cell, item);
-			cxx::Value converted = temporal ? std::move(*temporal) : PythonToValue(context, item, conversion);
-			cast = converted.Cast(context, column.type);
-			bool exact = false;
-			try {
-				exact = cast->Cast(context, converted.GetLogicalType()).ToText() == converted.ToText();
-			} catch (...) {
-				exact = false;
-			}
-			if (!exact) {
-				cast.reset();
-			}
+			// PythonToValue reads numpy's datetime64 and timedelta64 in their own unit, and only Python's own types
+			// otherwise, so any other numpy scalar is unwrapped first.
+			const bool temporal = nb::isinstance(cell, global.markers.numpy_datetime64) ||
+			                      nb::isinstance(cell, global.markers.numpy_timedelta64);
+			nb::object item = nb::isinstance(cell, global.markers.numpy_generic) && !temporal ? cell.attr("item")()
+			                                                                                  : nb::borrow(cell);
+			converted = PythonToValue(context, item, conversion);
+		} catch (const BeyondRangeException &) {
+			throw failed("at row " + row() + " beyond the range of its engine type");
+		} catch (const UnsupportedTypeException &) {
+			converted.reset();
+		} catch (const cxx::Exception &error) {
+			throw failed("at row " + row() + " that cannot be read: " + error.GetRawMessage());
+		} catch (nb::python_error &error) {
+			throw failed("at row " + row() + " that cannot be read: " + DescribePythonError(error));
 		} catch (...) {
-			cast.reset();
+			converted.reset();
 		}
+		if (converted && AssumesTimeZone(converted->GetLogicalType().GetTypeId(), column.type.GetTypeId())) {
+			throw failed("of type " + converted->GetLogicalType().ToText() + " at row " + row() +
+			             ", and converting it to its sampled type " + column.type.ToText() +
+			             " would assume a time zone");
+		}
+		const auto cast = converted ? TryCastTemporalExactly(context, *converted, column.type) : std::nullopt;
 		if (!cast) {
-			throw cxx::InvalidInputException("the object registered as '" + registered_name + "' failed: column '" +
-			                                 column.name + "' holds a value at row " + std::to_string(start + i) +
-			                                 " that its sampled type " + column.type.ToText() + " cannot hold exactly");
+			throw failed("at row " + row() + " that its sampled type " + column.type.ToText() + " cannot hold exactly");
 		}
 		vector.SetValue(i, *cast);
 	}

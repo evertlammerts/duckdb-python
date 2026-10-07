@@ -1,22 +1,28 @@
 //===----------------------------------------------------------------------===//
 //                         DuckDB
 //
-// src/_duckdb/pyconv.cpp
+// src/_duckdb/conversion/value_to_python.cpp
 //
 //
 //===----------------------------------------------------------------------===//
 
-#include "pyconv.hpp"
+#include "value_to_python.hpp"
+
+#include "conversion.hpp"
+#include "sql_types.hpp"
+#include "temporal.hpp"
 
 #include <nanobind/stl/string.h>
 
 #include <algorithm>
 #include <limits>
+#include <optional>
 #include <utility>
 #include <vector>
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 namespace duckdb_python {
 
@@ -26,38 +32,6 @@ using duckdb::cxx::Value;
 
 namespace {
 
-// DuckDB counts from the Unix epoch, Python from year 1, so convert by offsetting instead of by calendar math.
-
-// DuckDB reserves the extremes of each storage type for infinite dates, which Python cannot represent, so they
-// clamp to date and datetime min and max as the previous duckdb package did; such a value no longer round-trips.
-constexpr int32_t DATE_POSITIVE_INFINITY = 2147483647;
-constexpr int32_t DATE_NEGATIVE_INFINITY = -2147483647;
-constexpr int64_t TIMESTAMP_POSITIVE_INFINITY = 9223372036854775807LL;
-constexpr int64_t TIMESTAMP_NEGATIVE_INFINITY = -9223372036854775807LL;
-
-// DuckDB dates reach far past Python's year 9999, so name the offending value; OverflowError names a day count.
-[[noreturn]] void ThrowUnrepresentable(const std::string &what, const std::string &rendered,
-                                       const char *python_type = "datetime") {
-	throw duckdb::cxx::Exception(4001 /* TYPE_CONVERSION */, "Conversion Error: " + what + " " + rendered +
-	                                                             " is outside the range Python's " + python_type +
-	                                                             " can represent");
-}
-
-// Scaling the infinity markers would overflow and destroy them, so they pass through in their own unit. A coarse
-// unit can hold an instant no microsecond count can, which is unrepresentable rather than a wrapped value; the
-// diagnostic names the raw count, since rendering the value through DuckDB fails on the same conversion.
-int64_t MicrosFromUnit(int64_t raw, uint64_t multiply, uint64_t divide) {
-	if (raw == TIMESTAMP_POSITIVE_INFINITY || raw == TIMESTAMP_NEGATIVE_INFINITY) {
-		return raw;
-	}
-	int64_t micros;
-	if (!ScaleCount(raw, UnitConversion {multiply, 1, divide}, false, micros)) {
-		const char *unit = multiply == 1'000'000 ? " seconds" : " milliseconds";
-		ThrowUnrepresentable("timestamp", std::to_string(raw) + unit + " since the epoch");
-	}
-	return micros;
-}
-// `text` runs only on the failure path, so the bulk converter builds a Value only when one actually fails.
 template <class TEXT>
 nb::object EpochDate(ConversionContext &ctx, int32_t days, TEXT &&text) {
 	if (days == DATE_POSITIVE_INFINITY) {
@@ -97,36 +71,6 @@ nb::object EpochDateTime(ConversionContext &ctx, int64_t micros, bool utc, TEXT 
 	}
 }
 
-// For types whose text form is exact but whose binary form is wider than any C integer nanobind converts.
-nb::object IntFromText(ConversionContext &ctx, const std::string &text) {
-	return ctx.int_cls(text);
-}
-
-} // namespace
-
-ConversionContext::ConversionContext() {
-	nb::object datetime = nb::module_::import_("datetime");
-	date_cls = datetime.attr("date");
-	time_cls = datetime.attr("time");
-	datetime_cls = datetime.attr("datetime");
-	timedelta_cls = datetime.attr("timedelta");
-	timezone_cls = datetime.attr("timezone");
-	timezone_utc = timezone_cls.attr("utc");
-	nb::object decimal = nb::module_::import_("decimal");
-	decimal_cls = decimal.attr("Decimal");
-	decimal_context = decimal.attr("Context")(nb::arg("prec") = 45);
-	uuid_cls = nb::module_::import_("uuid").attr("UUID");
-	int_cls = nb::module_::import_("builtins").attr("int");
-	mapping_cls = nb::module_::import_("collections.abc").attr("Mapping");
-	two_pow_64 = int_cls("18446744073709551616");
-	epoch_date = date_cls(1970, 1, 1);
-	epoch_naive = datetime_cls(1970, 1, 1);
-	epoch_aware = datetime_cls(1970, 1, 1, 0, 0, 0, 0, timezone_utc);
-	one_microsecond = timedelta_cls(0, 0, 1);
-}
-
-namespace {
-
 // Whether values of this type land on something Python can hash; lists and dicts cannot be dictionary keys.
 bool KeysHashable(const LogicalType &type) {
 	switch (type.GetTypeId()) {
@@ -150,20 +94,6 @@ bool KeysHashable(const LogicalType &type) {
 }
 
 } // namespace
-
-std::string DescribePythonError(nb::python_error &error) {
-	std::string summary;
-	try {
-		summary = nb::cast<std::string>(nb::handle(error.type()).attr("__name__"));
-		const auto text = nb::cast<std::string>(nb::str(nb::handle(error.value())));
-		if (!text.empty()) {
-			summary += ": " + text;
-		}
-	} catch (...) {
-		summary.clear();
-	}
-	return summary + "\n" + error.what();
-}
 
 bool ConvertsLossless(LogicalTypeId type) {
 	switch (type) {
@@ -717,190 +647,6 @@ void AppendChunkRows(const duckdb::cxx::DataChunk &chunk, const std::vector<Logi
 		out.append(row);
 	}
 }
-
-namespace {
-
-using duckdb::cxx::Connection;
-
-// date(1970, 1, 1).toordinal(), since Python counts days from year 1 and DuckDB from the epoch.
-constexpr int64_t EPOCH_ORDINAL = 719163;
-
-// Whole microseconds between two datetimes; total_seconds() is a float and loses digits far from the epoch.
-int64_t MicrosSince(const nb::object &epoch, nb::handle moment, ConversionContext &ctx) {
-	nb::object delta = nb::steal(PyNumber_Subtract(moment.ptr(), epoch.ptr()));
-	if (!delta.is_valid()) {
-		throw nb::python_error();
-	}
-	nb::object count = nb::steal(PyNumber_FloorDivide(delta.ptr(), ctx.one_microsecond.ptr()));
-	if (!count.is_valid()) {
-		throw nb::python_error();
-	}
-	return nb::cast<int64_t>(count);
-}
-
-// Through text, which is exact for integers of any width and for decimals, neither having a C++ type here.
-template <class SCOPE>
-Value FromText(SCOPE &scope, const std::string &text, const LogicalType &target) {
-	const duckdb::cxx::varchar_t borrowed(text);
-	return Value::Create(scope, borrowed).Cast(scope, target);
-}
-
-[[noreturn]] void ThrowUnsupported(nb::handle object) {
-	throw UnsupportedTypeException(nb::cast<std::string>(nb::handle(Py_TYPE(object.ptr())).attr("__name__")));
-}
-
-// The message is carried twice, with and without the prefix, since DuckDB adds its own inside a callback.
-[[noreturn]] void ThrowInvalidInput(const std::string &body) {
-	throw duckdb::cxx::InvalidInputException("Invalid Input Error: " + body, body);
-}
-
-} // namespace
-
-UnsupportedTypeException::UnsupportedTypeException(std::string type_name)
-    : duckdb::cxx::InvalidInputException("Invalid Input Error: cannot bind a parameter of type " + type_name,
-                                         "cannot bind a parameter of type " + type_name),
-      type_name(std::move(type_name)) {
-}
-
-template <class SCOPE>
-Value PythonToValue(SCOPE &scope, nb::handle object, ConversionContext &ctx) {
-	using duckdb::cxx::LogicalTypeId;
-
-	// A NULL still needs a type; SQLNULL is rejected, and INTEGER works because a NULL casts to anything.
-	if (object.is_none()) {
-		return Value::CreateNull(scope, scope.CreateType(LogicalTypeId::INTEGER));
-	}
-	// Before the int branch: a Python bool is an int, so testing int first would silently pass True as 1.
-	if (nb::isinstance<nb::bool_>(object)) {
-		return Value::Create(scope, nb::cast<bool>(object));
-	}
-	if (nb::isinstance<nb::int_>(object)) {
-		// The widest type that holds the value, since narrowing here would reject values the column can hold.
-		int64_t narrow = 0;
-		if (nb::try_cast<int64_t>(object, narrow)) {
-			return Value::Create(scope, narrow);
-		}
-		const auto text = nb::cast<std::string>(nb::str(object));
-		// The C++ API pins C++17, so no starts_with here.
-		const bool negative = !text.empty() && text[0] == '-';
-		const auto id = negative ? LogicalTypeId::HUGEINT : LogicalTypeId::UHUGEINT;
-		return FromText(scope, text, scope.CreateType(id));
-	}
-	if (nb::isinstance<nb::float_>(object)) {
-		return Value::Create(scope, nb::cast<double>(object));
-	}
-	if (nb::isinstance<nb::str>(object)) {
-		const auto text = nb::cast<std::string>(object);
-		return Value::Create(scope, duckdb::cxx::varchar_t(text));
-	}
-	if (nb::isinstance<nb::bytes>(object)) {
-		const auto bytes = nb::cast<nb::bytes>(object);
-		// A BLOB length is 32 bits, so anything larger would wrap and be passed silently truncated.
-		if (bytes.size() > std::numeric_limits<uint32_t>::max()) {
-			ThrowInvalidInput("bytes value is larger than a BLOB can hold");
-		}
-		return Value::Create(scope, duckdb::cxx::blob_t(bytes.c_str(), static_cast<uint32_t>(bytes.size())));
-	}
-	// datetime before date: datetime subclasses date, so order decides.
-	if (nb::isinstance(object, ctx.datetime_cls)) {
-		const bool aware = !object.attr("tzinfo").is_none();
-		const int64_t micros = MicrosSince(aware ? ctx.epoch_aware : ctx.epoch_naive, object, ctx);
-		if (aware) {
-			return Value::Create(scope, duckdb::cxx::timestamp_tz_t {micros});
-		}
-		return Value::Create(scope, duckdb::cxx::timestamp_t {micros});
-	}
-	if (nb::isinstance(object, ctx.date_cls)) {
-		const auto days = nb::cast<int64_t>(object.attr("toordinal")()) - EPOCH_ORDINAL;
-		return Value::Create(scope, duckdb::cxx::date_t {static_cast<int32_t>(days)});
-	}
-	if (nb::isinstance(object, ctx.time_cls)) {
-		nb::object naive = object.attr("replace")(nb::arg("tzinfo") = nb::none());
-		nb::object combined = ctx.datetime_cls.attr("combine")(ctx.epoch_date, naive);
-		const int64_t micros = MicrosSince(ctx.epoch_naive, combined, ctx);
-
-		// A time with a time zone becomes TIME_TZ; dropping the offset would silently break the round trip.
-		nb::object offset = object.attr("utcoffset")();
-		if (!offset.is_none()) {
-			const auto seconds = nb::cast<int64_t>(offset.attr("total_seconds")().attr("__int__")());
-			if (seconds > duckdb::cxx::dtime_tz_t::MAX_OFFSET || seconds < -duckdb::cxx::dtime_tz_t::MAX_OFFSET) {
-				ThrowInvalidInput("time zone offset is outside the range TIME_TZ can hold");
-			}
-			return Value::Create(scope, duckdb::cxx::dtime_tz_t(micros, static_cast<int32_t>(seconds)));
-		}
-		return Value::Create(scope, duckdb::cxx::dtime_t {micros});
-	}
-	if (nb::isinstance(object, ctx.timedelta_cls)) {
-		// timedelta carries no months, so this direction is lossless where the reverse folds months at 30 days.
-		duckdb::cxx::interval_t interval {};
-		interval.months = 0;
-		interval.days = nb::cast<int32_t>(object.attr("days"));
-		interval.micros =
-		    nb::cast<int64_t>(object.attr("seconds")) * 1'000'000 + nb::cast<int64_t>(object.attr("microseconds"));
-		return Value::Create(scope, interval);
-	}
-	if (nb::isinstance(object, ctx.decimal_cls)) {
-		// Through text, since a double loses the scale; the width comes from the value, so nothing is repadded.
-		nb::object parts = object.attr("as_tuple")();
-		nb::object exponent = parts.attr("exponent");
-		if (!nb::isinstance<nb::int_>(exponent)) {
-			// NaN and the infinities carry a string exponent and have no DECIMAL counterpart.
-			ThrowInvalidInput("cannot bind a non-finite Decimal");
-		}
-		// A Decimal is digits x 10^exponent, so a positive exponent adds integer places the digit tuple omits.
-		const auto power = nb::cast<int>(exponent);
-		const auto digits = static_cast<int>(nb::cast<nb::tuple>(parts.attr("digits")).size());
-		const auto scale = std::max(0, -power);
-		const auto integer_places = digits + std::max(0, power);
-		const auto width = std::min(38, std::max(std::max(integer_places, scale), 1));
-		if (scale > width) {
-			ThrowInvalidInput("Decimal has more fractional digits than DECIMAL can hold");
-		}
-		return FromText(scope, nb::cast<std::string>(nb::str(object)),
-		                scope.ParseType("DECIMAL(" + std::to_string(width) + "," + std::to_string(scale) + ")"));
-	}
-	if (nb::isinstance(object, ctx.uuid_cls)) {
-		return FromText(scope, nb::cast<std::string>(nb::str(object)), scope.CreateType(LogicalTypeId::UUID));
-	}
-	if (nb::isinstance<nb::list>(object) || nb::isinstance<nb::tuple>(object)) {
-		std::vector<Value> children;
-		for (nb::handle item : object) {
-			children.push_back(PythonToValue(scope, item, ctx));
-		}
-		if (children.empty()) {
-			// An empty list still needs an element type and nothing says which, so INTEGER stands in again.
-			return Value::CreateList(scope, scope.CreateType(LogicalTypeId::INTEGER));
-		}
-		return Value::CreateList(scope, children);
-	}
-	if (nb::isinstance<nb::dict>(object)) {
-		// A dict maps onto two DuckDB types, so the rule is fixed: string keys make a STRUCT, anything else a MAP.
-		auto mapping = nb::cast<nb::dict>(object);
-		bool all_strings = true;
-		for (auto entry : mapping) {
-			if (!nb::isinstance<nb::str>(entry.first)) {
-				all_strings = false;
-				break;
-			}
-		}
-		if (all_strings) {
-			std::vector<std::pair<std::string, Value>> fields;
-			for (auto entry : mapping) {
-				fields.emplace_back(nb::cast<std::string>(entry.first), PythonToValue(scope, entry.second, ctx));
-			}
-			return Value::CreateStruct(scope, fields);
-		}
-		std::vector<std::pair<Value, Value>> entries;
-		for (auto entry : mapping) {
-			entries.emplace_back(PythonToValue(scope, entry.first, ctx), PythonToValue(scope, entry.second, ctx));
-		}
-		return Value::CreateMap(scope, entries);
-	}
-	ThrowUnsupported(object);
-}
-
-template Value PythonToValue<Connection>(Connection &, nb::handle, ConversionContext &);
-template Value PythonToValue<duckdb::cxx::Context>(duckdb::cxx::Context &, nb::handle, ConversionContext &);
 
 nb::list VectorElements(duckdb::cxx::Vector &vector, const LogicalType &type, duckdb::cxx::idx_t first,
                         duckdb::cxx::idx_t last, ConversionContext &ctx) {

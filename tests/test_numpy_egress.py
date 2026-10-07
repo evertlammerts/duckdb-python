@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 import duckdb
+from duckdb import exceptions
 from duckdb.frame import col
 
 if TYPE_CHECKING:
@@ -160,6 +161,19 @@ class TestTemporalInfinities:
         assert out["ts"].dtype == np.dtype("datetime64[us]")
         assert out["ts"][0] == np.datetime64("9999-12-31T23:59:59.999999", "us")
 
+    def test_infinite_nanosecond_timestamps_clamp_to_the_finite_ends_and_register_back(
+        self, con: duckdb.frame.Connection
+    ) -> None:
+        plan = duckdb.frame.sql("SELECT 'infinity'::TIMESTAMP_NS AS pos, '-infinity'::TIMESTAMP_NS AS neg")
+        out = plan.to_numpy(con)
+        assert out["pos"].dtype == out["neg"].dtype == np.dtype("datetime64[ns]")
+        assert out["pos"][0].astype("int64") == 2**63 - 2
+        assert out["neg"][0] == np.datetime64("1677-09-22T00:00:00", "ns")
+        con.register("back", out)
+        assert duckdb.frame.sql("SELECT epoch_ns(pos), epoch_ns(neg) FROM back").rows(con) == [
+            (2**63 - 2, -106_751 * 86_400 * 10**9)
+        ]
+
 
 class TestEmptyResults:
     def test_empty_decimal_and_enum_keep_their_dtypes(self, con: duckdb.frame.Connection) -> None:
@@ -238,3 +252,29 @@ class TestInt128Egress:
         out = duckdb.frame.sql("SELECT (-2.5)::DECIMAL(38,6) AS a, (-0.000001)::DECIMAL(38,6) AS b").to_numpy(con)
         assert out["a"][0] == -2.5
         assert out["b"][0] == -0.000001
+
+
+class TestIntervalRange:
+    """An interval past what int64 microseconds hold is refused, where numpy's own arithmetic would wrap it."""
+
+    @pytest.mark.parametrize(
+        "interval",
+        [
+            "INTERVAL 2147483647 MONTH",
+            "INTERVAL '106751992 days'",
+            "INTERVAL '-106751992 days'",
+            "INTERVAL '106751991 days 86399 seconds'",
+        ],
+    )
+    def test_past_int64_microseconds_is_refused(self, con: duckdb.frame.Connection, interval: str) -> None:
+        with pytest.raises(exceptions.ConversionError, match="outside the range numpy's timedelta64"):
+            duckdb.frame.sql(f"SELECT {interval} AS i").to_numpy(con)
+
+    def test_the_widest_intervals_convert(self, con: duckdb.frame.Connection) -> None:
+        query = (
+            "SELECT * FROM (VALUES (INTERVAL '9223372036854775807 microseconds'), "
+            "(INTERVAL '-9223372036854775807 microseconds'), (INTERVAL '106751991 days'), (NULL)) v(i)"
+        )
+        out = duckdb.frame.sql(query).to_numpy(con)["i"]
+        assert out.data.astype("int64")[:3].tolist() == [2**63 - 1, -(2**63 - 1), 106_751_991 * 86_400_000_000]
+        assert out.mask.tolist() == [False, False, False, True]

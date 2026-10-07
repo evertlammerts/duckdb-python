@@ -1,8 +1,61 @@
-"""Checks on the running interpreter and on the duckdb install, shared by the test modules."""
+"""Checks on the running interpreter and on the duckdb install, and tzinfo probes, shared by the test modules."""
 
 from __future__ import annotations
 
+import datetime
 import sys
+from typing import Any
+
+
+class NoOffset(datetime.tzinfo):
+    """A time zone that gives no offset, which makes a datetime carrying it naive, as Python defines it."""
+
+    def utcoffset(self, moment: datetime.datetime | None) -> None:
+        return None
+
+    def dst(self, moment: datetime.datetime | None) -> None:
+        return None
+
+    def tzname(self, moment: datetime.datetime | None) -> str:
+        return "none"
+
+
+class Failing(datetime.tzinfo):
+    """A time zone whose offset computation itself raises the given error.
+
+    A fresh instance per call: a stored exception would keep its traceback, whose frames hold the connection under
+    test alive past interpreter exit.
+    """
+
+    def __init__(self, error: type[Exception], message: str) -> None:
+        self.error = error
+        self.message = message
+
+    def utcoffset(self, moment: datetime.datetime | None) -> datetime.timedelta:
+        raise self.error(self.message)
+
+    def dst(self, moment: datetime.datetime | None) -> None:
+        return None
+
+    def tzname(self, moment: datetime.datetime | None) -> str:
+        return "failing"
+
+
+class Emptying(datetime.tzinfo):
+    """UTC, emptying a list or dict each time it gives an offset: a callback that changes a value while it converts."""
+
+    def __init__(self, container: list[Any] | dict[Any, Any]) -> None:
+        self.container = container
+
+    def utcoffset(self, moment: datetime.datetime | None) -> datetime.timedelta:
+        self.container.clear()
+        return datetime.timedelta(0)
+
+    def dst(self, moment: datetime.datetime | None) -> None:
+        return None
+
+    def tzname(self, moment: datetime.datetime | None) -> str:
+        return "emptying"
 
 
 def gil_enabled() -> bool:

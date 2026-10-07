@@ -105,7 +105,7 @@ jobs:
           uv venv --python "$PYTHON_REQUEST" .venv-build
           PY=.venv-build/bin/python
           [ -x "$PY" ] || PY=.venv-build/Scripts/python.exe
-          VIRTUAL_ENV=.venv-build uv pip install "scikit-build-core>=0.10" "nanobind>=2.13"
+          VIRTUAL_ENV=.venv-build uv pip install "scikit-build-core>=1.1" "nanobind>=2.13"
           VIRTUAL_ENV=.venv-build uv build --wheel --no-build-isolation --python "$PY"
 
       - name: Retag Linux wheels as manylinux
@@ -333,7 +333,7 @@ jobs:
           SKBUILD_INSTALL_STRIP: "false"
         run: |
           uv venv --python 3.12 .venv-build
-          VIRTUAL_ENV=.venv-build uv pip install "scikit-build-core>=0.10" "nanobind>=2.13"
+          VIRTUAL_ENV=.venv-build uv pip install "scikit-build-core>=1.1" "nanobind>=2.13"
           VIRTUAL_ENV=.venv-build uv build --wheel --no-build-isolation --python .venv-build/bin/python
           uv export --only-group test --no-emit-project --no-hashes -o "$RUNNER_TEMP/test-requirements.txt"
           uv venv --python 3.12 "$RUNNER_TEMP/suite"
