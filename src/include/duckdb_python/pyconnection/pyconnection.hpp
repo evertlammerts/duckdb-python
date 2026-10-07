@@ -13,6 +13,7 @@
 #include "duckdb_python/import_cache/python_import_cache.hpp"
 #include "duckdb_python/numpy/numpy_type.hpp"
 #include "duckdb_python/pyrelation.hpp"
+#include "duckdb_python/engine/connection.hpp"
 #include "duckdb_python/pytype.hpp"
 #include "duckdb_python/path_like.hpp"
 #include "duckdb/execution/operator/csv_scanner/csv_reader_options.hpp"
@@ -252,10 +253,11 @@ public:
 
 	void ExecuteImmediately(vector<unique_ptr<SQLStatement>> statements);
 	unique_ptr<PreparedStatement> PrepareQuery(unique_ptr<SQLStatement> statement);
-	unique_ptr<QueryResult> ExecuteInternal(PreparedStatement &prep, nb::object params = nb::list());
-	//! Binds the parameters and submits the statement. The handle is returned undriven.
-	unique_ptr<QueryResult> PrepareAndSubmitInternal(unique_ptr<SQLStatement> statement,
-	                                                 nb::object params = nb::list());
+	shared_ptr<engine::Result> ExecuteInternal(PreparedStatement &prep, nb::object params = nb::list());
+	//! Binds the parameters and submits the statement. The result is returned undriven.
+	shared_ptr<engine::Result> PrepareAndSubmitInternal(unique_ptr<SQLStatement> statement,
+	                                                    nb::object params = nb::list());
+	engine::Session EngineSession();
 
 	std::shared_ptr<DuckDBPyConnection> Execute(const nb::object &query, nb::object params = nb::list());
 	std::shared_ptr<DuckDBPyConnection> ExecuteFromString(const string &query);
@@ -360,9 +362,8 @@ public:
 	static bool IsAcceptedArrowObject(const nb::object &object);
 	static NumpyObjectType IsAcceptedNumpyObject(const nb::object &object);
 
-	//! Runs a submitted query to a retained, ended result on the calling thread, checking for Python
-	//! signals between tasks. Throws the query's error, and leaves the handle holding its collection.
-	static void CompleteQuery(QueryResult &result);
+	//! Abandons a blocking engine call when Python has a pending signal. Takes the GIL.
+	static void CheckSignals();
 
 private:
 	std::unique_ptr<DuckDBPyRelation> CreateRelation(shared_ptr<Relation> rel);

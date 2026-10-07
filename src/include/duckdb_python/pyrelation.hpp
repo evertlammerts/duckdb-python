@@ -286,9 +286,9 @@ private:
 	void AssertResult() const;
 	void AssertResultOpen() const;
 	void AssertRelation() const;
-	void ExecuteOrThrow(bool stream_result = false);
+	void ExecuteOrThrow(bool stream_result = false, const engine::Format &format = engine::Format::Chunks());
 	//! Runs the relation to a completed, retained result
-	unique_ptr<QueryResult> ExecuteInternal();
+	shared_ptr<engine::Result> ExecuteInternal();
 
 private:
 	//! Prevents GC of the parent DuckDBPyConnection.

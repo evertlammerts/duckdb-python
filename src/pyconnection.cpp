@@ -415,8 +415,7 @@ void DuckDBPyConnection::DisableProfiling() {
 
 nb::list DuckDBPyConnection::ExtractStatements(const string &query) {
 	nb::list result;
-	auto &connection = con.GetConnection();
-	auto statements = connection.ExtractStatements(query);
+	auto statements = EngineSession().Parse(query);
 	for (auto &statement : statements) {
 		result.append(std::make_unique<DuckDBPyStatement>(std::move(statement)));
 	}
@@ -536,7 +535,7 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::ExecuteMany(const nb::ob
 		throw InvalidInputException("executemany requires a non-empty list of parameter sets to be provided");
 	}
 
-	unique_ptr<QueryResult> query_result;
+	shared_ptr<engine::Result> query_result;
 	// Execute once for every set of parameters that are provided
 	for (auto parameters : outer_list) {
 		auto params = nb::borrow<nb::object>(parameters);
@@ -552,33 +551,15 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::ExecuteMany(const nb::ob
 	return shared_from_this();
 }
 
-void DuckDBPyConnection::CompleteQuery(QueryResult &result) {
-	if (result.HasError()) {
-		result.ThrowError();
+void DuckDBPyConnection::CheckSignals() {
+	nb::gil_scoped_acquire gil;
+	if (PyErr_CheckSignals() != 0) {
+		throw std::runtime_error("Query interrupted");
 	}
-	result.Materialize();
-	// A result built by a delegating collector arrives finished and without a context; Poll reports
-	// that without touching the context, where ExecuteTask would throw.
-	auto state = result.Poll();
-	while (!IsTerminal(state)) {
-		{
-			nb::gil_scoped_acquire gil;
-			if (PyErr_CheckSignals() != 0) {
-				throw std::runtime_error("Query interrupted");
-			}
-		}
-		if (state == QueryResultState::BLOCKED || state == QueryResultState::READY ||
-		    state == QueryResultState::NO_TASKS_AVAILABLE) {
-			result.WaitForTask();
-		}
-		state = result.ExecuteTask();
-	}
-	// FINISHED only means the executor is done: the collection is taken and the query ended, with
-	// its transaction step, by Complete. Left open, the next statement would roll it back.
-	result.Complete();
-	if (result.HasError()) {
-		result.ThrowError();
-	}
+}
+
+engine::Session DuckDBPyConnection::EngineSession() {
+	return engine::Session(con.GetConnection().context);
 }
 
 nb::list TransformNamedParameters(const case_insensitive_map_t<idx_t> &named_param_map, const nb::dict &params) {
@@ -646,60 +627,52 @@ identifier_map_t<BoundParameterData> TransformPreparedParameters(ClientContext &
 }
 
 unique_ptr<PreparedStatement> DuckDBPyConnection::PrepareQuery(unique_ptr<SQLStatement> statement) {
-	auto &connection = con.GetConnection();
+	auto session = EngineSession();
 	unique_ptr<PreparedStatement> prep;
 	{
 		D_ASSERT(duckdb::PyUtil::GilCheck());
 		nb::gil_scoped_release release;
 		unique_lock<std::recursive_mutex> lock(py_connection_lock);
-
-		prep = connection.Prepare(std::move(statement));
-		if (prep->HasError()) {
-			prep->GetErrorObject().Throw();
-		}
+		prep = session.Prepare(std::move(statement));
 	}
 	return prep;
 }
 
-unique_ptr<QueryResult> DuckDBPyConnection::ExecuteInternal(PreparedStatement &prep, nb::object params) {
+shared_ptr<engine::Result> DuckDBPyConnection::ExecuteInternal(PreparedStatement &prep, nb::object params) {
 	if (params.is_none()) {
 		params = nb::list();
 	}
-	auto &context = *con.GetConnection().context;
+	auto session = EngineSession();
 
 	// Execute the prepared statement with the prepared parameters
-	auto named_values = TransformPreparedParameters(context, params, prep);
-	unique_ptr<QueryResult> res;
+	auto named_values = TransformPreparedParameters(session.Context(), params, prep);
+	shared_ptr<engine::Result> res;
 	{
 		D_ASSERT(duckdb::PyUtil::GilCheck());
 		nb::gil_scoped_release release;
 		unique_lock<std::recursive_mutex> lock(py_connection_lock);
 
-		res = prep.Submit(named_values);
-		CompleteQuery(*res);
+		res = session.Submit(prep, named_values, engine::Format::Chunks());
+		res->Retain(CheckSignals);
 	}
 	return res;
 }
 
-unique_ptr<QueryResult> DuckDBPyConnection::PrepareAndSubmitInternal(unique_ptr<SQLStatement> statement,
-                                                                     nb::object params) {
+shared_ptr<engine::Result> DuckDBPyConnection::PrepareAndSubmitInternal(unique_ptr<SQLStatement> statement,
+                                                                        nb::object params) {
 	if (params.is_none()) {
 		params = nb::list();
 	}
-	auto &context = *con.GetConnection().context;
+	auto session = EngineSession();
 
-	auto named_values = TransformPreparedParameters(context, params);
+	auto named_values = TransformPreparedParameters(session.Context(), params);
 
-	unique_ptr<QueryResult> res;
+	shared_ptr<engine::Result> res;
 	{
 		D_ASSERT(duckdb::PyUtil::GilCheck());
 		nb::gil_scoped_release release;
 		unique_lock<std::recursive_mutex> lock(py_connection_lock);
-
-		res = con.GetConnection().Submit(std::move(statement), named_values);
-		if (res->HasError()) {
-			res->ThrowError();
-		}
+		res = session.Submit(std::move(statement), named_values, engine::Format::Chunks());
 	}
 	return res;
 }
@@ -712,10 +685,8 @@ vector<unique_ptr<SQLStatement>> DuckDBPyConnection::GetStatements(const nb::obj
 		return result;
 	}
 	if (nb::isinstance<nb::str>(query)) {
-		auto &connection = con.GetConnection();
 		auto sql_query = nb::cast<std::string>(nb::str(query));
-		auto statements = connection.ExtractStatements(sql_query);
-		return std::move(statements);
+		return EngineSession().Parse(sql_query);
 	}
 	throw InvalidInputException("Please provide either a DuckDBPyStatement or a string representing the query");
 }
@@ -742,19 +713,15 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::Execute(const nb::object
 	ExecuteImmediately(std::move(statements));
 
 	auto res = PrepareAndSubmitInternal(std::move(last_statement), std::move(params));
-
-	if (res) {
-		std::shared_ptr<DuckDBPyResult> py_result;
-		{
-			D_ASSERT(duckdb::PyUtil::GilCheck());
-			nb::gil_scoped_release release;
-			unique_lock<std::recursive_mutex> lock(py_connection_lock);
-			py_result = std::make_shared<DuckDBPyResult>(std::move(res), true);
-		}
-		// Don't use CreateRelation here: the result is stored inside the connection,
-		// so setting connection_owner would create a ref cycle (connection, result, connection).
-		con.SetResult(std::make_unique<DuckDBPyRelation>(std::move(py_result)));
+	if (res->CompletesBeforeReturning()) {
+		D_ASSERT(duckdb::PyUtil::GilCheck());
+		nb::gil_scoped_release release;
+		unique_lock<std::recursive_mutex> lock(py_connection_lock);
+		res->Retain(CheckSignals);
 	}
+	// Don't use CreateRelation here: the result is stored inside the connection,
+	// so setting connection_owner would create a ref cycle (connection, result, connection).
+	con.SetResult(std::make_unique<DuckDBPyRelation>(std::make_shared<DuckDBPyResult>(std::move(res))));
 	return shared_from_this();
 }
 
@@ -1609,7 +1576,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadCSV(const nb::object &
 }
 
 void DuckDBPyConnection::ExecuteImmediately(vector<unique_ptr<SQLStatement>> statements) {
-	auto &connection = con.GetConnection();
+	auto session = EngineSession();
 	D_ASSERT(duckdb::PyUtil::GilCheck());
 	nb::gil_scoped_release release;
 	if (statements.empty()) {
@@ -1621,8 +1588,7 @@ void DuckDBPyConnection::ExecuteImmediately(vector<unique_ptr<SQLStatement>> sta
 			    "Prepared parameters are only supported for the last statement, please split your query up into "
 			    "separate 'execute' calls if you want to use prepared parameters");
 		}
-		auto res = connection.Submit(std::move(stmt));
-		CompleteQuery(*res);
+		session.Run(std::move(stmt), CheckSignals);
 	}
 }
 
@@ -1671,18 +1637,17 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::RunQuery(const nb::object 
 		// connection can end the query in between
 		ConnectionLockGuard conn_lock(*this);
 		auto res = PrepareAndSubmitInternal(std::move(last_statement), std::move(params));
-		if (!res) {
-			return nullptr;
-		}
+		unique_ptr<ColumnDataCollection> collection;
 		{
 			D_ASSERT(duckdb::PyUtil::GilCheck());
 			nb::gil_scoped_release release;
-			CompleteQuery(*res);
+			res->Retain(CheckSignals);
+			if (res->Properties().return_type != StatementReturnType::QUERY_RESULT) {
+				return nullptr;
+			}
+			collection = res->TakeChunks(CheckSignals);
 		}
-		if (res->GetStatementProperties().return_type != StatementReturnType::QUERY_RESULT) {
-			return nullptr;
-		}
-		relation = make_shared_ptr<MaterializedRelation>(connection.context, res->TakeCollection(), res->GetNames(),
+		relation = make_shared_ptr<MaterializedRelation>(connection.context, std::move(collection), res->Names(),
 		                                                 Identifier(alias));
 	}
 	return CreateRelation(std::move(relation));

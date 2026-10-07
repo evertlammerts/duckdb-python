@@ -18,8 +18,8 @@
 #include "duckdb/main/relation/table_function_relation.hpp"
 #include "duckdb_python/map.hpp"
 #include "duckdb_python/expression/pyexpression.hpp"
-#include "duckdb/common/arrow/physical_arrow_collector.hpp"
 #include "duckdb_python/arrow/arrow_export_utils.hpp"
+#include "duckdb/common/arrow/arrow_converter.hpp"
 
 namespace duckdb {
 
@@ -232,7 +232,7 @@ vector<unique_ptr<ParsedExpression>> GetExpressions(ClientContext &context, cons
 		return expressions;
 	} else if (nb::isinstance<nb::str>(expr)) {
 		auto aggregate_list = nb::cast<std::string>(nb::str(expr));
-		return Parser::ParseExpressionList(aggregate_list, context.GetParserOptions());
+		return Parser(context).ParseExpressionList(aggregate_list);
 	} else {
 		// A single Expression could be supported here by wrapping it in a vector
 		string actual_type = nb::cast<std::string>(nb::str((expr).type()));
@@ -399,14 +399,14 @@ string DuckDBPyRelation::GenerateExpressionList(const string &function_name, vec
 
 		unique_ptr<ParsedExpression> expression;
 		try {
-			auto expressions = Parser::ParseExpressionList(trimmed_input);
+			auto expressions = Parser::GetBuiltinParser().ParseExpressionList(trimmed_input);
 			if (expressions.size() == 1) {
 				expression = std::move(expressions[0]);
 			}
 		} catch (const ParserException &) {
 			// First attempt at parsing failed, the input might be a column name that needs quoting.
 			auto quoted_input = SQLQuotedIdentifier::ToString(trimmed_input);
-			auto expressions = Parser::ParseExpressionList(quoted_input);
+			auto expressions = Parser::GetBuiltinParser().ParseExpressionList(quoted_input);
 			if (expressions.size() == 1 && expressions[0]->GetExpressionClass() == ExpressionClass::COLUMN_REF) {
 				expression = std::move(expressions[0]);
 			}
@@ -808,36 +808,28 @@ duckdb::pyarrow::RecordBatchReader DuckDBPyRelation::FetchRecordBatchReader(idx_
 	return result->FetchRecordBatchReader(rows_per_batch);
 }
 
-//! Submits the relation and returns the undriven handle. Call with the GIL released.
-static unique_ptr<QueryResult> PySubmitRelation(const shared_ptr<Relation> &rel, bool stream_result) {
-	auto context = rel->context->GetContext();
-	QueryParameters parameters;
-	// A stream can only be opened on a handle whose retention is still undecided at submission
-	parameters.result_eagerness = stream_result ? ResultEagerness::AUTO : ResultEagerness::FORCED;
-	auto result = context->Submit(rel, parameters);
-	if (result->HasError()) {
-		result->ThrowError();
-	}
-	return result;
+//! Submits the relation and returns the undriven result. Call with the GIL released.
+static shared_ptr<engine::Result> PySubmitRelation(const shared_ptr<Relation> &rel, const engine::Format &format) {
+	return engine::Session(rel->context->GetContext()).Submit(rel, format);
 }
 
-static unique_ptr<QueryResult> PyExecuteRelation(const shared_ptr<Relation> &rel) {
+static shared_ptr<engine::Result> PyExecuteRelation(const shared_ptr<Relation> &rel) {
 	if (!rel) {
 		return nullptr;
 	}
 	D_ASSERT(duckdb::PyUtil::GilCheck());
 	nb::gil_scoped_release release;
-	auto query_result = PySubmitRelation(rel, false);
-	DuckDBPyConnection::CompleteQuery(*query_result);
-	return query_result;
+	auto result = PySubmitRelation(rel, engine::Format::Chunks());
+	result->Retain(DuckDBPyConnection::CheckSignals);
+	return result;
 }
 
-unique_ptr<QueryResult> DuckDBPyRelation::ExecuteInternal() {
+shared_ptr<engine::Result> DuckDBPyRelation::ExecuteInternal() {
 	this->executed = true;
 	return PyExecuteRelation(rel);
 }
 
-void DuckDBPyRelation::ExecuteOrThrow(bool stream_result) {
+void DuckDBPyRelation::ExecuteOrThrow(bool stream_result, const engine::Format &format) {
 	nb::gil_scoped_acquire gil;
 	result.reset();
 	if (!rel) {
@@ -847,8 +839,11 @@ void DuckDBPyRelation::ExecuteOrThrow(bool stream_result) {
 	std::shared_ptr<DuckDBPyResult> py_result;
 	{
 		nb::gil_scoped_release release;
-		auto submitted = PySubmitRelation(rel, stream_result);
-		py_result = std::make_shared<DuckDBPyResult>(std::move(submitted), stream_result);
+		auto submitted = PySubmitRelation(rel, format);
+		if (!stream_result) {
+			submitted->Retain(DuckDBPyConnection::CheckSignals);
+		}
+		py_result = std::make_shared<DuckDBPyResult>(std::move(submitted));
 	}
 	result = std::move(py_result);
 }
@@ -963,16 +958,7 @@ pyarrow::Table DuckDBPyRelation::ToArrowTableInternal(idx_t batch_size, bool to_
 		return nb::none();
 	}
 	if (!result) {
-		auto &config = ClientConfig::GetConfig(*rel->context->GetContext());
-		ScopedConfigSetting scoped_setting(
-		    config,
-		    [&batch_size](ClientConfig &config) {
-			    config.get_result_collector = [&batch_size](ClientContext &context, PreparedStatementData &data) {
-				    return PhysicalArrowCollector::Create(context, data, batch_size);
-			    };
-		    },
-		    [](ClientConfig &config) { config.get_result_collector = nullptr; });
-		ExecuteOrThrow();
+		ExecuteOrThrow(false, engine::Format::Arrow(batch_size));
 	}
 	AssertResultOpen();
 	auto res = result->FetchArrowTable(batch_size, to_polars);
@@ -989,7 +975,7 @@ nb::object DuckDBPyRelation::ToArrowCapsule(const nb::object &requested_schema) 
 		if (!rel) {
 			return nb::none();
 		}
-		ExecuteOrThrow(true);
+		ExecuteOrThrow(true, engine::Format::Arrow(DuckDBPyResult::DEFAULT_ARROW_BATCH_SIZE));
 	}
 	AssertResultOpen();
 	auto res = result->FetchArrowCapsule();
@@ -1035,7 +1021,8 @@ duckdb::pyarrow::RecordBatchReader DuckDBPyRelation::ToRecordBatch(idx_t batch_s
 		if (!rel) {
 			return nb::none();
 		}
-		ExecuteOrThrow(true);
+		DuckDBPyResult::CheckBatchSize(batch_size);
+		ExecuteOrThrow(true, engine::Format::Arrow(batch_size));
 	}
 	AssertResultOpen();
 	auto res = result->FetchRecordBatchReader(batch_size);
@@ -1535,7 +1522,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Query(const string &view_nam
 	rel->CreateView(Identifier(view_name), /*replace=*/true, /*temporary=*/true);
 	auto all_dependencies = rel->GetAllDependencies();
 
-	Parser parser(rel->context->GetContext()->GetParserOptions());
+	Parser parser(*rel->context->GetContext());
 	parser.ParseQuery(sql_query);
 	if (parser.statements.size() != 1) {
 		throw InvalidInputException("'DuckDBPyRelation.query' only accepts a single statement");
@@ -1554,13 +1541,10 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Query(const string &view_nam
 	{
 		D_ASSERT(duckdb::PyUtil::GilCheck());
 		nb::gil_scoped_release release;
-		auto query_result = rel->context->GetContext()->Query(std::move(parser.statements[0]), QueryParameters());
 		// Execute it anyways, for creation/altering statements
 		// We only care that it succeeds, we can't store the result
-		D_ASSERT(query_result);
-		if (query_result->HasError()) {
-			query_result->ThrowError();
-		}
+		engine::Session(rel->context->GetContext())
+		    .Run(std::move(parser.statements[0]), DuckDBPyConnection::CheckSignals);
 	}
 	return nullptr;
 }
