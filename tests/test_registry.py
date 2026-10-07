@@ -1337,22 +1337,24 @@ class TestTemporalAndBinaryTypes:
         assert rows(con, f"SELECT TRY_CAST(t AS {target}) FROM far") == [(None,)]
         assert rows(con, "SELECT 42") == [(42,)]
 
-    @pytest.mark.parametrize(
-        ("unit", "count"),
-        [("us", -106_751_991 * 86_400_000_000 - 1), ("ns", -106_751 * 86_400_000_000_000 - 1)],
-        ids=["before 290309-12-22 BC", "before 1677-09-22"],
-    )
     @pytest.mark.xfail(
         strict=True,
         raises=exceptions.InternalError,
         reason="the engine's text form of a timestamp before its date range throws an internal error",
     )
-    def test_a_timestamp_before_the_date_range_try_casts_to_null(
-        self, con: duckdb.frame.Connection, unit: str, count: int
-    ) -> None:
-        con.register("early", pa.table({"t": pa.array([count], pa.timestamp(unit))}))
+    def test_a_timestamp_before_the_date_range_try_casts_to_null(self, con: duckdb.frame.Connection) -> None:
+        con.register("early", pa.table({"t": pa.array([-106_751_991 * 86_400_000_000 - 1], pa.timestamp("us"))}))
         assert rows(con, "SELECT TRY_CAST(t AS VARCHAR) FROM early") == [(None,)]
         assert rows(con, "SELECT 42") == [(42,)]
+
+    def test_the_first_day_of_nanoseconds_reads_as_text(self, con: duckdb.frame.Connection) -> None:
+        # Nanoseconds begin during 1677-09-21, whose midnight int64 cannot count.
+        counts = [-(2**63), -106_751 * 86_400_000_000_000 - 1]
+        con.register("early", pa.table({"t": pa.array(counts, pa.timestamp("ns"))}))
+        assert rows(con, "SELECT t::VARCHAR FROM early") == [
+            ("1677-09-21 00:12:43.145224192",),
+            ("1677-09-21 23:59:59.999999999",),
+        ]
 
     @pytest.mark.parametrize(
         ("extremes", "count", "bound"),

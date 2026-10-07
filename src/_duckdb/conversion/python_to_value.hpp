@@ -93,8 +93,11 @@ inline bool DictEmpty(nb::handle dict) {
 	return PyDict_Size(dict.ptr()) == 0;
 }
 
-/// Whether a dict's first key is the empty string, which makes the struct it becomes unnamed.
-inline bool FirstKeyEmpty(nb::handle dict) {
+/// Whether a dict's one key is the empty string, which makes the struct it becomes unnamed, a TUPLE.
+inline bool OnlyKeyEmpty(nb::handle dict) {
+	if (PyDict_Size(dict.ptr()) != 1) {
+		return false;
+	}
 	for (auto entry : nb::borrow<nb::dict>(dict)) {
 		return PyUnicode_GetLength(entry.first.ptr()) == 0;
 	}

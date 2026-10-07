@@ -23,6 +23,10 @@ bool IsStruct(duckdb::cxx::LogicalTypeId id);
 /// The field names of a struct type, in order.
 std::vector<std::string> StructNames(const duckdb::cxx::LogicalType &type);
 
+/// Whether the engine pairs a struct with these field names by position: it has no fields, or it is a TUPLE, the only
+/// struct whose names are all empty.
+bool AllUnnamed(const std::vector<std::string> &names);
+
 /// For each source field, the target field the engine's cast pairs it with, or nullopt for one it drops: by name
 /// ignoring ASCII case, or by position when either struct is unnamed.
 std::vector<std::optional<std::size_t>> CastPairing(const std::vector<std::string> &source,

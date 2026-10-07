@@ -277,14 +277,18 @@ std::optional<Value> TryCastTemporalExactly(duckdb::cxx::Context &context, const
 	}
 }
 
-// numpy cannot convert to a calendar date.
-std::string ScalarText(nb::handle scalar, int64_t raw, const std::string &dtype) {
-	nb::object text = nb::steal(PyObject_Str(scalar.ptr()));
-	if (!text.is_valid()) {
+// Where numpy's scaling of a count before printing it overflows int64, numpy refuses on some platforms and wraps to a
+// wrong value on others, so such a count is never handed to it.
+std::string ScalarText(nb::handle scalar, int64_t raw, uint64_t scale, const std::string &dtype) {
+	const auto magnitude = raw < 0 ? 0 - static_cast<uint64_t>(raw) : static_cast<uint64_t>(raw);
+	if (scale == 0 || magnitude <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) / scale) {
+		nb::object text = nb::steal(PyObject_Str(scalar.ptr()));
+		if (text.is_valid()) {
+			return nb::cast<std::string>(text);
+		}
 		PyErr_Clear();
-		return std::to_string(raw) + " of " + dtype;
 	}
-	return nb::cast<std::string>(text);
+	return std::to_string(raw) + " of " + dtype;
 }
 
 // numpy's scalar types, matched by name, so numpy is never imported for the check.
@@ -322,6 +326,8 @@ Value NumpyTemporalToValue(SCOPE &scope, nb::handle scalar, bool is_datetime, bo
 	    !SplitTimeUnit(std::string_view(spelled).substr(open + 1, spelled.size() - open - 2), step, code)) {
 		ThrowInvalidInput(std::string("a ") + kind + " without a unit has no engine type");
 	}
+	// numpy prints a datetime of weeks as the days it counts.
+	const uint64_t print_scale = is_datetime && code == "W" ? step * 7 : step;
 	const TimeUnit *unit = FindTimeUnit(code, true);
 	if (unit == nullptr) {
 		if (!is_datetime || (code != "M" && code != "Y")) {
@@ -332,19 +338,19 @@ Value NumpyTemporalToValue(SCOPE &scope, nb::handle scalar, bool is_datetime, bo
 		if (step != 0) {
 			const int64_t bound = CALENDAR_LIMIT / static_cast<int64_t>(step);
 			if (raw > bound || raw < -bound) {
-				ThrowBeyondRange(ScalarText(scalar, raw, spelled));
+				ThrowBeyondRange(ScalarText(scalar, raw, print_scale, spelled));
 			}
 			days = nb::cast<int64_t>(nb::int_(scalar.attr("astype")("<M8[D]").attr("view")("i8")));
 		}
 		if (days > DATE_LIMIT || days < -DATE_LIMIT) {
-			ThrowBeyondRange(ScalarText(scalar, raw, spelled));
+			ThrowBeyondRange(ScalarText(scalar, raw, print_scale, spelled));
 		}
 		return Value::Create(scope, duckdb::cxx::date_t {static_cast<int32_t>(days)});
 	}
 	if (!is_datetime) {
 		int64_t micros = 0;
 		if (!ScaleCount(raw, ConversionOf(*unit, step, 1'000), false, micros)) {
-			ThrowBeyondRange(ScalarText(scalar, raw, spelled));
+			ThrowBeyondRange(ScalarText(scalar, raw, print_scale, spelled));
 		}
 		return Value::Create(scope, duckdb::cxx::interval_t {0, 0, micros});
 	}
@@ -352,7 +358,7 @@ Value NumpyTemporalToValue(SCOPE &scope, nb::handle scalar, bool is_datetime, bo
 		int64_t days = 0;
 		if (!ScaleCount(raw, ConversionOf(*unit, step, 86'400'000'000'000), true, days) || days > DATE_LIMIT ||
 		    days < -DATE_LIMIT) {
-			ThrowBeyondRange(ScalarText(scalar, raw, spelled));
+			ThrowBeyondRange(ScalarText(scalar, raw, print_scale, spelled));
 		}
 		return Value::Create(scope, duckdb::cxx::date_t {static_cast<int32_t>(days)});
 	}
@@ -381,10 +387,10 @@ Value NumpyTemporalToValue(SCOPE &scope, nb::handle scalar, bool is_datetime, bo
 	const auto conversion = ConversionOf(*unit, step, target_nanos);
 	int64_t count = 0;
 	if (!ScaleCount(raw, conversion, false, count)) {
-		ThrowBeyondRange(ScalarText(scalar, raw, spelled));
+		ThrowBeyondRange(ScalarText(scalar, raw, print_scale, spelled));
 	}
 	if (conversion.denominator > 1 && !ScaleCount(raw, conversion, true, count)) {
-		const auto text = ScalarText(scalar, raw, spelled);
+		const auto text = ScalarText(scalar, raw, print_scale, spelled);
 		const auto to_nanos = ConversionOf(*unit, step, 1);
 		if (to_nanos.denominator > 1 && raw % static_cast<int64_t>(to_nanos.denominator) != 0) {
 			ThrowInvalidInput("the value " + text + " is finer than the engine's nanoseconds");
@@ -398,7 +404,7 @@ Value NumpyTemporalToValue(SCOPE &scope, nb::handle scalar, bool is_datetime, bo
 	}
 	const auto range = FiniteTimestampRange(target);
 	if (count < range.first || count > range.last) {
-		ThrowBeyondRange(ScalarText(scalar, raw, spelled));
+		ThrowBeyondRange(ScalarText(scalar, raw, print_scale, spelled));
 	}
 	return TimestampValue(scope, target, count);
 }

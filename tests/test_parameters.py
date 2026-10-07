@@ -336,14 +336,13 @@ class TestNestedZones:
     def test_a_struct_keeps_each_field_as_it_is(self, con: _duckdb.Connection) -> None:
         assert roundtrip(con, {"a": NAIVE, "b": AWARE}) == {"a": NAIVE, "b": AWARE}
 
-    def test_unnamed_fields_of_both_kinds_bind_in_their_own_places(self, con: _duckdb.Connection) -> None:
-        bound = con.execute("SELECT typeof($1)", [[{"": NAIVE, "x": AWARE}]]).fetch_all()
-        assert bound == [("STRUCT(TIMESTAMP, TIMESTAMP WITH TIME ZONE)[]",)]
+    def test_a_field_named_by_the_empty_string_meets_its_siblings_by_name(self, con: _duckdb.Connection) -> None:
+        # A struct is unnamed only when no field has a name, so these pair by name and the zones never meet.
+        bound = con.execute("SELECT typeof($1)", [[{"": NAIVE, "y": 1}, {"a": AWARE, "y": 2}]]).fetch_all()
+        assert bound == [('STRUCT("" TIMESTAMP, y BIGINT, a TIMESTAMP WITH TIME ZONE)[]',)]
 
     @pytest.mark.parametrize(
-        "value",
-        [[{"": NAIVE}, {"a": AWARE}], [{"a": NAIVE}, {"": AWARE}], [{"": NAIVE, "y": 1}, {"a": AWARE, "y": 2}]],
-        ids=["unnamed first", "named first", "beside a field of both"],
+        "value", [[{"": NAIVE}, {"a": AWARE}], [{"a": NAIVE}, {"": AWARE}]], ids=["unnamed first", "named first"]
     )
     def test_an_unnamed_struct_meets_a_named_one_by_position(self, con: _duckdb.Connection, value: object) -> None:
         with pytest.raises(exceptions.InvalidInputError, match="with and without a time zone"):
@@ -429,10 +428,19 @@ class TestTemporalScalarEdges:
         with pytest.raises(exceptions.InvalidInputError, match="has nanoseconds, and a query parameter holds"):
             con.execute("SELECT $1", [value])
 
-    def test_a_value_numpy_cannot_print_is_named_by_its_count(self, con: _duckdb.Connection) -> None:
-        message = "the value 1099511627776 of <M8[2147483647s] is beyond the range of its engine type"
+    @pytest.mark.parametrize(
+        ("count", "dtype"),
+        [(2**40, "datetime64[2147483647s]"), (2**62, "datetime64[W]"), (2**40, "timedelta64[2147483647s]")],
+        ids=["stepped", "weeks", "a stepped duration"],
+    )
+    def test_a_value_numpy_cannot_print_is_named_by_its_count(
+        self, con: _duckdb.Connection, count: int, dtype: str
+    ) -> None:
+        # numpy scales these past int64 before printing, which wraps to a wrong value on some platforms.
+        value = np.array(count, dtype=dtype)[()]
+        message = f"the value {count} of {value.dtype.str} is beyond the range of its engine type"
         with pytest.raises(exceptions.InvalidInputError, match=re.escape(message)):
-            con.execute("SELECT $1", [np.array(2**40, dtype="datetime64[2147483647s]")[()]])
+            con.execute("SELECT $1", [value])
 
     def test_a_tzinfo_that_raises_surfaces_its_error_and_the_connection_survives(self, con: _duckdb.Connection) -> None:
         with pytest.raises(ValueError, match="no offset today"):
@@ -457,6 +465,7 @@ class TestTypelessParts:
             ([{}, None], "STRUCT[]"),
             ([{"a": {}, "b": datetime.date(2020, 1, 1)}, {"a": None, "b": None}], "STRUCT(a STRUCT, b DATE)[]"),
             ({1: None, 2: "x"}, "MAP(BIGINT, VARCHAR)"),
+            ([{"": 1, "x": "a"}, {"": 2, "x": None}], 'STRUCT("" BIGINT, x VARCHAR)[]'),
         ],
         ids=[
             "empty list",
@@ -470,6 +479,7 @@ class TestTypelessParts:
             "beside an empty struct",
             "an empty struct field",
             "a null map value",
+            "beside a field named by the empty string",
         ],
     )
     def test_a_missing_part_takes_its_siblings_type(
@@ -480,19 +490,19 @@ class TestTypelessParts:
     @pytest.mark.parametrize(
         ("value", "expected"),
         [
-            ([{"": 1, "x": "a"}, {"": 2, "x": "b"}], "[(1, a), (2, b)]"),
-            ([None, {"": datetime.date(2020, 1, 1), "x": 1}], "[NULL, (2020-01-01, 1)]"),
+            ([{"": 1}, {"": 2}], "[(1,), (2,)]"),
+            ([None, {"": datetime.date(2020, 1, 1)}], "[NULL, (2020-01-01,)]"),
         ],
         ids=["two unnamed", "a null struct"],
     )
     def test_unnamed_fields_meet_by_position(self, con: _duckdb.Connection, value: object, expected: str) -> None:
-        # A first field named by the empty string makes the struct unnamed, so the engine pairs its fields by position.
+        # A dict whose one key is empty makes the struct unnamed, a TUPLE, so the engine pairs its fields by position.
         assert con.execute("SELECT $1::VARCHAR", [value]).fetch_all() == [(expected,)]
 
     @pytest.mark.parametrize(
         "value",
         [
-            [{"": 1, "x": "a"}, {"": 2, "x": None}],
+            [{"": "x"}, {"": None}],
             [{"": "x"}, {"a": None}],
             [{"a": "x"}, {"": None}],
             [{"a": None}, {"A": NAIVE}],
@@ -509,12 +519,10 @@ class TestTypelessParts:
             con.execute("SELECT $1::VARCHAR", [value])
 
     def test_a_named_sibling_after_an_unnamed_one_meets_it_by_name(self, con: _duckdb.Connection) -> None:
-        # The unnamed struct takes its named neighbour's names, so the third pairs with them by name, not position.
-        value = [{"a": "x", "b": 1}, {"": "y", "x": 2}, {"b": 3, "a": None}]
+        # The unnamed struct takes its named neighbour's name, which the third then meets.
+        value = [{"a": "x"}, {"": "y"}, {"a": None}]
         bound = con.execute("SELECT typeof($1), $1", [value]).fetch_all()
-        assert bound == [
-            ("STRUCT(a VARCHAR, b BIGINT)[]", [{"a": "x", "b": 1}, {"a": "y", "b": 2}, {"a": None, "b": 3}])
-        ]
+        assert bound == [("STRUCT(a VARCHAR)[]", [{"a": "x"}, {"a": "y"}, {"a": None}])]
 
 
 class TestStandInsTakeTheStatementsType:
@@ -659,6 +667,10 @@ def test_a_list_nested_a_thousand_deep_binds_within_seconds() -> None:
 TEXT_NAIVE = datetime.datetime(2020, 1, 1, 12)
 TEXT_AWARE = datetime.datetime(2020, 6, 1, 8, tzinfo=datetime.UTC)
 
+#: SQL cannot name a struct field by the empty string, so a literal names it this instead; the engine pairs named
+#: fields by name alone, so its reading differs from the bound value's only in that name.
+EMPTY_NAME = "empty_name_stand_in"
+
 
 def sql_literal(value: object) -> str:
     """`value` written as SQL that the engine combines by the same rules as the bound parameter."""
@@ -675,10 +687,10 @@ def sql_literal(value: object) -> str:
     if isinstance(value, dict):
         if not all(isinstance(key, str) for key in value):
             return "MAP {" + ", ".join(f"{sql_literal(key)}: {sql_literal(item)}" for key, item in value.items()) + "}"
-        # ROW makes the engine's unnamed struct, as a dict whose first key is empty does.
-        if next(iter(value)) == "":
-            return "ROW(" + ", ".join(sql_literal(item) for item in value.values()) + ")"
-        return "{" + ", ".join(f"'{name}': {sql_literal(item)}" for name, item in value.items()) + "}"
+        # ROW makes the engine's unnamed struct, as a dict whose one key is empty does.
+        if list(value) == [""]:
+            return f"ROW({sql_literal(value[''])})"
+        return "{" + ", ".join(f"'{name or EMPTY_NAME}': {sql_literal(item)}" for name, item in value.items()) + "}"
     raise TypeError(value)
 
 
@@ -731,7 +743,10 @@ def disagreement(con: _duckdb.Connection, value: object) -> str | None:
     if bound is None:
         return f"{literal}: the engine reads {engine}, binding failed: {error}"
     # A NULL no sibling types is INTEGER when bound, the engine's own NULL type in SQL; an unnamed struct is a TUPLE.
-    expected = (engine[0].replace('"NULL"', "INTEGER").replace("TUPLE(", "STRUCT("), engine[1])
+    expected = (
+        engine[0].replace('"NULL"', "INTEGER").replace("TUPLE(", "STRUCT(").replace(f"{EMPTY_NAME} ", '"" '),
+        engine[1].replace(f"'{EMPTY_NAME}':", "'':"),
+    )
     actual = (bound[0].replace("TUPLE(", "STRUCT("), bound[1])
     return None if actual == expected else f"{literal}: the engine reads {expected}, binding gave {actual}"
 

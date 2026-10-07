@@ -41,8 +41,7 @@ bool ContainsUntyped(const LogicalType &type) {
 namespace {
 
 bool Unnamed(const LogicalType &type) {
-	return type.GetTypeId() != LogicalTypeId::STRUCT || type.GetStructChildCount() == 0 ||
-	       type.GetStructChildName(0).empty();
+	return type.GetTypeId() != LogicalTypeId::STRUCT || AllUnnamed(StructNames(type));
 }
 
 template <class SCOPE>

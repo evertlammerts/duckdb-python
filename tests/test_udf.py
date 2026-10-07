@@ -939,8 +939,20 @@ class TestReturnedFieldsPairByName:
                 "STRUCT(a TIMESTAMPTZ, b TIMESTAMP)",
                 "converting between them would assume a time zone",
             ),
+            (
+                {"": datetime.datetime(2020, 1, 1, 5), "k": datetime.datetime(2020, 1, 1)},
+                "MAP(VARCHAR, DATE)",
+                "which cannot hold it exactly",
+            ),
         ],
-        ids=["ns into a map", "time into a map of dates", "aware into a map", "naive into a map", "reordered zones"],
+        ids=[
+            "ns into a map",
+            "time into a map of dates",
+            "aware into a map",
+            "naive into a map",
+            "reordered zones",
+            "an empty key into a map",
+        ],
     )
     def test_what_a_namesake_cannot_hold_is_refused(
         self, con: duckdb.frame.Connection, returned: object, declared: str, message: str
@@ -951,7 +963,10 @@ class TestReturnedFieldsPairByName:
 
 
 class TestUnnamedAndCaseFoldedFields:
-    """A field named by the empty string pairs by position, as the engine's cast pairs it; other names fold case."""
+    """A dict whose one key is empty is unnamed and pairs by position, as the engine's cast pairs it.
+
+    Beside other keys the empty one is a name like them, and names fold case.
+    """
 
     @pytest.mark.parametrize(
         ("returned", "declared", "message"),
@@ -959,14 +974,15 @@ class TestUnnamedAndCaseFoldedFields:
             ({"": datetime.datetime(2020, 1, 1, 5)}, "STRUCT(a DATE)", "which cannot hold it exactly"),
             ({"": np.datetime64(1, "ns")}, "STRUCT(a TIMESTAMP)", "which cannot hold it exactly"),
             (
-                {"": datetime.datetime(2020, 1, 1, 5, tzinfo=datetime.UTC), "b": 1},
-                "STRUCT(a TIMESTAMP, b INTEGER)",
+                {"": datetime.datetime(2020, 1, 1, 5, tzinfo=datetime.UTC)},
+                "STRUCT(a TIMESTAMP)",
                 "converting between them would assume a time zone",
             ),
             ({"": {"x": datetime.datetime(2020, 1, 1, 5)}}, "STRUCT(a STRUCT(x DATE))", "which cannot hold it exactly"),
             ({"A": datetime.datetime(2020, 1, 1, 5)}, "STRUCT(a DATE)", "which cannot hold it exactly"),
+            ({"a": datetime.datetime(2020, 1, 1, 5)}, "TUPLE(DATE)", "which cannot hold it exactly"),
         ],
-        ids=["unnamed", "unnamed ns", "unnamed zoned beside a named", "unnamed nested", "case folded"],
+        ids=["unnamed", "unnamed ns", "unnamed zoned", "unnamed nested", "case folded", "into an unnamed"],
     )
     def test_a_field_is_checked_against_the_field_it_meets(
         self, con: duckdb.frame.Connection, returned: object, declared: str, message: str
@@ -981,14 +997,22 @@ class TestUnnamedAndCaseFoldedFields:
         con.create_function("f", lambda _: returned, ["BIGINT"], "STRUCT(a DATE)")
         assert rows(con, "SELECT f(1)") == [({"a": datetime.date(2020, 1, 1)},)]
 
-    def test_unnamed_fields_are_kept_in_order(self, con: duckdb.frame.Connection) -> None:
-        returned = {"": datetime.datetime(2020, 1, 1), "y": datetime.date(2021, 1, 1)}
-        con.create_function("f", lambda _: returned, ["BIGINT"], "STRUCT(a DATE, b DATE)")
-        assert rows(con, "SELECT f(1)") == [({"a": datetime.date(2020, 1, 1), "b": datetime.date(2021, 1, 1)},)]
+    def test_an_unnamed_field_takes_the_declared_name(self, con: duckdb.frame.Connection) -> None:
+        con.create_function("f", lambda _: {"": datetime.datetime(2020, 1, 1)}, ["BIGINT"], "STRUCT(a DATE)")
+        assert rows(con, "SELECT f(1)") == [({"a": datetime.date(2020, 1, 1)},)]
 
-    def test_a_later_unnamed_field_is_dropped_as_the_engine_drops_it(self, con: duckdb.frame.Connection) -> None:
-        # Pairing is by name once the first field has one, and no declared field is named by the empty string.
-        returned = {"a": datetime.datetime(2020, 1, 1), "": datetime.datetime(2020, 1, 1, 12)}
+    @pytest.mark.parametrize(
+        "returned",
+        [
+            {"a": datetime.datetime(2020, 1, 1), "": datetime.datetime(2020, 1, 1, 12)},
+            {"": datetime.datetime(2020, 1, 1, 12), "a": datetime.datetime(2020, 1, 1)},
+        ],
+        ids=["after a named", "before a named"],
+    )
+    def test_a_field_named_by_the_empty_string_is_dropped_as_the_engine_drops_it(
+        self, con: duckdb.frame.Connection, returned: object
+    ) -> None:
+        # Beside another name the empty one pairs by name too, and no declared field is named by it.
         con.create_function("f", lambda _: returned, ["BIGINT"], "STRUCT(a DATE, b DATE)")
         assert rows(con, "SELECT f(1)") == [({"a": datetime.date(2020, 1, 1), "b": None},)]
 
@@ -1089,15 +1113,18 @@ class TestDroppedFields:
         assert rows(con, "SELECT f(1)") == [(expected,)]
 
     @pytest.mark.parametrize(
-        ("returned", "reason"),
+        ("returned", "declared", "reason"),
         [
-            ({"": datetime.datetime(2020, 1, 1), "x": object()}, "Cannot cast STRUCTs of different size"),
-            ({"x": object()}, "STRUCT to STRUCT cast must have at least one matching member"),
+            ({"": object()}, "STRUCT(a TIMESTAMP, b TIMESTAMP)", "Cannot cast STRUCTs of different size"),
+            ({"x": object()}, "STRUCT(a TIMESTAMP)", "STRUCT to STRUCT cast must have at least one matching member"),
+            ({"": 1}, "MAP(VARCHAR, BIGINT)", "Cannot cast unnamed STRUCTs to MAP"),
         ],
-        ids=["unnamed with a field too many", "no field matches"],
+        ids=["unnamed with a field too few", "no field matches", "unnamed into a map"],
     )
-    def test_the_cast_still_checks_the_shape(self, con: duckdb.frame.Connection, returned: object, reason: str) -> None:
-        con.create_function("f", lambda _: returned, ["BIGINT"], "STRUCT(a TIMESTAMP)")
+    def test_the_cast_still_checks_the_shape(
+        self, con: duckdb.frame.Connection, returned: object, declared: str, reason: str
+    ) -> None:
+        con.create_function("f", lambda _: returned, ["BIGINT"], declared)
         with pytest.raises(exceptions.InvalidInputError, match=reason):
             rows(con, "SELECT f(1)")
 
@@ -1182,9 +1209,9 @@ class TestUnionReturns:
         assert rows(con, "SELECT union_tag(f(1)), f(1)") == expected
 
     def test_an_unnamed_dict_takes_a_struct_member_by_position(self, con: duckdb.frame.Connection) -> None:
-        returned = {"": datetime.datetime(2020, 1, 1), "x": 1}
-        con.create_function("f", lambda _: returned, ["BIGINT"], "UNION(s STRUCT(a TIMESTAMP, b BIGINT), v VARCHAR)")
-        assert rows(con, "SELECT union_tag(f(1)), f(1)") == [("s", {"a": datetime.datetime(2020, 1, 1), "b": 1})]
+        returned = {"": datetime.datetime(2020, 1, 1)}
+        con.create_function("f", lambda _: returned, ["BIGINT"], "UNION(s STRUCT(a TIMESTAMP), v VARCHAR)")
+        assert rows(con, "SELECT union_tag(f(1)), f(1)") == [("s", {"a": datetime.datetime(2020, 1, 1)})]
 
     @pytest.mark.parametrize(
         ("returned", "declared"),

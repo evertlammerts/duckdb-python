@@ -213,8 +213,8 @@ Value ToDeclared(Conversion &conversion, nb::handle object, const TypeTree &node
 		if (IsStruct(id)) {
 			return StructToDeclared(conversion, object, node, whole);
 		}
-		// The engine refuses a STRUCT whose first field has no name as a MAP, so that one is left to it.
-		if (id == LogicalTypeId::MAP && !FirstKeyEmpty(object)) {
+		// The engine refuses an unnamed struct as a MAP, so that one is left to it.
+		if (id == LogicalTypeId::MAP && !OnlyKeyEmpty(object)) {
 			return MapToDeclared(conversion, object, node, whole);
 		}
 	}

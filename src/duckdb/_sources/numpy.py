@@ -72,6 +72,21 @@ _NANOSECONDS_LAST = 2**63 - 2
 
 _SUB_NANOSECOND_UNITS = ("ps", "fs", "as")
 
+#: Each datetime64 unit finer than a month in attoseconds, numpy's finest, so any two compare exactly as ints.
+_ATTOSECONDS = {
+    "W": 7 * 86_400 * 10**18,
+    "D": 86_400 * 10**18,
+    "h": 3_600 * 10**18,
+    "m": 60 * 10**18,
+    "s": 10**18,
+    "ms": 10**15,
+    "us": 10**12,
+    "ns": 10**9,
+    "ps": 10**6,
+    "fs": 10**3,
+    "as": 1,
+}
+
 #: numpy's NaT, as the int64 its datetime64 and timedelta64 buffers hold.
 _NAT = -(2**63)
 
@@ -255,16 +270,14 @@ def _within_nanoseconds(value: object) -> bool:
             # A step of zero makes every count the epoch.
             return True
         if unit in ("M", "Y"):
-            # numpy compares months and years with nanoseconds by wrapping arithmetic, so they are compared as days.
+            # numpy converts months and years to days by wrapping arithmetic, so the count is bounded first.
             if abs(int(moment.view("i8")) * step) > _CALENDAR_LIMIT:
                 return False
             moment = moment.astype("datetime64[D]")
-        try:
-            return bool(np.datetime64(_NANOSECONDS_FIRST, "ns") <= moment <= np.datetime64(_NANOSECONDS_LAST, "ns"))
-        except OverflowError:
-            # numpy compares in the finer unit: one under a nanosecond spans less than nanoseconds do, and a coarser
-            # count that overflows nanoseconds lies past them.
-            return unit in _SUB_NANOSECOND_UNITS
+            unit, step = "D", 1
+        # numpy's own comparison across units wraps on overflow on some platforms instead of raising.
+        attoseconds = int(moment.view("i8")) * step * _ATTOSECONDS[unit]
+        return _NANOSECONDS_FIRST * 10**9 <= attoseconds <= _NANOSECONDS_LAST * 10**9
     if isinstance(value, datetime.datetime):
         if value.utcoffset() is not None:
             try:

@@ -169,8 +169,9 @@ bool CastAssumesTimeZone(const duckdb::cxx::LogicalType &from, const duckdb::cxx
 /// A count in a coarser unit as microseconds, the infinity markers passed through unscaled.
 int64_t MicrosFromUnit(int64_t raw, uint64_t multiply, uint64_t divide);
 
-/// A numpy scalar as numpy prints it, or as its raw count and dtype when printing it fails.
-std::string ScalarText(nanobind::handle scalar, int64_t raw, const std::string &dtype);
+/// A numpy scalar as numpy prints it, or as its raw count and dtype when numpy cannot print it truly: when the count
+/// times `scale`, what numpy multiplies it by before printing, overflows int64.
+std::string ScalarText(nanobind::handle scalar, int64_t raw, uint64_t scale, const std::string &dtype);
 
 /// Whether `object` is the numpy scalar `name`, recognised by its type's name and module.
 bool IsNumpyScalar(nanobind::handle object, const char *name);

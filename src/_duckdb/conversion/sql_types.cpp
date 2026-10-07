@@ -41,13 +41,17 @@ std::vector<std::string> StructNames(const LogicalType &type) {
 	return names;
 }
 
+bool AllUnnamed(const std::vector<std::string> &names) {
+	return std::all_of(names.begin(), names.end(), [](const std::string &name) { return name.empty(); });
+}
+
 // Which field of a target struct each field of a source struct fills when the engine casts one to the other: by
-// position when either is unnamed, its first name empty, and then only between as many fields; else by name ignoring
-// ASCII case, each target field taken by the first source field naming it. A source field paired with none is dropped.
+// position when either is unnamed, and then only between as many fields; else by name ignoring ASCII case, each
+// target field taken by the first source field naming it. A source field paired with none is dropped.
 std::vector<std::optional<std::size_t>> CastPairing(const std::vector<std::string> &source,
                                                     const std::vector<std::string> &target) {
 	std::vector<std::optional<std::size_t>> pairing(source.size());
-	if (source.empty() || target.empty() || source.front().empty() || target.front().empty()) {
+	if (AllUnnamed(source) || AllUnnamed(target)) {
 		if (source.size() == target.size()) {
 			for (std::size_t i = 0; i < source.size(); i++) {
 				pairing[i] = i;

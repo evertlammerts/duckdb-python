@@ -1246,6 +1246,8 @@ class TestPandasNumpyScanTemporal:
         assert rows(con, f"SELECT {expression} FROM (SELECT TIMESTAMPTZ_NS '2020-01-02 03:04:05+00' AS t)")
 
     def test_a_nanosecond_aware_column_casts_to_date(self, con: duckdb.frame.Connection) -> None:
+        # The cast takes the date in the session's zone, which defaults to the machine's.
+        con._execute("SET TimeZone = 'UTC'").drain()
         instant = pd.Timestamp("2020-01-02 03:04:05.123456789", tz="UTC")
         con.register("ns", pd.DataFrame({"t": pd.Series([instant], dtype="datetime64[ns, UTC]")}))
         assert rows(con, "SELECT t::DATE FROM ns") == [(datetime.date(2020, 1, 2),)]
@@ -2357,7 +2359,12 @@ class TestPandasNumpyScanArrowColumns:
         ]
         union = pa.UnionArray.from_sparse(tags, members, ["i", "s"])
         con.register("t", arrow_backed(u=pa.chunked_array([union])))
-        assert [row[0] for row in rows(con, "SELECT u FROM t")] == union.to_pylist()
+        read = [row[0] for row in rows(con, "SELECT u FROM t")]
+        expected = union.to_pylist()
+        assert len(read) == len(expected)
+        # Under CI pytest diffs a failed list comparison in full, which for two long lists runs for hours.
+        wrong = [i for i, (got, want) in enumerate(zip(read, expected, strict=True)) if got != want]
+        assert not wrong, f"row {wrong[0]} reads {read[wrong[0]]!r}, not {expected[wrong[0]]!r}"
 
     def test_an_arrow_type_the_engine_does_not_import_is_refused_when_bound(self, con: duckdb.frame.Connection) -> None:
         con.register("t", arrow_backed(h=pa.chunked_array([pa.array([1.5], pa.float16())])))
