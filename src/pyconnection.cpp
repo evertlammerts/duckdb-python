@@ -191,13 +191,20 @@ static void InitializeConnectionMethods(nb::class_<DuckDBPyConnection> &m) {
 	      nb::arg("key"), nb::arg("value"));
 	m.def("duplicate", &DuckDBPyConnection::Cursor, "Create a duplicate of the current connection");
 	m.def("execute", &DuckDBPyConnection::Execute,
-	      "Execute the given SQL query, optionally using prepared statements with parameters set", nb::arg("query"),
-	      nb::arg("parameters") = nb::none());
+	      "Execute the given SQL query, optionally using prepared statements with parameters set. A query or DML "
+	      "statement that returns rows runs when its result is first read; every other statement runs before execute() "
+	      "returns",
+	      nb::arg("query"), nb::arg("parameters") = nb::none());
 	m.def("executemany", &DuckDBPyConnection::ExecuteMany,
 	      "Execute the given prepared statement multiple times using the list of parameter sets in parameters",
 	      nb::arg("query"), nb::arg("parameters") = nb::none());
 	m.def("close", &DuckDBPyConnection::Close, "Close the connection");
 	m.def("interrupt", &DuckDBPyConnection::Interrupt, "Interrupt pending operations");
+	m.def("complete", &DuckDBPyConnection::Complete,
+	      "Run the statement that execute() left pending to its end without reading its rows");
+	m.def("abort", &DuckDBPyConnection::Abort,
+	      "Drop the result of execute(); a statement that has not run yet never runs, and one that writes fails an "
+	      "open transaction");
 	m.def("query_progress", &DuckDBPyConnection::QueryProgress, "Query progress of pending operation");
 	m.def("fetchone", &DuckDBPyConnection::FetchOne, "Fetch a single row from a result following execute");
 	m.def("fetchmany", &DuckDBPyConnection::FetchMany, "Fetch the next set of rows from a result following execute",
@@ -214,11 +221,11 @@ static void InitializeConnectionMethods(nb::class_<DuckDBPyConnection> &m) {
 	      "Fetch a chunk of the result as DataFrame following execute()", nb::arg("vectors_per_chunk") = 1,
 	      nb::kw_only(), nb::arg("date_as_object") = false);
 	m.def("pl", &DuckDBPyConnection::FetchPolars, "Fetch a result as Polars DataFrame following execute()",
-	      nb::arg("rows_per_batch") = 1000000, nb::kw_only(), nb::arg("lazy") = false);
+	      nb::arg("rows_per_batch") = 131072, nb::kw_only(), nb::arg("lazy") = false);
 	m.def("to_arrow_table", &DuckDBPyConnection::FetchArrow, "Fetch a result as Arrow table following execute()",
-	      nb::arg("batch_size") = 1000000);
+	      nb::arg("batch_size") = 131072);
 	m.def("to_arrow_reader", &DuckDBPyConnection::FetchRecordBatchReader,
-	      "Fetch an Arrow RecordBatchReader following execute()", nb::arg("batch_size") = 1000000);
+	      "Fetch an Arrow RecordBatchReader following execute()", nb::arg("batch_size") = 131072);
 	m.def(
 	    "fetch_arrow_table",
 	    [](DuckDBPyConnection &self, idx_t rows_per_batch) {
@@ -226,7 +233,7 @@ static void InitializeConnectionMethods(nb::class_<DuckDBPyConnection> &m) {
 		                 0);
 		    return self.FetchArrow(rows_per_batch);
 	    },
-	    "Fetch a result as Arrow table following execute()", nb::arg("rows_per_batch") = 1000000);
+	    "Fetch a result as Arrow table following execute()", nb::arg("rows_per_batch") = 131072);
 	m.def(
 	    "fetch_record_batch",
 	    [](DuckDBPyConnection &self, idx_t rows_per_batch) {
@@ -234,10 +241,10 @@ static void InitializeConnectionMethods(nb::class_<DuckDBPyConnection> &m) {
 		                 0);
 		    return self.FetchRecordBatchReader(rows_per_batch);
 	    },
-	    "Fetch an Arrow RecordBatchReader following execute()", nb::arg("rows_per_batch") = 1000000);
+	    "Fetch an Arrow RecordBatchReader following execute()", nb::arg("rows_per_batch") = 131072);
 	m.def("arrow", &DuckDBPyConnection::FetchRecordBatchReader,
 	      "Alias of to_arrow_reader(). We recommend using to_arrow_reader() instead.",
-	      nb::arg("rows_per_batch") = 1000000);
+	      nb::arg("rows_per_batch") = 131072);
 	m.def("torch", &DuckDBPyConnection::FetchPyTorch, "Fetch a result as dict of PyTorch Tensors following execute()");
 	m.def("tf", &DuckDBPyConnection::FetchTF, "Fetch a result as dict of TensorFlow Tensors following execute()");
 	m.def("begin", &DuckDBPyConnection::Begin, "Start a new transaction");
@@ -539,7 +546,7 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::ExecuteMany(const nb::ob
 	// Execute once for every set of parameters that are provided
 	for (auto parameters : outer_list) {
 		auto params = nb::borrow<nb::object>(parameters);
-		query_result = ExecuteInternal(*prep, std::move(params));
+		query_result = ExecuteInternal(prep, std::move(params));
 	}
 	// Set the internal 'result' object
 	if (query_result) {
@@ -626,9 +633,9 @@ identifier_map_t<BoundParameterData> TransformPreparedParameters(ClientContext &
 	return named_values;
 }
 
-unique_ptr<PreparedStatement> DuckDBPyConnection::PrepareQuery(unique_ptr<SQLStatement> statement) {
+engine::Prepared DuckDBPyConnection::PrepareQuery(unique_ptr<SQLStatement> statement) {
 	auto session = EngineSession();
-	unique_ptr<PreparedStatement> prep;
+	engine::Prepared prep;
 	{
 		D_ASSERT(duckdb::PyUtil::GilCheck());
 		nb::gil_scoped_release release;
@@ -638,14 +645,14 @@ unique_ptr<PreparedStatement> DuckDBPyConnection::PrepareQuery(unique_ptr<SQLSta
 	return prep;
 }
 
-shared_ptr<engine::Result> DuckDBPyConnection::ExecuteInternal(PreparedStatement &prep, nb::object params) {
+shared_ptr<engine::Result> DuckDBPyConnection::ExecuteInternal(engine::Prepared &prep, nb::object params) {
 	if (params.is_none()) {
 		params = nb::list();
 	}
 	auto session = EngineSession();
 
 	// Execute the prepared statement with the prepared parameters
-	auto named_values = TransformPreparedParameters(session.Context(), params, prep);
+	auto named_values = TransformPreparedParameters(session.Context(), params, *prep.statement);
 	shared_ptr<engine::Result> res;
 	{
 		D_ASSERT(duckdb::PyUtil::GilCheck());
@@ -712,16 +719,53 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::Execute(const nb::object
 	// FIXME: SQLites implementation says to not accept an 'execute' call with multiple statements
 	ExecuteImmediately(std::move(statements));
 
-	auto res = PrepareAndSubmitInternal(std::move(last_statement), std::move(params));
-	if (res->CompletesBeforeReturning()) {
-		D_ASSERT(duckdb::PyUtil::GilCheck());
-		nb::gil_scoped_release release;
-		unique_lock<std::recursive_mutex> lock(py_connection_lock);
-		res->Retain(CheckSignals);
+	std::shared_ptr<DuckDBPyResult> py_result;
+	if (!engine::Deferred::MayDefer(last_statement->type)) {
+		auto res = PrepareAndSubmitInternal(std::move(last_statement), std::move(params));
+		{
+			D_ASSERT(duckdb::PyUtil::GilCheck());
+			nb::gil_scoped_release release;
+			unique_lock<std::recursive_mutex> lock(py_connection_lock);
+			res->Retain(CheckSignals);
+		}
+		py_result = std::make_shared<DuckDBPyResult>(std::move(res));
+	} else {
+		if (params.is_none()) {
+			params = nb::list();
+		}
+		auto session = EngineSession();
+		auto named_values = TransformPreparedParameters(session.Context(), params);
+		engine::Bound bound;
+		{
+			D_ASSERT(duckdb::PyUtil::GilCheck());
+			nb::gil_scoped_release release;
+			unique_lock<std::recursive_mutex> lock(py_connection_lock);
+			bound = session.Bind(std::move(last_statement));
+		}
+		// Binding succeeds in a failed transaction, so the statement runs now to report it from execute()
+		if (engine::Deferred::CanDefer(bound) && !session.TransactionFailed()) {
+			shared_ptr<engine::Deferred> deferred;
+			{
+				D_ASSERT(duckdb::PyUtil::GilCheck());
+				nb::gil_scoped_release release;
+				deferred = session.Defer(std::move(bound), std::move(named_values));
+			}
+			py_result = std::make_shared<DuckDBPyResult>(std::move(deferred));
+		} else {
+			shared_ptr<engine::Result> res;
+			{
+				D_ASSERT(duckdb::PyUtil::GilCheck());
+				nb::gil_scoped_release release;
+				unique_lock<std::recursive_mutex> lock(py_connection_lock);
+				res = session.Submit(bound, named_values, engine::Format::Chunks());
+				res->Retain(CheckSignals);
+			}
+			py_result = std::make_shared<DuckDBPyResult>(std::move(res));
+		}
 	}
 	// Don't use CreateRelation here: the result is stored inside the connection,
 	// so setting connection_owner would create a ref cycle (connection, result, connection).
-	con.SetResult(std::make_unique<DuckDBPyRelation>(std::make_shared<DuckDBPyResult>(std::move(res))));
+	con.SetResult(std::make_unique<DuckDBPyRelation>(std::move(py_result)));
 	return shared_from_this();
 }
 
@@ -1871,8 +1915,26 @@ Optional<nb::list> DuckDBPyConnection::GetDescription() {
 	return result.Description();
 }
 
-int DuckDBPyConnection::GetRowcount() {
-	return -1;
+int64_t DuckDBPyConnection::GetRowcount() {
+	ConnectionLockGuard conn_lock(*this);
+	if (!con.HasResult()) {
+		return -1;
+	}
+	return con.GetResult().Rowcount();
+}
+
+void DuckDBPyConnection::Complete() {
+	ConnectionLockGuard conn_lock(*this);
+	if (con.HasResult()) {
+		con.GetResult().CompleteResult();
+	}
+}
+
+void DuckDBPyConnection::Abort() {
+	ConnectionLockGuard conn_lock(*this);
+	if (con.HasResult()) {
+		con.GetResult().AbortResult();
+	}
 }
 
 void DuckDBPyConnection::Close() {

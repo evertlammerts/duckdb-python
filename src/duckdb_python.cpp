@@ -320,8 +320,10 @@ static void InitializeConnectionMethods(nb::module_ &m) {
 		    }
 		    return conn->Execute(query, params);
 	    },
-	    "Execute the given SQL query, optionally using prepared statements with parameters set", nb::arg("query"),
-	    nb::arg("parameters") = nb::none(), nb::kw_only(), nb::arg("connection").none() = nb::none());
+	    "Execute the given SQL query, optionally using prepared statements with parameters set. A query or DML "
+	    "statement that returns rows runs when its result is first read; every other statement runs before execute() "
+	    "returns",
+	    nb::arg("query"), nb::arg("parameters") = nb::none(), nb::kw_only(), nb::arg("connection").none() = nb::none());
 	m.def(
 	    "executemany",
 	    [](const nb::object &query, nb::object params = nb::list(),
@@ -351,6 +353,27 @@ static void InitializeConnectionMethods(nb::module_ &m) {
 		    conn->Interrupt();
 	    },
 	    "Interrupt pending operations", nb::kw_only(), nb::arg("connection").none() = nb::none());
+	m.def(
+	    "complete",
+	    [](std::shared_ptr<DuckDBPyConnection> conn = nullptr) {
+		    if (!conn) {
+			    conn = DuckDBPyConnection::DefaultConnection();
+		    }
+		    conn->Complete();
+	    },
+	    "Run the statement that execute() left pending to its end without reading its rows", nb::kw_only(),
+	    nb::arg("connection").none() = nb::none());
+	m.def(
+	    "abort",
+	    [](std::shared_ptr<DuckDBPyConnection> conn = nullptr) {
+		    if (!conn) {
+			    conn = DuckDBPyConnection::DefaultConnection();
+		    }
+		    conn->Abort();
+	    },
+	    "Drop the result of execute(); a statement that has not run yet never runs, and one that writes fails an open "
+	    "transaction",
+	    nb::kw_only(), nb::arg("connection").none() = nb::none());
 	m.def(
 	    "query_progress",
 	    [](std::shared_ptr<DuckDBPyConnection> conn = nullptr) {
@@ -447,7 +470,7 @@ static void InitializeConnectionMethods(nb::module_ &m) {
 		    }
 		    return conn->FetchPolars(rows_per_batch, lazy);
 	    },
-	    "Fetch a result as Polars DataFrame following execute()", nb::arg("rows_per_batch") = 1000000, nb::kw_only(),
+	    "Fetch a result as Polars DataFrame following execute()", nb::arg("rows_per_batch") = 131072, nb::kw_only(),
 	    nb::arg("lazy") = false, nb::arg("connection").none() = nb::none());
 	m.def(
 	    "to_arrow_table",
@@ -457,7 +480,7 @@ static void InitializeConnectionMethods(nb::module_ &m) {
 		    }
 		    return conn->FetchArrow(batch_size);
 	    },
-	    "Fetch a result as Arrow table following execute()", nb::arg("batch_size") = 1000000, nb::kw_only(),
+	    "Fetch a result as Arrow table following execute()", nb::arg("batch_size") = 131072, nb::kw_only(),
 	    nb::arg("connection").none() = nb::none());
 	m.def(
 	    "to_arrow_reader",
@@ -467,7 +490,7 @@ static void InitializeConnectionMethods(nb::module_ &m) {
 		    }
 		    return conn->FetchRecordBatchReader(batch_size);
 	    },
-	    "Fetch an Arrow RecordBatchReader following execute()", nb::arg("batch_size") = 1000000, nb::kw_only(),
+	    "Fetch an Arrow RecordBatchReader following execute()", nb::arg("batch_size") = 131072, nb::kw_only(),
 	    nb::arg("connection").none() = nb::none());
 	m.def(
 	    "fetch_arrow_table",
@@ -479,7 +502,7 @@ static void InitializeConnectionMethods(nb::module_ &m) {
 		                 0);
 		    return conn->FetchArrow(rows_per_batch);
 	    },
-	    "Fetch a result as Arrow table following execute()", nb::arg("rows_per_batch") = 1000000, nb::kw_only(),
+	    "Fetch a result as Arrow table following execute()", nb::arg("rows_per_batch") = 131072, nb::kw_only(),
 	    nb::arg("connection").none() = nb::none());
 	m.def(
 	    "fetch_record_batch",
@@ -491,7 +514,7 @@ static void InitializeConnectionMethods(nb::module_ &m) {
 		                 0);
 		    return conn->FetchRecordBatchReader(rows_per_batch);
 	    },
-	    "Fetch an Arrow RecordBatchReader following execute()", nb::arg("rows_per_batch") = 1000000, nb::kw_only(),
+	    "Fetch an Arrow RecordBatchReader following execute()", nb::arg("rows_per_batch") = 131072, nb::kw_only(),
 	    nb::arg("connection").none() = nb::none());
 	m.def(
 	    "torch",
@@ -987,8 +1010,8 @@ static void InitializeConnectionMethods(nb::module_ &m) {
 		    }
 		    return conn->FetchRecordBatchReader(rows_per_batch);
 	    },
-	    "Alias of to_arrow_reader(). We recommend using to_arrow_reader() instead.",
-	    nb::arg("rows_per_batch") = 1000000, nb::kw_only(), nb::arg("connection").none() = nb::none());
+	    "Alias of to_arrow_reader(). We recommend using to_arrow_reader() instead.", nb::arg("rows_per_batch") = 131072,
+	    nb::kw_only(), nb::arg("connection").none() = nb::none());
 	m.def(
 	    "arrow",
 	    [](nb::object &arrow_object, std::shared_ptr<DuckDBPyConnection> conn) -> std::unique_ptr<DuckDBPyRelation> {

@@ -68,12 +68,12 @@ static void InitializeConsumers(nb::class_<DuckDBPyRelation> &m) {
 	    .def("fetch_df_chunk", &DuckDBPyRelation::FetchDFChunk, "Execute and fetch a chunk of the rows",
 	         nb::arg("vectors_per_chunk") = 1, nb::kw_only(), nb::arg("date_as_object") = false)
 	    .def("to_arrow_table", &DuckDBPyRelation::ToArrowTable, "Execute and fetch all rows as an Arrow Table",
-	         nb::arg("batch_size") = 1000000)
+	         nb::arg("batch_size") = 131072)
 	    .def("to_arrow_reader", &DuckDBPyRelation::ToRecordBatch,
-	         "Execute and return an Arrow Record Batch Reader that yields all rows", nb::arg("batch_size") = 1000000)
+	         "Execute and return an Arrow Record Batch Reader that yields all rows", nb::arg("batch_size") = 131072)
 	    .def("arrow", &DuckDBPyRelation::ToRecordBatch,
 	         "Alias of to_arrow_reader(). We recommend using to_arrow_reader() instead.",
-	         nb::arg("batch_size") = 1000000)
+	         nb::arg("batch_size") = 131072)
 	    .def(
 	        "fetch_arrow_table",
 	        [](nb::object &self, idx_t batch_size) {
@@ -81,9 +81,9 @@ static void InitializeConsumers(nb::class_<DuckDBPyRelation> &m) {
 		                     "fetch_arrow_table() is deprecated, use to_arrow_table() instead.", 0);
 		        return self.attr("to_arrow_table")(batch_size);
 	        },
-	        "Execute and fetch all rows as an Arrow Table", nb::arg("batch_size") = 1000000)
+	        "Execute and fetch all rows as an Arrow Table", nb::arg("batch_size") = 131072)
 	    .def("pl", &DuckDBPyRelation::ToPolars, "Execute and fetch all rows as a Polars DataFrame",
-	         nb::arg("batch_size") = 1000000, nb::kw_only(), nb::arg("lazy") = false)
+	         nb::arg("batch_size") = 131072, nb::kw_only(), nb::arg("lazy") = false)
 	    .def("torch", &DuckDBPyRelation::FetchPyTorch, "Fetch a result as dict of PyTorch Tensors")
 	    .def("tf", &DuckDBPyRelation::FetchTF, "Fetch a result as dict of TensorFlow Tensors");
 	const char *capsule_docs = R"(
@@ -100,7 +100,7 @@ static void InitializeConsumers(nb::class_<DuckDBPyRelation> &m) {
 		                  "fetch_record_batch() is deprecated, use to_arrow_reader() instead.", 0);
 		     return self.attr("to_arrow_reader")(rows_per_batch);
 	     },
-	     "Execute and return an Arrow Record Batch Reader that yields all rows", nb::arg("rows_per_batch") = 1000000)
+	     "Execute and return an Arrow Record Batch Reader that yields all rows", nb::arg("rows_per_batch") = 131072)
 	    .def(
 	        "fetch_arrow_reader",
 	        [](nb::object &self, idx_t batch_size) {
@@ -111,7 +111,7 @@ static void InitializeConsumers(nb::class_<DuckDBPyRelation> &m) {
 		        }
 		        return self.attr("to_arrow_reader")(batch_size);
 	        },
-	        "Execute and return an Arrow Record Batch Reader that yields all rows", nb::arg("batch_size") = 1000000);
+	        "Execute and return an Arrow Record Batch Reader that yields all rows", nb::arg("batch_size") = 131072);
 }
 
 static void InitializeAggregates(nb::class_<DuckDBPyRelation> &m) {

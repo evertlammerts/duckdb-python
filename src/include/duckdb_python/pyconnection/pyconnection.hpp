@@ -252,8 +252,8 @@ public:
 	std::shared_ptr<DuckDBPyConnection> ExecuteMany(const nb::object &query, nb::object params = nb::list());
 
 	void ExecuteImmediately(vector<unique_ptr<SQLStatement>> statements);
-	unique_ptr<PreparedStatement> PrepareQuery(unique_ptr<SQLStatement> statement);
-	shared_ptr<engine::Result> ExecuteInternal(PreparedStatement &prep, nb::object params = nb::list());
+	engine::Prepared PrepareQuery(unique_ptr<SQLStatement> statement);
+	shared_ptr<engine::Result> ExecuteInternal(engine::Prepared &prep, nb::object params = nb::list());
 	//! Binds the parameters and submits the statement. The result is returned undriven.
 	shared_ptr<engine::Result> PrepareAndSubmitInternal(unique_ptr<SQLStatement> statement,
 	                                                    nb::object params = nb::list());
@@ -316,7 +316,11 @@ public:
 
 	Optional<nb::list> GetDescription();
 
-	int GetRowcount();
+	int64_t GetRowcount();
+	//! Runs the statement execute() left pending to its end without reading its rows
+	void Complete();
+	//! Drops the result execute() left pending
+	void Abort();
 
 	// these should be functions on the result but well
 	Optional<nb::tuple> FetchOne();

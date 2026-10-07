@@ -31,6 +31,12 @@ public:
 	nb::list Description();
 
 	void Close();
+	//! The held result, run to its end without reading its rows
+	void CompleteResult();
+	//! The held result, dropped: a deferred statement never runs, a running one ends
+	void AbortResult();
+	//! The rows the held result's completed DML statement changed, -1 otherwise
+	int64_t Rowcount();
 
 	std::unique_ptr<DuckDBPyRelation> GetAttribute(const string &name);
 

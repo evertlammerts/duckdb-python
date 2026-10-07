@@ -1030,6 +1030,24 @@ duckdb::pyarrow::RecordBatchReader DuckDBPyRelation::ToRecordBatch(idx_t batch_s
 	return res;
 }
 
+void DuckDBPyRelation::CompleteResult() {
+	if (result) {
+		result->Complete();
+		result = nullptr;
+	}
+}
+
+void DuckDBPyRelation::AbortResult() {
+	if (result) {
+		result->Close();
+		result = nullptr;
+	}
+}
+
+int64_t DuckDBPyRelation::Rowcount() {
+	return result ? result->Rowcount() : -1;
+}
+
 void DuckDBPyRelation::Close() {
 	// We always want to execute the query at least once, for side-effect purposes.
 	// if it has already been executed, we don't need to do it again.

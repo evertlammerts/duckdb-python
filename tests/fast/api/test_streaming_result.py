@@ -141,11 +141,13 @@ class TestStreamingSemantics:
         del reader
         assert produced[0] < ROW_COUNT + ROW_COUNT // 2
 
-    def test_arrow_reader_after_row_fetch_returns_the_remainder(self, duckdb_cursor):
+    def test_arrow_reader_after_row_fetch_raises(self, duckdb_cursor):
+        # A result is read in one format: the rows already fetched were produced as chunks
         pytest.importorskip("pyarrow")
         res = duckdb_cursor.sql("SELECT i FROM range(10) t(i)")
         assert res.fetchone() == (0,)
-        assert res.to_arrow_reader().read_all().column("i").to_pylist() == list(range(1, 10))
+        with pytest.raises(duckdb.InvalidInputException, match="already fetched"):
+            res.to_arrow_reader()
 
     def test_arrow_reader_over_a_retained_result(self, duckdb_cursor):
         pytest.importorskip("pyarrow")

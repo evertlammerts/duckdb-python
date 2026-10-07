@@ -10,7 +10,7 @@
 
 #include "duckdb_python/numpy/numpy_result_conversion.hpp"
 #include "duckdb.hpp"
-#include "duckdb_python/engine/result.hpp"
+#include "duckdb_python/engine/connection.hpp"
 #include "duckdb_python/nb/casters.hpp"
 #include "duckdb_python/python_objects.hpp"
 #include "duckdb_python/dataframe.hpp"
@@ -19,10 +19,11 @@ namespace duckdb {
 
 struct DuckDBPyResult {
 public:
-	static constexpr idx_t DEFAULT_ARROW_BATCH_SIZE = 1000000;
+	static constexpr idx_t DEFAULT_ARROW_BATCH_SIZE = 131072;
 
 public:
 	explicit DuckDBPyResult(shared_ptr<engine::Result> result);
+	explicit DuckDBPyResult(shared_ptr<engine::Deferred> deferred);
 	~DuckDBPyResult();
 
 public:
@@ -53,8 +54,12 @@ public:
 	static nb::list GetDescription(const vector<string> &names, const vector<LogicalType> &types);
 
 	void Close();
+	//! Runs the statement to its end without reading its rows, then closes the result
+	void Complete();
 
 	unique_ptr<DataChunk> FetchChunk();
+	//! The rows a completed DML statement changed, -1 otherwise
+	int64_t Rowcount();
 
 	vector<string> GetNames();
 	const vector<LogicalType> &GetTypes() const;
@@ -70,8 +75,10 @@ private:
 	//! The names the Python layer reports, see the definition for why this is not always the result's own.
 	const vector<Identifier> &ResultNames() const;
 	bool Empty() const {
-		return !result;
+		return !result && !deferred;
 	}
+	//! Submits a deferred statement in the format of its first consumer
+	void StartDeferred(const engine::Format &format, bool retain);
 	//! Flat vectors, for the row fetch
 	unique_ptr<DataChunk> FetchNext();
 	unique_ptr<DataChunk> FetchNextRaw();
@@ -80,8 +87,8 @@ private:
 	unique_ptr<DataChunk> TakeBufferedRows();
 	std::unique_ptr<NumpyResultConversion> InitializeNumpyConversion(bool pandas = false);
 
-	//! A result in the chunk format is scanned again by the engine in the Arrow format
-	void PromoteToArrow(idx_t batch_size);
+	//! Submits a deferred statement in the Arrow format, or has the engine scan a completed chunk result again in it
+	void EnsureArrow(idx_t batch_size, bool retain);
 
 	template <typename T>
 	T RunWithArrowSchema(const std::function<T(const ArrowSchema &)> &fun, bool dedup_col_names);
@@ -90,6 +97,8 @@ private:
 
 private:
 	shared_ptr<engine::Result> result;
+	//! The statement before its first consumer, which submits it as result
+	shared_ptr<engine::Deferred> deferred;
 	idx_t chunk_offset = 0;
 	//! Set only when the result was re-bound (promotion to Arrow de-duplicates column names
 	//! and core exposes no setter), so the original names survive. Empty means "use result's".

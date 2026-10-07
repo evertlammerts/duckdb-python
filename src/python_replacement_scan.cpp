@@ -1,4 +1,5 @@
 #include "duckdb_python/python_replacement_scan.hpp"
+#include "duckdb_python/engine/connection.hpp"
 #include "duckdb/main/db_instance_cache.hpp"
 #include "duckdb_python/nb/casters.hpp"
 #include "duckdb/main/client_properties.hpp"
@@ -311,8 +312,14 @@ unique_ptr<TableRef> PythonReplacementScan::Replace(ClientContext &context, Repl
 		return nullptr;
 	}
 
-	unique_ptr<TableRef> result;
-	result = ReplaceInternal(context, table_name);
+	auto state = engine::ConnectionState::Get(context);
+	if (auto resolved = state->RecallResolved(table_name)) {
+		return resolved;
+	}
+	auto result = ReplaceInternal(context, table_name);
+	if (result) {
+		state->RecordResolved(table_name, *result);
+	}
 	return result;
 }
 

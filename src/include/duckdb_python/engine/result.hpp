@@ -54,13 +54,20 @@ private:
 	idx_t arrow_batch_size;
 };
 
+//! Something that holds its connection until it is read, and lets go when another statement starts
+class Supersedable {
+public:
+	virtual ~Supersedable() = default;
+	virtual void Supersede() = 0;
+};
+
 //! A submitted statement. Retention is settled by the first consumer: a fetch opens a stream, Retain and the
 //! Take calls keep every row. Every call that drives the query takes the client context lock and may wait for
 //! running tasks, so callers must not hold a lock those tasks need.
-class Result {
+class Result : public Supersedable {
 public:
 	Result(unique_ptr<QueryResult> submitted, Format format, shared_ptr<Relation> relation);
-	~Result();
+	~Result() override;
 
 	Result(const Result &) = delete;
 	Result &operator=(const Result &) = delete;
@@ -108,16 +115,20 @@ public:
 	void CopyArrowSchema(ArrowSchema &out) const;
 	//! An Arrow schema for the result's types under the given names, built in a transaction on its connection
 	void BuildArrowSchema(const vector<string> &names, ArrowSchema &out) const;
-	//! The remaining rows, after the leading ones, scanned again by the engine in another format. The result
-	//! is empty afterwards. The scan is a new statement on the result's connection.
-	shared_ptr<Result> Reformat(const Format &target, unique_ptr<DataChunk> leading, const InterruptCheck &check);
+	//! The remaining rows scanned again by the engine in another format. The result is empty afterwards. The
+	//! scan is a new statement on the result's connection.
+	shared_ptr<Result> Reformat(const Format &target, const InterruptCheck &check);
 	//! Renders the rows of a retained result
 	string ToBox(BoxRendererContext &context, const BoxRendererConfig &config);
 
 	//! Ends the query if it is still running. Idempotent, and safe while another thread is fetching.
 	void Close();
 	//! Closes the result because another statement is about to run on its connection
-	void Supersede();
+	void Supersede() override;
+	//! Whether a consumer has read rows from it, after which no other format can be produced
+	bool RowsRead() const;
+	//! The rows a completed DML statement changed, or -1
+	int64_t ChangedRows();
 
 private:
 	enum class State : uint8_t { PENDING, STREAMING, RETAINED, DRAINED, CLOSED };

@@ -257,7 +257,7 @@
 	{
 		"name": "execute",
 		"function": "Execute",
-		"docs": "Execute the given SQL query, optionally using prepared statements with parameters set",
+		"docs": "Execute the given SQL query, optionally using prepared statements with parameters set. A query or DML statement that returns rows runs when its result is first read; every other statement runs before execute() returns",
 		"args": [
 			{
 				"name": "query",
@@ -298,6 +298,18 @@
 		"name": "interrupt",
 		"function": "Interrupt",
 		"docs": "Interrupt pending operations",
+		"return": "None"
+	},
+	{
+		"name": "complete",
+		"function": "Complete",
+		"docs": "Run the statement that execute() left pending to its end without reading its rows",
+		"return": "None"
+	},
+	{
+		"name": "abort",
+		"function": "Abort",
+		"docs": "Drop the result of execute(); a statement that has not run yet never runs, and one that writes fails an open transaction",
 		"return": "None"
 	},
 	{
@@ -381,7 +393,7 @@
 		"args": [
 			{
 				"name": "rows_per_batch",
-				"default": "1000000",
+				"default": "131072",
 				"type": "int"
 			}
 		],
@@ -401,7 +413,7 @@
 		"args": [
 			{
 				"name": "rows_per_batch",
-				"default": "1000000",
+				"default": "131072",
 				"type": "int"
 			}
 		],
@@ -418,7 +430,7 @@
 		"args": [
 			{
 				"name": "rows_per_batch",
-				"default": "1000000",
+				"default": "131072",
 				"type": "int"
 			}
 		],

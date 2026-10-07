@@ -24,6 +24,33 @@ DuckDBPyResult::DuckDBPyResult(shared_ptr<engine::Result> result_p) : result(std
 	}
 }
 
+DuckDBPyResult::DuckDBPyResult(shared_ptr<engine::Deferred> deferred_p) : deferred(std::move(deferred_p)) {
+	if (!deferred) {
+		throw InternalException("PyResult created without a deferred statement");
+	}
+}
+
+static constexpr const char *ROWS_THEN_ARROW =
+    "Rows were already fetched from this result, so the rest cannot be read as Arrow. Run the query again to "
+    "read it as Arrow.";
+static constexpr const char *ARROW_THEN_ROWS =
+    "This result is being read as Arrow, so rows cannot be fetched from it. Run the query again to fetch rows.";
+
+void DuckDBPyResult::StartDeferred(const engine::Format &format, bool retain) {
+	if (!deferred) {
+		return;
+	}
+	auto starting = std::move(deferred);
+	{
+		D_ASSERT(duckdb::PyUtil::GilCheck());
+		nb::gil_scoped_release release;
+		result = starting->Start(format);
+		if (retain) {
+			result->Retain(DuckDBPyConnection::CheckSignals);
+		}
+	}
+}
+
 DuckDBPyResult::~DuckDBPyResult() {
 	// The destructor must run with the GIL held: `result` and `current_chunk`
 	// can transitively own Python references (registered
@@ -42,11 +69,11 @@ const vector<Identifier> &DuckDBPyResult::ResultNames() const {
 	if (!names_override.empty()) {
 		return names_override;
 	}
-	return result->Names();
+	return deferred ? deferred->Names() : result->Names();
 }
 
 const ClientProperties &DuckDBPyResult::GetClientProperties() const {
-	return result->GetClientProperties();
+	return deferred ? deferred->GetClientProperties() : result->GetClientProperties();
 }
 
 vector<string> DuckDBPyResult::GetNames() {
@@ -60,13 +87,14 @@ const vector<LogicalType> &DuckDBPyResult::GetTypes() const {
 	if (Empty()) {
 		throw InternalException("Calling GetTypes without a result object");
 	}
-	return result->Types();
+	return deferred ? deferred->Types() : result->Types();
 }
 
 unique_ptr<DataChunk> DuckDBPyResult::FetchChunk() {
 	if (Empty()) {
 		throw InternalException("FetchChunk called without a result object");
 	}
+	StartDeferred(engine::Format::Chunks(), false);
 	return FetchNext();
 }
 
@@ -79,6 +107,9 @@ unique_ptr<DataChunk> DuckDBPyResult::FetchNext() {
 }
 
 unique_ptr<DataChunk> DuckDBPyResult::FetchNextRaw() {
+	if (result->GetFormat().IsArrow()) {
+		throw InvalidInputException(ARROW_THEN_ROWS);
+	}
 	return result->FetchChunk(DuckDBPyConnection::CheckSignals);
 }
 
@@ -98,6 +129,7 @@ Optional<nb::tuple> DuckDBPyResult::Fetchone() {
 	if (Empty()) {
 		throw InvalidInputException("result closed");
 	}
+	StartDeferred(engine::Format::Chunks(), false);
 	{
 		nb::gil_scoped_release release;
 		if (!current_chunk || chunk_offset >= current_chunk->size() || result->StreamEnded()) {
@@ -198,6 +230,7 @@ std::unique_ptr<NumpyResultConversion> DuckDBPyResult::InitializeNumpyConversion
 	if (Empty()) {
 		throw InvalidInputException("result closed");
 	}
+	StartDeferred(engine::Format::Chunks(), false);
 
 	idx_t initial_capacity = STANDARD_VECTOR_SIZE * 2ULL;
 	if (result->IsRetained()) {
@@ -394,18 +427,23 @@ nb::dict DuckDBPyResult::FetchTF() {
 	return result_dict;
 }
 
-void DuckDBPyResult::PromoteToArrow(idx_t batch_size) {
+void DuckDBPyResult::EnsureArrow(idx_t batch_size, bool retain) {
+	if (deferred) {
+		StartDeferred(engine::Format::Arrow(batch_size), retain);
+		return;
+	}
 	if (result->GetFormat().IsArrow()) {
 		return;
+	}
+	if (current_chunk || result->RowsRead()) {
+		throw InvalidInputException(ROWS_THEN_ARROW);
 	}
 	auto names = ResultNames();
 	shared_ptr<engine::Result> promoted;
 	{
 		D_ASSERT(duckdb::PyUtil::GilCheck());
 		nb::gil_scoped_release release;
-		auto leading = TakeBufferedRows();
-		promoted =
-		    result->Reformat(engine::Format::Arrow(batch_size), std::move(leading), DuckDBPyConnection::CheckSignals);
+		promoted = result->Reformat(engine::Format::Arrow(batch_size), DuckDBPyConnection::CheckSignals);
 		// The rows were materialized already; retained, the arrays no longer depend on the connection, which
 		// a reader scanned by a later query on that connection needs.
 		promoted->Retain(DuckDBPyConnection::CheckSignals);
@@ -433,7 +471,7 @@ duckdb::pyarrow::Table DuckDBPyResult::FetchArrowTable(const idx_t rows_per_batc
 	if (Empty()) {
 		throw InvalidInputException("There is no query result");
 	}
-	PromoteToArrow(rows_per_batch);
+	EnsureArrow(rows_per_batch, true);
 	return RunWithArrowSchema<duckdb::pyarrow::Table>(
 	    [&](const ArrowSchema &schema) -> duckdb::pyarrow::Table {
 		    auto pyarrow_schema = pyarrow::ToPyArrowSchema(schema);
@@ -590,7 +628,7 @@ struct ArrowArrayStreamGuard {
 } // namespace
 
 ArrowArrayStream DuckDBPyResult::FetchArrowArrayStream(idx_t rows_per_batch) {
-	PromoteToArrow(rows_per_batch);
+	EnsureArrow(rows_per_batch, false);
 	auto state = make_uniq<ArrowStreamState>();
 	if (names_override.empty()) {
 		result->CopyArrowSchema(state->cached_schema);
@@ -656,6 +694,14 @@ nb::list DuckDBPyResult::GetDescription(const vector<string> &names, const vecto
 }
 
 void DuckDBPyResult::Close() {
+	if (deferred) {
+		{
+			D_ASSERT(duckdb::PyUtil::GilCheck());
+			nb::gil_scoped_release release;
+			deferred->Close();
+		}
+		deferred.reset();
+	}
 	if (result) {
 		// Ending the query waits for its running tasks, and a task inside a Python UDF cannot finish
 		// until the GIL is free.
@@ -669,6 +715,38 @@ void DuckDBPyResult::Close() {
 	result.reset();
 	current_chunk.reset();
 	chunk_offset = 0;
+}
+
+void DuckDBPyResult::Complete() {
+	if (Empty()) {
+		return;
+	}
+	StartDeferred(engine::Format::Chunks(), false);
+	current_chunk.reset();
+	chunk_offset = 0;
+	const bool arrow = result->GetFormat().IsArrow();
+	// Each unit is dropped with the GIL held, since a chunk can hold Python objects
+	while (true) {
+		unique_ptr<DataChunk> chunk;
+		unique_ptr<ArrowArrayWrapper> array;
+		{
+			D_ASSERT(duckdb::PyUtil::GilCheck());
+			nb::gil_scoped_release release;
+			if (arrow) {
+				array = result->FetchArray(DuckDBPyConnection::CheckSignals);
+			} else {
+				chunk = result->FetchChunk(DuckDBPyConnection::CheckSignals);
+			}
+		}
+		if (!chunk && !array) {
+			break;
+		}
+	}
+	Close();
+}
+
+int64_t DuckDBPyResult::Rowcount() {
+	return result ? result->ChangedRows() : -1;
 }
 
 } // namespace duckdb

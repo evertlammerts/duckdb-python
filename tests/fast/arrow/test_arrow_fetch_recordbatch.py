@@ -277,17 +277,14 @@ class TestArrowFetchRecordBatch:
         object_size = 1000000
         duckdb_cursor = duckdb.connect()
         query = duckdb_cursor.execute(f"CREATE table t as select range a from range({object_size});")
+        # The engine also ends a batch at a row group and at the end of each producer's input, so the batch size
+        # is a maximum
         for i in [1, 2, 4, 8, 16, 32, 33, 77, 999, 999999]:
             query = duckdb_cursor.execute("SELECT a FROM t")
             record_batch_reader = query.to_arrow_reader(i)
-            num_loops = int(object_size / i)
-            for _j in range(num_loops):
-                assert record_batch_reader.schema.names == ["a"]
-                chunk = record_batch_reader.read_next_batch()
-                assert len(chunk) == i
-            remainder = object_size % i
-            if remainder > 0:
-                chunk = record_batch_reader.read_next_batch()
-                assert len(chunk) == remainder
+            assert record_batch_reader.schema.names == ["a"]
+            lengths = [len(batch) for batch in record_batch_reader]
+            assert all(0 < length <= i for length in lengths)
+            assert sum(lengths) == object_size
             with pytest.raises(StopIteration):
-                chunk = record_batch_reader.read_next_batch()
+                record_batch_reader.read_next_batch()

@@ -275,20 +275,13 @@ void Result::BuildArrowSchema(const vector<string> &schema_names, ArrowSchema &o
 	context->RunFunctionInTransaction([&]() { ArrowConverter::ToArrowSchema(&out, types, schema_names, properties); });
 }
 
-shared_ptr<Result> Result::Reformat(const Format &target, unique_ptr<DataChunk> leading, const InterruptCheck &check) {
+shared_ptr<Result> Result::Reformat(const Format &target, const InterruptCheck &check) {
 	auto context = client_properties.client_context;
 	if (!context) {
 		throw ConnectionException("Cannot convert a result whose connection is closed");
 	}
 	auto session = Session(context->shared_from_this());
-	auto remaining = TakeChunks(check);
-	if (!leading || leading->size() == 0) {
-		return session.Submit(std::move(remaining), names, target);
-	}
-	auto collection = make_uniq<ColumnDataCollection>(Allocator::DefaultAllocator(), types);
-	collection->Append(*leading);
-	collection->Combine(*remaining);
-	return session.Submit(std::move(collection), names, target);
+	return session.Submit(TakeChunks(check), names, target);
 }
 
 string Result::ToBox(BoxRendererContext &context, const BoxRendererConfig &config) {
@@ -296,6 +289,21 @@ string Result::ToBox(BoxRendererContext &context, const BoxRendererConfig &confi
 		throw InternalException("engine::Result::ToBox on a result that is not retained");
 	}
 	return handle->ToBox(context, config);
+}
+
+bool Result::RowsRead() const {
+	return retained_fetched || state == State::STREAMING || state == State::DRAINED;
+}
+
+int64_t Result::ChangedRows() {
+	if (properties.return_type != StatementReturnType::CHANGED_ROWS || state != State::RETAINED) {
+		return -1;
+	}
+	auto &collection = handle->Collection<ChunkFormat>();
+	if (collection.Count() == 0) {
+		return -1;
+	}
+	return collection.GetValue(0, 0).GetValue<int64_t>();
 }
 
 bool Result::StreamEnded() const {

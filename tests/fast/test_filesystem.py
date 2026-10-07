@@ -52,8 +52,11 @@ def memory():
     return fs
 
 
-def add_file(fs, filename=FILENAME):
-    with (Path(__file__).parent / "data" / filename).open("rb") as source, fs.open(filename, "wb") as dest:
+def add_file(fs, filename=FILENAME, destination=None):
+    with (
+        (Path(__file__).parent / "data" / filename).open("rb") as source,
+        fs.open(destination or filename, "wb") as dest,
+    ):
         copyfileobj(source, dest)
 
 
@@ -89,10 +92,11 @@ class TestPythonFilesystem:
             _strip_protocol = classmethod(fsspec.AbstractFileSystem._strip_protocol.__func__)
 
         memory = ExtendedMemoryFileSystem(skip_instance_cache=True)
-        add_file(memory)
+        # A file URI names a host before its path, and the engine only accepts an empty or localhost one
+        add_file(memory, destination=f"/{FILENAME}")
         duckdb_cursor.register_filesystem(memory)
         for protocol in memory.protocol:
-            duckdb_cursor.execute(f"select * from '{protocol}://{FILENAME}'")
+            duckdb_cursor.execute(f"select * from '{protocol}:///{FILENAME}'")
 
             assert duckdb_cursor.fetchall() == [(1, 10, 0), (2, 50, 30)]
 
