@@ -35,7 +35,7 @@ public:
 	void CompleteResult();
 	//! The held result, dropped: a deferred statement never runs, a running one ends
 	void AbortResult();
-	//! The rows the held result's completed DML statement changed, -1 otherwise
+	//! The rows the result's completed DML statement changed, -1 otherwise. Survives consuming the result.
 	int64_t Rowcount();
 
 	std::unique_ptr<DuckDBPyRelation> GetAttribute(const string &name);
@@ -267,6 +267,9 @@ public:
 	bool CanBeRegisteredBy(shared_ptr<ClientContext> &context);
 
 	Relation &GetRel();
+	shared_ptr<Relation> GetSharedRelation() const {
+		return rel;
+	}
 
 	bool ContainsColumnByName(const string &name) const;
 
@@ -303,6 +306,8 @@ private:
 	//! Whether the relation has been executed at least once
 	bool executed;
 	shared_ptr<Relation> rel;
+	//! Snapshot of the result's affected-row count, which outlives the consumed result
+	int64_t changed_rows = -1;
 	vector<LogicalType> types;
 	vector<string> names;
 	std::shared_ptr<DuckDBPyResult> result;

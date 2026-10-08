@@ -159,8 +159,18 @@ Bound Session::Bind(unique_ptr<SQLStatement> statement) {
 		try {
 			bound.signature = context->BindStatement(statement->Copy());
 		} catch (std::exception &ex) {
-			// Rendered like an error from any other entry point: with its location, or as JSON
 			ErrorData error(ex);
+			// BindStatement preserves the transaction because it is an inspection call, but this bind
+			// classifies a statement the user executed, so its failure follows the same transaction
+			// invalidation policy as any other failed execution (ClientContext::ErrorResult)
+			auto policy = context->transaction.GetInvalidationPolicy();
+			const bool invalidates = policy == TransactionInvalidationPolicy::SYNTACTIC_ERRORS_DO_NOT_INVALIDATE
+			                             ? Exception::InvalidatesTransaction(error.Type())
+			                             : true;
+			if (invalidates && context->transaction.HasActiveTransaction()) {
+				ValidChecker::Invalidate(context->transaction.ActiveTransaction(), error.RawMessage());
+			}
+			// Rendered like an error from any other entry point: with its location, or as JSON
 			context->ProcessError(error, statement->query);
 			error.Throw();
 		}
@@ -283,6 +293,9 @@ Deferred::Deferred(Session session_p, Bound bound_p, identifier_map_t<BoundParam
     : session(std::move(session_p)), bound(std::move(bound_p)), values(std::move(values_p)),
       client_properties(session.Context().GetClientProperties()), generation(session.state->Generation()),
       may_write(!bound.signature.properties.modified_databases.empty()), superseded(false), done(false) {
+	if (!bound.signature.parameters.empty()) {
+		diagnosis_statement = bound.statement->Copy();
+	}
 }
 
 Deferred::~Deferred() {
@@ -320,8 +333,28 @@ shared_ptr<Result> Deferred::Start(const Format &format) {
 	// The statement binds again here; its consumer already holds the columns it was described with
 	if (result->Names() != bound.signature.names || result->Types() != bound.signature.types) {
 		result->Close();
-		throw InvalidInputException("The result's columns changed after execute() described them; execute the query "
-		                            "again");
+		if (diagnosis_statement) {
+			// When a value-less rebind still matches the description, the catalog did not move:
+			// binding the values changed the types
+			bool parameter_typing = false;
+			try {
+				// Pinned like the submission itself, so a Python input whose defining scope has ended
+				// still resolves and cannot pass as a catalog change
+				PinGuard guard(*session.state, bound.tables);
+				auto fresh = session.Context().BindStatement(diagnosis_statement->Copy());
+				parameter_typing = fresh.names == bound.signature.names && fresh.types == bound.signature.types;
+			} catch (...) { // NOLINT: a statement that no longer binds means the catalog moved
+			}
+			if (parameter_typing) {
+				throw InvalidInputException(
+				    "The result's columns differ from what execute() described: a parameter without an explicit "
+				    "type settled on another type once its value was bound. Cast the parameter, for example "
+				    "CAST(? AS DOUBLE), to fix its type");
+			}
+		}
+		throw InvalidInputException(
+		    "The result's columns changed after execute() described them, because the catalog changed in between. "
+		    "Execute the query again");
 	}
 	return result;
 }

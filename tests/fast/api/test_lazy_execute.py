@@ -306,6 +306,211 @@ class TestPythonObjects:
         assert duckdb_cursor.fetchall() == [(11,)]
 
 
+class TestBindFailureTransactionPolicy:
+    def failing_execute(self, con):
+        with pytest.raises(duckdb.CatalogException):
+            con.execute("SELECT * FROM missing_table")
+
+    def test_all_errors_policy_invalidates(self, duckdb_cursor):
+        con = duckdb_cursor
+        con.execute("CREATE TABLE t(i INT)")
+        con.begin()
+        con.execute("SET current_transaction_invalidation_policy='ALL_ERRORS_INVALIDATE_TRANSACTION'")
+        con.execute("INSERT INTO t VALUES (7)")
+        self.failing_execute(con)
+        con.commit()
+        assert con.execute("SELECT * FROM t").fetchall() == []
+
+    def test_default_policy_invalidates(self, duckdb_cursor):
+        con = duckdb_cursor
+        con.execute("CREATE TABLE t(i INT)")
+        con.begin()
+        con.execute("INSERT INTO t VALUES (7)")
+        self.failing_execute(con)
+        con.commit()
+        assert con.execute("SELECT * FROM t").fetchall() == []
+
+    def test_lenient_policy_preserves(self, duckdb_cursor):
+        con = duckdb_cursor
+        con.execute("CREATE TABLE t(i INT)")
+        con.begin()
+        con.execute("SET current_transaction_invalidation_policy='SYNTACTIC_ERRORS_DO_NOT_INVALIDATE'")
+        con.execute("INSERT INTO t VALUES (7)")
+        self.failing_execute(con)
+        con.commit()
+        assert con.execute("SELECT * FROM t").fetchall() == [(7,)]
+
+    def test_relational_binding_is_not_execute(self, duckdb_cursor):
+        """Relation construction keeps its own, inspection-grade semantics."""
+        con = duckdb_cursor
+        con.execute("CREATE TABLE t(i INT)")
+        con.begin()
+        con.execute("SET current_transaction_invalidation_policy='SYNTACTIC_ERRORS_DO_NOT_INVALIDATE'")
+        con.execute("INSERT INTO t VALUES (7)")
+        with pytest.raises(duckdb.CatalogException):
+            con.sql("SELECT * FROM missing_table")
+        con.commit()
+        assert con.execute("SELECT * FROM t").fetchall() == [(7,)]
+
+
+class TestDeferredOwnership:
+    def collected(self, make):
+        import gc
+
+        refs = make()
+        gc.collect()
+        return [ref() is None for ref in refs]
+
+    def test_an_unreachable_deferred_query_is_collected(self):
+        import weakref
+
+        def make():
+            con = duckdb.connect()
+            rel = con.sql("SELECT 1 AS i")
+            refs = weakref.ref(con), weakref.ref(rel)
+            con.execute("SELECT * FROM rel")
+            return refs
+
+        assert self.collected(make) == [True, True]
+
+    def test_a_superseded_deferred_query_is_collected(self):
+        import weakref
+
+        def make():
+            con = duckdb.connect()
+            rel = con.sql("SELECT 1 AS i")
+            refs = weakref.ref(con), weakref.ref(rel)
+            con.execute("SELECT * FROM rel")
+            con.sql("SELECT 42").fetchall()
+            return refs
+
+        assert self.collected(make) == [True, True]
+
+    def test_a_failed_fetch_releases_ownership(self):
+        import weakref
+
+        def make():
+            con = duckdb.connect()
+            rel = con.sql("SELECT CAST('bad' || i::VARCHAR AS INTEGER) AS i FROM range(3) t(i)")
+            refs = weakref.ref(con), weakref.ref(rel)
+            con.execute("SELECT * FROM rel")
+            with pytest.raises(duckdb.ConversionException):
+                con.fetchall()
+            return refs
+
+        assert self.collected(make) == [True, True]
+
+    def test_the_source_outlives_its_defining_scope(self, duckdb_cursor):
+        pa = pytest.importorskip("pyarrow")
+        con = duckdb_cursor
+
+        def start():
+            local = pa.table({"x": [1, 2, 3]})  # noqa: F841 - read by the replacement scan
+            rel = con.sql("SELECT sum(x) AS s FROM local")  # noqa: F841 - read by the replacement scan
+            con.execute("SELECT s + 1 FROM rel")
+
+        start()
+        assert con.fetchall() == [(7,)]
+
+    def test_an_arrow_reader_keeps_its_source(self, duckdb_cursor):
+        pa = pytest.importorskip("pyarrow")
+        con = duckdb_cursor
+
+        def start():
+            local = pa.table({"x": list(range(100))})  # noqa: F841 - read by the replacement scan
+            rel = con.sql("SELECT x FROM local")  # noqa: F841 - read by the replacement scan
+            return con.execute("SELECT x FROM rel").to_arrow_reader()
+
+        reader = start()
+        assert reader.read_all().num_rows == 100
+
+    def test_releasing_the_query_leaves_the_source_relation_usable(self, duckdb_cursor):
+        con = duckdb_cursor
+        rel = con.sql("SELECT 1 AS i")
+        con.execute("SELECT * FROM rel")
+        con.abort()
+        assert rel.fetchall() == [(1,)]
+
+
+class TestRowcountSurvivesConsumption:
+    @pytest.mark.parametrize(
+        "consume",
+        [
+            pytest.param(lambda con: con.fetchall(), id="fetchall"),
+            pytest.param(lambda con: con.fetchone(), id="fetchone"),
+            pytest.param(lambda con: con.df(), id="df"),
+            pytest.param(lambda con: con.fetchnumpy(), id="fetchnumpy"),
+            pytest.param(lambda con: con.to_arrow_table(), id="to_arrow_table"),
+            pytest.param(lambda con: con.to_arrow_reader().read_all(), id="to_arrow_reader"),
+        ],
+    )
+    def test_consuming_the_result_keeps_the_count(self, duckdb_cursor, consume):
+        pytest.importorskip("pandas")
+        pytest.importorskip("pyarrow")
+        con = duckdb_cursor
+        con.execute("CREATE TABLE t(i INT)")
+        con.execute("INSERT INTO t VALUES (1), (2), (3)")
+        assert con.rowcount == 3
+        consume(con)
+        assert con.rowcount == 3
+
+    def test_zero_affected_rows(self, duckdb_cursor):
+        con = duckdb_cursor
+        con.execute("CREATE TABLE t(i INT)")
+        con.execute("INSERT INTO t SELECT * FROM range(0)")
+        con.fetchall()
+        assert con.rowcount == 0
+
+    def test_executemany_total_survives(self, duckdb_cursor):
+        con = duckdb_cursor
+        con.execute("CREATE TABLE t(i INT)")
+        con.executemany("INSERT INTO t VALUES (?)", [[1], [2], [3]])
+        con.fetchall()
+        assert con.rowcount == 3
+
+    def test_the_next_statement_resets_the_count(self, duckdb_cursor):
+        con = duckdb_cursor
+        con.execute("CREATE TABLE t(i INT)")
+        con.execute("INSERT INTO t VALUES (1)")
+        assert con.rowcount == 1
+        con.execute("SELECT 1")
+        assert con.rowcount == -1
+
+
+class TestDescribedColumnsChanged:
+    def test_an_untyped_parameter_names_the_cast_fix(self, duckdb_cursor):
+        duckdb_cursor.execute("SELECT coalesce(?, 1) AS c", [1.5])
+        with pytest.raises(duckdb.InvalidInputException, match="CAST"):
+            duckdb_cursor.fetchall()
+        assert duckdb_cursor.execute("SELECT coalesce(CAST(? AS DOUBLE), 1) AS c", [1.5]).fetchall() == [(1.5,)]
+
+    def test_a_catalog_change_advises_re_execution(self, duckdb_cursor):
+        duckdb_cursor.execute("CREATE TABLE t AS SELECT 1 AS x")
+        duckdb_cursor.execute("SELECT x FROM t")
+        duckdb_cursor.cursor().execute("ALTER TABLE t ALTER x TYPE VARCHAR")
+        with pytest.raises(duckdb.InvalidInputException, match="catalog changed"):
+            duckdb_cursor.fetchall()
+
+    def test_an_untyped_parameter_over_a_scope_ended_input_names_the_cast_fix(self, duckdb_cursor):
+        pa = pytest.importorskip("pyarrow")
+        con = duckdb_cursor
+
+        def start():
+            local_input = pa.table({"x": [7]})  # noqa: F841 - read by the replacement scan
+            con.execute("SELECT coalesce(?, 1) AS c FROM local_input", [1.5])
+
+        start()
+        with pytest.raises(duckdb.InvalidInputException, match="CAST"):
+            con.fetchall()
+
+    def test_a_catalog_change_with_a_typed_parameter_names_the_catalog(self, duckdb_cursor):
+        duckdb_cursor.execute("CREATE TABLE t(x INTEGER)")
+        duckdb_cursor.execute("SELECT x FROM t WHERE CAST(? AS INTEGER) = 1", [1])
+        duckdb_cursor.cursor().execute("ALTER TABLE t ALTER COLUMN x TYPE VARCHAR")
+        with pytest.raises(duckdb.InvalidInputException, match="catalog changed"):
+            duckdb_cursor.fetchall()
+
+
 class TestIntegrations:
     def test_the_dbapi_row_loop(self, duckdb_cursor):
         """The calls polars read_database makes on a native connection."""

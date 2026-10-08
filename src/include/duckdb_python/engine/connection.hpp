@@ -151,6 +151,9 @@ private:
 private:
 	Session session;
 	Bound bound;
+	//! For diagnosing a column mismatch: a value-less rebind of this copy tells a catalog change apart
+	//! from a parameter that settled on another type. Kept only when the statement has parameters.
+	unique_ptr<SQLStatement> diagnosis_statement;
 	identifier_map_t<BoundParameterData> values;
 	ClientProperties client_properties;
 	idx_t generation;
