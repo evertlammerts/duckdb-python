@@ -991,9 +991,6 @@ PolarsDataFrame DuckDBPyRelation::ToPolars(idx_t batch_size, bool lazy) {
 	}
 	auto &import_cache = *DuckDBPyConnection::ImportCache();
 	auto lazy_frame_produce = import_cache.duckdb.polars_io.duckdb_source();
-	//  We also have to get a polars schema here, for this we can get at empty arrow table
-	// We start by extracting the arrow schema
-	ArrowSchema arrow_schema;
 	auto result_names = names;
 	QueryResult::DeduplicateColumns(result_names);
 	ClientProperties client_properties;
@@ -1004,12 +1001,9 @@ PolarsDataFrame DuckDBPyRelation::ToPolars(idx_t batch_size, bool lazy) {
 	} else {
 		throw InternalException("DuckDBPyRelation To Polars must have a valid relation or result");
 	}
-	ArrowConverter::ToArrowSchema(&arrow_schema, types, result_names, client_properties);
 	nb::list batches;
-	// Now we create an empty arrow table
 	auto empty_table = pyarrow::ToArrowTable(types, result_names, batches, client_properties);
 
-	// And we extract the polars schema from the arrow table
 	auto polars_df = nb::cast<PolarsDataFrame>(nb::module_::import_("polars").attr("DataFrame")(empty_table));
 	auto polars_schema = polars_df.attr("schema");
 

@@ -470,8 +470,9 @@ static void InitializeConnectionMethods(nb::module_ &m) {
 		    }
 		    return conn->FetchPolars(rows_per_batch, lazy);
 	    },
-	    "Fetch a result as Polars DataFrame following execute()", nb::arg("rows_per_batch") = 131072, nb::kw_only(),
-	    nb::arg("lazy") = false, nb::arg("connection").none() = nb::none());
+	    "Fetch a result as Polars DataFrame following execute()",
+	    nb::arg("rows_per_batch") = DuckDBPyResult::DEFAULT_ARROW_BATCH_SIZE, nb::kw_only(), nb::arg("lazy") = false,
+	    nb::arg("connection").none() = nb::none());
 	m.def(
 	    "to_arrow_table",
 	    [](idx_t batch_size, std::shared_ptr<DuckDBPyConnection> conn = nullptr) {
@@ -480,7 +481,8 @@ static void InitializeConnectionMethods(nb::module_ &m) {
 		    }
 		    return conn->FetchArrow(batch_size);
 	    },
-	    "Fetch a result as Arrow table following execute()", nb::arg("batch_size") = 131072, nb::kw_only(),
+	    "Fetch a result as Arrow table following execute()",
+	    nb::arg("batch_size") = DuckDBPyResult::DEFAULT_ARROW_BATCH_SIZE, nb::kw_only(),
 	    nb::arg("connection").none() = nb::none());
 	m.def(
 	    "to_arrow_reader",
@@ -490,7 +492,8 @@ static void InitializeConnectionMethods(nb::module_ &m) {
 		    }
 		    return conn->FetchRecordBatchReader(batch_size);
 	    },
-	    "Fetch an Arrow RecordBatchReader following execute()", nb::arg("batch_size") = 131072, nb::kw_only(),
+	    "Fetch an Arrow RecordBatchReader following execute()",
+	    nb::arg("batch_size") = DuckDBPyResult::DEFAULT_ARROW_BATCH_SIZE, nb::kw_only(),
 	    nb::arg("connection").none() = nb::none());
 	m.def(
 	    "fetch_arrow_table",
@@ -502,7 +505,8 @@ static void InitializeConnectionMethods(nb::module_ &m) {
 		                 0);
 		    return conn->FetchArrow(rows_per_batch);
 	    },
-	    "Fetch a result as Arrow table following execute()", nb::arg("rows_per_batch") = 131072, nb::kw_only(),
+	    "Fetch a result as Arrow table following execute()",
+	    nb::arg("rows_per_batch") = DuckDBPyResult::DEFAULT_ARROW_BATCH_SIZE, nb::kw_only(),
 	    nb::arg("connection").none() = nb::none());
 	m.def(
 	    "fetch_record_batch",
@@ -514,7 +518,8 @@ static void InitializeConnectionMethods(nb::module_ &m) {
 		                 0);
 		    return conn->FetchRecordBatchReader(rows_per_batch);
 	    },
-	    "Fetch an Arrow RecordBatchReader following execute()", nb::arg("rows_per_batch") = 131072, nb::kw_only(),
+	    "Fetch an Arrow RecordBatchReader following execute()",
+	    nb::arg("rows_per_batch") = DuckDBPyResult::DEFAULT_ARROW_BATCH_SIZE, nb::kw_only(),
 	    nb::arg("connection").none() = nb::none());
 	m.def(
 	    "torch",
@@ -1010,8 +1015,9 @@ static void InitializeConnectionMethods(nb::module_ &m) {
 		    }
 		    return conn->FetchRecordBatchReader(rows_per_batch);
 	    },
-	    "Alias of to_arrow_reader(). We recommend using to_arrow_reader() instead.", nb::arg("rows_per_batch") = 131072,
-	    nb::kw_only(), nb::arg("connection").none() = nb::none());
+	    "Alias of to_arrow_reader(). We recommend using to_arrow_reader() instead.",
+	    nb::arg("rows_per_batch") = DuckDBPyResult::DEFAULT_ARROW_BATCH_SIZE, nb::kw_only(),
+	    nb::arg("connection").none() = nb::none());
 	m.def(
 	    "arrow",
 	    [](nb::object &arrow_object, std::shared_ptr<DuckDBPyConnection> conn) -> std::unique_ptr<DuckDBPyRelation> {

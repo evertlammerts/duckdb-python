@@ -149,6 +149,28 @@ class TestStreamingSemantics:
         with pytest.raises(duckdb.InvalidInputException, match="already fetched"):
             res.to_arrow_reader()
 
+    def test_df_after_row_fetch_returns_the_remainder(self, duckdb_cursor):
+        pytest.importorskip("pandas")
+        res = duckdb_cursor.sql("SELECT i FROM range(10) t(i)")
+        assert res.fetchone() == (0,)
+        assert len(res.df()) == 9
+
+    def test_row_terminal_after_a_partial_arrow_reader_re_executes(self, duckdb_cursor):
+        pytest.importorskip("pyarrow")
+        duckdb_cursor.execute("SET max_streaming_buffer_size='100KB'")
+        res = duckdb_cursor.sql(f"SELECT i FROM range({ROW_COUNT}) t(i)")
+        reader = res.to_arrow_reader(1024)
+        assert 0 < len(reader.read_next_batch()) <= 1024
+        # An Arrow terminal hands its result to the reader; the next terminal runs the relation again
+        assert len(res.fetchall()) == ROW_COUNT
+
+    def test_rows_then_arrow_on_a_retained_result_raises(self, duckdb_cursor):
+        pytest.importorskip("pyarrow")
+        res = duckdb_cursor.sql("SELECT i FROM range(10) t(i)").execute()
+        assert res.fetchone() == (0,)
+        with pytest.raises(duckdb.InvalidInputException, match="already fetched"):
+            res.to_arrow_reader()
+
     def test_arrow_reader_over_a_retained_result(self, duckdb_cursor):
         pytest.importorskip("pyarrow")
         res = duckdb_cursor.sql("SELECT i FROM range(10) t(i)").execute()
@@ -230,7 +252,7 @@ class TestStreamingSemantics:
         with pytest.raises(duckdb.InterruptException, match="cancelled"):
             drain(res)
 
-    def test_side_effecting_statement_falls_back_to_retained(self, duckdb_cursor):
+    def test_a_returning_write_applies_when_its_rows_are_read(self, duckdb_cursor):
         duckdb_cursor.execute("CREATE TABLE t (i INTEGER)")
 
         res = duckdb_cursor.execute("INSERT INTO t VALUES (1), (2), (3) RETURNING i")

@@ -60,6 +60,8 @@ public:
 	unique_ptr<DataChunk> FetchChunk();
 	//! The rows a completed DML statement changed, -1 otherwise
 	int64_t Rowcount();
+	//! The accumulated count of an executemany, which spans several results
+	void OverrideRowcount(int64_t rowcount);
 
 	vector<string> GetNames();
 	const vector<LogicalType> &GetTypes() const;
@@ -97,6 +99,7 @@ private:
 
 private:
 	shared_ptr<engine::Result> result;
+	int64_t rowcount_override = -1;
 	//! The statement before its first consumer, which submits it as result
 	shared_ptr<engine::Deferred> deferred;
 	idx_t chunk_offset = 0;

@@ -221,11 +221,12 @@ static void InitializeConnectionMethods(nb::class_<DuckDBPyConnection> &m) {
 	      "Fetch a chunk of the result as DataFrame following execute()", nb::arg("vectors_per_chunk") = 1,
 	      nb::kw_only(), nb::arg("date_as_object") = false);
 	m.def("pl", &DuckDBPyConnection::FetchPolars, "Fetch a result as Polars DataFrame following execute()",
-	      nb::arg("rows_per_batch") = 131072, nb::kw_only(), nb::arg("lazy") = false);
+	      nb::arg("rows_per_batch") = DuckDBPyResult::DEFAULT_ARROW_BATCH_SIZE, nb::kw_only(), nb::arg("lazy") = false);
 	m.def("to_arrow_table", &DuckDBPyConnection::FetchArrow, "Fetch a result as Arrow table following execute()",
-	      nb::arg("batch_size") = 131072);
+	      nb::arg("batch_size") = DuckDBPyResult::DEFAULT_ARROW_BATCH_SIZE);
 	m.def("to_arrow_reader", &DuckDBPyConnection::FetchRecordBatchReader,
-	      "Fetch an Arrow RecordBatchReader following execute()", nb::arg("batch_size") = 131072);
+	      "Fetch an Arrow RecordBatchReader following execute()",
+	      nb::arg("batch_size") = DuckDBPyResult::DEFAULT_ARROW_BATCH_SIZE);
 	m.def(
 	    "fetch_arrow_table",
 	    [](DuckDBPyConnection &self, idx_t rows_per_batch) {
@@ -233,7 +234,8 @@ static void InitializeConnectionMethods(nb::class_<DuckDBPyConnection> &m) {
 		                 0);
 		    return self.FetchArrow(rows_per_batch);
 	    },
-	    "Fetch a result as Arrow table following execute()", nb::arg("rows_per_batch") = 131072);
+	    "Fetch a result as Arrow table following execute()",
+	    nb::arg("rows_per_batch") = DuckDBPyResult::DEFAULT_ARROW_BATCH_SIZE);
 	m.def(
 	    "fetch_record_batch",
 	    [](DuckDBPyConnection &self, idx_t rows_per_batch) {
@@ -241,10 +243,11 @@ static void InitializeConnectionMethods(nb::class_<DuckDBPyConnection> &m) {
 		                 0);
 		    return self.FetchRecordBatchReader(rows_per_batch);
 	    },
-	    "Fetch an Arrow RecordBatchReader following execute()", nb::arg("rows_per_batch") = 131072);
+	    "Fetch an Arrow RecordBatchReader following execute()",
+	    nb::arg("rows_per_batch") = DuckDBPyResult::DEFAULT_ARROW_BATCH_SIZE);
 	m.def("arrow", &DuckDBPyConnection::FetchRecordBatchReader,
 	      "Alias of to_arrow_reader(). We recommend using to_arrow_reader() instead.",
-	      nb::arg("rows_per_batch") = 131072);
+	      nb::arg("rows_per_batch") = DuckDBPyResult::DEFAULT_ARROW_BATCH_SIZE);
 	m.def("torch", &DuckDBPyConnection::FetchPyTorch, "Fetch a result as dict of PyTorch Tensors following execute()");
 	m.def("tf", &DuckDBPyConnection::FetchTF, "Fetch a result as dict of TensorFlow Tensors following execute()");
 	m.def("begin", &DuckDBPyConnection::Begin, "Start a new transaction");
@@ -544,15 +547,22 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::ExecuteMany(const nb::ob
 
 	shared_ptr<engine::Result> query_result;
 	// Execute once for every set of parameters that are provided
+	int64_t total_changed_rows = -1;
 	for (auto parameters : outer_list) {
 		auto params = nb::borrow<nb::object>(parameters);
 		query_result = ExecuteInternal(prep, std::move(params));
+		auto changed_rows = query_result->ChangedRows();
+		if (changed_rows >= 0) {
+			total_changed_rows = (total_changed_rows < 0 ? 0 : total_changed_rows) + changed_rows;
+		}
 	}
 	// Set the internal 'result' object
 	if (query_result) {
+		auto py_result = std::make_shared<DuckDBPyResult>(std::move(query_result));
+		py_result->OverrideRowcount(total_changed_rows);
 		// Don't use CreateRelation here — the result is stored inside the connection,
 		// so setting connection_owner would create a ref cycle (connection → result → connection).
-		con.SetResult(std::make_unique<DuckDBPyRelation>(std::make_shared<DuckDBPyResult>(std::move(query_result))));
+		con.SetResult(std::make_unique<DuckDBPyRelation>(std::move(py_result)));
 	}
 
 	return shared_from_this();
@@ -748,6 +758,7 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::Execute(const nb::object
 			{
 				D_ASSERT(duckdb::PyUtil::GilCheck());
 				nb::gil_scoped_release release;
+				unique_lock<std::recursive_mutex> lock(py_connection_lock);
 				deferred = session.Defer(std::move(bound), std::move(named_values));
 			}
 			py_result = std::make_shared<DuckDBPyResult>(std::move(deferred));

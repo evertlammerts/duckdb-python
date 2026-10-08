@@ -36,10 +36,7 @@ public:
 
 public:
 	bool IsArrow() const {
-		return arrow_batch_size != 0;
-	}
-	idx_t ArrowBatchSize() const {
-		return arrow_batch_size;
+		return engine_format != nullptr;
 	}
 	//! Null for chunks, the engine's default format
 	const shared_ptr<ResultFormat> &EngineFormat() const {
@@ -47,11 +44,10 @@ public:
 	}
 
 private:
-	Format(shared_ptr<ResultFormat> engine_format, idx_t arrow_batch_size);
+	explicit Format(shared_ptr<ResultFormat> engine_format);
 
 private:
 	shared_ptr<ResultFormat> engine_format;
-	idx_t arrow_batch_size;
 };
 
 //! Something that holds its connection until it is read, and lets go when another statement starts

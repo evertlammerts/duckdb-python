@@ -10,19 +10,18 @@
 namespace duckdb {
 namespace engine {
 
-Format::Format(shared_ptr<ResultFormat> engine_format_p, idx_t arrow_batch_size_p)
-    : engine_format(std::move(engine_format_p)), arrow_batch_size(arrow_batch_size_p) {
+Format::Format(shared_ptr<ResultFormat> engine_format_p) : engine_format(std::move(engine_format_p)) {
 }
 
 Format Format::Chunks() {
-	return Format(nullptr, 0);
+	return Format(nullptr);
 }
 
 Format Format::Arrow(idx_t batch_size) {
 	if (batch_size == 0) {
 		throw InvalidInputException("The Arrow batch size must be larger than 0");
 	}
-	return Format(make_shared_ptr<ArrowFormat>(batch_size), batch_size);
+	return Format(make_shared_ptr<ArrowFormat>(batch_size));
 }
 
 void Complete(QueryResult &result, const InterruptCheck &check) {
@@ -85,12 +84,15 @@ void Result::ThrowIfSuperseded() const {
 }
 
 void Result::OpenStream() {
-	D_ASSERT(state == State::PENDING);
 	// Such a statement cannot be streamed; its rows are served from the retained handle instead
 	if (CompletesBeforeReturning()) {
 		return;
 	}
 	lock_guard<mutex> guard(handle_lock);
+	// A concurrent first consumer can have settled the result while this one waited for the lock
+	if (state != State::PENDING || !handle) {
+		return;
+	}
 	try {
 		if (format.IsArrow()) {
 			stream = make_uniq<QueryResultStream<ArrowFormat>>(std::move(handle));
@@ -106,8 +108,8 @@ void Result::OpenStream() {
 }
 
 void Result::EndStream() {
-	lock_guard<mutex> guard(handle_lock);
-	stream.reset();
+	// The stream object stays alive: another thread can still be inside a fetch on it, and a drained
+	// stream keeps reporting its terminal state
 	state = State::DRAINED;
 }
 
@@ -127,6 +129,11 @@ unique_ptr<typename FORMAT::T> Result::FetchStreamUnit(const InterruptCheck &che
 		}
 		if (query_state == QueryResultState::EXECUTION_ERROR) {
 			ThrowIfSuperseded();
+			// A thread that polls after another thread drained the stream sees the ended query as an
+			// interrupt; it reached the end, not an error
+			if (state == State::DRAINED) {
+				return nullptr;
+			}
 			typed.GetErrorObject().Throw();
 		}
 		check();

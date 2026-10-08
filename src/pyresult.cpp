@@ -746,7 +746,14 @@ void DuckDBPyResult::Complete() {
 }
 
 int64_t DuckDBPyResult::Rowcount() {
+	if (rowcount_override >= 0) {
+		return rowcount_override;
+	}
 	return result ? result->ChangedRows() : -1;
+}
+
+void DuckDBPyResult::OverrideRowcount(int64_t rowcount) {
+	rowcount_override = rowcount;
 }
 
 } // namespace duckdb

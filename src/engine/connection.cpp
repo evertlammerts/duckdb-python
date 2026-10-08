@@ -304,12 +304,16 @@ shared_ptr<Result> Deferred::Start(const Format &format) {
 	if (!superseded && session.state->Generation() != generation) {
 		Supersede();
 	}
+	if (done.exchange(true)) {
+		if (superseded) {
+			throw InterruptException(
+			    "The result was cancelled because another statement ran on its connection before it was read");
+		}
+		throw InternalException("engine::Deferred started twice");
+	}
 	if (superseded) {
 		throw InterruptException(
 		    "The result was cancelled because another statement ran on its connection before it was read");
-	}
-	if (done.exchange(true)) {
-		throw InternalException("engine::Deferred started twice");
 	}
 	session.state->ClearOpen(*this);
 	auto result = session.Submit(bound, values, format);
