@@ -1,9 +1,7 @@
 import os
 import platform
-import socket
 import subprocess
 import sys
-import time
 
 import pytest
 
@@ -24,32 +22,36 @@ def test_extension_loading(require):
         assert connection is not None
 
 
+# http.server's HTTPServer resolves its own name with getfqdn() before it listens,
+# which can stall on macOS CI runners.
+_SERVE_DIRECTORY = """
+import functools, http.server, socketserver, sys
+handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=sys.argv[1])
+with socketserver.ThreadingTCPServer(("127.0.0.1", 0), handler) as server:
+    print(server.server_address[1], flush=True)
+    server.serve_forever()
+"""
+
+
 @pytest.fixture
 def empty_extension_repository(tmp_path):
     # install_extension holds the GIL for the whole request, so a server in this
     # interpreter would deadlock with it. Serving an empty directory answers
     # every extension request with a 404.
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
     server = subprocess.Popen(
-        [sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1", "-d", str(tmp_path)],
-        stdout=subprocess.DEVNULL,
+        [sys.executable, "-c", _SERVE_DIRECTORY, str(tmp_path)],
+        stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
+        text=True,
     )
     try:
-        deadline = time.monotonic() + 30
-        while True:
-            try:
-                with socket.create_connection(("127.0.0.1", port), timeout=0.5):
-                    break
-            except OSError:
-                if server.poll() is not None or time.monotonic() > deadline:
-                    pytest.fail("the extension repository server did not come up")
-                time.sleep(0.05)
+        port = server.stdout.readline().strip()
+        if not port:
+            pytest.fail("the extension repository server did not come up")
         yield f"http://127.0.0.1:{port}"
     finally:
         server.terminate()
+        server.stdout.close()
         server.wait(timeout=30)
 
 

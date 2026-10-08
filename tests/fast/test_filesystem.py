@@ -285,7 +285,7 @@ class TestPythonFilesystem:
         c = duckdb.connect()
         c.register_filesystem(fsspec.implementations.local.LocalFileSystem())
 
-        q = f"SELECT * FROM read_parquet('file://{tmp_path}/table*.parquet', union_by_name = TRUE) ORDER BY time DESC LIMIT 1"  # noqa: E501
+        q = f"SELECT * FROM read_parquet('file:///{tmp_path.as_posix().lstrip('/')}/table*.parquet', union_by_name = TRUE) ORDER BY time DESC LIMIT 1"  # noqa: E501
 
         res = c.sql(q).fetchall()
         assert res == [(1719568210134107692, 1)]
