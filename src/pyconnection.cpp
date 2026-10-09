@@ -87,11 +87,97 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::CreateRelation(shared_ptr<
 	return py_rel;
 }
 
-std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::CreateRelation(std::shared_ptr<DuckDBPyResult> result) {
-	auto py_rel = std::make_unique<DuckDBPyRelation>(std::move(result));
-	nb::gil_scoped_acquire gil;
-	py_rel->SetConnectionOwner(nb::cast(shared_from_this()));
-	return py_rel;
+DbapiResult::DbapiResult(std::shared_ptr<DuckDBPyResult> result_p) : result(std::move(result_p)) {
+	if (!result) {
+		throw InternalException("DbapiResult created without a result");
+	}
+	types = result->GetTypes();
+	names = result->GetNames();
+	changed_rows = result->Rowcount();
+}
+
+nb::list DbapiResult::Description() const {
+	return DuckDBPyResult::GetDescription(names, types);
+}
+
+Optional<nb::tuple> DbapiResult::FetchOne() {
+	if (!result) {
+		return nb::none();
+	}
+	return result->Fetchone();
+}
+
+nb::list DbapiResult::FetchMany(idx_t size) {
+	if (!result) {
+		return nb::list();
+	}
+	return result->Fetchmany(size);
+}
+
+nb::list DbapiResult::FetchAll() {
+	if (!result) {
+		return nb::list();
+	}
+	auto rows = result->Fetchall();
+	result = nullptr;
+	return rows;
+}
+
+nb::dict DbapiResult::FetchNumpy() {
+	if (!result) {
+		return nb::borrow<nb::dict>(nb::none());
+	}
+	auto arrays = result->FetchNumpyInternal();
+	result = nullptr;
+	return arrays;
+}
+
+PandasDataFrame DbapiResult::FetchDF(bool date_as_object) {
+	if (!result) {
+		return nb::none();
+	}
+	auto df = result->FetchDF(date_as_object);
+	result = nullptr;
+	return df;
+}
+
+PandasDataFrame DbapiResult::FetchDFChunk(idx_t vectors_per_chunk, bool date_as_object) {
+	if (!result) {
+		return nb::none();
+	}
+	return result->FetchDFChunk(vectors_per_chunk, date_as_object);
+}
+
+nb::dict DbapiResult::FetchPyTorch() {
+	if (!result) {
+		return nb::borrow<nb::dict>(nb::none());
+	}
+	auto tensors = result->FetchPyTorch();
+	result = nullptr;
+	return tensors;
+}
+
+nb::dict DbapiResult::FetchTF() {
+	if (!result) {
+		return nb::borrow<nb::dict>(nb::none());
+	}
+	auto tensors = result->FetchTF();
+	result = nullptr;
+	return tensors;
+}
+
+void DbapiResult::Complete() {
+	if (result) {
+		result->Complete();
+		result = nullptr;
+	}
+}
+
+void DbapiResult::Abort() {
+	if (result) {
+		result->Close();
+		result = nullptr;
+	}
 }
 
 void DuckDBPyConnection::DetectEnvironment() {
@@ -532,9 +618,7 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::ExecuteMany(const nb::ob
 	if (query_result) {
 		auto py_result = std::make_shared<DuckDBPyResult>(std::move(query_result));
 		py_result->OverrideRowcount(total_changed_rows);
-		// Don't use CreateRelation here — the result is stored inside the connection,
-		// so setting connection_owner would create a ref cycle (connection → result → connection).
-		con.SetResult(std::make_unique<DuckDBPyRelation>(std::move(py_result)));
+		con.SetResult(std::make_unique<DbapiResult>(std::move(py_result)));
 	}
 
 	return shared_from_this();
@@ -746,9 +830,7 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::Execute(const nb::object
 			py_result = std::make_shared<DuckDBPyResult>(std::move(res));
 		}
 	}
-	// Don't use CreateRelation here: the result is stored inside the connection,
-	// so setting connection_owner would create a ref cycle (connection, result, connection).
-	con.SetResult(std::make_unique<DuckDBPyRelation>(std::move(py_result)));
+	con.SetResult(std::make_unique<DbapiResult>(std::move(py_result)));
 	return shared_from_this();
 }
 
@@ -1909,14 +1991,14 @@ int64_t DuckDBPyConnection::GetRowcount() {
 void DuckDBPyConnection::Complete() {
 	ConnectionLockGuard conn_lock(*this);
 	if (con.HasResult()) {
-		con.GetResult().CompleteResult();
+		con.GetResult().Complete();
 	}
 }
 
 void DuckDBPyConnection::Abort() {
 	ConnectionLockGuard conn_lock(*this);
 	if (con.HasResult()) {
-		con.GetResult().AbortResult();
+		con.GetResult().Abort();
 	}
 }
 
@@ -2105,7 +2187,7 @@ nb::dict DuckDBPyConnection::FetchNumpy() {
 		throw InvalidInputException("No open result set");
 	}
 	auto &result = con.GetResult();
-	return result.FetchNumpyInternal();
+	return result.FetchNumpy();
 }
 
 PandasDataFrame DuckDBPyConnection::FetchDF(bool date_as_object) {

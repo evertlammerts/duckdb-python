@@ -22,7 +22,6 @@ namespace duckdb {
 struct DuckDBPyRelation {
 public:
 	explicit DuckDBPyRelation(shared_ptr<Relation> rel);
-	explicit DuckDBPyRelation(std::shared_ptr<DuckDBPyResult> result);
 	~DuckDBPyRelation();
 
 public:
@@ -31,19 +30,10 @@ public:
 	nb::list Description();
 
 	void Close();
-	//! The held result, run to its end without reading its rows
-	void CompleteResult();
-	//! The held result, dropped: a deferred statement never runs, a running one ends
-	void AbortResult();
-	//! The rows the result's completed DML statement changed, -1 otherwise. Survives consuming the result.
-	int64_t Rowcount();
 
 	std::unique_ptr<DuckDBPyRelation> GetAttribute(const string &name);
 
 	nb::str GetAlias();
-
-	static std::unique_ptr<DuckDBPyRelation> EmptyResult(const shared_ptr<ClientContext> &context,
-	                                                     const vector<LogicalType> &types, vector<string> names);
 
 	std::unique_ptr<DuckDBPyRelation> SetAlias(const string &expr);
 
@@ -273,7 +263,6 @@ public:
 
 	void SetConnectionOwner(nb::object owner);
 	std::unique_ptr<DuckDBPyRelation> DeriveRelation(shared_ptr<Relation> new_rel);
-	std::unique_ptr<DuckDBPyRelation> DeriveRelation(std::shared_ptr<DuckDBPyResult> result);
 
 private:
 	string ToStringInternal(const BoxRendererConfig &config, bool invalidate_cache = false);
@@ -290,9 +279,6 @@ private:
 	                                                const string &window_spec = "",
 	                                                const string &projected_columns = "", bool ignore_nulls = false);
 
-	void AssertResult() const;
-	void AssertResultOpen() const;
-	void AssertRelation() const;
 	void ExecuteOrThrow(bool stream_result = false, const engine::Format &format = engine::Format::Chunks());
 	//! Runs the relation to a completed, retained result
 	shared_ptr<engine::Result> ExecuteInternal();
@@ -304,8 +290,6 @@ private:
 	//! Whether the relation has been executed at least once
 	bool executed;
 	shared_ptr<Relation> rel;
-	//! Snapshot of the result's affected-row count, which outlives the consumed result
-	int64_t changed_rows = -1;
 	vector<LogicalType> types;
 	vector<string> names;
 	std::shared_ptr<DuckDBPyResult> result;

@@ -40,10 +40,6 @@ bool DuckDBPyRelation::CanBeRegisteredBy(Connection &con) {
 }
 
 bool DuckDBPyRelation::CanBeRegisteredBy(ClientContext &context) {
-	if (!rel) {
-		// PyRelation without an internal relation can not be registered
-		return false;
-	}
 	auto this_context = rel->context->TryGetContext();
 	if (!this_context) {
 		return false;
@@ -64,17 +60,6 @@ DuckDBPyRelation::~DuckDBPyRelation() {
 	rel.reset();
 }
 
-DuckDBPyRelation::DuckDBPyRelation(std::shared_ptr<DuckDBPyResult> result_p)
-    : rel(nullptr), result(std::move(result_p)) {
-	if (!result) {
-		throw InternalException("DuckDBPyRelation created without a result");
-	}
-	this->executed = true;
-	this->types = result->GetTypes();
-	this->names = result->GetNames();
-	this->changed_rows = result->Rowcount();
-}
-
 std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::ProjectFromExpression(const string &expression) {
 	auto projected_relation = DeriveRelation(rel->Project(expression));
 	for (auto &dep : this->rel->external_dependencies) {
@@ -84,9 +69,6 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::ProjectFromExpression(const 
 }
 
 std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Project(const nb::args &args, const string &groups) {
-	if (!rel) {
-		return nullptr;
-	}
 	auto arg_count = args.size();
 	if (arg_count == 0) {
 		return nullptr;
@@ -111,9 +93,6 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Project(const nb::args &args
 }
 
 std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::ProjectFromTypes(const nb::object &obj) {
-	if (!rel) {
-		return nullptr;
-	}
 	if (!nb::isinstance<nb::list>(obj)) {
 		throw InvalidInputException("'columns_by_type' expects a list containing types");
 	}
@@ -157,23 +136,6 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::ProjectFromTypes(const nb::o
 		throw InvalidInputException("None of the columns matched the provided type filter!");
 	}
 	return ProjectFromExpression(projection);
-}
-
-std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::EmptyResult(const shared_ptr<ClientContext> &context,
-                                                                const vector<LogicalType> &types,
-                                                                vector<string> names) {
-	vector<Value> dummy_values;
-	D_ASSERT(types.size() == names.size());
-	dummy_values.reserve(types.size());
-	D_ASSERT(!types.empty());
-	for (auto &type : types) {
-		dummy_values.emplace_back(type);
-	}
-	vector<vector<Value>> single_row(1, dummy_values);
-	auto values_relation =
-	    std::make_unique<DuckDBPyRelation>(make_shared_ptr<ValueRelation>(context, single_row, std::move(names)));
-	// Add a filter on an impossible condition
-	return values_relation->FilterFromExpression("true = false");
 }
 
 std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::SetAlias(const string &expr) {
@@ -243,30 +205,11 @@ vector<unique_ptr<ParsedExpression>> GetExpressions(ClientContext &context, cons
 }
 
 std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Aggregate(const nb::object &expr, const string &groups) {
-	AssertRelation();
 	auto expressions = GetExpressions(*rel->context->GetContext(), expr);
 	if (!groups.empty()) {
 		return DeriveRelation(rel->Aggregate(std::move(expressions), groups));
 	}
 	return DeriveRelation(rel->Aggregate(std::move(expressions)));
-}
-
-void DuckDBPyRelation::AssertResult() const {
-	if (!result) {
-		throw InvalidInputException("No open result set");
-	}
-}
-
-void DuckDBPyRelation::AssertRelation() const {
-	if (!rel) {
-		throw InvalidInputException("This relation was created from a result");
-	}
-}
-
-void DuckDBPyRelation::AssertResultOpen() const {
-	if (!result) {
-		throw InvalidInputException("No open result set");
-	}
 }
 
 nb::list DuckDBPyRelation::Description() {
@@ -352,10 +295,6 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Describe() {
 }
 
 string DuckDBPyRelation::ToSQL() {
-	if (!rel) {
-		// This relation is just a wrapper around a result set, can't figure out what the SQL was
-		return "";
-	}
 	try {
 		return rel->GetQueryNode()->ToString();
 	} catch (const std::exception &) {
@@ -828,9 +767,6 @@ shared_ptr<engine::Result> DuckDBPyRelation::ExecuteInternal() {
 void DuckDBPyRelation::ExecuteOrThrow(bool stream_result, const engine::Format &format) {
 	nb::gil_scoped_acquire gil;
 	result.reset();
-	if (!rel) {
-		throw InternalException("ExecuteOrThrow - no query available to execute");
-	}
 	this->executed = true;
 	std::shared_ptr<DuckDBPyResult> py_result;
 	{
@@ -846,9 +782,6 @@ void DuckDBPyRelation::ExecuteOrThrow(bool stream_result, const engine::Format &
 
 PandasDataFrame DuckDBPyRelation::FetchDF(bool date_as_object) {
 	if (!result) {
-		if (!rel) {
-			return nb::none();
-		}
 		ExecuteOrThrow();
 	}
 	auto df = result->FetchDF(date_as_object);
@@ -858,9 +791,6 @@ PandasDataFrame DuckDBPyRelation::FetchDF(bool date_as_object) {
 
 Optional<nb::tuple> DuckDBPyRelation::FetchOne() {
 	if (!result) {
-		if (!rel) {
-			return nb::none();
-		}
 		ExecuteOrThrow(true);
 	}
 	return result->Fetchone();
@@ -868,9 +798,6 @@ Optional<nb::tuple> DuckDBPyRelation::FetchOne() {
 
 nb::list DuckDBPyRelation::FetchMany(idx_t size) {
 	if (!result) {
-		if (!rel) {
-			return nb::list();
-		}
 		ExecuteOrThrow(true);
 		D_ASSERT(result);
 	}
@@ -879,9 +806,6 @@ nb::list DuckDBPyRelation::FetchMany(idx_t size) {
 
 nb::list DuckDBPyRelation::FetchAll() {
 	if (!result) {
-		if (!rel) {
-			return nb::list();
-		}
 		ExecuteOrThrow();
 	}
 	auto res = result->Fetchall();
@@ -891,9 +815,6 @@ nb::list DuckDBPyRelation::FetchAll() {
 
 nb::dict DuckDBPyRelation::FetchNumpy() {
 	if (!result) {
-		if (!rel) {
-			return nb::borrow<nb::dict>(nb::none());
-		}
 		ExecuteOrThrow();
 	}
 	auto res = result->FetchNumpy();
@@ -903,9 +824,6 @@ nb::dict DuckDBPyRelation::FetchNumpy() {
 
 nb::dict DuckDBPyRelation::FetchPyTorch() {
 	if (!result) {
-		if (!rel) {
-			return nb::borrow<nb::dict>(nb::none());
-		}
 		ExecuteOrThrow();
 	}
 	auto res = result->FetchPyTorch();
@@ -915,9 +833,6 @@ nb::dict DuckDBPyRelation::FetchPyTorch() {
 
 nb::dict DuckDBPyRelation::FetchTF() {
 	if (!result) {
-		if (!rel) {
-			return nb::borrow<nb::dict>(nb::none());
-		}
 		ExecuteOrThrow();
 	}
 	auto res = result->FetchTF();
@@ -927,12 +842,8 @@ nb::dict DuckDBPyRelation::FetchTF() {
 
 nb::dict DuckDBPyRelation::FetchNumpyInternal(bool chunked, idx_t vectors_per_chunk) {
 	if (!result) {
-		if (!rel) {
-			return nb::borrow<nb::dict>(nb::none());
-		}
 		ExecuteOrThrow();
 	}
-	AssertResultOpen();
 	auto res = result->FetchNumpyInternal(chunked, vectors_per_chunk);
 	result = nullptr;
 	return res;
@@ -940,23 +851,15 @@ nb::dict DuckDBPyRelation::FetchNumpyInternal(bool chunked, idx_t vectors_per_ch
 
 PandasDataFrame DuckDBPyRelation::FetchDFChunk(idx_t vectors_per_chunk, bool date_as_object) {
 	if (!result) {
-		if (!rel) {
-			return nb::none();
-		}
 		ExecuteOrThrow(true);
 	}
-	AssertResultOpen();
 	return result->FetchDFChunk(vectors_per_chunk, date_as_object);
 }
 
 pyarrow::Table DuckDBPyRelation::ToArrowTableInternal(idx_t batch_size, bool to_polars) {
-	if (!result && !rel) {
-		return nb::none();
-	}
 	if (!result) {
 		ExecuteOrThrow(false, engine::Format::Arrow(batch_size));
 	}
-	AssertResultOpen();
 	auto res = result->FetchArrowTable(batch_size, to_polars);
 	result = nullptr;
 	return res;
@@ -968,12 +871,8 @@ duckdb::pyarrow::Table DuckDBPyRelation::ToArrowTable(idx_t batch_size) {
 
 nb::object DuckDBPyRelation::ToArrowCapsule(const nb::object &requested_schema) {
 	if (!result) {
-		if (!rel) {
-			return nb::none();
-		}
 		ExecuteOrThrow(true, engine::Format::Arrow(DuckDBPyResult::DEFAULT_ARROW_BATCH_SIZE));
 	}
-	AssertResultOpen();
 	auto res = result->FetchArrowCapsule();
 	result = nullptr;
 	return res;
@@ -989,14 +888,7 @@ PolarsDataFrame DuckDBPyRelation::ToPolars(idx_t batch_size, bool lazy) {
 	auto lazy_frame_produce = import_cache.duckdb.polars_io.duckdb_source();
 	auto result_names = names;
 	QueryResult::DeduplicateColumns(result_names);
-	ClientProperties client_properties;
-	if (rel) {
-		client_properties = rel->context->GetContext()->GetClientProperties();
-	} else if (result) {
-		client_properties = result->GetClientProperties();
-	} else {
-		throw InternalException("DuckDBPyRelation To Polars must have a valid relation or result");
-	}
+	auto client_properties = rel->context->GetContext()->GetClientProperties();
 	nb::list batches;
 	auto empty_table = pyarrow::ToArrowTable(types, result_names, batches, client_properties);
 
@@ -1008,43 +900,18 @@ PolarsDataFrame DuckDBPyRelation::ToPolars(idx_t batch_size, bool lazy) {
 
 duckdb::pyarrow::RecordBatchReader DuckDBPyRelation::ToRecordBatch(idx_t batch_size) {
 	if (!result) {
-		if (!rel) {
-			return nb::none();
-		}
 		DuckDBPyResult::CheckBatchSize(batch_size);
 		ExecuteOrThrow(true, engine::Format::Arrow(batch_size));
 	}
-	AssertResultOpen();
 	auto res = result->FetchRecordBatchReader(batch_size);
 	result = nullptr;
 	return res;
-}
-
-void DuckDBPyRelation::CompleteResult() {
-	if (result) {
-		result->Complete();
-		result = nullptr;
-	}
-}
-
-void DuckDBPyRelation::AbortResult() {
-	if (result) {
-		result->Close();
-		result = nullptr;
-	}
-}
-
-int64_t DuckDBPyRelation::Rowcount() {
-	return changed_rows;
 }
 
 void DuckDBPyRelation::Close() {
 	// We always want to execute the query at least once, for side-effect purposes.
 	// if it has already been executed, we don't need to do it again.
 	if (!executed && !result) {
-		if (!rel) {
-			return;
-		}
 		ExecuteOrThrow();
 	}
 	if (result) {
@@ -1067,12 +934,6 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::DeriveRelation(shared_ptr<Re
 	return result_;
 }
 
-std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::DeriveRelation(std::shared_ptr<DuckDBPyResult> result_p) {
-	auto result_ = std::make_unique<DuckDBPyRelation>(std::move(result_p));
-	result_->connection_owner = connection_owner;
-	return result_;
-}
-
 static bool ContainsStructFieldByName(LogicalType &type, const string &name) {
 	if (type.id() != LogicalTypeId::STRUCT) {
 		return false;
@@ -1089,10 +950,6 @@ static bool ContainsStructFieldByName(LogicalType &type, const string &name) {
 
 std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::GetAttribute(const string &name) {
 	// TODO: support fetching a result containing only column 'name' from a value_relation
-	if (!rel) {
-		throw nb::attribute_error(
-		    StringUtil::Format("This relation does not contain a column by the name of '%s'", name).c_str());
-	}
 	vector<Identifier> column_names;
 	if (names.size() == 1 && ContainsStructFieldByName(types[0], name)) {
 		// e.g 'rel['my_struct']['my_field']:
@@ -1558,20 +1415,17 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Query(const string &view_nam
 }
 
 DuckDBPyRelation &DuckDBPyRelation::Execute() {
-	AssertRelation();
 	ExecuteOrThrow();
 	return *this;
 }
 
 void DuckDBPyRelation::InsertInto(const string &table) {
-	AssertRelation();
 	auto parsed_info = QualifiedName::Parse(table);
 	auto insert = rel->InsertRel(parsed_info.Catalog(), parsed_info.Schema(), parsed_info.Name());
 	PyExecuteRelation(insert);
 }
 
 void DuckDBPyRelation::Update(const nb::object &set_p, const nb::object &where) {
-	AssertRelation();
 	unique_ptr<ParsedExpression> condition;
 	if (!nb::none().is(where)) {
 		auto py_expr = DuckDBPyExpression::ToExpression(where);
@@ -1612,7 +1466,6 @@ void DuckDBPyRelation::Update(const nb::object &set_p, const nb::object &where) 
 }
 
 void DuckDBPyRelation::Insert(const nb::object &params) const {
-	AssertRelation();
 	if (this->rel->type != RelationType::TABLE_RELATION) {
 		throw InvalidInputException("'DuckDBPyRelation.insert' can only be used on a table relation");
 	}
@@ -1625,14 +1478,12 @@ void DuckDBPyRelation::Insert(const nb::object &params) const {
 }
 
 void DuckDBPyRelation::Create(const string &table) {
-	AssertRelation();
 	auto parsed_info = QualifiedName::Parse(table);
 	auto create = rel->CreateRel(parsed_info.Schema(), parsed_info.Name(), false);
 	PyExecuteRelation(create);
 }
 
 std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Map(nb::callable fun, Optional<nb::object> schema) {
-	AssertRelation();
 	auto info = make_shared_ptr<MapFunctionInfo>(std::move(fun), std::move(schema));
 	return DeriveRelation(make_shared_ptr<TableFunctionRelation>(rel->context->GetContext(), "python_map_function",
 	                                                             vector<Value>(), named_parameter_map_t(), rel, true,
@@ -1640,7 +1491,6 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Map(nb::callable fun, Option
 }
 
 string DuckDBPyRelation::ToStringInternal(const BoxRendererConfig &config, bool invalidate_cache) {
-	AssertRelation();
 	if (rendered_result.empty() || invalidate_cache) {
 		BoxRenderer renderer;
 		auto limit = Limit(config.limit, 0);
@@ -1719,7 +1569,6 @@ static void DisplayHTML(const string &html) {
 }
 
 string DuckDBPyRelation::Explain(ExplainType type, const string &format) {
-	AssertRelation();
 	D_ASSERT(duckdb::PyUtil::GilCheck());
 	nb::gil_scoped_release release;
 
@@ -1817,15 +1666,11 @@ resizeTFTree();
 
 // TODO: RelationType to a python enum
 nb::str DuckDBPyRelation::Type() {
-	if (!rel) {
-		return nb::str("QUERY_RESULT");
-	}
 	auto type_str = RelationTypeToString(rel->type);
 	return nb::str(type_str.c_str(), type_str.size());
 }
 
 nb::list DuckDBPyRelation::Columns() {
-	AssertRelation();
 	nb::list res;
 	for (auto &col : rel->Columns()) {
 		res.append(col.Name());
@@ -1834,7 +1679,6 @@ nb::list DuckDBPyRelation::Columns() {
 }
 
 nb::list DuckDBPyRelation::ColumnTypes() {
-	AssertRelation();
 	nb::list res;
 	for (auto &col : rel->Columns()) {
 		res.append(DuckDBPyType(col.Type()));

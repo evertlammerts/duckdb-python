@@ -54,6 +54,35 @@ private:
 	mutex l;
 };
 
+//! The result of the last execute(), read by the connection's fetch methods
+class DbapiResult {
+public:
+	explicit DbapiResult(std::shared_ptr<DuckDBPyResult> result);
+
+public:
+	nb::list Description() const;
+	int64_t Rowcount() const {
+		return changed_rows;
+	}
+	Optional<nb::tuple> FetchOne();
+	nb::list FetchMany(idx_t size);
+	nb::list FetchAll();
+	nb::dict FetchNumpy();
+	PandasDataFrame FetchDF(bool date_as_object);
+	PandasDataFrame FetchDFChunk(idx_t vectors_per_chunk, bool date_as_object);
+	nb::dict FetchPyTorch();
+	nb::dict FetchTF();
+	void Complete();
+	void Abort();
+
+private:
+	//! Null once a consuming fetch, complete() or abort() has used the rows up
+	std::shared_ptr<DuckDBPyResult> result;
+	vector<string> names;
+	vector<LogicalType> types;
+	int64_t changed_rows;
+};
+
 struct ConnectionGuard {
 public:
 	ConnectionGuard() {
@@ -91,13 +120,13 @@ public:
 		}
 		return *connection;
 	}
-	DuckDBPyRelation &GetResult() {
+	DbapiResult &GetResult() {
 		if (!result) {
 			ThrowConnectionException();
 		}
 		return *result;
 	}
-	const DuckDBPyRelation &GetResult() const {
+	const DbapiResult &GetResult() const {
 		if (!result) {
 			ThrowConnectionException();
 		}
@@ -122,7 +151,7 @@ public:
 	void SetConnection(unique_ptr<Connection> con) {
 		connection = std::move(con);
 	}
-	void SetResult(std::unique_ptr<DuckDBPyRelation> res) {
+	void SetResult(std::unique_ptr<DbapiResult> res) {
 		result = std::move(res);
 	}
 
@@ -134,7 +163,7 @@ private:
 private:
 	shared_ptr<DuckDB> database;
 	unique_ptr<Connection> connection;
-	std::unique_ptr<DuckDBPyRelation> result;
+	std::unique_ptr<DbapiResult> result;
 };
 
 struct DuckDBPyConnection : public std::enable_shared_from_this<DuckDBPyConnection> {
@@ -366,7 +395,6 @@ public:
 
 private:
 	std::unique_ptr<DuckDBPyRelation> CreateRelation(shared_ptr<Relation> rel);
-	std::unique_ptr<DuckDBPyRelation> CreateRelation(std::shared_ptr<DuckDBPyResult> result);
 	PathLike GetPathLike(const nb::object &object);
 	ScalarFunction CreateScalarUDF(const string &name, const nb::callable &udf, const nb::object &parameters,
 	                               const nb::object &return_type, bool vectorized, FunctionNullHandling null_handling,
