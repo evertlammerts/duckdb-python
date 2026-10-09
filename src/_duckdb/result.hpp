@@ -60,6 +60,10 @@ public:
 	/// Release the result: DuckDB allows one live result per connection, and holding it keeps the file in use.
 	void Close();
 
+	/// Run the statement until its first batch is held, so an early execution error or an interrupt raises
+	/// here rather than at the first fetch; the batch waits for the fetches. No-op once anything has run.
+	void Settle();
+
 	/// Up to `count` more rows, or every remaining row when `count` is zero; a partly read batch carries over.
 	nb::list FetchRows(size_t count);
 

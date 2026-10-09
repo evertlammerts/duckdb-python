@@ -24,7 +24,7 @@
 <header class="top">
   <div class="eyebrow">duckdb for python &middot; user manual</div>
   <h1>The DB-API</h1>
-  <p class="standfirst"><code>duckdb.dbapi</code> is DuckDB behind <strong>PEP 249</strong>: <code>connect</code>, a <strong>cursor</strong>, <code>execute</code>, the fetch family, <code>commit</code> and <code>rollback</code>. It is here because other tools ask for exactly that. It follows the specification strictly and adds nothing to it.</p>
+  <p class="standfirst"><code>duckdb.dbapi</code> is DuckDB behind <strong>PEP 249</strong>: <code>connect</code>, a <strong>cursor</strong>, <code>execute</code>, the fetch family, <code>commit</code> and <code>rollback</code>. It is here because other tools ask for exactly that. It follows the specification strictly and adds only <code>complete()</code> and <code>abort()</code>, for disposing of a pending result deliberately.</p>
 </header>
 
 <nav class="toc">
@@ -89,7 +89,7 @@ reader.execute(<span class="s">"SELECT count(*) FROM orders"</span>)
 reader.fetchone()      <span class="c"># (5,): the same transaction, so the insert is visible</span></code></pre>
 
   <div class="note">
-    <p><strong>One result at a time.</strong> The engine keeps one live result per connection, and cursors share theirs. An <code>execute</code> on any cursor releases whatever result is open, including one a sibling cursor is still reading; that sibling's next fetch raises <code>InterfaceError</code>. PEP 249 permits this; it is what ODBC does without MARS. Read a result out before running the next statement on the connection.</p>
+    <p><strong>One result at a time.</strong> The engine keeps one live result per connection, and cursors share theirs. An <code>execute</code> on any cursor supersedes whatever result is open, including one a sibling cursor is still reading; that sibling's next fetch raises <code>InterfaceError</code>. A superseded <code>SELECT</code> stops where it stands; any other statement, a <code>RETURNING</code> among them, first runs out to its end, so a write is never cut short and the transaction stays valid. PEP 249 permits this; it is what ODBC does without MARS. Read a result out before running the next statement on the connection, or dispose of it yourself: <code>complete()</code> runs it to its end without reading, <code>abort()</code> drops it where it stands. While one call is driving the engine, a fetch, a <code>complete()</code>, an <code>execute</code> mid-settle, every other call on that connection refuses with <code>ProgrammingError</code> instead of waiting; only <code>interrupt()</code> goes through, from any thread.</p>
   </div>
   <div class="pair">
     <div class="bad">
@@ -112,6 +112,7 @@ b.execute(<span class="s">"SELECT customer FROM orders"</span>)</code></pre>
     cur.fetchone()
 <span class="c"># cur is closed</span></code></pre>
   <p><code>close()</code> releases the cursor's result and is idempotent. A closed cursor refuses every <code>execute</code> and every fetch with <code>InterfaceError</code>. <code>cur.connection</code> is the connection it came from. <code>cur.arraysize</code> is how many rows <code>fetchmany()</code> returns when not told; it starts at <code>1</code>.</p>
+  <p>Two methods beyond PEP 249 dispose of a pending result deliberately. <code>complete()</code> runs it to its end without reading its rows, so its side effects land in full. <code>abort()</code> drops it: rows never produced never arrive, what already ran keeps its effects, and a cancelled write fails the open transaction. Both are no-ops without a pending result.</p>
 </section>
 
 <section id="execute">
@@ -128,11 +129,9 @@ cur.execute(<span class="s">"SELECT $a + $b"</span>, {<span class="s">"a"</span>
   <p>A value never becomes part of the SQL text; it is sent to the engine separately. <code>None</code>, <code>bool</code>, <code>int</code> of any width, <code>float</code>, <code>str</code>, <code>bytes</code>, <code>Decimal</code> at its own scale, <code>date</code>, <code>time</code>, <code>datetime</code>, <code>timedelta</code> and <code>UUID</code> all bind, and an aware <code>datetime</code> or <code>time</code> keeps its offset. A numpy <code>datetime64</code> or <code>timedelta64</code> and a pandas <code>Timestamp</code> or <code>Timedelta</code> bind in their own unit, up to microseconds: a timestamp with nanoseconds is refused rather than rounded, a duration drops them toward zero, and <code>NaT</code> binds as NULL. A <code>time</code> whose zone's offset depends on a date is refused, and so is a list or map holding values both with and without a time zone in the same place. Places line up as the engine combines a list's elements, one after another: struct fields meet by name, ignoring case, or by position when either struct's first key is the empty string. A list binds as a list; a dict with string keys as a STRUCT, with any other keys as a MAP. A <code>None</code> or an empty list inside one has no type of its own and takes the one a sibling has in the same place, struct fields by their exact name, so <code>[[], ["a"]]</code> is a <code>VARCHAR[][]</code>. What no sibling types takes the type the statement expects for the parameter, as an <code>INSERT</code> or a comparison with a column fixes it; what the expectation cannot type cleanly goes to the engine as it is, cast like the same SQL literal. Where the statement expects nothing at all, as in <code>SELECT $1</code> with <code>[None]</code>, binding is refused with a message naming a cast such as <code>$1::VARCHAR[]</code>. A bare <code>None</code> is simply a NULL and binds wherever a NULL can go. In a mapping of parameters the names must be strings.</p>
 
   <p class="lead-in">what execute does</p>
-  <p>A query is prepared and its result opened; nothing is read until you fetch. <code>description</code> is known at once, since the column names and types arrive when the result opens, and the rows are produced as you fetch them. So an error inside a row, a value that will not cast, is raised by the fetch that reaches it, not by <code>execute</code>.</p>
-  <pre><code>cur.execute(<span class="s">"SELECT 'abc'::INTEGER AS n"</span>)   <span class="c"># fine: the statement binds</span>
-cur.description                             <span class="c"># [('n', 'INTEGER', None, None, None, None, None)]</span>
-cur.fetchone()                              <span class="c"># ConversionError</span></code></pre>
-  <p>Any other statement runs to completion inside <code>execute</code>. Its effect has landed when the call returns, and <code>rowcount</code> says how many rows it changed.</p>
+  <p>A query runs until its first batch of rows is ready, then waits; the rest is produced as you fetch. So an early error, one the engine hits on the way to that first batch, raises from <code>execute</code> itself, and a later one is raised by the fetch that reaches it. <code>description</code> is set when <code>execute</code> returns. How far "the way to the first batch" runs is the engine's streaming buffer (the <code>max_streaming_buffer_size</code> setting, 10&nbsp;MB unless changed): the first batch surfaces once the buffer is full or the query is done, so a small result runs entirely inside <code>execute</code>.</p>
+  <pre><code>cur.execute(<span class="s">"SELECT 'abc'::INTEGER AS n"</span>)   <span class="c"># ConversionError: hit before the first batch</span></code></pre>
+  <p>A statement with <code>RETURNING</code> applies its write entirely inside <code>execute</code>; the returned rows wait to be fetched. Any other statement runs to completion inside <code>execute</code>. Its effect has landed when the call returns, and <code>rowcount</code> says how many rows it changed.</p>
   <p>One statement per call. <code>"CREATE TABLE t (v INTEGER); INSERT INTO t VALUES (1)"</code> is refused with <code>InvalidInputError</code>; run each on its own.</p>
 
   <p class="lead-in">executemany</p>

@@ -123,6 +123,13 @@ void Result::Close() {
 	result.Release();
 }
 
+void Result::Settle() {
+	if (pending || finished) {
+		return;
+	}
+	Advance();
+}
+
 nb::list Result::FetchRows(size_t count) {
 	auto live = Live();
 	auto &ctx = result.Module()->conversion;

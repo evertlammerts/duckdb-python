@@ -556,6 +556,7 @@ NB_MODULE(_duckdb, m) {
 	    .def("fetch_all", &Result::FetchAll)
 	    .def("close", &Result::Close)
 	    .def("drain", &Result::Drain)
+	    .def("settle", &Result::Settle)
 	    .def_prop_ro("result_type", &Result::ResultType)
 	    .def("fetch_rows", &Result::FetchRows, nb::arg("count"))
 	    .def("fetch_chunk_view", &Result::FetchChunkView)

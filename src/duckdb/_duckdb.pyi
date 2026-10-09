@@ -73,6 +73,9 @@ class Result:
     def drain(self) -> int:
         """Run the statement to completion and report how many rows changed."""
 
+    def settle(self) -> None:
+        """Run until the first batch is held, so an early error or interrupt raises here, not at the first fetch."""
+
     def fetch_rows(self, count: int) -> list[tuple[Any, ...]]:
         """Up to `count` more rows, or every remaining row when `count` is zero."""
 
