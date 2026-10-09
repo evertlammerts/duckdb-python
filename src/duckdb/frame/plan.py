@@ -1284,6 +1284,15 @@ class Frame(PlanBase):
         sql, values = self._sql_and_values(connection=connection, parameters=parameters)
         return _arrow.table(connection, sql, values)
 
+    def to_polars(self, connection: Connection, *, parameters: Mapping[str, object] | None = None) -> Any:  # noqa: ANN401
+        """Every row as a polars DataFrame; needs polars installed."""
+        # Imported here so that importing duckdb does not require polars.
+        from . import _arrow
+
+        connection = self._on(connection)
+        sql, values = self._sql_and_values(connection=connection, parameters=parameters)
+        return _arrow.polars_frame(connection, sql, values)
+
     def to_reader(
         self,
         connection: Connection,
@@ -1464,6 +1473,10 @@ class Bound:
     def to_arrow(self, *, parameters: Mapping[str, object] | None = None) -> Any:  # noqa: ANN401
         """Every row as a pyarrow Table; needs pyarrow installed."""
         return self.plan.to_arrow(self.connection, parameters=parameters)
+
+    def to_polars(self, *, parameters: Mapping[str, object] | None = None) -> Any:  # noqa: ANN401
+        """Every row as a polars DataFrame; needs polars installed."""
+        return self.plan.to_polars(self.connection, parameters=parameters)
 
     def to_reader(self, *, parameters: Mapping[str, object] | None = None, batch_size: int | None = None) -> Any:  # noqa: ANN401
         """A pyarrow RecordBatchReader streaming the rows, at most `batch_size` per batch."""

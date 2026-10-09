@@ -1,14 +1,14 @@
-"""Results leaving as Arrow: the table and reader egress over the engine's Arrow stream.
+"""Results leaving as Arrow: the table, reader and polars egress over the engine's Arrow stream.
 
-pyarrow is imported on use; the capsule protocol itself needs none of this module, so a consumer such as
-polars reads a bound plan with no pyarrow installed.
+pyarrow and polars are imported on use; the capsule protocol itself needs neither, so any Arrow-native
+consumer reads a bound plan with nothing extra installed.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, NoReturn
 
-from ..exceptions import InterfaceError, InvalidInputError, class_for_code
+from ..exceptions import InterfaceError, InvalidInputError, NotSupportedError, class_for_code
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -82,5 +82,39 @@ def table(connection: Connection, sql: str, values: Sequence[Any] | None) -> Any
         return pyarrow.RecordBatchReader.from_stream(stream).read_all()
     except Exception as error:
         _raise_typed(stream, error)
+    finally:
+        stream.close()
+
+
+def _polars() -> Any:
+    try:
+        import polars
+    except ImportError as error:
+        message = "to_polars needs polars, which is not installed"
+        raise ImportError(message) from error
+    version = tuple(int(part) for part in polars.__version__.split(".")[:2] if part.isdigit())
+    if version < (1, 3):
+        message = "to_polars needs polars 1.3 or newer, where the DataFrame constructor reads an Arrow stream"
+        raise ImportError(message)
+    return polars
+
+
+def polars_frame(connection: Connection, sql: str, values: Sequence[Any] | None) -> Any:
+    """Every row as a polars DataFrame, read batch by batch from the stream's capsule."""
+    polars = _polars()
+    # polars aborts on Arrow data it has no type for by panicking out of Rust, a BaseException.
+    panics = getattr(polars.exceptions, "PanicException", ())
+    stream = connection._execute_arrow(sql, values, 0)
+    try:
+        return polars.DataFrame(stream)
+    except Exception as error:
+        # polars raises its own error types; what ended the stream carries the engine's code.
+        _raise_typed(stream, error)
+    except panics as error:
+        message = (
+            "polars has no type for a column of this result (INTERVAL and UNION are not polars types); "
+            "use to_arrow or to_reader instead"
+        )
+        raise NotSupportedError(message) from error
     finally:
         stream.close()
