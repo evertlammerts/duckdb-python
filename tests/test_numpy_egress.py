@@ -61,6 +61,28 @@ class TestToNumpy:
         assert out["l"][0] == [1, 2]
         assert out["st"][0] == {"a": 1}
 
+    def test_an_object_column_without_nulls_is_a_plain_array(self, con: duckdb.frame.Connection) -> None:
+        out = duckdb.frame.sql("SELECT 's' || i AS s, [i] AS l FROM range(3) t(i)").to_numpy(con)
+        assert not isinstance(out["s"], np.ma.MaskedArray)
+        assert not isinstance(out["l"], np.ma.MaskedArray)
+
+    @pytest.mark.parametrize("with_null_rows", [False, True], ids=["members_only", "with_null_rows"])
+    def test_a_union_holding_a_null_member_is_masked(
+        self, con: duckdb.frame.Connection, *, with_null_rows: bool
+    ) -> None:
+        # The union row itself is valid, so only its value says it is missing; a NULL row beside it must not hide it.
+        member = "union_value(a := CASE WHEN i = 1 THEN NULL ELSE i END)"
+        value = f"CASE WHEN i = 2 THEN NULL ELSE {member} END" if with_null_rows else member
+        out = duckdb.frame.sql(f"SELECT ({value})::UNION(a BIGINT, b VARCHAR) AS c FROM range(3) t(i)").to_numpy(con)
+        assert out["c"].mask.tolist() == [False, True, with_null_rows]
+        assert out["c"][0] == 0
+
+    def test_the_union_type_id_copy_matches_the_engine(self, con: duckdb.frame.Connection) -> None:
+        from duckdb.frame import _numpy
+
+        with con._execute("SELECT union_value(a := 1) AS c") as live:
+            assert live.result.schema_types[0][0] == _numpy._UNION
+
     def test_temporal_units(self, con: duckdb.frame.Connection) -> None:
         out = duckdb.frame.sql(
             "SELECT DATE '2026-09-01' AS d, TIMESTAMP '2026-09-01 12:00:00' AS ts, "

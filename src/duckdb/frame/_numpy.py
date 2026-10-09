@@ -33,6 +33,7 @@ _TS_TZ_NS = 33
 _UHUGEINT = 49
 _HUGEINT = 50
 _ENUM = 104
+_UNION = 107
 
 _NUMERIC_DTYPE = {
     _BOOLEAN: "bool",
@@ -164,8 +165,11 @@ def _convert_column(np: Any, view: _duckdb.ChunkView, column: int, count: int) -
 
     values = np.empty(count, dtype=object)
     values[:] = view.values(column)
-    if mask is None:
+    # A union whose member is NULL is a valid row that reads as None, the one value the validity bits miss.
+    if type_id == _UNION:
         nones = np.array([v is None for v in values], dtype=bool)
+        if mask is not None:
+            nones |= mask
         mask = nones if nones.any() else None
     return values, mask, "object", None
 

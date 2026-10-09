@@ -266,6 +266,16 @@ class TestObjects:
         assert type(frame_["c"][0]) is type(rows[0][0])
         assert frame_["c"][1] is pd.NA
 
+    def test_a_union_holding_a_null_member_is_na(self, con: frame.Connection) -> None:
+        member = "union_value(a := CASE WHEN i = 1 THEN NULL ELSE i END)"
+        frame_ = out(
+            con,
+            f"SELECT (CASE WHEN i = 2 THEN NULL ELSE {member} END)::UNION(a BIGINT, b VARCHAR) AS c FROM range(3) t(i)",
+        )
+        assert frame_["c"][0] == 0
+        assert frame_["c"][1] is pd.NA
+        assert frame_["c"][2] is pd.NA
+
     def test_a_uuid_is_a_uuid(self, con: frame.Connection) -> None:
         assert isinstance(out(con, "SELECT uuid() AS c")["c"][0], uuid.UUID)
 

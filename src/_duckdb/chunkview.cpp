@@ -55,13 +55,7 @@ nb::object ChunkView::Validity(cxx::idx_t column) {
 }
 
 nb::list ChunkView::Values(cxx::idx_t column, ConversionContext &ctx) {
-	auto &vector = vectors.at(column);
-	nb::list out;
-	const auto count = chunk.GetRowCount();
-	for (cxx::idx_t row = 0; row < count; row++) {
-		out.append(ValueToPython(vector.GetValue(row), ctx));
-	}
-	return out;
+	return VectorElements(vectors.at(column), Type(column), 0, chunk.GetRowCount(), ctx);
 }
 
 size_t ChunkView::ElementSize(cxx::idx_t column) const {
