@@ -270,19 +270,31 @@ class TestOpenResultIsExclusive:
 
     @SUPERSEDES
     @pytest.mark.parametrize(
-        "use",
+        ("prepare", "run"),
         [
-            pytest.param(lambda c: c.sql("SELECT 1").fetchall(), id="relation"),
-            pytest.param(lambda c: c.table("t"), id="table"),
-            pytest.param(lambda c: c.create_function("f", lambda x: x, [BIGINT], BIGINT), id="create_function"),
+            pytest.param(lambda c: c.sql("SELECT 1"), lambda r: r.fetchall(), id="relation"),
+            pytest.param(lambda c: c.table("t"), lambda r: r.fetchall(), id="table"),
+            pytest.param(
+                lambda c: c, lambda c: c.create_function("f", lambda x: x, [BIGINT], BIGINT), id="create_function"
+            ),
         ],
     )
-    def test_anything_but_the_dbapi_errors(self, con, use):
+    def test_executing_anything_but_the_dbapi_errors(self, con, prepare, run):
         con.execute("CREATE TABLE t AS SELECT 1 AS a")
         con.execute(f"SELECT * FROM range({ROWS})")
         con.fetchone()
+        # Building a relation only binds, so it succeeds; running it is what conflicts with the open result.
+        target = prepare(con)
         with pytest.raises(duckdb.InvalidInputException, match=OPEN_RESULT):
-            use(con)
+            run(target)
+        assert con.fetchone() == (1,)
+
+    def test_constructing_relations_leaves_the_open_result_alone(self, con):
+        con.execute("CREATE TABLE t AS SELECT 1 AS a")
+        con.execute(f"SELECT * FROM range({ROWS})")
+        con.fetchone()
+        relations = [con.sql("SELECT 1 AS b"), con.table("t"), con.values([1, 2])]
+        assert [r.columns for r in relations] == [["b"], ["a"], ["col0", "col1"]]
         assert con.fetchone() == (1,)
 
     @SUPERSEDES

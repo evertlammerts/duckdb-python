@@ -141,8 +141,6 @@ public:
 
 	string ToSQL();
 
-	duckdb::pyarrow::RecordBatchReader FetchRecordBatchReader(idx_t rows_per_batch);
-
 	idx_t Length();
 
 	nb::tuple Shape();

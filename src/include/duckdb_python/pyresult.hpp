@@ -79,8 +79,8 @@ private:
 	bool Empty() const {
 		return !result && !deferred;
 	}
-	//! Submits a deferred statement in the format of its first consumer
-	void StartDeferred(const engine::Format &format, bool retain);
+	//! Submits a deferred statement, in the chunk format, at its first fetch
+	void StartDeferred();
 	//! Flat vectors, for the row fetch
 	unique_ptr<DataChunk> FetchNext();
 	unique_ptr<DataChunk> FetchNextRaw();
@@ -89,8 +89,8 @@ private:
 	unique_ptr<DataChunk> TakeBufferedRows();
 	std::unique_ptr<NumpyResultConversion> InitializeNumpyConversion(bool pandas = false);
 
-	//! Submits a deferred statement in the Arrow format, or has the engine scan a completed chunk result again in it
-	void EnsureArrow(idx_t batch_size, bool retain);
+	//! Has the engine scan a completed chunk result again in the Arrow format
+	void EnsureArrow(idx_t batch_size);
 
 	template <typename T>
 	T RunWithArrowSchema(const std::function<T(const ArrowSchema &)> &fun, bool dedup_col_names);

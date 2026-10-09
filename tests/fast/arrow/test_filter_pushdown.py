@@ -713,9 +713,7 @@ class TestRegressions:
         df.to_parquet(str(file_path))
 
         my_arrow_dataset = pa_ds.dataset(str(file_path))
-        res = duckdb_cursor.execute(
-            "SELECT * FROM my_arrow_dataset WHERE ts = ?", parameters=[timestamp]
-        ).to_arrow_table()
+        res = duckdb_cursor.sql("SELECT * FROM my_arrow_dataset WHERE ts = ?", params=[timestamp]).to_arrow_table()
         assert duckdb_cursor.sql("SELECT * FROM res").fetchall() == [(1, timestamp), (2, timestamp), (3, timestamp)]
 
     def test_2145_parquet_glob_through_arrow(self, duckdb_cursor, tmp_path):

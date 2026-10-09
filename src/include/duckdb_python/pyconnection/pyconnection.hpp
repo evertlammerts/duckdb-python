@@ -333,14 +333,9 @@ public:
 	PandasDataFrame FetchDF(bool date_as_object);
 	PandasDataFrame FetchDFChunk(const idx_t vectors_per_chunk = 1, bool date_as_object = false);
 
-	duckdb::pyarrow::Table FetchArrow(idx_t rows_per_batch);
-	PolarsDataFrame FetchPolars(idx_t rows_per_batch, bool lazy);
-
 	nb::dict FetchPyTorch();
 
 	nb::dict FetchTF();
-
-	duckdb::pyarrow::RecordBatchReader FetchRecordBatchReader(const idx_t rows_per_batch);
 
 	static std::shared_ptr<DuckDBPyConnection> Connect(const nb::object &database, bool read_only,
 	                                                   const nb::dict &config);

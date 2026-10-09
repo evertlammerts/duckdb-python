@@ -10,7 +10,7 @@ Routing is by *result type*, and a lazy result is never materialized:
   ``pl`` run it through a ``PhysicalArrowCollector`` (eager + parallel); the lazy
   surfaces re-run it as a ``StreamQueryResult``. Both run on the user's own context,
   which the produced stream co-owns (so it survives ``del conn``).
-* ``StreamQueryResult`` (from ``con.execute()``, or a fresh streaming relation)
+* ``StreamQueryResult`` (from a fresh streaming relation)
   already has a live context, so it is converted directly: ``to_arrow_table`` pulls
   the stream serially; ``__arrow_c_stream__`` / ``to_arrow_reader`` wrap it directly
   in core's ``ResultArrowArrayStreamWrapper`` — never copied. Such a reader/capsule
@@ -51,14 +51,7 @@ RICH_SQL = """
 
 
 class TestEagerToArrowTablePromotion:
-    """Eager + parallel promotion of already-executed results matches the fresh path."""
-
-    def test_cursor_fetch_arrow_table_matches_fresh(self):
-        conn = duckdb.connect()
-        expected = conn.sql(RICH_SQL).to_arrow_table()
-        # con.execute(...) materializes; fetch goes through the promotion path.
-        actual = conn.execute(RICH_SQL).to_arrow_table()
-        assert actual.equals(expected)
+    """A relation executed ahead of time reads as Arrow like a fresh one."""
 
     def test_preexecuted_relation_to_arrow_table_matches_fresh(self):
         conn = duckdb.connect()
@@ -67,23 +60,6 @@ class TestEagerToArrowTablePromotion:
         rel.execute()  # forces a MaterializedQueryResult
         actual = rel.to_arrow_table()
         assert actual.equals(expected)
-
-    def test_cursor_pl_matches_fresh(self):
-        pl = pytest.importorskip("polars")
-        conn = duckdb.connect()
-        sql = "SELECT i AS a, i::VARCHAR AS b FROM range(500) t(i)"
-        expected = conn.sql(sql).pl()
-        actual = conn.execute(sql).pl()
-        assert expected.equals(actual)
-        assert isinstance(actual, pl.DataFrame)
-
-    def test_cursor_fetch_arrow_table_empty(self):
-        conn = duckdb.connect()
-        sql = "SELECT i AS a, i::VARCHAR AS b FROM range(10) t(i) WHERE i < 0"
-        expected = conn.sql(sql).to_arrow_table()
-        actual = conn.execute(sql).to_arrow_table()
-        assert actual.num_rows == 0
-        assert actual.schema.equals(expected.schema)
 
 
 class TestLazyCapsuleStreaming:
@@ -136,13 +112,13 @@ class TestLazyCapsuleStreaming:
         assert second.num_rows == 100
 
 
-class TestCursorRecordBatchReaderStreaming:
-    """Cursor reader over a stream: not materialized, survives del conn, shares the active-stream slot."""
+class TestRecordBatchReaderStreaming:
+    """A relation reader over a stream: not materialized, survives del conn, shares the active-stream slot."""
 
     def test_reader_consume_then_reuse_connection(self):
         conn = duckdb.connect()
         conn.execute("CREATE TABLE t AS SELECT range AS a FROM range(3000)")
-        reader = conn.execute("SELECT a FROM t").to_arrow_reader(1024)
+        reader = conn.sql("SELECT a FROM t").to_arrow_reader(1024)
         tbl = reader.read_all()  # consume before reusing the connection
         assert tbl.num_rows == 3000
         assert tbl.column("a").to_pylist() == list(range(3000))
@@ -152,16 +128,16 @@ class TestCursorRecordBatchReaderStreaming:
     def test_reader_survives_del_conn(self):
         conn = duckdb.connect()
         conn.execute("CREATE TABLE t AS SELECT range AS a FROM range(3000)")
-        reader = conn.execute("SELECT a FROM t").to_arrow_reader(1024)
+        reader = conn.sql("SELECT a FROM t").to_arrow_reader(1024)
         del conn
         gc.collect()
         tbl = reader.read_all()
         assert tbl.num_rows == 3000
 
-    def test_cursor_reader_exact_batch_sizes(self):
+    def test_reader_exact_batch_sizes(self):
         conn = duckdb.connect()
         conn.execute("CREATE TABLE t AS SELECT range AS a FROM range(3000)")
-        reader = conn.execute("SELECT a FROM t").to_arrow_reader(1024)
+        reader = conn.sql("SELECT a FROM t").to_arrow_reader(1024)
         assert reader.read_next_batch().num_rows == 1024
         assert reader.read_next_batch().num_rows == 1024
         assert reader.read_next_batch().num_rows == 952
@@ -174,18 +150,29 @@ class TestDuplicateColumnNames:
 
     DUP_SQL = "SELECT i AS a, i + 1 AS a, i + 2 AS a FROM range(50) t(i)"
 
-    def test_cursor_fetch_arrow_table_duplicate_columns(self):
+    def test_to_arrow_table_duplicate_columns(self):
         conn = duckdb.connect()
-        tbl = conn.execute(self.DUP_SQL).to_arrow_table()
+        tbl = conn.sql(self.DUP_SQL).to_arrow_table()
         assert tbl.num_rows == 50
         assert tbl.num_columns == 3
-        # Re-feeding through a MaterializedRelation re-binds (which would dedup the
-        # names); the promotion restores the original names, so pyarrow still sees
-        # the duplicate 'a' columns exactly as the un-promoted result would.
         assert tbl.column_names == ["a", "a", "a"]
         assert tbl.column(0).to_pylist() == list(range(50))
         assert tbl.column(1).to_pylist() == list(range(1, 51))
         assert tbl.column(2).to_pylist() == list(range(2, 52))
+
+    def test_preexecuted_to_arrow_table_restores_duplicate_columns(self):
+        conn = duckdb.connect()
+        rel = conn.sql(self.DUP_SQL)
+        rel.execute()
+        # Re-scanning the executed rows renames duplicates; the original names are put back.
+        assert rel.to_arrow_table().column_names == ["a", "a", "a"]
+
+    def test_arrow_after_a_row_fetch_raises(self):
+        conn = duckdb.connect()
+        rel = conn.sql(self.DUP_SQL)
+        rel.fetchone()
+        with pytest.raises(duckdb.InvalidInputException, match="Rows were already fetched"):
+            rel.to_arrow_table()
 
     def test_preexecuted_capsule_duplicate_columns(self):
         conn = duckdb.connect()
@@ -195,17 +182,17 @@ class TestDuplicateColumnNames:
         assert tbl.num_rows == 50
         assert tbl.num_columns == 3
 
-    def test_cursor_record_batch_duplicate_columns(self):
+    def test_reader_duplicate_columns(self):
         conn = duckdb.connect()
-        reader = conn.execute(self.DUP_SQL).to_arrow_reader()
+        reader = conn.sql(self.DUP_SQL).to_arrow_reader()
         tbl = reader.read_all()
         assert tbl.num_rows == 50
         assert tbl.num_columns == 3
 
-    def test_cursor_pl_duplicate_columns_dedups(self):
+    def test_pl_duplicate_columns_dedups(self):
         pl = pytest.importorskip("polars")
         conn = duckdb.connect()
-        df = conn.execute(self.DUP_SQL).pl()
+        df = conn.sql(self.DUP_SQL).pl()
         # polars requires unique column names; the dedup must still apply.
         assert isinstance(df, pl.DataFrame)
         assert len(set(df.columns)) == 3
@@ -217,7 +204,7 @@ class TestEdgeCaseShapes:
 
     def test_single_row_single_column(self):
         conn = duckdb.connect()
-        tbl = conn.execute("SELECT 42 AS x").to_arrow_table()
+        tbl = conn.sql("SELECT 42 AS x").to_arrow_table()
         assert tbl.num_rows == 1
         assert tbl.column("x").to_pylist() == [42]
 
@@ -225,17 +212,15 @@ class TestEdgeCaseShapes:
         conn = duckdb.connect()
         conn.execute("CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')")
         conn.execute("CREATE TABLE t AS SELECT 'happy'::mood AS m FROM range(100)")
-        expected = conn.sql("SELECT m FROM t").to_arrow_table()
-        actual = conn.execute("SELECT m FROM t").to_arrow_table()
-        assert actual.equals(expected)
+        actual = conn.sql("SELECT m FROM t").to_arrow_table()
         # ENUM should map to a dictionary-encoded Arrow column.
         assert pa.types.is_dictionary(actual.schema.field("m").type)
 
-    def test_enum_via_cursor_stream(self):
+    def test_enum_via_reader(self):
         conn = duckdb.connect()
         conn.execute("CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')")
         conn.execute("CREATE TABLE t AS SELECT 'ok'::mood AS m FROM range(100)")
-        reader = conn.execute("SELECT m FROM t").to_arrow_reader()
+        reader = conn.sql("SELECT m FROM t").to_arrow_reader()
         tbl = reader.read_all()
         assert tbl.num_rows == 100
         assert pa.types.is_dictionary(tbl.schema.field("m").type)
@@ -244,10 +229,10 @@ class TestEdgeCaseShapes:
 class TestConfigFidelity:
     """Re-fed / directly-wrapped results reproduce the user's Arrow output config (e.g. TimeZone)."""
 
-    def test_timezone_preserved_through_cursor_stream_reader(self):
+    def test_timezone_preserved_through_reader(self):
         conn = duckdb.connect()
         conn.execute("SET TimeZone = 'America/New_York'")
-        reader = conn.execute("SELECT TIMESTAMPTZ '2021-06-01 12:00:00' AS ts").to_arrow_reader()
+        reader = conn.sql("SELECT TIMESTAMPTZ '2021-06-01 12:00:00' AS ts").to_arrow_reader()
         tbl = reader.read_all()
         assert tbl.schema.field("ts").type.tz == "America/New_York"
 
@@ -259,11 +244,11 @@ class TestConfigFidelity:
         tbl = pa.table(rel)
         assert tbl.schema.field("ts").type.tz == "Asia/Kathmandu"
 
-    def test_large_buffer_size_preserved_through_cursor_stream(self):
+    def test_large_buffer_size_preserved_through_reader(self):
         # arrow_large_buffer_size promotes string/blob/list offsets to 64-bit.
         conn = duckdb.connect()
         conn.execute("SET arrow_large_buffer_size = true")
-        reader = conn.execute("SELECT 'hello' AS s FROM range(10)").to_arrow_reader()
+        reader = conn.sql("SELECT 'hello' AS s FROM range(10)").to_arrow_reader()
         tbl = reader.read_all()
         assert tbl.schema.field("s").type == pa.large_string()
 
@@ -274,7 +259,7 @@ class TestLazyStreamMechanism:
     def test_refed_stream_data_correct_after_del_conn(self):
         conn = duckdb.connect()
         conn.execute("CREATE TABLE t AS SELECT i, i::VARCHAR AS s FROM range(2000) t(i)")
-        reader = conn.execute("SELECT * FROM t ORDER BY i").to_arrow_reader(512)
+        reader = conn.sql("SELECT * FROM t ORDER BY i").to_arrow_reader(512)
         del conn
         gc.collect()
         tbl = reader.read_all()
@@ -334,11 +319,11 @@ class TestGeometryAfterClose:
         self._assert_geoarrow(actual)
         assert actual.column("g").to_pylist() == expected.column("g").to_pylist()
 
-    def test_cursor_reader_geometry_after_del_conn(self):
-        # con.execute() stream wrapped directly; conversion runs after del conn
+    def test_reader_geometry_after_del_conn(self):
+        # A streaming relation is wrapped directly; conversion runs after del conn
         expected = self._expected()
         conn = duckdb.connect()
-        reader = conn.execute(self.GEOM_SQL).to_arrow_reader()
+        reader = conn.sql(self.GEOM_SQL).to_arrow_reader()
         del conn
         gc.collect()
         actual = reader.read_all()

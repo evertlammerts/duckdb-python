@@ -37,17 +37,6 @@ class TestDBApiFetch:
         assert c.df() is None
         assert c.df() is None
 
-    def test_multiple_fetch_arrow(self, duckdb_cursor):
-        pd = pytest.importorskip("pandas")
-        pytest.importorskip("pyarrow")
-        con = duckdb.connect()
-        c = con.execute("SELECT 42::BIGINT AS a")
-        table = c.to_arrow_table()
-        df = table.to_pandas()
-        pd.testing.assert_frame_equal(df, pd.DataFrame.from_dict({"a": [42]}))
-        assert c.to_arrow_table() is None
-        assert c.to_arrow_table() is None
-
     def test_multiple_close(self, duckdb_cursor):
         con = duckdb.connect()
         c = con.execute("SELECT 42")

@@ -51,51 +51,18 @@ class TestDeferredQuery:
             pytest.param(lambda con: len(con.fetchmany(ROWS + 1)), id="fetchmany"),
             pytest.param(lambda con: len(con.df()), id="df"),
             pytest.param(lambda con: len(con.fetchnumpy()["i"]), id="fetchnumpy"),
-            pytest.param(lambda con: con.to_arrow_table().num_rows, id="to_arrow_table"),
-            pytest.param(lambda con: con.to_arrow_reader(10_000).read_all().num_rows, id="to_arrow_reader"),
         ],
     )
     def test_the_first_consumer_runs_the_query_once(self, duckdb_cursor, produced, consume):
         pytest.importorskip("pandas")
-        pytest.importorskip("pyarrow")
         duckdb_cursor.execute(TALLY_QUERY)
         assert consume(duckdb_cursor) == ROWS
         assert produced[0] == ROWS
-
-    def test_polars_runs_the_query_once(self, duckdb_cursor, produced):
-        pytest.importorskip("polars")
-        duckdb_cursor.execute(TALLY_QUERY)
-        assert len(duckdb_cursor.pl()) == ROWS
-        assert produced[0] == ROWS
-
-    def test_an_arrow_reader_streams(self, duckdb_cursor, produced):
-        pytest.importorskip("pyarrow")
-        duckdb_cursor.execute("SET max_streaming_buffer_size='100KB'")
-        duckdb_cursor.execute(TALLY_QUERY)
-        reader = duckdb_cursor.to_arrow_reader(1024)
-        assert len(reader.read_next_batch()) > 0
-        del reader
-        assert produced[0] < ROWS
-
-    def test_arrow_batches_are_at_most_the_batch_size(self, duckdb_cursor):
-        pytest.importorskip("pyarrow")
-        duckdb_cursor.execute("CREATE TABLE t AS SELECT range i FROM range(300000)")
-        duckdb_cursor.execute("SELECT i FROM t")
-        batches = list(duckdb_cursor.to_arrow_reader(100_000))
-        assert all(0 < len(batch) <= 100_000 for batch in batches)
-        assert sum(len(batch) for batch in batches) == 300_000
 
     def test_a_whole_fetch_after_a_row_fetch_returns_the_remainder(self, duckdb_cursor):
         duckdb_cursor.execute("SELECT i FROM range(10) t(i)")
         assert duckdb_cursor.fetchone() == (0,)
         assert duckdb_cursor.fetchall() == [(i,) for i in range(1, 10)]
-
-    def test_arrow_after_a_row_fetch_raises(self, duckdb_cursor):
-        pytest.importorskip("pyarrow")
-        duckdb_cursor.execute("SELECT i FROM range(10) t(i)")
-        assert duckdb_cursor.fetchone() == (0,)
-        with pytest.raises(duckdb.InvalidInputException, match="already fetched"):
-            duckdb_cursor.to_arrow_table()
 
     def test_a_runtime_error_surfaces_at_the_first_fetch(self, duckdb_cursor):
         duckdb_cursor.execute("SELECT 'a'::INTEGER")
@@ -213,15 +180,6 @@ class TestWrites:
         con = returning_table
         assert con.execute("INSERT INTO r VALUES (1), (2) RETURNING i").fetchall() == [(1,), (2,)]
         assert count_rows(con) == 2
-
-    def test_a_returning_write_as_arrow(self, returning_table):
-        pytest.importorskip("pyarrow")
-        con = returning_table
-        table = con.execute("INSERT INTO r VALUES (1), (2) RETURNING i").to_arrow_table()
-        assert table.column("i").to_pylist() == [1, 2]
-        reader = con.execute("INSERT INTO r VALUES (3) RETURNING i").to_arrow_reader()
-        assert reader.read_all().column("i").to_pylist() == [3]
-        assert count_rows(con) == 3
 
     def test_an_unread_returning_write_is_not_applied(self, returning_table):
         con = returning_table
@@ -412,18 +370,6 @@ class TestDeferredOwnership:
         start()
         assert con.fetchall() == [(7,)]
 
-    def test_an_arrow_reader_keeps_its_source(self, duckdb_cursor):
-        pa = pytest.importorskip("pyarrow")
-        con = duckdb_cursor
-
-        def start():
-            local = pa.table({"x": list(range(100))})  # noqa: F841 - read by the replacement scan
-            rel = con.sql("SELECT x FROM local")  # noqa: F841 - read by the replacement scan
-            return con.execute("SELECT x FROM rel").to_arrow_reader()
-
-        reader = start()
-        assert reader.read_all().num_rows == 100
-
     def test_releasing_the_query_leaves_the_source_relation_usable(self, duckdb_cursor):
         con = duckdb_cursor
         rel = con.sql("SELECT 1 AS i")
@@ -440,13 +386,10 @@ class TestRowcountSurvivesConsumption:
             pytest.param(lambda con: con.fetchone(), id="fetchone"),
             pytest.param(lambda con: con.df(), id="df"),
             pytest.param(lambda con: con.fetchnumpy(), id="fetchnumpy"),
-            pytest.param(lambda con: con.to_arrow_table(), id="to_arrow_table"),
-            pytest.param(lambda con: con.to_arrow_reader().read_all(), id="to_arrow_reader"),
         ],
     )
     def test_consuming_the_result_keeps_the_count(self, duckdb_cursor, consume):
         pytest.importorskip("pandas")
-        pytest.importorskip("pyarrow")
         con = duckdb_cursor
         con.execute("CREATE TABLE t(i INT)")
         con.execute("INSERT INTO t VALUES (1), (2), (3)")
@@ -523,9 +466,29 @@ class TestIntegrations:
         assert batches == [4, 4, 2]
         cursor.close()
 
-    def test_a_record_batch_reader_from_execute(self, duckdb_cursor):
-        """The call ibis makes on the object raw_sql returns."""
+
+class TestRelationArrow:
+    def test_polars_runs_the_query_once(self, duckdb_cursor, produced):
+        pytest.importorskip("polars")
+        assert len(duckdb_cursor.sql(TALLY_QUERY).pl()) == ROWS
+        assert produced[0] == ROWS
+
+    def test_an_arrow_reader_streams(self, duckdb_cursor, produced):
         pytest.importorskip("pyarrow")
-        with pytest.deprecated_call():
-            reader = duckdb_cursor.execute("SELECT i FROM range(5000) t(i)").fetch_record_batch(rows_per_batch=1000)
-        assert sum(len(batch) for batch in reader) == 5000
+        duckdb_cursor.execute("SET max_streaming_buffer_size='100KB'")
+        reader = duckdb_cursor.sql(TALLY_QUERY).to_arrow_reader(1024)
+        assert len(reader.read_next_batch()) > 0
+        del reader
+        assert produced[0] < ROWS
+
+    def test_an_arrow_reader_keeps_its_source(self, duckdb_cursor):
+        pa = pytest.importorskip("pyarrow")
+        con = duckdb_cursor
+
+        def start():
+            local = pa.table({"x": list(range(100))})  # noqa: F841 - read by the replacement scan
+            rel = con.sql("SELECT x FROM local")  # noqa: F841 - read by the replacement scan
+            return con.sql("SELECT x FROM rel").to_arrow_reader()
+
+        reader = start()
+        assert reader.read_all().num_rows == 100

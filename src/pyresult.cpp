@@ -36,7 +36,7 @@ static constexpr const char *ROWS_THEN_ARROW =
 static constexpr const char *ARROW_THEN_ROWS =
     "This result is being read as Arrow, so rows cannot be fetched from it. Run the query again to fetch rows.";
 
-void DuckDBPyResult::StartDeferred(const engine::Format &format, bool retain) {
+void DuckDBPyResult::StartDeferred() {
 	if (!deferred) {
 		return;
 	}
@@ -44,10 +44,7 @@ void DuckDBPyResult::StartDeferred(const engine::Format &format, bool retain) {
 	{
 		D_ASSERT(duckdb::PyUtil::GilCheck());
 		nb::gil_scoped_release release;
-		result = starting->Start(format);
-		if (retain) {
-			result->Retain(DuckDBPyConnection::CheckSignals);
-		}
+		result = starting->Start(engine::Format::Chunks());
 	}
 }
 
@@ -94,7 +91,7 @@ unique_ptr<DataChunk> DuckDBPyResult::FetchChunk() {
 	if (Empty()) {
 		throw InternalException("FetchChunk called without a result object");
 	}
-	StartDeferred(engine::Format::Chunks(), false);
+	StartDeferred();
 	return FetchNext();
 }
 
@@ -129,7 +126,7 @@ Optional<nb::tuple> DuckDBPyResult::Fetchone() {
 	if (Empty()) {
 		throw InvalidInputException("result closed");
 	}
-	StartDeferred(engine::Format::Chunks(), false);
+	StartDeferred();
 	{
 		nb::gil_scoped_release release;
 		if (!current_chunk || chunk_offset >= current_chunk->size() || result->StreamEnded()) {
@@ -230,7 +227,7 @@ std::unique_ptr<NumpyResultConversion> DuckDBPyResult::InitializeNumpyConversion
 	if (Empty()) {
 		throw InvalidInputException("result closed");
 	}
-	StartDeferred(engine::Format::Chunks(), false);
+	StartDeferred();
 
 	idx_t initial_capacity = STANDARD_VECTOR_SIZE * 2ULL;
 	if (result->IsRetained()) {
@@ -427,11 +424,9 @@ nb::dict DuckDBPyResult::FetchTF() {
 	return result_dict;
 }
 
-void DuckDBPyResult::EnsureArrow(idx_t batch_size, bool retain) {
-	if (deferred) {
-		StartDeferred(engine::Format::Arrow(batch_size), retain);
-		return;
-	}
+void DuckDBPyResult::EnsureArrow(idx_t batch_size) {
+	// Only the DB-API defers, and it never asks for Arrow.
+	D_ASSERT(result);
 	if (result->GetFormat().IsArrow()) {
 		return;
 	}
@@ -471,7 +466,7 @@ duckdb::pyarrow::Table DuckDBPyResult::FetchArrowTable(const idx_t rows_per_batc
 	if (Empty()) {
 		throw InvalidInputException("There is no query result");
 	}
-	EnsureArrow(rows_per_batch, true);
+	EnsureArrow(rows_per_batch);
 	return RunWithArrowSchema<duckdb::pyarrow::Table>(
 	    [&](const ArrowSchema &schema) -> duckdb::pyarrow::Table {
 		    auto pyarrow_schema = pyarrow::ToPyArrowSchema(schema);
@@ -628,7 +623,7 @@ struct ArrowArrayStreamGuard {
 } // namespace
 
 ArrowArrayStream DuckDBPyResult::FetchArrowArrayStream(idx_t rows_per_batch) {
-	EnsureArrow(rows_per_batch, false);
+	EnsureArrow(rows_per_batch);
 	auto state = make_uniq<ArrowStreamState>();
 	if (names_override.empty()) {
 		result->CopyArrowSchema(state->cached_schema);
@@ -721,7 +716,7 @@ void DuckDBPyResult::Complete() {
 	if (Empty()) {
 		return;
 	}
-	StartDeferred(engine::Format::Chunks(), false);
+	StartDeferred();
 	current_chunk.reset();
 	chunk_offset = 0;
 	const bool arrow = result->GetFormat().IsArrow();

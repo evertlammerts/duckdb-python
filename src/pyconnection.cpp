@@ -220,34 +220,6 @@ static void InitializeConnectionMethods(nb::class_<DuckDBPyConnection> &m) {
 	m.def("fetch_df_chunk", &DuckDBPyConnection::FetchDFChunk,
 	      "Fetch a chunk of the result as DataFrame following execute()", nb::arg("vectors_per_chunk") = 1,
 	      nb::kw_only(), nb::arg("date_as_object") = false);
-	m.def("pl", &DuckDBPyConnection::FetchPolars, "Fetch a result as Polars DataFrame following execute()",
-	      nb::arg("rows_per_batch") = DuckDBPyResult::DEFAULT_ARROW_BATCH_SIZE, nb::kw_only(), nb::arg("lazy") = false);
-	m.def("to_arrow_table", &DuckDBPyConnection::FetchArrow, "Fetch a result as Arrow table following execute()",
-	      nb::arg("batch_size") = DuckDBPyResult::DEFAULT_ARROW_BATCH_SIZE);
-	m.def("to_arrow_reader", &DuckDBPyConnection::FetchRecordBatchReader,
-	      "Fetch an Arrow RecordBatchReader following execute()",
-	      nb::arg("batch_size") = DuckDBPyResult::DEFAULT_ARROW_BATCH_SIZE);
-	m.def(
-	    "fetch_arrow_table",
-	    [](DuckDBPyConnection &self, idx_t rows_per_batch) {
-		    PyErr_WarnEx(PyExc_DeprecationWarning, "fetch_arrow_table() is deprecated, use to_arrow_table() instead.",
-		                 0);
-		    return self.FetchArrow(rows_per_batch);
-	    },
-	    "Fetch a result as Arrow table following execute()",
-	    nb::arg("rows_per_batch") = DuckDBPyResult::DEFAULT_ARROW_BATCH_SIZE);
-	m.def(
-	    "fetch_record_batch",
-	    [](DuckDBPyConnection &self, idx_t rows_per_batch) {
-		    PyErr_WarnEx(PyExc_DeprecationWarning, "fetch_record_batch() is deprecated, use to_arrow_reader() instead.",
-		                 0);
-		    return self.FetchRecordBatchReader(rows_per_batch);
-	    },
-	    "Fetch an Arrow RecordBatchReader following execute()",
-	    nb::arg("rows_per_batch") = DuckDBPyResult::DEFAULT_ARROW_BATCH_SIZE);
-	m.def("arrow", &DuckDBPyConnection::FetchRecordBatchReader,
-	      "Alias of to_arrow_reader(). We recommend using to_arrow_reader() instead.",
-	      nb::arg("rows_per_batch") = DuckDBPyResult::DEFAULT_ARROW_BATCH_SIZE);
 	m.def("torch", &DuckDBPyConnection::FetchPyTorch, "Fetch a result as dict of PyTorch Tensors following execute()");
 	m.def("tf", &DuckDBPyConnection::FetchTF, "Fetch a result as dict of TensorFlow Tensors following execute()");
 	m.def("begin", &DuckDBPyConnection::Begin, "Start a new transaction");
@@ -2154,15 +2126,6 @@ PandasDataFrame DuckDBPyConnection::FetchDFChunk(const idx_t vectors_per_chunk, 
 	return result.FetchDFChunk(vectors_per_chunk, date_as_object);
 }
 
-duckdb::pyarrow::Table DuckDBPyConnection::FetchArrow(idx_t rows_per_batch) {
-	ConnectionLockGuard conn_lock(*this);
-	if (!con.HasResult()) {
-		throw InvalidInputException("No open result set");
-	}
-	auto &result = con.GetResult();
-	return result.ToArrowTable(rows_per_batch);
-}
-
 nb::dict DuckDBPyConnection::FetchPyTorch() {
 	ConnectionLockGuard conn_lock(*this);
 	if (!con.HasResult()) {
@@ -2179,24 +2142,6 @@ nb::dict DuckDBPyConnection::FetchTF() {
 	}
 	auto &result = con.GetResult();
 	return result.FetchTF();
-}
-
-PolarsDataFrame DuckDBPyConnection::FetchPolars(idx_t rows_per_batch, bool lazy) {
-	ConnectionLockGuard conn_lock(*this);
-	if (!con.HasResult()) {
-		throw InvalidInputException("No open result set");
-	}
-	auto &result = con.GetResult();
-	return result.ToPolars(rows_per_batch, lazy);
-}
-
-duckdb::pyarrow::RecordBatchReader DuckDBPyConnection::FetchRecordBatchReader(const idx_t rows_per_batch) {
-	ConnectionLockGuard conn_lock(*this);
-	if (!con.HasResult()) {
-		throw InvalidInputException("No open result set");
-	}
-	auto &result = con.GetResult();
-	return result.FetchRecordBatchReader(rows_per_batch);
 }
 
 identifier_map_t<Value> TransformPyConfigDict(const nb::dict &py_config_dict) {

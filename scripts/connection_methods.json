@@ -387,56 +387,6 @@
 		"return": "pandas.DataFrame"
 	},
 	{
-		"name": "pl",
-		"function": "FetchPolars",
-		"docs": "Fetch a result as Polars DataFrame following execute()",
-		"args": [
-			{
-				"name": "rows_per_batch",
-				"default": "131072",
-				"type": "int"
-			}
-		],
-		"kwargs": [
-			{
-				"name": "lazy",
-				"default": "False",
-				"type": "bool"
-			}
-		],
-		"return": "polars.DataFrame"
-	},
-	{
-		"name": "arrow_table",
-		"function": "FetchArrow",
-		"docs": "Fetch a result as Arrow table following execute()",
-		"args": [
-			{
-				"name": "rows_per_batch",
-				"default": "131072",
-				"type": "int"
-			}
-		],
-		"return": "pyarrow.lib.Table"
-	},
-	{
-		"name": [
-			"fetch_record_batch",
-			"arrow"
-		],
-
-		"function": "FetchRecordBatchReader",
-		"docs": "Fetch an Arrow RecordBatchReader following execute()",
-		"args": [
-			{
-				"name": "rows_per_batch",
-				"default": "131072",
-				"type": "int"
-			}
-		],
-		"return": "pyarrow.lib.RecordBatchReader"
-	},
-	{
 		"name": "torch",
 		"function": "FetchPyTorch",
 		"docs": "Fetch a result as dict of PyTorch Tensors following execute()",

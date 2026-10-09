@@ -804,11 +804,6 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Distinct() {
 	return DeriveRelation(rel->Distinct());
 }
 
-duckdb::pyarrow::RecordBatchReader DuckDBPyRelation::FetchRecordBatchReader(idx_t rows_per_batch) {
-	AssertResult();
-	return result->FetchRecordBatchReader(rows_per_batch);
-}
-
 //! Submits the relation and returns the undriven result. Call with the GIL released.
 static shared_ptr<engine::Result> PySubmitRelation(const shared_ptr<Relation> &rel, const engine::Format &format) {
 	return engine::Session(rel->context->GetContext()).Submit(rel, format);
