@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
 import datetime
+import os
+import signal
 import sys
-from typing import Any
+import threading
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
 
 
 class NoOffset(datetime.tzinfo):
@@ -74,3 +81,26 @@ def installed_as_wheel() -> bool:
     package_dir = Path(duckdb.__file__).resolve().parent
     roots = {sysconfig.get_path(name) for name in ("purelib", "platlib")}
     return any(root and package_dir.is_relative_to(Path(root).resolve()) for root in roots)
+
+
+@contextlib.contextmanager
+def ctrl_c_after(seconds: float, rescue: Callable[[], None]) -> Iterator[None]:
+    """Press Ctrl-C on this process after `seconds`, and call `rescue` should the block still run 10 seconds in.
+
+    Python's own Ctrl-C handler is installed for the block, which a process started with SIGINT ignored, as a
+    background job is, lacks. Use it inside `pytest.raises`: leaving it is a Python call, so a Ctrl-C still pending
+    once the rescue has stopped the work is raised here and caught, not in pytest's own code, where it would stop
+    the whole test session.
+    """
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    # Sent to the process, as a terminal sends Ctrl-C, so the OS may hand it to one of the engine's threads.
+    interrupter = threading.Timer(seconds, os.kill, (os.getpid(), signal.SIGINT))
+    rescuer = threading.Timer(10, rescue)
+    interrupter.start()
+    rescuer.start()
+    try:
+        yield
+    finally:
+        interrupter.cancel()
+        rescuer.cancel()
+        signal.signal(signal.SIGINT, previous)

@@ -59,7 +59,7 @@ struct NumpyScanBindData {
 
 	/// Freed from engine threads too, so the Python reference is dropped under the GIL.
 	~NumpyScanBindData() {
-		nb::gil_scoped_acquire gil;
+		FencedGil gil;
 		entry.reset();
 	}
 
@@ -164,7 +164,7 @@ struct NumpyScanState {
 
 	/// Torn down from an engine thread, so every buffer and Python reference is released under the GIL.
 	~NumpyScanState() {
-		nb::gil_scoped_acquire gil;
+		FencedGil gil;
 		columns.clear();
 		markers = ScalarMarkers();
 	}
@@ -225,7 +225,7 @@ void NumpyScanBind(cxx::TableFunction::BindInput &input) {
 	const auto batch_rows = input.GetUserData<NumpyScanUserData>().batch_rows;
 	auto context = input.GetContext();
 	{
-		nb::gil_scoped_acquire gil;
+		FencedGil gil;
 		try {
 			nb::object description = entry->object.attr("describe")();
 			for (nb::handle item : description) {
@@ -637,7 +637,7 @@ void NumpyScanInitGlobal(cxx::TableFunction::InitGlobalInput &input) {
 	input.SetMaxThreads(std::max<cxx::idx_t>(1, (bound.rows + range_rows - 1) / range_rows));
 
 	// One GIL scope up to the hand-over, so views and markers dropped by a failure are released under the GIL.
-	nb::gil_scoped_acquire gil;
+	FencedGil gil;
 	nb::object answer;
 	try {
 		nb::object request = nb::none();
@@ -842,7 +842,7 @@ bool IsNoneLike(const ScalarMarkers &markers, PyObject *value) {
 /// other value, which only reaches this encoding through the sampling rule's mixed-type fallback, through `str()`.
 void FillText(const NumpyScanState &global, cxx::Vector &vector, const NumpyColumn &column, cxx::idx_t start,
               cxx::idx_t count, const std::string &registered_name) {
-	nb::gil_scoped_acquire gil;
+	FencedGil gil;
 	for (cxx::idx_t i = 0; i < count; i++) {
 		PyObject *value = Load<PyObject *>(column.data, start + i);
 		if (Masked(column, start + i) || IsNoneLike(global.markers, value)) {
@@ -876,7 +876,7 @@ void FillText(const NumpyScanState &global, cxx::Vector &vector, const NumpyColu
 void FillObjects(const NumpyScanState &global, cxx::Context &context, cxx::Vector &vector, const NumpyColumn &column,
                  cxx::idx_t start, cxx::idx_t count, ConversionContext &conversion,
                  const std::string &registered_name) {
-	nb::gil_scoped_acquire gil;
+	FencedGil gil;
 	for (cxx::idx_t i = 0; i < count; i++) {
 		PyObject *value = Load<PyObject *>(column.data, start + i);
 		if (Masked(column, start + i) || IsNoneLike(global.markers, value)) {

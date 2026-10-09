@@ -153,7 +153,7 @@ int ReadNext(ChainedStream &chain, ArrowArray *out) {
 /// one, still comes back as a code rather than crossing the C boundary.
 template <class F>
 int Guarded(ChainedStream &chain, F &&body) {
-	nb::gil_scoped_acquire gil;
+	FencedGil gil;
 	try {
 		try {
 			return body();
@@ -183,7 +183,7 @@ const char *ChainGetLastError(ArrowArrayStream *self) {
 }
 
 void ChainRelease(ArrowArrayStream *self) {
-	nb::gil_scoped_acquire gil;
+	FencedGil gil;
 	delete static_cast<ChainedStream *>(self->private_data);
 	self->private_data = nullptr;
 	self->get_schema = nullptr;
@@ -202,6 +202,12 @@ void ReleaseStreamCapsule(void *ptr) noexcept {
 
 } // namespace
 
+nb::capsule WrapStream(std::unique_ptr<ArrowArrayStream> stream) {
+	nb::capsule capsule(stream.get(), kStreamCapsule, &ReleaseStreamCapsule);
+	stream.release();
+	return capsule;
+}
+
 nb::capsule ChainStreams(nb::object schema, nb::handle parts) {
 	std::unique_ptr<ChainedStream> chain(new ChainedStream {std::move(schema), nb::iter(parts)});
 	std::unique_ptr<ArrowArrayStream> stream(new ArrowArrayStream {});
@@ -209,11 +215,8 @@ nb::capsule ChainStreams(nb::object schema, nb::handle parts) {
 	stream->get_next = &ChainGetNext;
 	stream->get_last_error = &ChainGetLastError;
 	stream->release = &ChainRelease;
-	stream->private_data = chain.get();
-	nb::capsule capsule(stream.get(), kStreamCapsule, &ReleaseStreamCapsule);
-	chain.release();
-	stream.release();
-	return capsule;
+	stream->private_data = chain.release();
+	return WrapStream(std::move(stream));
 }
 
 } // namespace duckdb_python

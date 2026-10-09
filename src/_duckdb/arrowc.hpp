@@ -75,6 +75,9 @@ void WrapAsBatch(ArrowSchema &schema);
 /// The array counterpart: a struct array with no validity buffer whose only child is the array.
 void WrapAsBatch(ArrowArray &array);
 
+/// A heap stream as the "arrow_array_stream" capsule, which releases the stream when the consumer never does.
+nb::capsule WrapStream(std::unique_ptr<ArrowArrayStream> stream);
+
 /// Several Arrow exports read as one stream: `parts`, an iterable of objects with `__arrow_c_stream__`, are read
 /// in order, each part expected to carry the schema `schema` (itself anything with `__arrow_c_stream__`) exports;
 /// the caller guarantees that, nothing checks it. Pulled from one thread at a time, as the Arrow stream

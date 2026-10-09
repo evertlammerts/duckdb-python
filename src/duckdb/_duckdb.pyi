@@ -83,9 +83,35 @@ class Result:
     def schema_types(self) -> list[tuple[int, int, list[str] | None]]:
         """Per-column (type id, decimal scale, enum dictionary or None), from the schema alone."""
 
+class ArrowStream:
+    """A query result leaving as an Arrow C stream, handed out once as a capsule."""
+
+    def __arrow_c_stream__(self, requested_schema: object | None = None) -> Any:  # noqa: ANN401
+        """The "arrow_array_stream" capsule, once; a second call raises, since a stream reads exactly once."""
+
+    @property
+    def error(self) -> tuple[int, str] | None:
+        """What ended the stream, or None; codes above zero are the engine's: -1 closed, -2 Ctrl-C, -3 Python error."""
+
+    @property
+    def live(self) -> bool:
+        """Whether the query is still open: False once read out, released by the consumer, or closed."""
+
+    @property
+    def close_pending(self) -> bool:
+        """Whether a close was requested but the stream is still open; its connection finishes the job."""
+
+    def close(self) -> None:
+        """End the query and wait for its teardown, like a join; Ctrl-C breaks the wait and leaves it pending."""
+
 class Connection:
     def execute(self, sql: str, parameters: Sequence[Any] | Mapping[str, Any] | None = None) -> Result:
         """Run one statement, binding parameters positionally or by name."""
+
+    def execute_arrow(
+        self, sql: str, parameters: Sequence[Any] | Mapping[str, Any] | None = None, batch_size: int = 0
+    ) -> ArrowStream:
+        """Run one statement like `execute`, into an Arrow stream capped at `batch_size` rows per array."""
 
     def bind(self, sql: str) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
         """The output columns and the parameters a statement would have, without running it, as (name, type) pairs."""

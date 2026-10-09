@@ -1275,6 +1275,33 @@ class Frame(PlanBase):
         with connection._execute(sql, values) as result:
             return fetch_numpy(result.result)
 
+    def to_arrow(self, connection: Connection, *, parameters: Mapping[str, object] | None = None) -> Any:  # noqa: ANN401
+        """Every row as a pyarrow Table; needs pyarrow installed."""
+        # Imported here so that importing duckdb does not require pyarrow.
+        from . import _arrow
+
+        connection = self._on(connection)
+        sql, values = self._sql_and_values(connection=connection, parameters=parameters)
+        return _arrow.table(connection, sql, values)
+
+    def to_reader(
+        self,
+        connection: Connection,
+        *,
+        parameters: Mapping[str, object] | None = None,
+        batch_size: int | None = None,
+    ) -> Any:  # noqa: ANN401
+        """A pyarrow RecordBatchReader streaming the rows, at most `batch_size` per batch.
+
+        The query stays live on the connection until the reader is closed or read out, and no other statement
+        can run there meanwhile. A read that fails raises pyarrow's error carrying the engine's message.
+        """
+        from . import _arrow
+
+        connection = self._on(connection)
+        sql, values = self._sql_and_values(connection=connection, parameters=parameters)
+        return _arrow.reader(connection, sql, values, batch_size)
+
     def on(self, connection: Connection) -> Bound:
         """This plan with a connection filled in, so `plan.on(con).rows()` takes no argument; the plan is unchanged."""
         return Bound(self, self._on(connection))
@@ -1433,6 +1460,23 @@ class Bound:
     def to_numpy(self, *, parameters: Mapping[str, object] | None = None) -> dict[str, Any]:
         """Every column as a numpy array; columns holding NULLs come back masked."""
         return self.plan.to_numpy(self.connection, parameters=parameters)
+
+    def to_arrow(self, *, parameters: Mapping[str, object] | None = None) -> Any:  # noqa: ANN401
+        """Every row as a pyarrow Table; needs pyarrow installed."""
+        return self.plan.to_arrow(self.connection, parameters=parameters)
+
+    def to_reader(self, *, parameters: Mapping[str, object] | None = None, batch_size: int | None = None) -> Any:  # noqa: ANN401
+        """A pyarrow RecordBatchReader streaming the rows, at most `batch_size` per batch."""
+        return self.plan.to_reader(self.connection, parameters=parameters, batch_size=batch_size)
+
+    def __arrow_c_stream__(self, requested_schema: object | None = None) -> Any:  # noqa: ANN401
+        """The rows as an Arrow C stream capsule, so pyarrow and polars consume them zero-copy.
+
+        Each call runs the plan again, and a capsule reads front to back exactly once. `requested_schema` is
+        ignored, as the protocol permits: the stream carries the query's own schema.
+        """
+        sql, values = self.plan._sql_and_values(connection=self.connection, parameters=None)
+        return self.connection._execute_arrow(sql, values, 0).__arrow_c_stream__(requested_schema)
 
     def count(self, *, parameters: Mapping[str, object] | None = None) -> int:
         """How many rows the plan produces."""

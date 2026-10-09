@@ -112,7 +112,7 @@ struct ArrowScanBindData {
 
 	/// Freed from engine threads too, so the predicates are dropped under the GIL.
 	~ArrowScanBindData() {
-		nb::gil_scoped_acquire gil;
+		FencedGil gil;
 		filters.clear();
 		entry.reset();
 	}
@@ -141,7 +141,7 @@ struct ArrowScanState {
 	/// Torn down from an engine thread; a source's release may run Python, so everything is released here, under
 	/// the GIL, rather than by the members' own destructors after it.
 	~ArrowScanState() {
-		nb::gil_scoped_acquire gil;
+		FencedGil gil;
 		stream.Release();
 		single.Release();
 		schema.Release();
@@ -196,7 +196,7 @@ void ArrowScanBind(cxx::TableFunction::BindInput &input) {
 	}
 	ArrowOwned<ArrowSchema> schema;
 	{
-		nb::gil_scoped_acquire gil;
+		FencedGil gil;
 		try {
 			schema = SchemaOf(*entry);
 		} catch (nb::python_error &error) {
@@ -220,7 +220,7 @@ void ArrowScanBind(cxx::TableFunction::BindInput &input) {
 		names.push_back(raw);
 	}
 	{
-		nb::gil_scoped_acquire gil;
+		FencedGil gil;
 		try {
 			nb::object rows = entry->object.attr("rows")();
 			if (!rows.is_none()) {
@@ -240,7 +240,7 @@ void ArrowScanFilterPushdown(cxx::TableFunction::FilterPushdownInput &input) {
 	auto &bound = input.GetBindData<ArrowScanBindData>();
 	auto &conversion = input.GetUserData<ArrowScanUserData>().module->conversion;
 	auto &entry = *bound.entry;
-	nb::gil_scoped_acquire gil;
+	FencedGil gil;
 	try {
 		const auto resolve = [&](cxx::idx_t reference) {
 			const auto declared = input.GetColumnIndex(reference);
@@ -276,7 +276,7 @@ void OpenStream(const ArrowScanBindData &bound, cxx::TableFunction::InitGlobalIn
 		requested.push_back(input.GetColumnIndex(i));
 		identity = identity && requested.back() == i;
 	}
-	nb::gil_scoped_acquire gil;
+	FencedGil gil;
 	Exported exported;
 	try {
 		exported = ExportStream(entry, identity ? nullptr : &requested, bound.filters);
@@ -397,7 +397,7 @@ void HandOver(ArrowScanState &global, ArrowScanLocalState &local, cxx::DataChunk
 
 /// Pulls the stream's next array, under the GIL when the source said pulling may run Python.
 void PullNext(ArrowArrayStream &stream, bool under_gil, const std::string &name, ArrowArray &out) {
-	std::optional<nb::gil_scoped_acquire> gil;
+	std::optional<FencedGil> gil;
 	if (under_gil) {
 		gil.emplace();
 	}

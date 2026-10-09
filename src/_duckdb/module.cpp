@@ -22,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+#include "arrow_export.hpp"
 #include "arrowc.hpp"
 #include "chunkview.hpp"
 #include "lifetime.hpp"
@@ -79,6 +80,27 @@ public:
 	std::vector<nb::object> TakeCallables() {
 		nb::ft_lock_guard guard(callables_lock);
 		return std::exchange(callables, {});
+	}
+
+	/// A copy for a stream to pin: its query may call these long after this Database is gone.
+	std::vector<nb::object> CallablesSnapshot() {
+		nb::ft_lock_guard guard(callables_lock);
+		return callables;
+	}
+
+	/// Undo a KeepCallable whose registration then failed: the pin must not outlive the publication attempt.
+	void AbandonCallable(nb::handle callable) {
+		nb::object dropped;
+		{
+			nb::ft_lock_guard guard(callables_lock);
+			for (auto it = callables.rbegin(); it != callables.rend(); ++it) {
+				if (it->ptr() == callable.ptr()) {
+					dropped = std::move(*it);
+					callables.erase(std::next(it).base());
+					break;
+				}
+			}
+		}
 	}
 
 	/// Only for the garbage collector's visit, which runs with every other thread stopped.
@@ -177,6 +199,68 @@ void FillUntypedFromStatement(cxx::Connection &live, const cxx::SqlStatement &st
 	}
 }
 
+/// `parameters`, a sequence filling $1, $2, ... in order or a mapping by name, converted and bound by name where
+/// one is given; `untyped` marks the values whose type the statement must still say.
+///
+/// An empty name in the list handed to DuckDB means positional, and a statement cannot mix the two forms.
+void ConvertParameters(cxx::Connection &live, nb::handle parameters, ConversionContext &ctx,
+                       std::vector<cxx::NamedParam> &bound, std::vector<bool> &untyped) {
+	const auto convert = [&](nb::handle value) {
+		bool still = false;
+		auto converted = PythonToValue(live, value, ctx, TimestampPrecision::MICROSECONDS, &still);
+		untyped.push_back(still);
+		return converted;
+	};
+	const auto bind_named = [&](nb::handle name, nb::handle value) {
+		// Checked here because a failed nanobind cast surfaces as std::bad_cast, which names nothing.
+		if (!nb::isinstance<nb::str>(name)) {
+			throw cxx::InvalidInputException("Invalid Input Error: parameter names must be strings");
+		}
+		bound.push_back({nb::cast<std::string>(name), convert(value)});
+	};
+	// Converting a value can run Python code that mutates the container passed in, so every shape is snapshotted
+	// before any value converts: what binds is what was passed.
+	if (nb::isinstance<nb::dict>(parameters)) {
+		std::vector<std::pair<nb::object, nb::object>> entries;
+		for (auto entry : nb::cast<nb::dict>(parameters)) {
+			entries.emplace_back(nb::borrow(entry.first), nb::borrow(entry.second));
+		}
+		for (const auto &[name, value] : entries) {
+			bind_named(name, value);
+		}
+	} else if (nb::isinstance(parameters, ctx.mapping_cls)) {
+		std::vector<std::pair<nb::object, nb::object>> entries;
+		for (nb::handle entry : parameters.attr("items")()) {
+			entries.emplace_back(nb::borrow(entry[0]), nb::borrow(entry[1]));
+		}
+		for (const auto &[name, value] : entries) {
+			bind_named(name, value);
+		}
+	} else {
+		std::vector<nb::object> items;
+		for (nb::handle item : parameters) {
+			items.push_back(nb::borrow(item));
+		}
+		for (const nb::object &item : items) {
+			bound.push_back({std::string(), convert(item)});
+		}
+	}
+}
+
+/// Parameters need a parsed statement, and exactly one, so a second cannot slip past unparameterised.
+cxx::SqlStatement ParseExactlyOne(cxx::Connection &live, const std::string &sql) {
+	auto statements = live.ParseSQL(sql);
+	auto statement = statements.Next();
+	if (!statement) {
+		throw cxx::InvalidInputException("Invalid Input Error: no statement to execute");
+	}
+	if (statements.Next()) {
+		throw cxx::InvalidInputException(
+		    "Invalid Input Error: execute takes exactly one statement when binding parameters");
+	}
+	return statement;
+}
+
 class Connection {
 public:
 	Connection(nb::object database, std::shared_ptr<ModuleState> module, cxx::Connection connection)
@@ -188,8 +272,6 @@ public:
 	}
 
 	/// Run one statement, with `parameters` either a sequence filling $1, $2, ... in order or a mapping by name.
-	///
-	/// An empty name in the list handed to DuckDB means positional, and a statement cannot mix the two forms.
 	std::unique_ptr<Result> Execute(const std::string &sql, nb::handle parameters) {
 		auto held = Live();
 		auto &live = *held.engine;
@@ -197,64 +279,48 @@ public:
 			auto result = WithoutGil([&] { return live.Execute(sql); });
 			return std::make_unique<Result>(std::move(held.database), connection.Module(), std::move(result));
 		}
-
-		auto &ctx = connection.Module()->conversion;
 		std::vector<cxx::NamedParam> bound;
 		std::vector<bool> untyped;
-		const auto convert = [&](nb::handle value) {
-			bool still = false;
-			auto converted = PythonToValue(live, value, ctx, TimestampPrecision::MICROSECONDS, &still);
-			untyped.push_back(still);
-			return converted;
-		};
-		const auto bind_named = [&](nb::handle name, nb::handle value) {
-			// Checked here because a failed nanobind cast surfaces as std::bad_cast, which names nothing.
-			if (!nb::isinstance<nb::str>(name)) {
-				throw cxx::InvalidInputException("Invalid Input Error: parameter names must be strings");
-			}
-			bound.push_back({nb::cast<std::string>(name), convert(value)});
-		};
-		// Converting a value can run Python code that mutates the container passed in, so every shape is snapshotted
-		// before any value converts: what binds is what was passed.
-		if (nb::isinstance<nb::dict>(parameters)) {
-			std::vector<std::pair<nb::object, nb::object>> entries;
-			for (auto entry : nb::cast<nb::dict>(parameters)) {
-				entries.emplace_back(nb::borrow(entry.first), nb::borrow(entry.second));
-			}
-			for (const auto &[name, value] : entries) {
-				bind_named(name, value);
-			}
-		} else if (nb::isinstance(parameters, ctx.mapping_cls)) {
-			std::vector<std::pair<nb::object, nb::object>> entries;
-			for (nb::handle entry : parameters.attr("items")()) {
-				entries.emplace_back(nb::borrow(entry[0]), nb::borrow(entry[1]));
-			}
-			for (const auto &[name, value] : entries) {
-				bind_named(name, value);
-			}
-		} else {
-			std::vector<nb::object> items;
-			for (nb::handle item : parameters) {
-				items.push_back(nb::borrow(item));
-			}
-			for (const nb::object &item : items) {
-				bound.push_back({std::string(), convert(item)});
-			}
-		}
-
-		// Parameters need a parsed statement, and exactly one, so a second cannot slip past unparameterised.
-		auto statements = live.ParseSQL(sql);
-		auto statement = statements.Next();
-		if (!statement) {
-			throw cxx::InvalidInputException("Invalid Input Error: no statement to execute");
-		}
-		if (statements.Next()) {
-			throw cxx::InvalidInputException(
-			    "Invalid Input Error: execute takes exactly one statement when binding parameters");
-		}
+		ConvertParameters(live, parameters, connection.Module()->conversion, bound, untyped);
+		auto statement = ParseExactlyOne(live, sql);
 		FillUntypedFromStatement(live, statement, bound, untyped);
 		auto result = WithoutGil([&] { return live.Execute(statement, bound); });
 		return std::make_unique<Result>(std::move(held.database), connection.Module(), std::move(result));
+	}
+
+	/// Run one statement like `Execute`, into an Arrow stream of at most `batch_size` rows per array.
+	std::unique_ptr<ArrowStream> ExecuteArrow(const std::string &sql, nb::handle parameters, cxx::idx_t batch_size) {
+		auto held = Live();
+		auto &live = *held.engine;
+		const cxx::ArrowFormat format {batch_size};
+		std::optional<cxx::ArrowResult> result;
+		if (parameters.is_none()) {
+			result.emplace(WithoutGil([&] { return live.Execute(sql, format); }));
+		} else {
+			std::vector<cxx::NamedParam> bound;
+			std::vector<bool> untyped;
+			ConvertParameters(live, parameters, connection.Module()->conversion, bound, untyped);
+			auto statement = ParseExactlyOne(live, sql);
+			FillUntypedFromStatement(live, statement, bound, untyped);
+			result.emplace(WithoutGil([&] { return live.Execute(statement, bound, format); }));
+		}
+		// An expanding statement knows its shape only once stepping reaches it; the stream reports those late.
+		bool rows = true;
+		try {
+			rows = WithoutGil([&] { return result->GetResultType(); }) == cxx::ResultType::QUERY_RESULT;
+		} catch (const cxx::Exception &error) {
+			if (error.GetCode() != DUCKDB_V2_ERROR_INPUT_INVALID) {
+				throw;
+			}
+		}
+		if (!rows) {
+			throw cxx::InvalidInputException(
+			    "Invalid Input Error: the statement returns no rows, so there is no Arrow stream to read");
+		}
+		auto kept = Database::From(held.database).CallablesSnapshot();
+		return std::make_unique<ArrowStream>(std::move(held.database), connection.Module(),
+		                                     std::weak_ptr<cxx::Connection>(held.engine), std::move(*result),
+		                                     std::move(kept));
 	}
 
 	/// The columns a statement would produce and the parameters it expects, asked of DuckDB rather than guessed.
@@ -281,9 +347,16 @@ public:
 	                          cxx::FunctionStability level) {
 		auto held = Live();
 		auto &owner = Database::From(held.database);
-		RegisterScalarFunction(*held.engine, name, callable, parameters, returns, nulls, level, connection.Module());
-		// DuckDB borrows the callable only once registration succeeds, so only then must the database keep it.
-		owner.KeepCallable(std::move(callable));
+		// Kept BEFORE the engine can hand the name to anyone: a stream on another connection snapshots the
+		// kept callables when it starts, so a function must never be visible without its lifetime pin.
+		owner.KeepCallable(callable);
+		try {
+			RegisterScalarFunction(*held.engine, name, callable, parameters, returns, nulls, level,
+			                       connection.Module());
+		} catch (...) {
+			owner.AbandonCallable(callable);
+			throw;
+		}
 	}
 
 	/// Register a Python object as the table `name`; a one-shot object is a stream, readable once, and `numpy_scan`
@@ -389,6 +462,27 @@ const PyType_Slot kDatabaseSlots[] = {
     {0, nullptr},
 };
 
+int ClearArrowStream(PyObject *self) {
+	if (nb::inst_ready(self)) {
+		nb::inst_ptr<ArrowStream>(self)->GcClear();
+	}
+	return 0;
+}
+
+int TraverseArrowStream(PyObject *self, visitproc visit, void *arg) {
+	Py_VISIT(Py_TYPE(self));
+	if (!nb::inst_ready(self)) {
+		return 0;
+	}
+	return nb::inst_ptr<ArrowStream>(self)->Traverse(visit, arg);
+}
+
+const PyType_Slot kArrowStreamSlots[] = {
+    {Py_tp_traverse, reinterpret_cast<void *>(&TraverseArrowStream)},
+    {Py_tp_clear, reinterpret_cast<void *>(&ClearArrowStream)},
+    {0, nullptr},
+};
+
 template <class T>
 const PyType_Slot *ChildSlots() {
 	static const PyType_Slot slots[] = {
@@ -434,8 +528,17 @@ NB_MODULE(_duckdb, m) {
 	        nb::arg("path") = std::string(":memory:"), nb::arg("options") = nb::none())
 	    .def("connect", &Database::Connect);
 
+	nb::class_<ArrowStream>(m, "ArrowStream", nb::type_slots(kArrowStreamSlots))
+	    .def("__arrow_c_stream__", &ArrowStream::Capsule, nb::arg("requested_schema") = nb::none())
+	    .def_prop_ro("error", &ArrowStream::Error)
+	    .def_prop_ro("live", &ArrowStream::Live)
+	    .def_prop_ro("close_pending", &ArrowStream::ClosePending)
+	    .def("close", &ArrowStream::Close);
+
 	nb::class_<Connection>(m, "Connection", nb::type_slots(ChildSlots<Connection>()))
 	    .def("execute", &Connection::Execute, nb::arg("sql"), nb::arg("parameters") = nb::none())
+	    .def("execute_arrow", &Connection::ExecuteArrow, nb::arg("sql"), nb::arg("parameters") = nb::none(),
+	         nb::arg("batch_size") = cxx::idx_t(0))
 	    .def("bind", &Connection::Bind, nb::arg("sql"))
 	    .def("create_scalar_function", &Connection::CreateScalarFunction, nb::arg("name"), nb::arg("callable"),
 	         nb::arg("parameters"), nb::arg("returns"), nb::arg("null_handling"), nb::arg("stability"))

@@ -274,8 +274,15 @@ plan.show(con)              <span class="c"># print the first ten as a table; pr
   <pre><code>plan.to_numpy(con)      <span class="c"># {column: ndarray}; columns holding NULLs come back masked</span></code></pre>
   <p>Columns convert from the engine's own vectors, never through rows. A column holding NULLs comes back as a masked array; one without is a plain ndarray, so a clean result costs nothing extra. ENUM comes back as strings with <code>None</code> for NULL, and TIMESTAMPTZ as <code>datetime64</code> instants in UTC. DATE comes back as <code>datetime64[D]</code>, day-precise like the type, so every date fits and the array registers back as a DATE. An INTERVAL past what <code>timedelta64[us]</code> holds raises <code>ConversionError</code>. DECIMAL and HUGEINT become float64 on this path; when the exact values matter, fetch rows, which keeps <code>Decimal</code> and Python's int. An empty result keeps every column's dtype.</p>
 
+  <pre><code>plan.to_arrow(con)                  <span class="c"># a pyarrow Table</span>
+plan.to_reader(con, batch_size=...) <span class="c"># a pyarrow RecordBatchReader, streaming</span>
+
+pa.table(plan.on(con))              <span class="c"># a bound plan is an Arrow stream, so Arrow-native</span>
+pl.DataFrame(plan.on(con))          <span class="c"># consumers read it directly, pyarrow installed or not</span></code></pre>
+  <p>Arrow egress streams: batches leave as the engine produces them, at most <code>batch_size</code> rows each (the engine's 131072 unless given). The query stays live on the connection until the reader is closed or read out, and no other statement can run there meanwhile; <code>to_arrow</code> reads to the end and frees it. An open reader also keeps the database open until it is read out, closed, or its connection closes, and it keeps the Python functions registered on that database alive, since the query may call them; a reference cycle between an open reader and such a function is therefore collected only once the reader is finished or closed. Finish or close readers rather than abandon them. A bound plan's <code>__arrow_c_stream__</code> runs the plan again on each export, and each stream reads front to back exactly once. The session's Arrow settings apply: by default HUGEINT comes back as <code>decimal128</code> and UUID as text, and <code>SET arrow_lossless_conversion = true</code> switches both to extension types. <code>to_arrow</code> raises duckdb's own exception types; a read on the bare reader surfaces pyarrow's error carrying the engine's message. Only pyarrow, polars and other Arrow-native consumers belong on this path: <code>to_numpy</code> and row fetching convert straight from the engine's vectors.</p>
+
   <p class="lead-in">stopping a query</p>
-  <p>A Ctrl&#8209;C while a query runs cancels it and raises <code>KeyboardInterrupt</code>. From another thread, <code>con.interrupt()</code> cancels whatever the connection is running; the query fails with <code>InterruptError</code>.</p>
+  <p>A Ctrl&#8209;C while a query runs cancels it and raises <code>KeyboardInterrupt</code>. From another thread, <code>con.interrupt()</code> cancels whatever the connection is running; the query fails with <code>InterruptError</code>. On the Arrow paths a Ctrl&#8209;C lands between the engine's units of work, so it interrupts even a big sort or aggregate whose first batch is still far away.</p>
 
   <p class="lead-in">transactions</p>
   <pre><code><span class="k">with</span> con.transaction():
@@ -472,6 +479,8 @@ orders.filter(sql_expr(<span class="s">"region = 'emea' AND total &gt; 1000"</sp
   <dl class="ref">
     <dt>.rows(con) / .first(con) / .iter_rows(con) / .to_dicts(con) / .count(con)</dt><dd>Rows out. All take <code>parameters=</code>.</dd>
     <dt>.to_numpy(con)</dt><dd>Columns out, straight from the engine's vectors. NULLs are masked entries.</dd>
+    <dt>.to_arrow(con)</dt><dd>A pyarrow Table.</dd>
+    <dt>.to_reader(con, batch_size=...)</dt><dd>A pyarrow RecordBatchReader, streaming; it holds the connection until closed or read out.</dd>
     <dt>.on(con)</dt><dd>The plan on a connection: every method here, with no connection argument.</dd>
     <dt>.show(con, limit) / .preview(con, limit)</dt><dd>Print, or return, a table of the first rows.</dd>
     <dt>.columns(con) / .types(con) / .schema(con)</dt><dd>What it produces.</dd>

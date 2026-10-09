@@ -46,6 +46,44 @@ class LiveResult:
         self.close()
 
 
+class LiveArrowStream:
+    """An Arrow stream still being read, tracked by its connection and consumable through the capsule protocol.
+
+    Tracked strongly, unlike a `LiveResult`: the capsule's consumer holds no Python reference, and a stream
+    `close()` cannot reach is a query the engine ends quietly, so a read past the close would look complete.
+    """
+
+    __slots__ = ("_owner", "stream")
+
+    def __init__(self, stream: _duckdb.ArrowStream, owner: Connection) -> None:
+        self.stream = stream
+        self._owner = weakref.ref(owner)
+
+    def __arrow_c_stream__(self, requested_schema: object | None = None) -> Any:  # noqa: ANN401
+        return self.stream.__arrow_c_stream__(requested_schema)
+
+    @property
+    def error(self) -> tuple[int, str] | None:
+        """What ended the stream, or None; codes above zero are the engine's."""
+        return self.stream.error
+
+    def close(self) -> None:
+        self.stream.close()
+        if self.stream.close_pending:
+            # Deferred by a close on an engine thread: stay tracked, so the connection completes it.
+            return
+        owner = self._owner()
+        if owner is not None:
+            with owner._live_lock:
+                owner._live_streams.discard(self)
+
+    def __enter__(self) -> LiveArrowStream:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+
 class _Catalog:
     """A counter of catalog changes, shared by connections to one database so each sees a sibling's change."""
 
@@ -73,10 +111,25 @@ class Connection:
         self._stub_generation = self._catalog.generation
         #: Results still being read; weak so finished ones drop out, guarded because close() may run in another thread.
         self._live: weakref.WeakSet[LiveResult] = weakref.WeakSet()
+        #: Open Arrow streams, held strongly: their consumers keep no Python reference close() could find.
+        self._live_streams: set[LiveArrowStream] = set()
         self._live_lock = threading.Lock()
+
+    def _finish_pending_closes(self) -> None:
+        """Complete closes that an engine thread could only request.
+
+        A close reached from inside a query (a scalar function, a source callback) cancels and defers its
+        teardown; when nothing will ever read that stream again, this connection is the cleanup owner of last
+        resort, finishing the job before it runs anything else.
+        """
+        with self._live_lock:
+            pending = [held for held in self._live_streams if held.stream.close_pending]
+        for held in pending:
+            held.close()
 
     def _execute(self, sql: str, parameters: Sequence[Any] | Mapping[str, Any] | None = None) -> LiveResult:
         """Run a statement and track its result; every execution comes through here."""
+        self._finish_pending_closes()
         if _may_change_binding(sql):
             self._catalog.changed()
         return self._track(self._engine().execute(sql, parameters))
@@ -90,6 +143,24 @@ class Connection:
                 message = "connection is closed"
                 raise InterfaceError(message)
             self._live.add(live)
+        return live
+
+    def _execute_arrow(
+        self, sql: str, parameters: Sequence[Any] | Mapping[str, Any] | None, batch_size: int
+    ) -> LiveArrowStream:
+        """Run a statement into an Arrow stream and track it, like `_execute` tracks a result."""
+        self._finish_pending_closes()
+        if _may_change_binding(sql):
+            self._catalog.changed()
+        live = LiveArrowStream(self._engine().execute_arrow(sql, parameters, batch_size), self)
+        with self._live_lock:
+            if self._raw is None:
+                live.stream.close()
+                message = "connection is closed"
+                raise InterfaceError(message)
+            # Streams whose consumer finished or released them are done; pruning here bounds the set.
+            self._live_streams = {held for held in self._live_streams if held.stream.live}
+            self._live_streams.add(live)
         return live
 
     def _engine(self) -> _duckdb.Connection:
@@ -256,17 +327,27 @@ class Connection:
     def close(self) -> None:
         """Close the connection and release the database. Idempotent, and results still being read are closed too."""
         with self._live_lock:
-            pending = list(self._live)
+            pending: list[LiveResult | LiveArrowStream] = [*self._live, *self._live_streams]
             self._live.clear()
-            # Marked closed under the lock, so a result tracked from now on is refused, not orphaned.
+            # The streams stay tracked: each discards itself as its close completes, so a Ctrl-C breaking out
+            # mid-loop leaves the rest for a repeated close() instead of losing them.
+            # Marked closed under the lock, so a result tracked from now on is refused, not orphaned. The engine
+            # connection stays alive in `raw` until the results are closed: ending a stream mid-read cancels its
+            # query through the connection, which must still exist for that.
+            raw = self._raw
             self._raw = None
             self._database = None
         failures: list[BaseException] = []
-        for live in pending:
-            try:
-                live.close()
-            except Exception as error:  # every result must be tried
-                failures.append(error)
+        try:
+            for live in pending:
+                try:
+                    live.close()
+                except Exception as error:  # every result must be tried
+                    failures.append(error)
+        finally:
+            # A Ctrl-C breaking out of a stream's close must still release the engine connection.
+            if raw is not None:
+                raw.close()
         if failures:
             raise failures[0]
 

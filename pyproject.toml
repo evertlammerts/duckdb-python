@@ -105,6 +105,7 @@ convention = "google"
 # Operator methods return NotImplemented for an operand that is not ours, and its type cannot be spelled.
 "src/duckdb/_expressions/expr.py" = ["ANN401"]
 # Naming these types would mean importing numpy into a package that depends on nothing.
+"src/duckdb/frame/_arrow.py" = ["ANN401"]
 "src/duckdb/frame/_numpy.py" = ["ANN401"]
 # Test names are the documentation; what matters is explained where it applies.
 "tests/*" = ["D100", "D101", "D102", "D103"]

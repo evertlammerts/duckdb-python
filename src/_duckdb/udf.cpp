@@ -46,7 +46,8 @@ void PyScalarExec(cxx::ScalarFunction::ExecInput &input) {
 	auto context = input.GetContext();
 	auto result = input.GetResult();
 
-	nb::gil_scoped_acquire gil;
+	// Fenced: the function may close an Arrow stream of this very query, which must not wait on this thread.
+	FencedGil gil;
 	try {
 		std::vector<nb::list> columns;
 		columns.reserve(count);

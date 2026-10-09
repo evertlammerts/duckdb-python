@@ -71,6 +71,7 @@ nanobind_add_module(_duckdb STABLE_ABI FREE_THREADED NB_DOMAIN duckdb
   src/_duckdb/registry.cpp
   src/_duckdb/arrow_scan.cpp
   src/_duckdb/numpy_scan.cpp
+  src/_duckdb/arrow_export.cpp
   src/_duckdb/arrowc.cpp
   src/_duckdb/predicate.cpp
   src/_duckdb/result.cpp

@@ -55,7 +55,7 @@ Registered::Registered(std::string name, nb::object object, bool one_shot, bool 
 }
 
 Registered::~Registered() {
-	nb::gil_scoped_acquire gil;
+	FencedGil gil;
 	object.reset();
 }
 

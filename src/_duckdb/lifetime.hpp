@@ -37,6 +37,14 @@ public:
 	cxx::Environment environment;
 	ConversionContext conversion;
 
+	/// Quarantine for an Arrow capsule holder released while frames still used its stream: no event marks the
+	/// consumer's last trailing call, so the holder is never freed while the process can still make one. It
+	/// stays reachable here until the interpreter tears the module down, which is deliberate, not a leak.
+	void Quarantine(std::shared_ptr<void> holder) {
+		nb::ft_lock_guard guard(orphan_lock);
+		orphans.push_back(std::move(holder));
+	}
+
 	/// A connection to a private one-thread database, opened on first use, that values written into SQL text are
 	/// converted on by the same rules as query parameters. Its session is in UTC, so a zoned value's text names its
 	/// offset the same way whatever zone the process runs in.
@@ -114,6 +122,8 @@ private:
 		return *exceptions;
 	}
 
+	nb::ft_mutex orphan_lock;
+	std::vector<std::shared_ptr<void>> orphans;
 	nb::ft_mutex exceptions_lock;
 	std::optional<ExceptionClasses> exceptions;
 	// As many idle connections as nested or parallel conversions commonly need; more are opened when wanted.
@@ -122,6 +132,55 @@ private:
 	// Declared after the environment, so they are closed before it, the connections before their database.
 	std::optional<cxx::Instance> literal_instance;
 	std::vector<cxx::Connection> literal_idle;
+};
+
+/// Marks this thread as one a stream close must never wait on: it is doing work the close could be waiting
+/// for, user Python reached from an engine thread or a stream callback, or a stream teardown running
+/// finalizers. Python reached from such work can close streams; the close then leaves its request standing,
+/// completed by the read it interrupted, instead of deadlocking.
+class BusyFence {
+public:
+	enum class Kind {
+		/// Work a close may be waiting for; a close here only skips its wait.
+		kWork,
+		/// An engine task, a scalar function or a scan callback mid-call. A close here must also never
+		/// destroy a result: destroying one waits for the engine's in-flight tasks, and this thread is one.
+		kEngineTask,
+	};
+
+	explicit BusyFence(Kind kind = Kind::kWork) : kind(kind) {
+		depth++;
+		if (kind == Kind::kEngineTask) {
+			engine_depth++;
+		}
+	}
+	~BusyFence() {
+		depth--;
+		if (kind == Kind::kEngineTask) {
+			engine_depth--;
+		}
+	}
+	BusyFence(const BusyFence &) = delete;
+	BusyFence &operator=(const BusyFence &) = delete;
+
+	static bool Here() {
+		return depth > 0;
+	}
+
+	static bool EngineTask() {
+		return engine_depth > 0;
+	}
+
+private:
+	Kind kind;
+	inline static thread_local int depth = 0;
+	inline static thread_local int engine_depth = 0;
+};
+
+/// The GIL plus the engine-task mark, as one word: what every engine-thread entry into user Python takes.
+struct FencedGil {
+	nb::gil_scoped_acquire gil;
+	BusyFence fence {BusyFence::Kind::kEngineTask};
 };
 
 /// References a running call holds itself, so a close on another thread cannot free what it is still using.
