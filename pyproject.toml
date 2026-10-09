@@ -56,6 +56,7 @@ dev = [
 bench = [
     "pytest-codspeed>=5",
     "numpy",
+    "pandas",
 ]
 
 [tool.pytest.ini_options]
@@ -107,6 +108,7 @@ convention = "google"
 # Naming these types would mean importing numpy into a package that depends on nothing.
 "src/duckdb/frame/_arrow.py" = ["ANN401"]
 "src/duckdb/frame/_numpy.py" = ["ANN401"]
+"src/duckdb/frame/_pandas.py" = ["ANN401"]
 # Test names are the documentation; what matters is explained where it applies.
 "tests/*" = ["D100", "D101", "D102", "D103"]
 # Benchmark names are the documentation, same as tests.

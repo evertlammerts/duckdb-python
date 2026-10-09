@@ -217,6 +217,7 @@ source = { editable = "." }
 bench = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "pandas" },
     { name = "pytest-codspeed" },
 ]
 build = [
@@ -248,6 +249,7 @@ test = [
 [package.metadata.requires-dev]
 bench = [
     { name = "numpy" },
+    { name = "pandas" },
     { name = "pytest-codspeed", specifier = ">=5" },
 ]
 build = [

@@ -1275,6 +1275,27 @@ class Frame(PlanBase):
         with connection._execute(sql, values) as result:
             return fetch_numpy(result.result)
 
+    def to_pandas(
+        self,
+        connection: Connection,
+        *,
+        parameters: Mapping[str, object] | None = None,
+        date_as_object: bool = False,
+    ) -> Any:  # noqa: ANN401
+        """Every row as a pandas DataFrame, converted from DuckDB's vectors without Arrow; needs pandas installed.
+
+        A column holding NULLs gets pandas' nullable integer or boolean dtype, TIMESTAMPTZ is in the session's
+        TimeZone, and `date_as_object` gives DATE as `datetime.date` values instead of `datetime64[us]`.
+        """
+        from ._pandas import fetch_pandas
+
+        connection = self._on(connection)
+        sql, values = self._sql_and_values(connection=connection, parameters=parameters)
+        # Read before the statement runs: the setting decides what the TIMESTAMPTZ columns are shown in.
+        time_zone = connection._engine().get_option("TimeZone")
+        with connection._execute(sql, values) as result:
+            return fetch_pandas(result.result, time_zone=time_zone, date_as_object=date_as_object)
+
     def to_arrow(self, connection: Connection, *, parameters: Mapping[str, object] | None = None) -> Any:  # noqa: ANN401
         """Every row as a pyarrow Table; needs pyarrow installed."""
         # Imported here so that importing duckdb does not require pyarrow.
@@ -1469,6 +1490,10 @@ class Bound:
     def to_numpy(self, *, parameters: Mapping[str, object] | None = None) -> dict[str, Any]:
         """Every column as a numpy array; columns holding NULLs come back masked."""
         return self.plan.to_numpy(self.connection, parameters=parameters)
+
+    def to_pandas(self, *, parameters: Mapping[str, object] | None = None, date_as_object: bool = False) -> Any:  # noqa: ANN401
+        """Every row as a pandas DataFrame; needs pandas installed."""
+        return self.plan.to_pandas(self.connection, parameters=parameters, date_as_object=date_as_object)
 
     def to_arrow(self, *, parameters: Mapping[str, object] | None = None) -> Any:  # noqa: ANN401
         """Every row as a pyarrow Table; needs pyarrow installed."""
