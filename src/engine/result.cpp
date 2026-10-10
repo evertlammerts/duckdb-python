@@ -24,14 +24,11 @@ Format Format::Arrow(idx_t batch_size) {
 	return Format(make_shared_ptr<ArrowFormat>(batch_size));
 }
 
-void Complete(QueryResult &result, const InterruptCheck &check) {
-	if (result.HasError()) {
-		result.ThrowError();
-	}
-	result.Materialize();
+//! Runs tasks until the query ends or, when asked, until the engine waits for the consumer
+static QueryResultState Drive(QueryResult &result, const InterruptCheck &check, bool stop_when_ready) {
 	// A result that arrives finished has no context to run tasks on; Poll reports that without touching it.
 	auto state = result.Poll();
-	while (!IsTerminal(state)) {
+	while (!IsTerminal(state) && !(stop_when_ready && state == QueryResultState::READY)) {
 		check();
 		if (state == QueryResultState::BLOCKED || state == QueryResultState::READY ||
 		    state == QueryResultState::NO_TASKS_AVAILABLE) {
@@ -39,6 +36,15 @@ void Complete(QueryResult &result, const InterruptCheck &check) {
 		}
 		state = result.ExecuteTask();
 	}
+	return state;
+}
+
+void Complete(QueryResult &result, const InterruptCheck &check) {
+	if (result.HasError()) {
+		result.ThrowError();
+	}
+	result.Materialize();
+	Drive(result, check, false);
 	// FINISHED only means the executor is done: Complete takes the rows and ends the query with its
 	// transaction step. Left open, the next statement would roll it back.
 	result.Complete();
@@ -151,6 +157,26 @@ void Result::Retain(const InterruptCheck &check) {
 	}
 	Complete(*handle, check);
 	state = State::RETAINED;
+}
+
+void Result::Settle(const InterruptCheck &check) {
+	ThrowIfSuperseded();
+	if (state != State::PENDING) {
+		return;
+	}
+	if (CompletesBeforeReturning()) {
+		Retain(check);
+		return;
+	}
+	// Undecided, the engine parks the first unit at the result sink; READY means it waits for that decision
+	auto query_state = Drive(*handle, check, true);
+	if (handle->HasError()) {
+		handle->ThrowError();
+	}
+	if (query_state == QueryResultState::FINISHED) {
+		// A statement that sank no row ends undecided, its empty rows collected
+		state = State::RETAINED;
+	}
 }
 
 idx_t Result::RowCount(const InterruptCheck &check) {
@@ -311,6 +337,20 @@ int64_t Result::ChangedRows() {
 		return -1;
 	}
 	return collection.GetValue(0, 0).GetValue<int64_t>();
+}
+
+bool Result::Running() const {
+	if (superseded) {
+		return false;
+	}
+	lock_guard<mutex> guard(handle_lock);
+	if (state == State::PENDING) {
+		return handle && handle->IsOpen();
+	}
+	if (state == State::STREAMING) {
+		return stream && stream->IsOpen();
+	}
+	return false;
 }
 
 bool Result::StreamEnded() const {

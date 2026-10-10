@@ -23,7 +23,6 @@ public:
 
 public:
 	explicit DuckDBPyResult(shared_ptr<engine::Result> result);
-	explicit DuckDBPyResult(shared_ptr<engine::Deferred> deferred);
 	~DuckDBPyResult();
 
 public:
@@ -56,6 +55,8 @@ public:
 	void Close();
 	//! Runs the statement to its end without reading its rows, then closes the result
 	void Complete();
+	//! Whether the statement may change a database, nextval included, and still has work left to run
+	bool HasWritesToRun() const;
 
 	unique_ptr<DataChunk> FetchChunk();
 	//! The rows a completed DML statement changed, -1 otherwise
@@ -77,10 +78,8 @@ private:
 	//! The names the Python layer reports, see the definition for why this is not always the result's own.
 	const vector<Identifier> &ResultNames() const;
 	bool Empty() const {
-		return !result && !deferred;
+		return !result;
 	}
-	//! Submits a deferred statement, in the chunk format, at its first fetch
-	void StartDeferred();
 	//! Flat vectors, for the row fetch
 	unique_ptr<DataChunk> FetchNext();
 	unique_ptr<DataChunk> FetchNextRaw();
@@ -100,8 +99,6 @@ private:
 private:
 	shared_ptr<engine::Result> result;
 	int64_t rowcount_override = -1;
-	//! The statement before its first consumer, which submits it as result
-	shared_ptr<engine::Deferred> deferred;
 	idx_t chunk_offset = 0;
 	//! Set only when the result was re-bound (promotion to Arrow de-duplicates column names
 	//! and core exposes no setter), so the original names survive. Empty means "use result's".

@@ -18,6 +18,7 @@
 #include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
+#include "duckdb/parser/statement/transaction_statement.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "duckdb_python/arrow/arrow_array_stream.hpp"
 #include "duckdb_python/map.hpp"
@@ -173,6 +174,18 @@ void DbapiResult::Complete() {
 	}
 }
 
+void DbapiResult::Supersede() {
+	if (!result) {
+		return;
+	}
+	auto superseded = std::move(result);
+	if (superseded->HasWritesToRun()) {
+		superseded->Complete();
+	} else {
+		superseded->Close();
+	}
+}
+
 void DbapiResult::Abort() {
 	if (result) {
 		result->Close();
@@ -277,20 +290,17 @@ static void InitializeConnectionMethods(nb::class_<DuckDBPyConnection> &m) {
 	      nb::arg("key"), nb::arg("value"));
 	m.def("duplicate", &DuckDBPyConnection::Cursor, "Create a duplicate of the current connection");
 	m.def("execute", &DuckDBPyConnection::Execute,
-	      "Execute the given SQL query, optionally using prepared statements with parameters set. A query or DML "
-	      "statement that returns rows runs when its result is first read; every other statement runs before execute() "
-	      "returns",
+	      "Execute the given SQL query, optionally using prepared statements with parameters set. A query runs until "
+	      "its first rows are ready, so an error there raises here; every other statement runs to its end",
 	      nb::arg("query"), nb::arg("parameters") = nb::none());
 	m.def("executemany", &DuckDBPyConnection::ExecuteMany,
 	      "Execute the given prepared statement multiple times using the list of parameter sets in parameters",
 	      nb::arg("query"), nb::arg("parameters") = nb::none());
 	m.def("close", &DuckDBPyConnection::Close, "Close the connection");
 	m.def("interrupt", &DuckDBPyConnection::Interrupt, "Interrupt pending operations");
-	m.def("complete", &DuckDBPyConnection::Complete,
-	      "Run the statement that execute() left pending to its end without reading its rows");
+	m.def("complete", &DuckDBPyConnection::Complete, "Run the result of execute() to its end without reading its rows");
 	m.def("abort", &DuckDBPyConnection::Abort,
-	      "Drop the result of execute(); a statement that has not run yet never runs, and one that writes fails an "
-	      "open transaction");
+	      "Cancel the rest of the result of execute(); a statement that may write fails an open transaction");
 	m.def("query_progress", &DuckDBPyConnection::QueryProgress, "Query progress of pending operation");
 	m.def("fetchone", &DuckDBPyConnection::FetchOne, "Fetch a single row from a result following execute");
 	m.def("fetchmany", &DuckDBPyConnection::FetchMany, "Fetch the next set of rows from a result following execute",
@@ -573,15 +583,42 @@ void DuckDBPyConnection::Initialize(nb::handle &m) {
 	DuckDBPyConnection::ImportCache();
 }
 
+static bool StartsWithRollback(const vector<unique_ptr<SQLStatement>> &statements) {
+	if (statements.empty() || statements[0]->type != StatementType::TRANSACTION_STATEMENT) {
+		return false;
+	}
+	return statements[0]->Cast<TransactionStatement>().info->type == TransactionType::ROLLBACK;
+}
+
+void DuckDBPyConnection::SupersedeResult(bool cancel) {
+	if (!con.HasResult()) {
+		return;
+	}
+	// The result is dropped even when draining it raises, so the error is reported once
+	auto &result = con.GetResult();
+	try {
+		if (cancel) {
+			result.Abort();
+		} else {
+			result.Supersede();
+		}
+	} catch (...) {
+		con.SetResult(nullptr);
+		throw;
+	}
+	con.SetResult(nullptr);
+}
+
 std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::ExecuteMany(const nb::object &query, nb::object params_p) {
 	nb::gil_scoped_acquire gil;
 	ConnectionLockGuard conn_lock(*this);
-	con.SetResult(nullptr);
 	if (params_p.is_none()) {
 		params_p = nb::list();
 	}
 
 	auto statements = GetStatements(query);
+	// A rollback discards what the open result would still write, so draining it first only risks failing the rollback
+	SupersedeResult(StartsWithRollback(statements));
 	if (statements.empty()) {
 		// TODO: should we throw?
 		return nullptr;
@@ -771,9 +808,10 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::ExecuteFromString(const 
 std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::Execute(const nb::object &query, nb::object params) {
 	nb::gil_scoped_acquire gil;
 	ConnectionLockGuard conn_lock(*this);
-	con.SetResult(nullptr);
 
 	auto statements = GetStatements(query);
+	// A rollback discards what the open result would still write, so draining it first only risks failing the rollback
+	SupersedeResult(StartsWithRollback(statements));
 	if (statements.empty()) {
 		// TODO: should we throw?
 		return nullptr;
@@ -785,51 +823,20 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::Execute(const nb::object
 	// FIXME: SQLites implementation says to not accept an 'execute' call with multiple statements
 	ExecuteImmediately(std::move(statements));
 
-	std::shared_ptr<DuckDBPyResult> py_result;
-	if (!engine::Deferred::MayDefer(last_statement->type)) {
-		auto res = PrepareAndSubmitInternal(std::move(last_statement), std::move(params));
-		{
-			D_ASSERT(duckdb::PyUtil::GilCheck());
-			nb::gil_scoped_release release;
-			unique_lock<std::recursive_mutex> lock(py_connection_lock);
-			res->Retain(CheckSignals);
-		}
-		py_result = std::make_shared<DuckDBPyResult>(std::move(res));
-	} else {
-		if (params.is_none()) {
-			params = nb::list();
-		}
-		auto session = EngineSession();
-		auto named_values = TransformPreparedParameters(session.Context(), params);
-		engine::Bound bound;
-		{
-			D_ASSERT(duckdb::PyUtil::GilCheck());
-			nb::gil_scoped_release release;
-			unique_lock<std::recursive_mutex> lock(py_connection_lock);
-			bound = session.Bind(std::move(last_statement));
-		}
-		// Binding succeeds in a failed transaction, so the statement runs now to report it from execute()
-		if (engine::Deferred::CanDefer(bound) && !session.TransactionFailed()) {
-			shared_ptr<engine::Deferred> deferred;
-			{
-				D_ASSERT(duckdb::PyUtil::GilCheck());
-				nb::gil_scoped_release release;
-				unique_lock<std::recursive_mutex> lock(py_connection_lock);
-				deferred = session.Defer(std::move(bound), std::move(named_values));
-			}
-			py_result = std::make_shared<DuckDBPyResult>(std::move(deferred));
-		} else {
-			shared_ptr<engine::Result> res;
-			{
-				D_ASSERT(duckdb::PyUtil::GilCheck());
-				nb::gil_scoped_release release;
-				unique_lock<std::recursive_mutex> lock(py_connection_lock);
-				res = session.Submit(bound, named_values, engine::Format::Chunks());
-				res->Retain(CheckSignals);
-			}
-			py_result = std::make_shared<DuckDBPyResult>(std::move(res));
+	auto res = PrepareAndSubmitInternal(std::move(last_statement), std::move(params));
+	{
+		D_ASSERT(duckdb::PyUtil::GilCheck());
+		nb::gil_scoped_release release;
+		unique_lock<std::recursive_mutex> lock(py_connection_lock);
+		try {
+			res->Settle(CheckSignals);
+		} catch (...) {
+			// Ending the query waits for its tasks, which a Python UDF holds until the GIL is free
+			res->Close();
+			throw;
 		}
 	}
+	auto py_result = std::make_shared<DuckDBPyResult>(std::move(res));
 	con.SetResult(std::make_unique<DbapiResult>(std::move(py_result)));
 	return shared_from_this();
 }

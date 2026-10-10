@@ -74,6 +74,9 @@ public:
 	nb::dict FetchTF();
 	void Complete();
 	void Abort();
+	//! Makes way for the next statement: one that may write runs to its end, so its effects are not lost; one
+	//! that reads is cancelled
+	void Supersede();
 
 private:
 	//! Null once a consuming fetch, complete() or abort() has used the rows up
@@ -346,9 +349,9 @@ public:
 	Optional<nb::list> GetDescription();
 
 	int64_t GetRowcount();
-	//! Runs the statement execute() left pending to its end without reading its rows
+	//! Runs the result of execute() to its end without reading its rows
 	void Complete();
-	//! Drops the result execute() left pending
+	//! Cancels the rest of the result of execute()
 	void Abort();
 
 	// these should be functions on the result but well
@@ -365,6 +368,9 @@ public:
 	nb::dict FetchPyTorch();
 
 	nb::dict FetchTF();
+
+	//! Drops the last execute() result the way the next statement requires; cancel skips the drain
+	void SupersedeResult(bool cancel);
 
 	static std::shared_ptr<DuckDBPyConnection> Connect(const nb::object &database, bool read_only,
 	                                                   const nb::dict &config);

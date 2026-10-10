@@ -24,29 +24,11 @@ DuckDBPyResult::DuckDBPyResult(shared_ptr<engine::Result> result_p) : result(std
 	}
 }
 
-DuckDBPyResult::DuckDBPyResult(shared_ptr<engine::Deferred> deferred_p) : deferred(std::move(deferred_p)) {
-	if (!deferred) {
-		throw InternalException("PyResult created without a deferred statement");
-	}
-}
-
 static constexpr const char *ROWS_THEN_ARROW =
     "Rows were already fetched from this result, so the rest cannot be read as Arrow. Run the query again to "
     "read it as Arrow.";
 static constexpr const char *ARROW_THEN_ROWS =
     "This result is being read as Arrow, so rows cannot be fetched from it. Run the query again to fetch rows.";
-
-void DuckDBPyResult::StartDeferred() {
-	if (!deferred) {
-		return;
-	}
-	auto starting = std::move(deferred);
-	{
-		D_ASSERT(duckdb::PyUtil::GilCheck());
-		nb::gil_scoped_release release;
-		result = starting->Start(engine::Format::Chunks());
-	}
-}
 
 DuckDBPyResult::~DuckDBPyResult() {
 	// The destructor must run with the GIL held: `result` and `current_chunk`
@@ -66,11 +48,11 @@ const vector<Identifier> &DuckDBPyResult::ResultNames() const {
 	if (!names_override.empty()) {
 		return names_override;
 	}
-	return deferred ? deferred->Names() : result->Names();
+	return result->Names();
 }
 
 const ClientProperties &DuckDBPyResult::GetClientProperties() const {
-	return deferred ? deferred->GetClientProperties() : result->GetClientProperties();
+	return result->GetClientProperties();
 }
 
 vector<string> DuckDBPyResult::GetNames() {
@@ -84,14 +66,13 @@ const vector<LogicalType> &DuckDBPyResult::GetTypes() const {
 	if (Empty()) {
 		throw InternalException("Calling GetTypes without a result object");
 	}
-	return deferred ? deferred->Types() : result->Types();
+	return result->Types();
 }
 
 unique_ptr<DataChunk> DuckDBPyResult::FetchChunk() {
 	if (Empty()) {
 		throw InternalException("FetchChunk called without a result object");
 	}
-	StartDeferred();
 	return FetchNext();
 }
 
@@ -126,7 +107,6 @@ Optional<nb::tuple> DuckDBPyResult::Fetchone() {
 	if (Empty()) {
 		throw InvalidInputException("result closed");
 	}
-	StartDeferred();
 	{
 		nb::gil_scoped_release release;
 		if (!current_chunk || chunk_offset >= current_chunk->size() || result->StreamEnded()) {
@@ -227,7 +207,6 @@ std::unique_ptr<NumpyResultConversion> DuckDBPyResult::InitializeNumpyConversion
 	if (Empty()) {
 		throw InvalidInputException("result closed");
 	}
-	StartDeferred();
 
 	idx_t initial_capacity = STANDARD_VECTOR_SIZE * 2ULL;
 	if (result->IsRetained()) {
@@ -425,8 +404,6 @@ nb::dict DuckDBPyResult::FetchTF() {
 }
 
 void DuckDBPyResult::EnsureArrow(idx_t batch_size) {
-	// Only the DB-API defers, and it never asks for Arrow.
-	D_ASSERT(result);
 	if (result->GetFormat().IsArrow()) {
 		return;
 	}
@@ -689,14 +666,6 @@ nb::list DuckDBPyResult::GetDescription(const vector<string> &names, const vecto
 }
 
 void DuckDBPyResult::Close() {
-	if (deferred) {
-		{
-			D_ASSERT(duckdb::PyUtil::GilCheck());
-			nb::gil_scoped_release release;
-			deferred->Close();
-		}
-		deferred.reset();
-	}
 	if (result) {
 		// Ending the query waits for its running tasks, and a task inside a Python UDF cannot finish
 		// until the GIL is free.
@@ -716,7 +685,6 @@ void DuckDBPyResult::Complete() {
 	if (Empty()) {
 		return;
 	}
-	StartDeferred();
 	current_chunk.reset();
 	chunk_offset = 0;
 	const bool arrow = result->GetFormat().IsArrow();
@@ -738,6 +706,10 @@ void DuckDBPyResult::Complete() {
 		}
 	}
 	Close();
+}
+
+bool DuckDBPyResult::HasWritesToRun() const {
+	return result && !result->Properties().modified_databases.empty() && result->Running();
 }
 
 int64_t DuckDBPyResult::Rowcount() {

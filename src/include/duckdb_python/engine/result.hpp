@@ -90,6 +90,8 @@ public:
 	//! Whether a stream's query has ended underneath it, also by a statement the seam did not run. Takes the
 	//! client context lock.
 	bool StreamEnded() const;
+	//! Whether the query still runs on its connection with rows left to produce. Takes the client context lock.
+	bool Running() const;
 	//! The planner settles such a statement before its result is returned. Goes away with planner eagerness.
 	bool CompletesBeforeReturning() const {
 		return properties.result_eagerness == ResultEagerness::FORCED;
@@ -97,6 +99,9 @@ public:
 
 	//! Keeps every row: drives the query to its end unless it already ended
 	void Retain(const InterruptCheck &check);
+	//! Runs the statement until its first unit is ready or it ends, without deciding how its rows are read,
+	//! and throws the error it ended with
+	void Settle(const InterruptCheck &check);
 	//! Rows of a retained result. Materializes it first.
 	idx_t RowCount(const InterruptCheck &check);
 	//! The next chunk, not flattened; null at the end. Opens a stream unless the result is retained.

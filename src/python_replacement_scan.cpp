@@ -150,8 +150,8 @@ unique_ptr<TableRef> PythonReplacementScan::TryReplacementObject(const nb::objec
 		auto subquery = make_uniq<SubqueryRef>(std::move(select));
 		auto dependency = make_uniq<ExternalDependency>();
 		// The native relation carries the Python data the scan reads. Owning the wrapper instead would
-		// own its connection, and a deferred statement holding that closes a cycle the garbage
-		// collector cannot see: connection to deferred result to wrapper to connection.
+		// own its connection, and an open result holding that closes a cycle the garbage
+		// collector cannot see: connection to result to wrapper to connection.
 		dependency->AddDependency("replacement_cache", RelationDependencyItem::Create(pyrel->GetSharedRelation()));
 		subquery->external_dependency = std::move(dependency);
 		return std::move(subquery);

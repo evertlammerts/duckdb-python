@@ -30,19 +30,12 @@ def count_rows(con, table="r"):
     return con.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
 
 
-class TestDeferredQuery:
-    def test_description_is_known_before_the_query_runs(self, duckdb_cursor, produced):
+class TestExecutedQuery:
+    def test_description_is_known_after_execute(self, duckdb_cursor, produced):
         duckdb_cursor.execute(TALLY_QUERY)
         assert [column[0] for column in duckdb_cursor.description] == ["i"]
         assert duckdb_cursor.description[0][1] == BIGINT
         assert duckdb_cursor.rowcount == -1
-        assert produced[0] == 0
-
-    def test_an_unread_query_never_runs(self, duckdb_cursor, produced):
-        duckdb_cursor.execute(TALLY_QUERY)
-        duckdb_cursor.execute("SELECT 42")
-        assert produced[0] == 0
-        assert duckdb_cursor.fetchall() == [(42,)]
 
     @pytest.mark.parametrize(
         "consume",
@@ -64,10 +57,9 @@ class TestDeferredQuery:
         assert duckdb_cursor.fetchone() == (0,)
         assert duckdb_cursor.fetchall() == [(i,) for i in range(1, 10)]
 
-    def test_a_runtime_error_surfaces_at_the_first_fetch(self, duckdb_cursor):
-        duckdb_cursor.execute("SELECT 'a'::INTEGER")
+    def test_a_runtime_error_surfaces_in_execute(self, duckdb_cursor):
         with pytest.raises(duckdb.ConversionException):
-            duckdb_cursor.fetchall()
+            duckdb_cursor.execute("SELECT 'a'::INTEGER")
 
     def test_a_bind_error_surfaces_in_execute(self, duckdb_cursor):
         with pytest.raises(duckdb.CatalogException):
@@ -83,25 +75,9 @@ class TestDeferredQuery:
         duckdb_cursor.execute("PIVOT p ON k USING sum(v)")
         assert duckdb_cursor.fetchall() == [(4, 2)]
 
-    def test_columns_that_change_before_the_first_fetch_raise(self, duckdb_cursor):
-        duckdb_cursor.execute("CREATE TABLE t AS SELECT 1 AS x")
-        duckdb_cursor.execute("SELECT x FROM t")
-        duckdb_cursor.cursor().execute("ALTER TABLE t ALTER x TYPE VARCHAR")
-        with pytest.raises(duckdb.InvalidInputException, match="columns changed"):
-            duckdb_cursor.fetchall()
-
-    def test_a_failed_first_fetch_does_not_hide_its_error_behind_another(self, duckdb_cursor):
-        duckdb_cursor.execute("CREATE TABLE t AS SELECT 1 AS x")
-        duckdb_cursor.execute("SELECT x FROM t")
-        duckdb_cursor.cursor().execute("DROP TABLE t")
-        with pytest.raises(duckdb.CatalogException):
-            duckdb_cursor.fetchall()
-        with pytest.raises(duckdb.InvalidInputException, match="result closed"):
-            duckdb_cursor.fetchall()
-
 
 class TestAnotherStatement:
-    @pytest.mark.parametrize("read_first", [False, True], ids=["deferred", "streaming"])
+    @pytest.mark.parametrize("read_first", [False, True], ids=["settled", "streaming"])
     @pytest.mark.parametrize(
         "statement",
         [
@@ -133,7 +109,7 @@ class TestAnotherStatement:
 
 
 class TestCompleteAndAbort:
-    def test_complete_runs_a_deferred_query_without_reading_it(self, duckdb_cursor, produced):
+    def test_complete_runs_a_settled_query_without_reading_it(self, duckdb_cursor, produced):
         duckdb_cursor.execute(TALLY_QUERY)
         duckdb_cursor.complete()
         assert produced[0] == ROWS
@@ -151,12 +127,6 @@ class TestCompleteAndAbort:
         con.execute("INSERT INTO r VALUES (1), (2) RETURNING i")
         con.complete()
         assert count_rows(con) == 2
-
-    def test_abort_drops_a_deferred_query(self, duckdb_cursor, produced):
-        duckdb_cursor.execute(TALLY_QUERY)
-        duckdb_cursor.abort()
-        assert produced[0] == 0
-        assert duckdb_cursor.fetchall() == []
 
     def test_abort_leaves_a_completed_write(self, returning_table):
         con = returning_table
@@ -181,31 +151,17 @@ class TestWrites:
         assert con.execute("INSERT INTO r VALUES (1), (2) RETURNING i").fetchall() == [(1,), (2,)]
         assert count_rows(con) == 2
 
-    def test_an_unread_returning_write_is_not_applied(self, returning_table):
-        con = returning_table
-        con.execute("INSERT INTO r VALUES (1), (2) RETURNING i")
-        assert count_rows(con) == 0
-
-    def test_an_unread_returning_write_fails_the_transaction(self, returning_table):
-        con = returning_table
-        con.execute("BEGIN")
-        con.execute("INSERT INTO r VALUES (1) RETURNING i")
-        with pytest.raises(duckdb.TransactionException, match="aborted"):
-            con.execute("SELECT 1")
-        con.execute("ROLLBACK")
-        assert count_rows(con) == 0
-
-    def test_commit_after_an_unread_returning_write_rolls_back(self, returning_table):
+    def test_commit_keeps_an_unread_returning_write(self, returning_table):
         con = returning_table
         con.execute("BEGIN")
         con.execute("INSERT INTO r VALUES (1) RETURNING i")
         con.commit()
-        assert count_rows(con) == 0
+        assert count_rows(con) == 1
 
-    def test_an_unread_nextval_does_not_advance(self, duckdb_cursor):
+    def test_an_unread_nextval_advances(self, duckdb_cursor):
         duckdb_cursor.execute("CREATE SEQUENCE s")
         duckdb_cursor.execute("SELECT nextval('s')")
-        assert duckdb_cursor.execute("SELECT nextval('s')").fetchall() == [(1,)]
+        assert duckdb_cursor.execute("SELECT nextval('s')").fetchall() == [(2,)]
 
     def test_explain_analyze_of_a_write_runs_in_execute(self, returning_table):
         con = returning_table
@@ -243,16 +199,15 @@ class TestWrites:
 
 
 class TestPythonObjects:
-    def test_a_deferred_statement_reads_the_object_it_was_bound_with(self, duckdb_cursor):
+    def test_a_statement_reads_the_object_it_was_bound_with(self, duckdb_cursor):
         pa = pytest.importorskip("pyarrow")
         con = duckdb_cursor
 
-        def deferred_over_a_local_table():
+        def over_a_local_table():
             tbl = pa.table({"x": [1, 2, 3]})  # noqa: F841 - read by the replacement scan
             return con.execute("SELECT sum(x) FROM tbl")
 
-        result = deferred_over_a_local_table()
-        # The statement binds again when it is submitted, where this frame holds another object under the name
+        result = over_a_local_table()
         tbl = pa.table({"x": [100]})  # noqa: F841
         assert result.fetchall() == [(6,)]
 
@@ -311,7 +266,7 @@ class TestBindFailureTransactionPolicy:
         assert con.execute("SELECT * FROM t").fetchall() == [(7,)]
 
 
-class TestDeferredOwnership:
+class TestResultOwnership:
     def collected(self, make):
         import gc
 
@@ -319,7 +274,7 @@ class TestDeferredOwnership:
         gc.collect()
         return [ref() is None for ref in refs]
 
-    def test_an_unreachable_deferred_query_is_collected(self):
+    def test_an_unreachable_query_is_collected(self):
         import weakref
 
         def make():
@@ -331,7 +286,7 @@ class TestDeferredOwnership:
 
         assert self.collected(make) == [True, True]
 
-    def test_a_superseded_deferred_query_is_collected(self):
+    def test_a_superseded_query_is_collected(self):
         import weakref
 
         def make():
@@ -344,16 +299,15 @@ class TestDeferredOwnership:
 
         assert self.collected(make) == [True, True]
 
-    def test_a_failed_fetch_releases_ownership(self):
+    def test_a_failed_execute_releases_ownership(self):
         import weakref
 
         def make():
             con = duckdb.connect()
             rel = con.sql("SELECT CAST('bad' || i::VARCHAR AS INTEGER) AS i FROM range(3) t(i)")
             refs = weakref.ref(con), weakref.ref(rel)
-            con.execute("SELECT * FROM rel")
             with pytest.raises(duckdb.ConversionException):
-                con.fetchall()
+                con.execute("SELECT * FROM rel")
             return refs
 
         assert self.collected(make) == [True, True]
@@ -418,40 +372,6 @@ class TestRowcountSurvivesConsumption:
         assert con.rowcount == 1
         con.execute("SELECT 1")
         assert con.rowcount == -1
-
-
-class TestDescribedColumnsChanged:
-    def test_an_untyped_parameter_names_the_cast_fix(self, duckdb_cursor):
-        duckdb_cursor.execute("SELECT coalesce(?, 1) AS c", [1.5])
-        with pytest.raises(duckdb.InvalidInputException, match="CAST"):
-            duckdb_cursor.fetchall()
-        assert duckdb_cursor.execute("SELECT coalesce(CAST(? AS DOUBLE), 1) AS c", [1.5]).fetchall() == [(1.5,)]
-
-    def test_a_catalog_change_advises_re_execution(self, duckdb_cursor):
-        duckdb_cursor.execute("CREATE TABLE t AS SELECT 1 AS x")
-        duckdb_cursor.execute("SELECT x FROM t")
-        duckdb_cursor.cursor().execute("ALTER TABLE t ALTER x TYPE VARCHAR")
-        with pytest.raises(duckdb.InvalidInputException, match="catalog changed"):
-            duckdb_cursor.fetchall()
-
-    def test_an_untyped_parameter_over_a_scope_ended_input_names_the_cast_fix(self, duckdb_cursor):
-        pa = pytest.importorskip("pyarrow")
-        con = duckdb_cursor
-
-        def start():
-            local_input = pa.table({"x": [7]})  # noqa: F841 - read by the replacement scan
-            con.execute("SELECT coalesce(?, 1) AS c FROM local_input", [1.5])
-
-        start()
-        with pytest.raises(duckdb.InvalidInputException, match="CAST"):
-            con.fetchall()
-
-    def test_a_catalog_change_with_a_typed_parameter_names_the_catalog(self, duckdb_cursor):
-        duckdb_cursor.execute("CREATE TABLE t(x INTEGER)")
-        duckdb_cursor.execute("SELECT x FROM t WHERE CAST(? AS INTEGER) = 1", [1])
-        duckdb_cursor.cursor().execute("ALTER TABLE t ALTER COLUMN x TYPE VARCHAR")
-        with pytest.raises(duckdb.InvalidInputException, match="catalog changed"):
-            duckdb_cursor.fetchall()
 
 
 class TestIntegrations:

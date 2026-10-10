@@ -1,3 +1,4 @@
+import contextlib
 import importlib.util
 import subprocess
 import sys
@@ -21,14 +22,8 @@ needs_pandas = pytest.mark.skipif(importlib.util.find_spec("pandas") is None, re
 needs_pyarrow = pytest.mark.skipif(importlib.util.find_spec("pyarrow") is None, reason="pyarrow not installed")
 
 FAILED = (AssertionError, pytest.fail.Exception)
-DEFERS = pytest.mark.xfail(strict=True, raises=FAILED, reason="execute() defers SELECT-class statements")
 SUPERSEDES = pytest.mark.xfail(
     strict=True, raises=FAILED, reason="other users of a connection supersede its open result instead of erroring"
-)
-DRAINS = pytest.mark.xfail(
-    strict=True,
-    raises=duckdb.TransactionException,
-    reason="a superseded statement that may write is cancelled, which invalidates the transaction",
 )
 CANCELS = pytest.mark.xfail(
     strict=True, raises=FAILED, reason="two lazy polars sources of one connection cancel each other"
@@ -75,17 +70,14 @@ def run_isolated(script):
 
 
 class TestExecuteSettles:
-    @DEFERS
     def test_an_error_in_the_first_chunk_raises_from_execute(self, con):
         with pytest.raises(duckdb.InvalidInputException, match="boom"):
             con.execute("SELECT error('boom')")
 
-    @DEFERS
     def test_a_parameterized_error_raises_from_execute(self, con):
         with pytest.raises(duckdb.InvalidInputException, match="boom"):
             con.execute("SELECT error(?)", ["boom"])
 
-    @DEFERS
     def test_the_last_statement_of_a_script_settles_too(self, con):
         with pytest.raises(duckdb.InvalidInputException, match="boom"):
             con.execute("SELECT 1; SELECT error('boom')")
@@ -102,7 +94,6 @@ class TestExecuteSettles:
             con.executemany("SELECT tally(CASE WHEN ? = 1 THEN error('boom')::BIGINT ELSE 0 END)", parameter_sets)
         assert produced[0] == ran
 
-    @DEFERS
     def test_the_first_chunk_runs_and_the_rest_waits(self, con, produced):
         con.execute(f"SELECT tally(i) FROM range({ROWS}) t(i)")
         assert 0 < produced[0] <= SETTLED
@@ -117,6 +108,8 @@ class TestExecuteSettles:
 
     def test_an_empty_result_settles(self, con):
         con.execute("SELECT * FROM range(0)")
+        assert [column[0] for column in con.description] == ["range"]
+        assert con.rowcount == -1
         assert con.fetchall() == []
 
     def test_an_error_after_the_first_chunk_waits_for_the_fetch(self, con):
@@ -129,7 +122,6 @@ class TestExecuteSettles:
         con.execute("ROLLBACK")
         assert con.execute("SELECT 42").fetchall() == [(42,)]
 
-    @DEFERS
     @pytest.mark.timeout(60)
     def test_an_interrupt_while_settling_raises_from_execute(self, con):
         timer = threading.Timer(0.5, con.interrupt)
@@ -151,7 +143,6 @@ class TestExecuteSettles:
         ],
     )
 
-    @DEFERS
     @RETURNING
     def test_returning_completes_in_execute(self, con, statement, returned, remaining):
         con.execute("CREATE TABLE t AS SELECT range AS i FROM range(5000)")
@@ -159,7 +150,6 @@ class TestExecuteSettles:
         assert con.cursor().execute("SELECT count(*) FROM t").fetchall() == [(remaining,)]
         assert sorted(con.fetchall()) == [(i,) for i in returned]
 
-    @DEFERS
     @RETURNING
     def test_unread_returning_survives_the_next_statement(self, con, statement, returned, remaining):
         con.execute("CREATE TABLE t AS SELECT range AS i FROM range(5000)")
@@ -188,7 +178,6 @@ class TestExecuteSettles:
         with pytest.raises(duckdb.InvalidInputException, match="boom"):
             con.execute(f"COPY (SELECT {late} FROM range({ROWS}) t(i)) TO '{(tmp_path / 'out.csv').as_posix()}'")
 
-    @DEFERS
     def test_a_failed_select_aborts_the_transaction(self, con):
         con.execute("BEGIN")
         con.execute("CREATE TABLE t AS SELECT 1 AS a")
@@ -216,7 +205,6 @@ class TestSupersede:
         con.execute("COMMIT")
         assert con.execute("SELECT a FROM t ORDER BY a").fetchall() == [(1,), (2,)]
 
-    @DRAINS
     def test_a_superseded_statement_that_may_write_is_drained(self, con):
         con.execute("CREATE SEQUENCE s")
         con.execute("BEGIN")
@@ -226,7 +214,6 @@ class TestSupersede:
         con.execute("COMMIT")
         assert con.execute("SELECT currval('s')").fetchall() == [(ROWS,)]
 
-    @DRAINS
     def test_an_error_in_the_drained_remainder_raises_from_the_next_execute(self, con):
         con.execute("CREATE SEQUENCE s")
         con.execute("BEGIN")
@@ -239,7 +226,6 @@ class TestSupersede:
             con.execute("SELECT 1")
         con.execute("ROLLBACK")
 
-    @DEFERS
     def test_a_superseded_read_only_select_keeps_its_side_effects_and_runs_no_further(self, con, produced):
         con.execute(f"SELECT tally(i) FROM range({ROWS}) t(i)")
         settled = produced[0]
@@ -247,6 +233,59 @@ class TestSupersede:
         time.sleep(0.5)
         assert 0 < settled <= SETTLED
         assert produced[0] == settled
+
+    @pytest.mark.parametrize(
+        "rollback",
+        [
+            pytest.param(lambda c: c.rollback(), id="method"),
+            pytest.param(lambda c: c.execute("ROLLBACK"), id="statement"),
+            pytest.param(lambda c: c.execute("ABORT"), id="abort"),
+            pytest.param(lambda c: c.execute("ROLLBACK TRANSACTION"), id="rollback_transaction"),
+            pytest.param(lambda c: c.execute("ABORT WORK"), id="abort_work"),
+            pytest.param(lambda c: c.execute(c.extract_statements("ROLLBACK")[0]), id="prepared_statement"),
+        ],
+    )
+    def test_a_rollback_cancels_an_open_result_instead_of_draining_it(self, con, rollback):
+        con.execute("CREATE SEQUENCE s")
+        con.execute("BEGIN")
+        late = f"CASE WHEN i = {ROWS - 1} THEN error('late')::BIGINT ELSE 0 END"
+        con.execute(f"SELECT nextval('s') + {late} FROM range({ROWS}) t(i)")
+        con.fetchone()
+        rollback(con)
+        assert con.execute("SELECT 42").fetchall() == [(42,)]
+        (advanced,) = con.execute("SELECT currval('s')").fetchone()
+        assert advanced < ROWS
+
+    @pytest.mark.parametrize("statement", ["PRAGMA show_tables", "SHOW TABLES"])
+    def test_parsing_a_preprocessed_statement_leaves_the_open_result_alone(self, con, statement):
+        con.execute("CREATE TABLE t AS SELECT 1 AS a")
+        con.execute(f"SELECT * FROM range({ROWS})")
+        con.fetchone()
+        assert con.execute(statement).fetchall() == [("t",)]
+
+    def test_a_commit_drains_an_open_result_that_may_write(self, con):
+        con.execute("CREATE SEQUENCE s")
+        con.execute("BEGIN")
+        con.execute(f"SELECT nextval('s') FROM range({ROWS})")
+        con.fetchone()
+        con.commit()
+        assert con.execute("SELECT currval('s')").fetchall() == [(ROWS,)]
+
+    def test_executemany_drains_an_open_result_that_may_write(self, con):
+        con.execute("CREATE SEQUENCE s")
+        con.execute(f"SELECT nextval('s') FROM range({ROWS})")
+        con.fetchone()
+        con.executemany("SELECT ?", [[1], [2]])
+        assert con.execute("SELECT currval('s')").fetchall() == [(ROWS,)]
+
+    def test_a_result_ended_by_another_statement_is_not_drained_again(self, con):
+        con.execute("CREATE SEQUENCE s")
+        con.execute(f"SELECT nextval('s') FROM range({ROWS})")
+        con.fetchone()
+        # Whether the relation ends the open result or is refused, the next execute() must not fail over it.
+        with contextlib.suppress(duckdb.InvalidInputException):
+            con.sql("SELECT 1").fetchall()
+        assert con.execute("SELECT 2").fetchall() == [(2,)]
 
     @pytest.mark.parametrize(
         "commit",
@@ -340,7 +379,6 @@ class TestOpenResultIsExclusive:
             con.execute("SELECT 1")
         con.execute("ROLLBACK")
 
-    @DEFERS
     def test_abort_stops_the_result_where_it_settled(self, con, produced):
         con.execute(f"SELECT tally(i) FROM range({ROWS}) t(i)")
         settled = produced[0]

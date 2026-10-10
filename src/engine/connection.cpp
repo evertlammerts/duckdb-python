@@ -16,20 +16,9 @@ shared_ptr<ConnectionState> ConnectionState::Get(ClientContext &context) {
 	return context.registered_state->GetOrCreate<ConnectionState>("python_connection_state");
 }
 
-void ConnectionState::QueryBegin(ClientContext &) {
-	++generation;
-}
-
 void ConnectionState::SetOpen(const shared_ptr<Supersedable> &result) {
 	lock_guard<mutex> guard(lock);
 	open = result;
-}
-
-void ConnectionState::ClearOpen(const Supersedable &result) {
-	lock_guard<mutex> guard(lock);
-	if (open.lock().get() == &result) {
-		open.reset();
-	}
 }
 
 void ConnectionState::SupersedeOpen() {
@@ -152,34 +141,6 @@ Prepared Session::Prepare(unique_ptr<SQLStatement> statement) {
 	return prepared;
 }
 
-Bound Session::Bind(unique_ptr<SQLStatement> statement) {
-	Bound bound;
-	{
-		ResolvingGuard guard(*state);
-		try {
-			bound.signature = context->BindStatement(statement->Copy());
-		} catch (std::exception &ex) {
-			ErrorData error(ex);
-			// BindStatement preserves the transaction because it is an inspection call, but this bind
-			// classifies a statement the user executed, so its failure follows the same transaction
-			// invalidation policy as any other failed execution (ClientContext::ErrorResult)
-			auto policy = context->transaction.GetInvalidationPolicy();
-			const bool invalidates = policy == TransactionInvalidationPolicy::SYNTACTIC_ERRORS_DO_NOT_INVALIDATE
-			                             ? Exception::InvalidatesTransaction(error.Type())
-			                             : true;
-			if (invalidates && context->transaction.HasActiveTransaction()) {
-				ValidChecker::Invalidate(context->transaction.ActiveTransaction(), error.RawMessage());
-			}
-			// Rendered like an error from any other entry point: with its location, or as JSON
-			context->ProcessError(error, statement->query);
-			error.Throw();
-		}
-		bound.tables = guard.End();
-	}
-	bound.statement = std::move(statement);
-	return bound;
-}
-
 shared_ptr<Result> Session::Track(unique_ptr<QueryResult> handle, const Format &format, shared_ptr<Relation> relation) {
 	auto result = make_shared_ptr<Result>(std::move(handle), format, std::move(relation));
 	state->SetOpen(result);
@@ -200,16 +161,6 @@ shared_ptr<Result> Session::Submit(Prepared &prepared, identifier_map_t<BoundPar
 	{
 		PinGuard guard(*state, prepared.tables);
 		handle = prepared.statement->Submit(values, QueryParameters(format.EngineFormat()));
-	}
-	return Track(std::move(handle), format, nullptr);
-}
-
-shared_ptr<Result> Session::Submit(Bound &bound, identifier_map_t<BoundParameterData> &values, const Format &format) {
-	state->SupersedeOpen();
-	unique_ptr<QueryResult> handle;
-	{
-		PinGuard guard(*state, bound.tables);
-		handle = context->Submit(std::move(bound.statement), values, QueryParameters(format.EngineFormat()));
 	}
 	return Track(std::move(handle), format, nullptr);
 }
@@ -249,141 +200,6 @@ void Session::Run(unique_ptr<SQLStatement> statement, const InterruptCheck &chec
 	state->SupersedeOpen();
 	auto handle = context->Submit(std::move(statement), QueryParameters());
 	Complete(*handle, check);
-}
-
-bool Session::TransactionFailed() const {
-	auto &transaction = context->transaction;
-	return transaction.HasActiveTransaction() && ValidChecker::IsInvalidated(transaction.ActiveTransaction());
-}
-
-shared_ptr<Deferred> Session::Defer(Bound bound, identifier_map_t<BoundParameterData> values) {
-	identifier_map_t<idx_t> parameters;
-	for (auto &parameter : bound.signature.parameters) {
-		parameters[parameter.identifier] = parameter.index;
-	}
-	PreparedStatement::VerifyParameters(values, parameters, context.get());
-	// execute() ends whatever else is reading on the connection, as a statement that ran would
-	state->SupersedeOpen();
-	auto deferred = make_shared_ptr<Deferred>(*this, std::move(bound), std::move(values));
-	state->SetOpen(deferred);
-	return deferred;
-}
-
-bool Deferred::MayDefer(StatementType type) {
-	switch (type) {
-	case StatementType::SELECT_STATEMENT:
-	case StatementType::INSERT_STATEMENT:
-	case StatementType::UPDATE_STATEMENT:
-	case StatementType::DELETE_STATEMENT:
-	case StatementType::MERGE_INTO_STATEMENT:
-		return true;
-	default:
-		return false;
-	}
-}
-
-bool Deferred::CanDefer(const Bound &bound) {
-	auto &properties = bound.signature.properties;
-	// A statement whose types are only known once its values are bound cannot be described before it runs
-	return MayDefer(bound.statement->type) && properties.return_type == StatementReturnType::QUERY_RESULT &&
-	       properties.bound_all_parameters;
-}
-
-Deferred::Deferred(Session session_p, Bound bound_p, identifier_map_t<BoundParameterData> values_p)
-    : session(std::move(session_p)), bound(std::move(bound_p)), values(std::move(values_p)),
-      client_properties(session.Context().GetClientProperties()), generation(session.state->Generation()),
-      may_write(!bound.signature.properties.modified_databases.empty()), superseded(false), done(false) {
-	if (!bound.signature.parameters.empty()) {
-		diagnosis_statement = bound.statement->Copy();
-	}
-}
-
-Deferred::~Deferred() {
-	try {
-		Close();
-	} catch (...) { // NOLINT: a destructor must not throw
-	}
-}
-
-const vector<Identifier> &Deferred::Names() const {
-	return bound.signature.names;
-}
-
-const vector<LogicalType> &Deferred::Types() const {
-	return bound.signature.types;
-}
-
-shared_ptr<Result> Deferred::Start(const Format &format) {
-	if (!superseded && session.state->Generation() != generation) {
-		Supersede();
-	}
-	if (done.exchange(true)) {
-		if (superseded) {
-			throw InterruptException(
-			    "The result was cancelled because another statement ran on its connection before it was read");
-		}
-		throw InternalException("engine::Deferred started twice");
-	}
-	if (superseded) {
-		throw InterruptException(
-		    "The result was cancelled because another statement ran on its connection before it was read");
-	}
-	session.state->ClearOpen(*this);
-	auto result = session.Submit(bound, values, format);
-	// The statement binds again here; its consumer already holds the columns it was described with
-	if (result->Names() != bound.signature.names || result->Types() != bound.signature.types) {
-		result->Close();
-		if (diagnosis_statement) {
-			// When a value-less rebind still matches the description, the catalog did not move:
-			// binding the values changed the types
-			bool parameter_typing = false;
-			try {
-				// Pinned like the submission itself, so a Python input whose defining scope has ended
-				// still resolves and cannot pass as a catalog change
-				PinGuard guard(*session.state, bound.tables);
-				auto fresh = session.Context().BindStatement(diagnosis_statement->Copy());
-				parameter_typing = fresh.names == bound.signature.names && fresh.types == bound.signature.types;
-			} catch (...) { // NOLINT: a statement that no longer binds means the catalog moved
-			}
-			if (parameter_typing) {
-				throw InvalidInputException(
-				    "The result's columns differ from what execute() described: a parameter without an explicit "
-				    "type settled on another type once its value was bound. Cast the parameter, for example "
-				    "CAST(? AS DOUBLE), to fix its type");
-			}
-		}
-		throw InvalidInputException(
-		    "The result's columns changed after execute() described them, because the catalog changed in between. "
-		    "Execute the query again");
-	}
-	return result;
-}
-
-void Deferred::Close() {
-	Abandon();
-}
-
-void Deferred::Supersede() {
-	superseded = true;
-	Abandon();
-}
-
-void Deferred::Abandon() {
-	if (done.exchange(true) || !may_write) {
-		return;
-	}
-	auto &context = session.Context();
-	if (context.transaction.IsAutoCommit() || !context.transaction.HasActiveTransaction()) {
-		return;
-	}
-	// The engine fails the transaction of an unfinished statement that may write, so a write that never ran
-	// does the same rather than letting the transaction commit without it
-	context.RunFunctionInTransaction(
-	    [&]() {
-		    ValidChecker::Invalidate(context.transaction.ActiveTransaction(),
-		                             "a statement that writes was abandoned before its result was read");
-	    },
-	    false);
 }
 
 } // namespace engine
