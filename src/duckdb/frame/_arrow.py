@@ -8,12 +8,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, NoReturn
 
-from ..exceptions import InterfaceError, InvalidInputError, NotSupportedError, class_for_code
+from ..exceptions import InterfaceError, InvalidInputError, NotSupportedError, OperationalError, class_for_code
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from .connection import Connection, LiveArrowStream
+    from .plan import Frame
 
 #: `ArrowStream.error` codes beside the engine's own, mirrored from the extension.
 _CLOSED = -1
@@ -111,10 +112,108 @@ def polars_frame(connection: Connection, sql: str, values: Sequence[Any] | None)
         # polars raises its own error types; what ended the stream carries the engine's code.
         _raise_typed(stream, error)
     except panics as error:
-        message = (
-            "polars has no type for a column of this result (INTERVAL and UNION are not polars types); "
-            "use to_arrow or to_reader instead"
-        )
+        # A type polars lacks (INTERVAL, UNION) panics, and so does an empty result with a repeated name.
+        message = f"polars cannot hold this result, panicking with: {error}; to_arrow and to_reader carry it"
         raise NotSupportedError(message) from error
     finally:
         stream.close()
+
+
+def _plugins(polars: Any) -> Any:
+    try:
+        from polars.io import plugins
+    except ImportError as error:
+        message = f"to_polars(lazy=True) needs polars' IO plugins, which polars {polars.__version__} does not have"
+        raise ImportError(message) from error
+    return plugins
+
+
+def _result_header(connection: Connection, sql: str, values: Sequence[Any] | None) -> list[tuple[str, str]]:
+    """The names and types a statement's result carries, read before it runs where the statement allows."""
+    with connection._execute(sql, values) as live:
+        try:
+            return live.result.schema
+        except InvalidInputError:
+            # The PIVOT family names its columns only once it has run.
+            live.result.settle()
+            return live.result.schema
+
+
+def _busy(error: OperationalError) -> OperationalError:
+    # Only a connection already running a query raises the bare class here; its subclasses mean other things.
+    if type(error) is not OperationalError:
+        return error
+    message = (
+        "Resource In Use Error: a LazyFrame runs its plan on its connection, which runs one query at a time, and "
+        "polars scans the frames of one query at once; give each LazyFrame combined in one polars query a "
+        "connection of its own, as Connection.duplicate() makes"
+    )
+    return OperationalError(message)
+
+
+def polars_lazy(plan: Frame, connection: Connection, parameters: Mapping[str, object] | None) -> Any:
+    """The plan as a polars LazyFrame whose scans run it on `connection`, with polars' pushdowns applied.
+
+    polars trusts a source to apply the projection, the row limit and the predicate it hands over, and checks
+    none of them, so every scan applies all three: the projection and the limit in the query, the predicate to
+    the polars frame the query returns.
+    """
+    from .._expressions.expr import quote
+
+    polars = _polars()
+    plugins = _plugins(polars)
+    sql, values = plan._sql_and_values(connection=connection, parameters=parameters)
+    header = _result_header(connection, sql, values)
+    names = [name for name, _ in header]
+    seen: set[str] = set()
+    for name in names:
+        if name in seen:
+            # The eager path's error; polars itself panics on repeated names when the frame it is given is empty.
+            message = f"could not create a new DataFrame: column with name '{name}' has more than one occurrence"
+            raise polars.exceptions.DuplicateError(message)
+        seen.add(name)
+
+    def projected(columns: list[tuple[int, str]], limit: int | None) -> str:
+        # By position, aliased back: DuckDB resolves a name regardless of case, to its first match, and a star
+        # over the plan suffixes repeated names, so neither may stand between polars' names and the columns.
+        select = ", ".join(f"#{position} AS {quote(name)}" for position, name in columns)
+        return f"SELECT {select} FROM ({sql})" + (f" LIMIT {limit}" if limit is not None else "")
+
+    every = list(enumerate(names, 1))
+    # Through the eager path, so the dtypes are to_polars' and its refusals happen here, before any scan.
+    schema = polars_frame(connection, projected(every, 0), values).schema
+    position = {name: index for index, name in every}
+
+    def scan(with_columns: list[str] | None, predicate: Any, n_rows: int | None, _batch_size: int | None) -> Any:
+        if with_columns == []:
+            # polars asks for no column only where it needs no row either, as for a select of literals.
+            yield polars.DataFrame()
+            return
+        limit = n_rows if predicate is None else None
+        if with_columns is None and limit is None:
+            query = sql
+        else:
+            columns = every if with_columns is None else [(position[name], name) for name in with_columns]
+            query = projected(columns, limit)
+        try:
+            # Positions and dtypes are the schema's, so a plan whose columns moved since must not be read by them.
+            now = _result_header(connection, sql, values)
+            if now != header:
+                message = (
+                    f"Invalid Input Error: the plan's columns changed since the LazyFrame was made, from {header} to "
+                    f"{now}; make a new LazyFrame"
+                )
+                raise InvalidInputError(message)
+            out = polars_frame(connection, query, values)
+        except OperationalError as error:
+            busy = _busy(error)
+            if busy is error:
+                raise
+            raise busy from error
+        if predicate is not None:
+            out = out.filter(predicate)
+            if n_rows is not None:
+                out = out.head(n_rows)
+        yield out
+
+    return plugins.register_io_source(scan, schema=schema)
