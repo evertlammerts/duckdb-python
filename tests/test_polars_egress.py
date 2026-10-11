@@ -691,8 +691,8 @@ class TestLazyPushdown:
 
     @pytest.fixture(autouse=True)
     def utc(self, con: frame.Connection) -> None:
-        # polars gives an aware Python datetime the zone UTC and compares it only with a column in that same zone,
-        # which the session zone names; an Etc/UTC session would make polars itself refuse the comparison.
+        # polars types a datetime aware of UTC or a fixed offset as zone UTC and compares it only with a column of
+        # that same zone name, which the session zone sets; an Etc/UTC session would make polars refuse it.
         con.run("SET TimeZone = 'UTC'")
 
     @pytest.fixture

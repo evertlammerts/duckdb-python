@@ -221,8 +221,8 @@ class TestReaderStreaming:
 
     def test_a_consumer_driven_read_is_not_throttled(self) -> None:
         # With one thread the consumer runs the engine's work itself, step by step; a pacing nap after every
-        # bounded step more than doubles this scan (3.8 s to 9.9 s, measured). Timed against the same work run
-        # without the Arrow read's pacing, so a slow machine slows both.
+        # bounded step adds about 6 s to this scan whatever the machine (3.8 s to 9.9 s here), a cost set by the
+        # step count, so the bound leaves the same work run without the Arrow read's pacing a fixed margin.
         query = "SELECT count(*) AS n FROM range(600_000_000) t(i) WHERE i % 7 = 0"
         con = duckdb.frame.connect(threads="1")
         try:
@@ -233,7 +233,7 @@ class TestReaderStreaming:
             table = sql(query).to_arrow(con)
             elapsed = time.monotonic() - started
             assert table.column("n").to_pylist() == [85714286]
-            assert elapsed < 1.5 * unpaced + 1, f"the read took {elapsed:.1f}s where the same work took {unpaced:.1f}s"
+            assert elapsed < 1.2 * unpaced + 2, f"the read took {elapsed:.1f}s where the same work took {unpaced:.1f}s"
         finally:
             con.close()
 
@@ -553,8 +553,8 @@ class TestReentrantClose:
         assert not worker.is_alive()
 
     def test_ctrl_c_breaks_out_of_a_blocked_close(self, con: duckdb.frame.Connection) -> None:
-        # A close is a join, and a join on work that never ends must still answer Ctrl-C; the request then
-        # stands and the connection's next statement completes it.
+        # A close is a join, and a join on work that never ends must still answer Ctrl-C, without losing the
+        # request: it stands, or the read in flight has taken it over.
         from ._support import ctrl_c_after
 
         resume = threading.Event()
@@ -1188,6 +1188,7 @@ class TestCtrlC:
                 sql("SELECT i FROM range(10_000_000_000) t(i)").to_arrow(con)
         finally:
             interrupter.cancel()
+            interrupter.join()
             signal.signal(signal.SIGINT, previous)
         assert sql("SELECT 1").rows(con) == [(1,)]
 

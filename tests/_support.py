@@ -111,5 +111,7 @@ def ctrl_c_after(seconds: float, rescue: Callable[[], None]) -> Iterator[None]:
         yield
     finally:
         interrupter.cancel()
+        # A press already under way lands before the handler is restored, so never in pytest's own code.
+        interrupter.join()
         rescuer.cancel()
         signal.signal(signal.SIGINT, previous)
