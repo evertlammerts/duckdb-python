@@ -6,7 +6,6 @@ import contextlib
 import datetime
 import decimal
 import gc
-import os
 import signal
 import subprocess
 import sys
@@ -222,14 +221,19 @@ class TestReaderStreaming:
 
     def test_a_consumer_driven_read_is_not_throttled(self) -> None:
         # With one thread the consumer runs the engine's work itself, step by step; a pacing nap after every
-        # bounded step would stretch this scan from about a second to minutes.
+        # bounded step more than doubles this scan (3.8 s to 9.9 s, measured). Timed against the same work run
+        # without the Arrow read's pacing, so a slow machine slows both.
+        query = "SELECT count(*) AS n FROM range(600_000_000) t(i) WHERE i % 7 = 0"
         con = duckdb.frame.connect(threads="1")
         try:
             started = time.monotonic()
-            table = sql("SELECT count(*) AS n FROM range(600_000_000) t(i) WHERE i % 7 = 0").to_arrow(con)
+            con.run(f"CREATE TEMP TABLE unpaced AS {query}")
+            unpaced = time.monotonic() - started
+            started = time.monotonic()
+            table = sql(query).to_arrow(con)
             elapsed = time.monotonic() - started
             assert table.column("n").to_pylist() == [85714286]
-            assert elapsed < 8, f"the single-threaded read took {elapsed:.1f}s"
+            assert elapsed < 1.5 * unpaced + 1, f"the read took {elapsed:.1f}s where the same work took {unpaced:.1f}s"
         finally:
             con.close()
 
@@ -365,7 +369,7 @@ class TestReentrantClose:
     def test_a_signal_handler_may_close_the_stream_it_interrupts(self) -> None:
         probe = textwrap.dedent(
             """
-            import os, signal, threading
+            import os, signal, sys, threading
             import duckdb
             import pyarrow as pa
 
@@ -385,7 +389,11 @@ class TestReentrantClose:
 
             def send_signal():
                 in_flight.wait(10)
-                os.kill(os.getpid(), signal.SIGINT)
+                # As tests/_support.press_ctrl_c: os.kill with SIGINT terminates a process on Windows.
+                if sys.platform == "win32":
+                    signal.raise_signal(signal.SIGINT)
+                else:
+                    os.kill(os.getpid(), signal.SIGINT)
 
             threading.Thread(target=send_signal).start()
             try:
@@ -572,7 +580,10 @@ class TestReentrantClose:
         with pytest.raises(KeyboardInterrupt), ctrl_c_after(0.5, resume.set):
             held.close()
         assert time.monotonic() - started < 8, "the close did not poll for the interrupt"
-        assert held.stream.close_pending
+        # Where the engine's step returns while a worker runs the function, the read in flight takes the request
+        # over at its next pace point, its teardown waiting on the function; where the step blocks, the request
+        # stands. Never is the stream live with the request lost.
+        assert held.stream.close_pending or not held.stream.live
         resume.set()
         worker.join(10)
         assert not worker.is_alive()
@@ -721,7 +732,7 @@ class TestReentrantClose:
         # must refuse rather than deadlock on it.
         probe = textwrap.dedent(
             """
-            import os, signal, threading
+            import os, signal, sys, threading
             import duckdb
             import pyarrow as pa
 
@@ -738,7 +749,11 @@ class TestReentrantClose:
                 stream.close()
 
             signal.signal(signal.SIGINT, handler)
-            threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT)).start()
+            # As tests/_support.press_ctrl_c: os.kill with SIGINT terminates a process on Windows.
+            if sys.platform == "win32":
+                threading.Timer(0.3, signal.raise_signal, (signal.SIGINT,)).start()
+            else:
+                threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT)).start()
             try:
                 reader.read_next_batch()
             except Exception as error:
@@ -1163,8 +1178,10 @@ class TestCtrlC:
             message = "handler says no"
             raise ValueError(message)
 
+        from ._support import press_ctrl_c
+
         previous = signal.signal(signal.SIGINT, refuse)
-        interrupter = threading.Timer(0.2, os.kill, (os.getpid(), signal.SIGINT))
+        interrupter = threading.Timer(0.2, press_ctrl_c)
         interrupter.start()
         try:
             with pytest.raises(exceptions.InterfaceError, match="handler says no"):

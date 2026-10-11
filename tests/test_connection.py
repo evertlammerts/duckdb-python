@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import gc
-import sys
 import threading
 import time
 from collections.abc import Callable
@@ -148,7 +147,6 @@ class TestPublicInterrupt:
         with pytest.raises(exceptions.InterfaceError, match="closed"):
             con.interrupt()
 
-    @pytest.mark.skipif(sys.platform == "win32", reason="os.kill with SIGINT terminates the process on Windows")
     def test_a_keyboard_interrupt_stops_a_drain(self) -> None:
         # run() gives the interpreter back a few times a second to check for signals, so Ctrl-C lands promptly.
         con = duckdb.frame.connect()
@@ -158,7 +156,6 @@ class TestPublicInterrupt:
         assert time.monotonic() - started < 5, "the interrupt did not land between step batches"
         assert duckdb.frame.sql("SELECT 1").rows(con) == [(1,)]
 
-    @pytest.mark.skipif(sys.platform == "win32", reason="os.kill with SIGINT terminates the process on Windows")
     def test_a_keyboard_interrupt_stops_a_fetch(self) -> None:
         # Minutes of work for a few thousand rows: a fetch that never checks for Ctrl-C runs into the rescue and
         # fails the bound, where a quick query would finish inside it, and no rows pile up while it runs.

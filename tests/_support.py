@@ -83,6 +83,16 @@ def installed_as_wheel() -> bool:
     return any(root and package_dir.is_relative_to(Path(root).resolve()) for root in roots)
 
 
+def press_ctrl_c() -> None:
+    """Deliver Ctrl-C to this process as the platform's console does."""
+    if sys.platform == "win32":
+        # There os.kill with SIGINT terminates the process; a console's Ctrl-C reaches Python as a raised SIGINT.
+        signal.raise_signal(signal.SIGINT)
+    else:
+        # Sent to the process, as a terminal sends Ctrl-C, so the OS may hand it to one of the engine's threads.
+        os.kill(os.getpid(), signal.SIGINT)
+
+
 @contextlib.contextmanager
 def ctrl_c_after(seconds: float, rescue: Callable[[], None]) -> Iterator[None]:
     """Press Ctrl-C on this process after `seconds`, and call `rescue` should the block still run 10 seconds in.
@@ -93,8 +103,7 @@ def ctrl_c_after(seconds: float, rescue: Callable[[], None]) -> Iterator[None]:
     the whole test session.
     """
     previous = signal.signal(signal.SIGINT, signal.default_int_handler)
-    # Sent to the process, as a terminal sends Ctrl-C, so the OS may hand it to one of the engine's threads.
-    interrupter = threading.Timer(seconds, os.kill, (os.getpid(), signal.SIGINT))
+    interrupter = threading.Timer(seconds, press_ctrl_c)
     rescuer = threading.Timer(10, rescue)
     interrupter.start()
     rescuer.start()

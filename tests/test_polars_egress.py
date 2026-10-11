@@ -689,6 +689,12 @@ AWKWARD_TEXT = [
 class TestLazyPushdown:
     """A pushed filter must mean exactly what polars' own does, on every row: each case is checked against polars."""
 
+    @pytest.fixture(autouse=True)
+    def utc(self, con: frame.Connection) -> None:
+        # polars gives an aware Python datetime the zone UTC and compares it only with a column in that same zone,
+        # which the session zone names; an Etc/UTC session would make polars itself refuse the comparison.
+        con.run("SET TimeZone = 'UTC'")
+
     @pytest.fixture
     def queries(self, monkeypatch: pytest.MonkeyPatch) -> list[str]:
         from duckdb.frame import _arrow
@@ -729,6 +735,29 @@ class TestLazyPushdown:
         eager = table.to_polars(con)
         for predicate in (pl.col("s") == "abc", pl.col("s") < "b", pl.col("s").is_in(["ABC", "e"])):
             assert lazy.filter(predicate).collect().equals(eager.filter(predicate))
+
+    def test_instants_compare_as_instants_in_any_session_zone(self, con: frame.Connection, queries: list[str]) -> None:
+        import zoneinfo
+
+        import polars as pl
+
+        con.run("SET TimeZone = 'America/New_York'")
+        # Quarter hours across the autumn change, where 01:30 local happens twice.
+        start = "TIMESTAMPTZ '2026-11-01 04:00:00+00'"
+        con.run(f"CREATE TABLE z AS SELECT {start} + i * INTERVAL 15 MINUTE AS tz FROM range(12) t(i)")
+        lazy, eager = frame.table("z").to_polars(con, lazy=True), frame.table("z").to_polars(con)
+        assert eager.schema["tz"] == pl.Datetime("us", "America/New_York")
+        zone = zoneinfo.ZoneInfo("America/New_York")
+        first, second = (datetime.datetime(2026, 11, 1, 1, 30, fold=fold, tzinfo=zone) for fold in (0, 1))
+        for predicate in (
+            pl.col("tz") > first,
+            pl.col("tz") > second,
+            pl.col("tz") == second,
+            pl.col("tz").is_between(first, second),
+        ):
+            queries.clear()
+            assert lazy.filter(predicate).collect().equals(eager.filter(predicate)), predicate
+            assert any(" WHERE " in query for query in queries), predicate
 
     def test_strings_compare_byte_wise_on_a_collated_column(self, con: frame.Connection) -> None:
         import polars as pl

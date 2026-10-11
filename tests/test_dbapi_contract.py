@@ -347,14 +347,16 @@ class TestBusyRefusal:
 
         thread = threading.Thread(target=contend)
         thread.start()
-        # The contender either supersedes first (this fetch then raises) or is refused mid-drive.
+        # The contender either supersedes first (this fetch then raises), is still driving the connection when
+        # this fetch begins (this fetch is refused), or is refused mid-drive itself.
+        mine: object
         try:
-            rows = cursor.fetchall()
-            assert len(rows) == ROWS
-        except dbapi.InterfaceError:
-            pass
+            mine = len(cursor.fetchall())
+        except (dbapi.InterfaceError, dbapi.ProgrammingError) as error:
+            mine = error
         thread.join(timeout=30)
         assert not thread.is_alive()
+        assert mine == ROWS or isinstance(mine, dbapi.InterfaceError) or "being driven by another call" in str(mine)
         assert outcomes
         assert outcomes[0] == [(42,)] or isinstance(outcomes[0], dbapi.ProgrammingError)
 
