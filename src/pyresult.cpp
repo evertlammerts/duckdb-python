@@ -24,12 +24,6 @@ DuckDBPyResult::DuckDBPyResult(shared_ptr<engine::Result> result_p) : result(std
 	}
 }
 
-static constexpr const char *ROWS_THEN_ARROW =
-    "Rows were already fetched from this result, so the rest cannot be read as Arrow. Run the query again to "
-    "read it as Arrow.";
-static constexpr const char *ARROW_THEN_ROWS =
-    "This result is being read as Arrow, so rows cannot be fetched from it. Run the query again to fetch rows.";
-
 DuckDBPyResult::~DuckDBPyResult() {
 	// The destructor must run with the GIL held: `result` and `current_chunk`
 	// can transitively own Python references (registered
@@ -45,9 +39,6 @@ DuckDBPyResult::~DuckDBPyResult() {
 }
 
 const vector<Identifier> &DuckDBPyResult::ResultNames() const {
-	if (!names_override.empty()) {
-		return names_override;
-	}
 	return result->Names();
 }
 
@@ -86,7 +77,7 @@ unique_ptr<DataChunk> DuckDBPyResult::FetchNext() {
 
 unique_ptr<DataChunk> DuckDBPyResult::FetchNextRaw() {
 	if (result->GetFormat().IsArrow()) {
-		throw InvalidInputException(ARROW_THEN_ROWS);
+		throw InternalException("Rows fetched from a result submitted in the Arrow format");
 	}
 	return result->FetchChunk(DuckDBPyConnection::CheckSignals);
 }
@@ -403,26 +394,11 @@ nb::dict DuckDBPyResult::FetchTF() {
 	return result_dict;
 }
 
-void DuckDBPyResult::EnsureArrow(idx_t batch_size) {
-	if (result->GetFormat().IsArrow()) {
-		return;
+//! Arrow is produced only by results submitted in the Arrow format
+static void RequireArrowFormat(const engine::Result &result) {
+	if (!result.GetFormat().IsArrow()) {
+		throw InternalException("Arrow fetched from a result not submitted in the Arrow format");
 	}
-	if (current_chunk || result->RowsRead()) {
-		throw InvalidInputException(ROWS_THEN_ARROW);
-	}
-	auto names = ResultNames();
-	shared_ptr<engine::Result> promoted;
-	{
-		D_ASSERT(duckdb::PyUtil::GilCheck());
-		nb::gil_scoped_release release;
-		promoted = result->Reformat(engine::Format::Arrow(batch_size), DuckDBPyConnection::CheckSignals);
-		// The rows were materialized already; retained, the arrays no longer depend on the connection, which
-		// a reader scanned by a later query on that connection needs.
-		promoted->Retain(DuckDBPyConnection::CheckSignals);
-	}
-	// The scan de-duplicated the column names
-	names_override = std::move(names);
-	result = std::move(promoted);
 }
 
 template <typename T>
@@ -443,7 +419,7 @@ duckdb::pyarrow::Table DuckDBPyResult::FetchArrowTable(const idx_t rows_per_batc
 	if (Empty()) {
 		throw InvalidInputException("There is no query result");
 	}
-	EnsureArrow(rows_per_batch);
+	RequireArrowFormat(*result);
 	return RunWithArrowSchema<duckdb::pyarrow::Table>(
 	    [&](const ArrowSchema &schema) -> duckdb::pyarrow::Table {
 		    auto pyarrow_schema = pyarrow::ToPyArrowSchema(schema);
@@ -600,13 +576,9 @@ struct ArrowArrayStreamGuard {
 } // namespace
 
 ArrowArrayStream DuckDBPyResult::FetchArrowArrayStream(idx_t rows_per_batch) {
-	EnsureArrow(rows_per_batch);
+	RequireArrowFormat(*result);
 	auto state = make_uniq<ArrowStreamState>();
-	if (names_override.empty()) {
-		result->CopyArrowSchema(state->cached_schema);
-	} else {
-		result->BuildArrowSchema(IdentifiersToStrings(names_override), state->cached_schema);
-	}
+	result->CopyArrowSchema(state->cached_schema);
 	state->result = std::move(result);
 	current_chunk.reset();
 	chunk_offset = 0;

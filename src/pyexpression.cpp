@@ -444,7 +444,8 @@ std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::LambdaExpression(const n
 
 std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::SQLExpression(string sql) {
 	auto conn = DuckDBPyConnection::DefaultConnection();
-	auto &context = *conn->con.GetConnection().context;
+	// Parsing reads the connection's options and nothing else, so it works while the connection is busy
+	auto &context = *conn->con.GetConnectionWhileBusy().context;
 	vector<unique_ptr<ParsedExpression>> expressions;
 	try {
 		expressions = Parser(context).ParseExpressionList(sql);

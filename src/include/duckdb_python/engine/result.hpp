@@ -50,20 +50,16 @@ private:
 	shared_ptr<ResultFormat> engine_format;
 };
 
-//! Something that holds its connection until it is read, and lets go when another statement starts
-class Supersedable {
-public:
-	virtual ~Supersedable() = default;
-	virtual void Supersede() = 0;
-};
+class ConnectionState;
+class ConnectionClaim;
 
 //! A submitted statement. Retention is settled by the first consumer: a fetch opens a stream, Retain and the
-//! Take calls keep every row. Every call that drives the query takes the client context lock and may wait for
-//! running tasks, so callers must not hold a lock those tasks need.
-class Result : public Supersedable {
+//! Take calls keep every row. Every call that drives the query claims the connection, takes the client context
+//! lock and may wait for running tasks, so callers must not hold a lock those tasks need.
+class Result {
 public:
 	Result(unique_ptr<QueryResult> submitted, Format format, shared_ptr<Relation> relation);
-	~Result() override;
+	~Result();
 
 	Result(const Result &) = delete;
 	Result &operator=(const Result &) = delete;
@@ -87,8 +83,7 @@ public:
 	bool IsRetained() const {
 		return state == State::RETAINED;
 	}
-	//! Whether a stream's query has ended underneath it, also by a statement the seam did not run. Takes the
-	//! client context lock.
+	//! Whether a stream's query has ended underneath it. Takes the client context lock.
 	bool StreamEnded() const;
 	//! Whether the query still runs on its connection with rows left to produce. Takes the client context lock.
 	bool Running() const;
@@ -116,25 +111,21 @@ public:
 	void CopyArrowSchema(ArrowSchema &out) const;
 	//! An Arrow schema for the result's types under the given names, built in a transaction on its connection
 	void BuildArrowSchema(const vector<string> &names, ArrowSchema &out) const;
-	//! The remaining rows scanned again by the engine in another format. The result is empty afterwards. The
-	//! scan is a new statement on the result's connection.
-	shared_ptr<Result> Reformat(const Format &target, const InterruptCheck &check);
 	//! Renders the rows of a retained result
 	string ToBox(BoxRendererContext &context, const BoxRendererConfig &config);
 
 	//! Ends the query if it is still running. Idempotent, and safe while another thread is fetching.
 	void Close();
-	//! Closes the result because another statement is about to run on its connection
-	void Supersede() override;
-	//! Whether a consumer has read rows from it, after which no other format can be produced
-	bool RowsRead() const;
 	//! The rows a completed DML statement changed, or -1
 	int64_t ChangedRows();
 
 private:
 	enum class State : uint8_t { PENDING, STREAMING, RETAINED, DRAINED, CLOSED };
 
-	void ThrowIfSuperseded() const;
+	//! Retain for a caller that already holds the connection's claim
+	void RetainClaimed(const InterruptCheck &check);
+	//! The connection's claim while the query can still run engine work, otherwise none
+	unique_ptr<ConnectionClaim> ClaimWhileRunning();
 	void OpenStream();
 	template <class FORMAT>
 	unique_ptr<typename FORMAT::T> FetchStreamUnit(const InterruptCheck &check);
@@ -146,9 +137,10 @@ private:
 	Format format;
 	atomic<State> state;
 	bool retained_fetched = false;
-	atomic<bool> superseded;
-	//! Guards handle and stream against Supersede from another thread; never held while a task runs
+	//! Guards handle and stream against Close from another thread
 	mutable mutex handle_lock;
+	//! The state of the connection the query runs on, whose claim every driving call takes
+	shared_ptr<ConnectionState> connection_state;
 	//! Keeps the relation's external dependencies alive while its query runs
 	shared_ptr<Relation> relation;
 	vector<Identifier> names;

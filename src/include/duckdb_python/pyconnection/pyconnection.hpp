@@ -106,11 +106,22 @@ public:
 		}
 		return *database;
 	}
+	//! Refuses while engine work runs on the connection, so a call from inside that work errors instead of waiting
 	Connection &GetConnection() {
+		ThrowIfBusy();
+		return GetConnectionWhileBusy();
+	}
+	//! For the calls that must reach a connection whose query is running: interrupting it, reading its progress
+	Connection &GetConnectionWhileBusy() {
 		if (!connection) {
 			ThrowConnectionException();
 		}
 		return *connection;
+	}
+	void ThrowIfBusy() const {
+		if (state && connection) {
+			state->ThrowIfBusy(*connection->context);
+		}
 	}
 
 	bool ConnectionIsClosed() const {
@@ -118,6 +129,7 @@ public:
 	}
 
 	const Connection &GetConnection() const {
+		ThrowIfBusy();
 		if (!connection) {
 			ThrowConnectionException();
 		}
@@ -152,6 +164,7 @@ public:
 		database = con.database;
 	}
 	void SetConnection(unique_ptr<Connection> con) {
+		state = con ? engine::ConnectionState::Get(*con->context) : nullptr;
 		connection = std::move(con);
 	}
 	void SetResult(std::unique_ptr<DbapiResult> res) {
@@ -166,6 +179,7 @@ private:
 private:
 	shared_ptr<DuckDB> database;
 	unique_ptr<Connection> connection;
+	shared_ptr<engine::ConnectionState> state;
 	std::unique_ptr<DbapiResult> result;
 };
 
@@ -197,6 +211,8 @@ public:
 	public:
 		explicit ConnectionLockGuard(DuckDBPyConnection &conn) : lock_(conn.py_connection_lock, std::defer_lock) {
 			D_ASSERT(duckdb::PyUtil::GilCheck());
+			// The holder of the mutex may be running a query that is waiting for this very call
+			conn.con.ThrowIfBusy();
 			nb::gil_scoped_release release;
 			lock_.lock();
 		}

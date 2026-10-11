@@ -28,12 +28,9 @@ static void InitializeReadOnlyProperties(nb::class_<DuckDBPyRelation> &m) {
 }
 
 static void InitializeConsumers(nb::class_<DuckDBPyRelation> &m) {
-	// Execute() returns *this (DuckDBPyRelation&). Without reference_internal nanobind applies the default policy to
-	// the reference return and *moves* the (move-only) relation into a fresh wrapper, leaving the original with a
-	// null rel/result (so a subsequent fetch returns []). reference_internal returns the existing object instead.
-	m.def("execute", &DuckDBPyRelation::Execute, nb::rv_policy::reference_internal,
-	      "Transform the relation into a result set")
-	    .def("close", &DuckDBPyRelation::Close, "Closes the result");
+	m.def("materialize", &DuckDBPyRelation::Materialize,
+	      "Execute once and return a relation over the rows, held in client memory")
+	    .def("close", &DuckDBPyRelation::Close, "Does nothing: a relation holds no result");
 
 	DefineMethod({"to_parquet", "write_parquet"}, m, &DuckDBPyRelation::ToParquet,
 	             "Write the relation object to a Parquet file in 'file_name'", nb::arg("file_name"), nb::kw_only(),
@@ -53,10 +50,7 @@ static void InitializeConsumers(nb::class_<DuckDBPyRelation> &m) {
 	    nb::arg("per_thread_output") = nb::none(), nb::arg("use_tmp_file") = nb::none(),
 	    nb::arg("partition_by") = nb::none(), nb::arg("write_partition_columns") = nb::none());
 
-	m.def("fetchone", &DuckDBPyRelation::FetchOne, "Execute and fetch a single row as a tuple")
-	    .def("fetchmany", &DuckDBPyRelation::FetchMany, "Execute and fetch the next set of rows as a list of tuples",
-	         nb::arg("size") = 1)
-	    .def("fetchall", &DuckDBPyRelation::FetchAll, "Execute and fetch all rows as a list of tuples")
+	m.def("fetchall", &DuckDBPyRelation::FetchAll, "Execute and fetch all rows as a list of tuples")
 	    .def("fetchnumpy", &DuckDBPyRelation::FetchNumpy,
 	         "Execute and fetch all rows as a Python dict mapping each column to one numpy arrays")
 	    .def("df", &DuckDBPyRelation::FetchDF, "Execute and fetch all rows as a pandas DataFrame", nb::kw_only(),
@@ -65,8 +59,6 @@ static void InitializeConsumers(nb::class_<DuckDBPyRelation> &m) {
 	         nb::arg("date_as_object") = false)
 	    .def("to_df", &DuckDBPyRelation::FetchDF, "Execute and fetch all rows as a pandas DataFrame", nb::kw_only(),
 	         nb::arg("date_as_object") = false)
-	    .def("fetch_df_chunk", &DuckDBPyRelation::FetchDFChunk, "Execute and fetch a chunk of the rows",
-	         nb::arg("vectors_per_chunk") = 1, nb::kw_only(), nb::arg("date_as_object") = false)
 	    .def("to_arrow_table", &DuckDBPyRelation::ToArrowTable, "Execute and fetch all rows as an Arrow Table",
 	         nb::arg("batch_size") = DuckDBPyResult::DEFAULT_ARROW_BATCH_SIZE)
 	    .def("to_arrow_reader", &DuckDBPyRelation::ToRecordBatch,

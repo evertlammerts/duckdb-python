@@ -86,14 +86,14 @@ class TestAnotherStatement:
             pytest.param(lambda con: con.register("view_of_df", con.sql("SELECT 1")), id="register"),
         ],
     )
-    def test_it_cancels_an_unfinished_result(self, duckdb_cursor, read_first, statement):
+    def test_it_is_refused_and_leaves_an_unfinished_result(self, duckdb_cursor, read_first, statement):
         duckdb_cursor.execute("SET max_streaming_buffer_size='100KB'")
         duckdb_cursor.execute(f"SELECT i FROM range({ROWS}) t(i)")
         if read_first:
             assert duckdb_cursor.fetchone() == (0,)
-        statement(duckdb_cursor)
-        with pytest.raises(duckdb.InterruptException, match="cancelled"):
-            duckdb_cursor.fetchall()
+        with pytest.raises(duckdb.ResourceInUseException, match="open result"):
+            statement(duckdb_cursor)
+        assert len(duckdb_cursor.fetchall()) == ROWS - read_first
 
     def test_it_leaves_a_completed_result(self, returning_table):
         con = returning_table
@@ -294,7 +294,7 @@ class TestResultOwnership:
             rel = con.sql("SELECT 1 AS i")
             refs = weakref.ref(con), weakref.ref(rel)
             con.execute("SELECT * FROM rel")
-            con.sql("SELECT 42").fetchall()
+            con.execute("SELECT 42").fetchall()
             return refs
 
         assert self.collected(make) == [True, True]

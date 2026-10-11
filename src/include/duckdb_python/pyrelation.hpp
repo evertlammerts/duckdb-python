@@ -168,11 +168,7 @@ public:
 
 	PandasDataFrame FetchDF(bool date_as_object);
 
-	Optional<nb::tuple> FetchOne();
-
 	nb::list FetchAll();
-
-	nb::list FetchMany(idx_t size);
 
 	nb::dict FetchNumpy();
 
@@ -181,8 +177,6 @@ public:
 	nb::dict FetchTF();
 
 	nb::dict FetchNumpyInternal(bool chunked = false, idx_t vectors_per_chunk = 1);
-
-	PandasDataFrame FetchDFChunk(const idx_t vectors_per_chunk = 1, bool date_as_object = false);
 
 	duckdb::pyarrow::Table ToArrowTable(idx_t batch_size);
 
@@ -227,8 +221,8 @@ public:
 
 	std::unique_ptr<DuckDBPyRelation> Query(const string &view_name, const string &sql_query);
 
-	// Update the internal result of the relation
-	DuckDBPyRelation &Execute();
+	//! Runs the relation once and returns a relation over its rows, held in client memory
+	std::unique_ptr<DuckDBPyRelation> Materialize();
 
 	void InsertInto(const string &table);
 
@@ -265,7 +259,7 @@ public:
 	std::unique_ptr<DuckDBPyRelation> DeriveRelation(shared_ptr<Relation> new_rel);
 
 private:
-	string ToStringInternal(const BoxRendererConfig &config, bool invalidate_cache = false);
+	string ToStringInternal(const BoxRendererConfig &config);
 	string GenerateExpressionList(const string &function_name, const string &aggregated_columns,
 	                              const string &groups = "", const string &function_parameter = "",
 	                              bool ignore_nulls = false, const string &projected_columns = "",
@@ -279,7 +273,8 @@ private:
 	                                                const string &window_spec = "",
 	                                                const string &projected_columns = "", bool ignore_nulls = false);
 
-	void ExecuteOrThrow(bool stream_result = false, const engine::Format &format = engine::Format::Chunks());
+	std::shared_ptr<DuckDBPyResult> ExecuteOrThrow(bool stream_result = false,
+	                                               const engine::Format &format = engine::Format::Chunks());
 	//! Runs the relation to a completed, retained result
 	shared_ptr<engine::Result> ExecuteInternal();
 
@@ -287,13 +282,9 @@ private:
 	//! Prevents GC of the parent DuckDBPyConnection.
 	//! Declared first so it is destroyed last (reverse declaration order).
 	nb::object connection_owner;
-	//! Whether the relation has been executed at least once
-	bool executed;
 	shared_ptr<Relation> rel;
 	vector<LogicalType> types;
 	vector<string> names;
-	std::shared_ptr<DuckDBPyResult> result;
-	std::string rendered_result;
 };
 
 } // namespace duckdb

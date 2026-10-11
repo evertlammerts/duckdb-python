@@ -353,7 +353,6 @@ def description(_, queue):
     duckdb_conn.execute("CREATE TABLE test (i bool, j TIME, k VARCHAR)")
     duckdb_conn.execute("INSERT INTO test VALUES (TRUE, '01:01:01', 'bla' )")
     rel = duckdb_conn.table("test")
-    rel.execute()
     try:
         rel.description  # noqa: B018
         queue.put(True)

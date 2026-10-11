@@ -215,6 +215,7 @@ class TestArrowFetchRecordBatch:
         record_batch_reader = query.to_arrow_reader(1)
         chunk = record_batch_reader.read_next_batch()
         assert len(chunk) == 1
+        record_batch_reader.close()
 
         query = duckdb_cursor.sql("SELECT a FROM t")
         record_batch_reader = query.to_arrow_reader(2000)

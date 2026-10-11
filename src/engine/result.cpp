@@ -54,7 +54,7 @@ void Complete(QueryResult &result, const InterruptCheck &check) {
 }
 
 Result::Result(unique_ptr<QueryResult> submitted, Format format_p, shared_ptr<Relation> relation_p)
-    : handle(std::move(submitted)), format(std::move(format_p)), state(State::PENDING), superseded(false),
+    : handle(std::move(submitted)), format(std::move(format_p)), state(State::PENDING),
       relation(std::move(relation_p)) {
 	if (!handle) {
 		throw InternalException("engine::Result created without a query result");
@@ -66,6 +66,10 @@ Result::Result(unique_ptr<QueryResult> submitted, Format format_p, shared_ptr<Re
 	types = handle->GetTypes();
 	properties = handle->GetStatementProperties();
 	client_properties = handle->client_properties;
+	if (!client_properties.client_context) {
+		throw InternalException("engine::Result created without a client context");
+	}
+	connection_state = ConnectionState::Get(*client_properties.client_context);
 	if (format.IsArrow()) {
 		auto &schema = handle->FormatState<ArrowFormat>().Schema();
 		if (duckdb_nanoarrow::ArrowSchemaDeepCopy(&schema, &arrow_schema.arrow_schema) != NANOARROW_OK) {
@@ -78,14 +82,6 @@ Result::~Result() {
 	try {
 		Close();
 	} catch (...) { // NOLINT: a destructor must not throw
-	}
-}
-
-void Result::ThrowIfSuperseded() const {
-	if (superseded) {
-		// The engine reports a query ended by a later statement as an interrupt, and so does the client
-		throw InterruptException(
-		    "The result was cancelled because another statement ran on its connection before it was fully read");
 	}
 }
 
@@ -129,17 +125,10 @@ unique_ptr<typename FORMAT::T> Result::FetchStreamUnit(const InterruptCheck &che
 			return unit;
 		}
 		if (query_state == QueryResultState::FINISHED) {
-			ThrowIfSuperseded();
 			EndStream();
 			return nullptr;
 		}
 		if (query_state == QueryResultState::EXECUTION_ERROR) {
-			ThrowIfSuperseded();
-			// A thread that polls after another thread drained the stream sees the ended query as an
-			// interrupt; it reached the end, not an error
-			if (state == State::DRAINED) {
-				return nullptr;
-			}
 			typed.GetErrorObject().Throw();
 		}
 		check();
@@ -151,7 +140,19 @@ unique_ptr<typename FORMAT::T> Result::FetchStreamUnit(const InterruptCheck &che
 }
 
 void Result::Retain(const InterruptCheck &check) {
-	ThrowIfSuperseded();
+	ConnectionClaim claim(*connection_state, *client_properties.client_context);
+	RetainClaimed(check);
+}
+
+unique_ptr<ConnectionClaim> Result::ClaimWhileRunning() {
+	// Rows already in the client need no engine work, so a fetch of them claims nothing and works anywhere
+	if (state != State::PENDING && state != State::STREAMING) {
+		return nullptr;
+	}
+	return make_uniq<ConnectionClaim>(*connection_state, *client_properties.client_context);
+}
+
+void Result::RetainClaimed(const InterruptCheck &check) {
 	if (state != State::PENDING) {
 		return;
 	}
@@ -160,12 +161,12 @@ void Result::Retain(const InterruptCheck &check) {
 }
 
 void Result::Settle(const InterruptCheck &check) {
-	ThrowIfSuperseded();
+	ConnectionClaim claim(*connection_state, *client_properties.client_context);
 	if (state != State::PENDING) {
 		return;
 	}
 	if (CompletesBeforeReturning()) {
-		Retain(check);
+		RetainClaimed(check);
 		return;
 	}
 	// Undecided, the engine parks the first unit at the result sink; READY means it waits for that decision
@@ -180,7 +181,8 @@ void Result::Settle(const InterruptCheck &check) {
 }
 
 idx_t Result::RowCount(const InterruptCheck &check) {
-	Retain(check);
+	ConnectionClaim claim(*connection_state, *client_properties.client_context);
+	RetainClaimed(check);
 	if (state != State::RETAINED) {
 		throw InternalException("engine::Result::RowCount on a result that is not retained");
 	}
@@ -189,11 +191,11 @@ idx_t Result::RowCount(const InterruptCheck &check) {
 
 unique_ptr<DataChunk> Result::FetchChunk(const InterruptCheck &check) {
 	D_ASSERT(!format.IsArrow());
-	ThrowIfSuperseded();
+	auto claim = ClaimWhileRunning();
 	if (state == State::PENDING) {
 		OpenStream();
 		if (state == State::PENDING) {
-			Retain(check);
+			RetainClaimed(check);
 		}
 	}
 	switch (state) {
@@ -214,11 +216,11 @@ unique_ptr<DataChunk> Result::FetchChunk(const InterruptCheck &check) {
 
 unique_ptr<ArrowArrayWrapper> Result::FetchArray(const InterruptCheck &check) {
 	D_ASSERT(format.IsArrow());
-	ThrowIfSuperseded();
+	auto claim = ClaimWhileRunning();
 	if (state == State::PENDING) {
 		OpenStream();
 		if (state == State::PENDING) {
-			Retain(check);
+			RetainClaimed(check);
 		}
 	}
 	switch (state) {
@@ -234,9 +236,9 @@ unique_ptr<ArrowArrayWrapper> Result::FetchArray(const InterruptCheck &check) {
 
 unique_ptr<ColumnDataCollection> Result::TakeChunks(const InterruptCheck &check) {
 	D_ASSERT(!format.IsArrow());
-	ThrowIfSuperseded();
+	ConnectionClaim claim(*connection_state, *client_properties.client_context);
 	if (state == State::PENDING) {
-		Retain(check);
+		RetainClaimed(check);
 	}
 	if (state == State::RETAINED && !retained_fetched) {
 		auto collection = handle->TakeCollection<ChunkFormat>();
@@ -260,10 +262,10 @@ unique_ptr<ColumnDataCollection> Result::TakeChunks(const InterruptCheck &check)
 
 vector<unique_ptr<ArrowArrayWrapper>> Result::TakeArrays(const InterruptCheck &check) {
 	D_ASSERT(format.IsArrow());
-	ThrowIfSuperseded();
+	ConnectionClaim claim(*connection_state, *client_properties.client_context);
 	vector<unique_ptr<ArrowArrayWrapper>> arrays;
 	if (state == State::PENDING) {
-		Retain(check);
+		RetainClaimed(check);
 	}
 	if (state == State::RETAINED && retained_fetched) {
 		while (auto array = handle->Fetch<ArrowFormat>()) {
@@ -301,20 +303,9 @@ void Result::CopyArrowSchema(ArrowSchema &out) const {
 
 void Result::BuildArrowSchema(const vector<string> &schema_names, ArrowSchema &out) const {
 	auto context = client_properties.client_context;
-	if (!context) {
-		throw ConnectionException("Cannot build an Arrow schema without a valid connection");
-	}
 	auto properties = client_properties;
+	ConnectionClaim claim(*connection_state, *client_properties.client_context);
 	context->RunFunctionInTransaction([&]() { ArrowConverter::ToArrowSchema(&out, types, schema_names, properties); });
-}
-
-shared_ptr<Result> Result::Reformat(const Format &target, const InterruptCheck &check) {
-	auto context = client_properties.client_context;
-	if (!context) {
-		throw ConnectionException("Cannot convert a result whose connection is closed");
-	}
-	auto session = Session(context->shared_from_this());
-	return session.Submit(TakeChunks(check), names, target);
 }
 
 string Result::ToBox(BoxRendererContext &context, const BoxRendererConfig &config) {
@@ -322,10 +313,6 @@ string Result::ToBox(BoxRendererContext &context, const BoxRendererConfig &confi
 		throw InternalException("engine::Result::ToBox on a result that is not retained");
 	}
 	return handle->ToBox(context, config);
-}
-
-bool Result::RowsRead() const {
-	return retained_fetched || state == State::STREAMING || state == State::DRAINED;
 }
 
 int64_t Result::ChangedRows() {
@@ -340,9 +327,6 @@ int64_t Result::ChangedRows() {
 }
 
 bool Result::Running() const {
-	if (superseded) {
-		return false;
-	}
 	lock_guard<mutex> guard(handle_lock);
 	if (state == State::PENDING) {
 		return handle && handle->IsOpen();
@@ -354,9 +338,6 @@ bool Result::Running() const {
 }
 
 bool Result::StreamEnded() const {
-	if (superseded) {
-		return true;
-	}
 	lock_guard<mutex> guard(handle_lock);
 	return stream && !stream->IsOpen();
 }
@@ -374,17 +355,6 @@ void Result::Close() {
 		}
 	}
 	state = State::CLOSED;
-}
-
-void Result::Supersede() {
-	lock_guard<mutex> guard(handle_lock);
-	if (stream && stream->IsOpen()) {
-		superseded = true;
-		stream->Close();
-	} else if (handle && handle->IsOpen()) {
-		superseded = true;
-		handle->Close();
-	}
 }
 
 } // namespace engine

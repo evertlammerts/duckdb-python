@@ -3,10 +3,7 @@
 #include "duckdb/main/relation.hpp"
 #include "duckdb/main/statement_iterator.hpp"
 #include "duckdb/main/valid_checker.hpp"
-#include "duckdb/parser/expression/star_expression.hpp"
-#include "duckdb/parser/query_node/select_node.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
-#include "duckdb/parser/tableref/column_data_ref.hpp"
 #include "duckdb/transaction/meta_transaction.hpp"
 
 namespace duckdb {
@@ -16,20 +13,52 @@ shared_ptr<ConnectionState> ConnectionState::Get(ClientContext &context) {
 	return context.registered_state->GetOrCreate<ConnectionState>("python_connection_state");
 }
 
-void ConnectionState::SetOpen(const shared_ptr<Supersedable> &result) {
-	lock_guard<mutex> guard(lock);
-	open = result;
+static constexpr const char *BUSY_ERROR =
+    "connection is busy with another call; it refuses instead of waiting, so use a separate connection from cursor()";
+static constexpr const char *CALLBACK_ERROR =
+    "code running inside a query cannot use that query's connection; use a separate connection from cursor()";
+
+static thread_local CallbackScope *innermost_callback = nullptr;
+
+CallbackScope::CallbackScope(const ClientContext &context_p) : context(context_p), outer(innermost_callback) {
+	innermost_callback = this;
 }
 
-void ConnectionState::SupersedeOpen() {
-	shared_ptr<Supersedable> result;
-	{
-		lock_guard<mutex> guard(lock);
-		result = open.lock();
-		open.reset();
+CallbackScope::~CallbackScope() {
+	innermost_callback = outer;
+}
+
+bool CallbackScope::Inside(const ClientContext &context) {
+	for (auto scope = innermost_callback; scope; scope = scope->outer) {
+		if (&scope->context == &context) {
+			return true;
+		}
 	}
-	if (result) {
-		result->Supersede();
+	return false;
+}
+
+ConnectionClaim::ConnectionClaim(ConnectionState &state_p, const ClientContext &context) : state(state_p) {
+	if (CallbackScope::Inside(context)) {
+		throw ResourceInUseException(CALLBACK_ERROR);
+	}
+	if (state.busy.exchange(true)) {
+		throw ResourceInUseException(BUSY_ERROR);
+	}
+}
+
+ConnectionClaim::ConnectionClaim(ClientContext &context) : ConnectionClaim(*ConnectionState::Get(context), context) {
+}
+
+ConnectionClaim::~ConnectionClaim() {
+	state.busy = false;
+}
+
+void ConnectionState::ThrowIfBusy(const ClientContext &context) const {
+	if (CallbackScope::Inside(context)) {
+		throw ResourceInUseException(CALLBACK_ERROR);
+	}
+	if (busy) {
+		throw ResourceInUseException(BUSY_ERROR);
 	}
 }
 
@@ -111,11 +140,29 @@ private:
 
 } // namespace
 
+ClaimingContextWrapper::ClaimingContextWrapper(shared_ptr<ClientContextWrapper> inner_p)
+    : ClientContextWrapper(inner_p->TryGetContext()), inner(std::move(inner_p)) {
+}
+
+void ClaimingContextWrapper::TryBindRelation(Relation &relation, vector<ColumnDefinition> &columns) {
+	auto context = GetContext();
+	ConnectionClaim claim(*context);
+	inner->TryBindRelation(relation, columns);
+}
+
+void ClaimingContextWrapper::Install(Relation &relation) {
+	if (!relation.context || dynamic_cast<ClaimingContextWrapper *>(relation.context.get())) {
+		return;
+	}
+	relation.context = make_shared_ptr<ClaimingContextWrapper>(relation.context);
+}
+
 Session::Session(shared_ptr<ClientContext> context_p)
     : context(std::move(context_p)), state(ConnectionState::Get(*context)) {
 }
 
 vector<unique_ptr<SQLStatement>> Session::Parse(const string &sql) {
+	ConnectionClaim claim(*state, *context);
 	// The iterator also runs the preprocessor, without which a PRAGMA cannot be prepared
 	auto iterator = context->IterateStatements(sql);
 	vector<unique_ptr<SQLStatement>> statements;
@@ -128,7 +175,7 @@ vector<unique_ptr<SQLStatement>> Session::Parse(const string &sql) {
 }
 
 Prepared Session::Prepare(unique_ptr<SQLStatement> statement) {
-	state->SupersedeOpen();
+	ConnectionClaim claim(*state, *context);
 	Prepared prepared;
 	{
 		ResolvingGuard guard(*state);
@@ -141,63 +188,40 @@ Prepared Session::Prepare(unique_ptr<SQLStatement> statement) {
 	return prepared;
 }
 
-shared_ptr<Result> Session::Track(unique_ptr<QueryResult> handle, const Format &format, shared_ptr<Relation> relation) {
-	auto result = make_shared_ptr<Result>(std::move(handle), format, std::move(relation));
-	state->SetOpen(result);
-	return result;
-}
-
 shared_ptr<Result> Session::Submit(unique_ptr<SQLStatement> statement, identifier_map_t<BoundParameterData> &values,
                                    const Format &format) {
-	state->SupersedeOpen();
+	ConnectionClaim claim(*state, *context);
 	auto handle = context->Submit(std::move(statement), values, QueryParameters(format.EngineFormat()));
-	return Track(std::move(handle), format, nullptr);
+	return make_shared_ptr<Result>(std::move(handle), format, nullptr);
 }
 
 shared_ptr<Result> Session::Submit(Prepared &prepared, identifier_map_t<BoundParameterData> &values,
                                    const Format &format) {
-	state->SupersedeOpen();
+	ConnectionClaim claim(*state, *context);
 	unique_ptr<QueryResult> handle;
 	{
 		PinGuard guard(*state, prepared.tables);
 		handle = prepared.statement->Submit(values, QueryParameters(format.EngineFormat()));
 	}
-	return Track(std::move(handle), format, nullptr);
+	return make_shared_ptr<Result>(std::move(handle), format, nullptr);
 }
 
 shared_ptr<Result> Session::Submit(const shared_ptr<Relation> &relation, const Format &format) {
-	state->SupersedeOpen();
+	ConnectionClaim claim(*state, *context);
 	QueryParameters parameters(format.EngineFormat());
 	if (!relation->IsReadOnly()) {
 		auto handle = context->Submit(relation, parameters);
-		return Track(std::move(handle), format, relation);
+		return make_shared_ptr<Result>(std::move(handle), format, relation);
 	}
 	auto select = make_uniq<SelectStatement>();
 	select->node = relation->GetQueryNode();
 	select->query = relation->GetQuery();
 	auto handle = context->Submit(std::move(select), parameters);
-	return Track(std::move(handle), format, relation);
-}
-
-shared_ptr<Result> Session::Submit(unique_ptr<ColumnDataCollection> collection, const vector<Identifier> &names,
-                                   const Format &format) {
-	// The binder rejects duplicate column names; the caller keeps the originals
-	auto deduplicated_names = names;
-	QueryResult::DeduplicateColumns(deduplicated_names);
-	auto table_ref = make_uniq<ColumnDataRef>(std::move(collection), std::move(deduplicated_names));
-	// Binding asserts on an unset alias
-	table_ref->alias = "materialized";
-	auto select_node = make_uniq<SelectNode>();
-	select_node->select_list.push_back(make_uniq<StarExpression>());
-	select_node->from_table = std::move(table_ref);
-	auto select = make_uniq<SelectStatement>();
-	select->node = std::move(select_node);
-	identifier_map_t<BoundParameterData> no_values;
-	return Submit(std::move(select), no_values, format);
+	return make_shared_ptr<Result>(std::move(handle), format, relation);
 }
 
 void Session::Run(unique_ptr<SQLStatement> statement, const InterruptCheck &check) {
-	state->SupersedeOpen();
+	ConnectionClaim claim(*state, *context);
 	auto handle = context->Submit(std::move(statement), QueryParameters());
 	Complete(*handle, check);
 }

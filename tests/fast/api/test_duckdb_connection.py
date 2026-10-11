@@ -281,7 +281,7 @@ class TestDuckDBConnection:
     def test_unregister_problematic_behavior(self, duckdb_cursor):
         # We have a VIEW called 'vw' in the Catalog
         duckdb_cursor.execute("create temporary view vw as from range(100)")
-        assert duckdb_cursor.execute("select * from vw").fetchone() == (0,)
+        assert duckdb_cursor.execute("select * from vw").fetchall()[0] == (0,)
 
         # Create a registered object called 'vw'
         arrow_result = duckdb_cursor.sql("select 42").to_arrow_table()
@@ -404,7 +404,7 @@ class TestDuckDBConnection:
 
     def test_set_pandas_analyze_sample_size(self):
         con = duckdb.connect(":memory:named", config={"pandas_analyze_sample": 0})
-        res = con.sql("select current_setting('pandas_analyze_sample')").fetchone()
+        res = con.sql("select current_setting('pandas_analyze_sample')").fetchall()[0]
         assert res == (0,)
 
         # Find the cached config
@@ -412,5 +412,5 @@ class TestDuckDBConnection:
         con2.execute("SET GLOBAL pandas_analyze_sample=2")
 
         # This change is reflected in 'con' because the instance was cached
-        res = con.sql("select current_setting('pandas_analyze_sample')").fetchone()
+        res = con.sql("select current_setting('pandas_analyze_sample')").fetchall()[0]
         assert res == (2,)

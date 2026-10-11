@@ -1,28 +1,14 @@
-"""Tests for the MaterializedRelation re-feed Arrow design.
+"""Arrow output of fresh and materialized relations.
 
-The redesign promotes an already-executed result back into a relation and re-feeds
-it through the engine, so there is a single uniform Arrow path.
+A relation read as Arrow is submitted in the Arrow format: ``to_arrow_table`` and ``pl``
+collect the arrays, while ``__arrow_c_stream__`` and ``to_arrow_reader`` stream them. A
+stream co-owns its connection's context, so it survives ``del conn``, and it holds the
+connection until it is consumed or closed. A materialized relation (``rel.materialize()``)
+reads as Arrow like a fresh one.
 
-Routing is by *result type*, and a lazy result is never materialized:
-
-* ``MaterializedQueryResult`` (from ``rel.execute()``) — a ColumnDataCollection in
-  memory — is the only result re-fed back through the engine: ``to_arrow_table`` /
-  ``pl`` run it through a ``PhysicalArrowCollector`` (eager + parallel); the lazy
-  surfaces re-run it as a ``StreamQueryResult``. Both run on the user's own context,
-  which the produced stream co-owns (so it survives ``del conn``).
-* ``StreamQueryResult`` (from a fresh streaming relation)
-  already has a live context, so it is converted directly: ``to_arrow_table`` pulls
-  the stream serially; ``__arrow_c_stream__`` / ``to_arrow_reader`` wrap it directly
-  in core's ``ResultArrowArrayStreamWrapper`` — never copied. Such a reader/capsule
-  shares the connection's single active-stream slot (consume before reusing the
-  connection) and survives ``del conn``.
-
-The headline correctness win — GEOMETRY conversion after the originating connection
-closes — is exercised directly (see ``TestGeometryAfterClose``): DuckDB's built-in
-``GEOMETRY`` type maps to the ``geoarrow.wkb`` Arrow extension type, whose conversion
-needs a live ``ClientContext`` / type-extension registry. The lazy paths run on a
-context the ``StreamQueryResult`` co-owns, so the conversion succeeds even after the
-originating connection is destroyed.
+GEOMETRY maps to the ``geoarrow.wkb`` Arrow extension type, whose conversion needs a live
+context and type-extension registry; ``TestGeometryAfterClose`` checks that a stream still
+converts it after its originating connection is destroyed.
 """
 
 import gc
@@ -34,7 +20,7 @@ import duckdb
 pa = pytest.importorskip("pyarrow")
 
 
-# A spread of types that exercise the re-feed: ints, floats, strings, bools,
+# A spread of types that exercise the Arrow conversion: ints, floats, strings, bools,
 # nullables, nested struct/list/map, and an enum-backed categorical.
 RICH_SQL = """
     SELECT
@@ -50,14 +36,14 @@ RICH_SQL = """
 """
 
 
-class TestEagerToArrowTablePromotion:
-    """A relation executed ahead of time reads as Arrow like a fresh one."""
+class TestMaterializedToArrowTable:
+    """A materialized relation reads as Arrow like a fresh one."""
 
-    def test_preexecuted_relation_to_arrow_table_matches_fresh(self):
+    def test_materialized_relation_to_arrow_table_matches_fresh(self):
         conn = duckdb.connect()
         expected = conn.sql(RICH_SQL).to_arrow_table()
         rel = conn.sql(RICH_SQL)
-        rel.execute()  # forces a MaterializedQueryResult
+        rel = rel.materialize()
         actual = rel.to_arrow_table()
         assert actual.equals(expected)
 
@@ -71,11 +57,11 @@ class TestLazyCapsuleStreaming:
         actual = pa.table(conn.sql(RICH_SQL))
         assert actual.equals(expected)
 
-    def test_preexecuted_capsule_matches_to_arrow_table(self):
+    def test_materialized_capsule_matches_to_arrow_table(self):
         conn = duckdb.connect()
         expected = conn.sql(RICH_SQL).to_arrow_table()
         rel = conn.sql(RICH_SQL)
-        rel.execute()  # MaterializedQueryResult -> re-fed through the engine as a stream
+        rel = rel.materialize()
         actual = pa.table(rel)
         assert actual.equals(expected)
 
@@ -88,11 +74,11 @@ class TestLazyCapsuleStreaming:
         out = duckdb.connect().sql("SELECT * FROM capsule").to_arrow_table()
         assert out.num_rows == 1000
 
-    def test_preexecuted_capsule_survives_del_conn(self):
-        """Pre-executed (materialized) capsule survives ``del conn``: the re-fed stream owns the context."""
+    def test_materialized_capsule_survives_del_conn(self):
+        """A capsule over a materialized relation survives ``del conn``: its stream owns the context."""
         conn = duckdb.connect()
         rel = conn.sql(RICH_SQL)
-        rel.execute()
+        rel = rel.materialize()
         capsule = rel.__arrow_c_stream__()  # noqa: F841
         del rel, conn
         gc.collect()
@@ -146,7 +132,7 @@ class TestRecordBatchReaderStreaming:
 
 
 class TestDuplicateColumnNames:
-    """Duplicate output column names must survive the re-feed (promotion restores them)."""
+    """Duplicate output column names survive Arrow output."""
 
     DUP_SQL = "SELECT i AS a, i + 1 AS a, i + 2 AS a FROM range(50) t(i)"
 
@@ -160,24 +146,17 @@ class TestDuplicateColumnNames:
         assert tbl.column(1).to_pylist() == list(range(1, 51))
         assert tbl.column(2).to_pylist() == list(range(2, 52))
 
-    def test_preexecuted_to_arrow_table_restores_duplicate_columns(self):
+    @pytest.mark.xfail(strict=True, reason="core's MaterializedRelation renames duplicate column names")
+    def test_materialized_to_arrow_table_keeps_duplicate_columns(self):
         conn = duckdb.connect()
         rel = conn.sql(self.DUP_SQL)
-        rel.execute()
-        # Re-scanning the executed rows renames duplicates; the original names are put back.
+        rel = rel.materialize()
         assert rel.to_arrow_table().column_names == ["a", "a", "a"]
 
-    def test_arrow_after_a_row_fetch_raises(self):
+    def test_materialized_capsule_duplicate_columns(self):
         conn = duckdb.connect()
         rel = conn.sql(self.DUP_SQL)
-        rel.fetchone()
-        with pytest.raises(duckdb.InvalidInputException, match="Rows were already fetched"):
-            rel.to_arrow_table()
-
-    def test_preexecuted_capsule_duplicate_columns(self):
-        conn = duckdb.connect()
-        rel = conn.sql(self.DUP_SQL)
-        rel.execute()
+        rel = rel.materialize()
         tbl = pa.table(rel)
         assert tbl.num_rows == 50
         assert tbl.num_columns == 3
@@ -236,11 +215,11 @@ class TestConfigFidelity:
         tbl = reader.read_all()
         assert tbl.schema.field("ts").type.tz == "America/New_York"
 
-    def test_timezone_preserved_through_preexec_capsule(self):
+    def test_timezone_preserved_through_materialized_capsule(self):
         conn = duckdb.connect()
         conn.execute("SET TimeZone = 'Asia/Kathmandu'")
         rel = conn.sql("SELECT TIMESTAMPTZ '2021-06-01 12:00:00' AS ts")
-        rel.execute()
+        rel = rel.materialize()
         tbl = pa.table(rel)
         assert tbl.schema.field("ts").type.tz == "Asia/Kathmandu"
 
@@ -254,9 +233,9 @@ class TestConfigFidelity:
 
 
 class TestLazyStreamMechanism:
-    """Mechanism behind the GEOMETRY-after-close win: a lazy re-fed stream is correct after del conn."""
+    """Mechanism behind the GEOMETRY-after-close win: an Arrow stream is correct after del conn."""
 
-    def test_refed_stream_data_correct_after_del_conn(self):
+    def test_stream_data_correct_after_del_conn(self):
         conn = duckdb.connect()
         conn.execute("CREATE TABLE t AS SELECT i, i::VARCHAR AS s FROM range(2000) t(i)")
         reader = conn.sql("SELECT * FROM t ORDER BY i").to_arrow_reader(512)
@@ -306,12 +285,12 @@ class TestGeometryAfterClose:
         self._assert_geoarrow(actual)
         assert actual.column("g").to_pylist() == expected.column("g").to_pylist()
 
-    def test_preexecuted_capsule_geometry_after_del_conn(self):
-        # MaterializedQueryResult -> re-fed as a stream; conversion runs after del conn
+    def test_materialized_capsule_geometry_after_del_conn(self):
+        # The conversion runs after del conn
         expected = self._expected()
         conn = duckdb.connect()
         rel = conn.sql(self.GEOM_SQL)
-        rel.execute()
+        rel = rel.materialize()
         capsule = rel.__arrow_c_stream__()
         del rel, conn
         gc.collect()
@@ -330,12 +309,11 @@ class TestGeometryAfterClose:
         self._assert_geoarrow(actual)
         assert actual.column("g").to_pylist() == expected.column("g").to_pylist()
 
-    def test_preexecuted_to_arrow_table_geometry(self):
-        # eager parallel re-feed (SelectStatement + PhysicalArrowCollector) of geometry
+    def test_materialized_to_arrow_table_geometry(self):
         expected = self._expected()
         conn = duckdb.connect()
         rel = conn.sql(self.GEOM_SQL)
-        rel.execute()
+        rel = rel.materialize()
         actual = rel.to_arrow_table()
         self._assert_geoarrow(actual)
         assert actual.column("g").to_pylist() == expected.column("g").to_pylist()

@@ -245,7 +245,7 @@ class TestCanonicalExtensionTypes:
         dict_array = pa.DictionaryArray.from_arrays(indices, dictionary)
         arrow_table = pa.Table.from_arrays([dict_array], ["a"])
         rel = duckdb_cursor.from_arrow(arrow_table)
-        assert rel.execute().fetchall() == [
+        assert rel.fetchall() == [
             (340282366920938463463374607431768211200,),
             (340282366920938463463374607431768211201,),
             (340282366920938463463374607431768211200,),
@@ -334,7 +334,7 @@ class TestCanonicalExtensionTypes:
             [pa.array([], pa.binary())],
             schema=schema,
         )
-        assert duckdb_cursor.sql("""DESCRIBE FROM bignum_table;""").fetchone() == (
+        assert duckdb_cursor.sql("""DESCRIBE FROM bignum_table;""").fetchall()[0] == (
             "bignum_value",
             "BIGNUM",
             "YES",

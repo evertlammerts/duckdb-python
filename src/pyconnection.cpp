@@ -516,6 +516,9 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::UnregisterUDF(const stri
 
 	auto &connection = con.GetConnection();
 	auto &context = *connection.context;
+	// Held from the check to the change, so no result can open in between and be ended by it
+	engine::ConnectionClaim claim(context);
+	context.VerifyNoOpenResult();
 
 	context.RunFunctionInTransaction([&]() {
 		// create function
@@ -540,6 +543,9 @@ DuckDBPyConnection::RegisterScalarUDF(const string &name, const nb::callable &ud
                                       bool side_effects) {
 	auto &connection = con.GetConnection();
 	auto &context = *connection.context;
+	// Held from the check to the change, so no result can open in between and be ended by it
+	engine::ConnectionClaim claim(context);
+	context.VerifyNoOpenResult();
 
 	if (context.transaction.HasActiveTransaction()) {
 		context.CancelTransaction();
@@ -870,6 +876,9 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::RegisterPythonObject(con
                                                                              const nb::object &python_object) {
 	auto &connection = con.GetConnection();
 	auto &client = *connection.context;
+	// Held from the check to the change, so no result can open in between and be ended by it
+	engine::ConnectionClaim claim(client);
+	client.VerifyNoOpenResult();
 	auto object = PythonReplacementScan::ReplacementObject(python_object, name, client);
 	auto view_rel = make_shared_ptr<ViewRelation>(connection.context, std::move(object), name);
 	bool replace = registered_objects.count(name);
@@ -1749,19 +1758,23 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::RunQuery(const nb::object 
 
 	if (!relation) {
 		// Could not create a relation, resort to direct execution
-		// One critical section from submit to completion, so no other statement on the
-		// connection can end the query in between
 		ConnectionLockGuard conn_lock(*this);
 		auto res = PrepareAndSubmitInternal(std::move(last_statement), std::move(params));
 		unique_ptr<ColumnDataCollection> collection;
 		{
 			D_ASSERT(duckdb::PyUtil::GilCheck());
 			nb::gil_scoped_release release;
-			res->Retain(CheckSignals);
-			if (res->Properties().return_type != StatementReturnType::QUERY_RESULT) {
-				return nullptr;
+			try {
+				res->Retain(CheckSignals);
+				if (res->Properties().return_type != StatementReturnType::QUERY_RESULT) {
+					return nullptr;
+				}
+				collection = res->TakeChunks(CheckSignals);
+			} catch (...) {
+				// Ending the query waits for its tasks, which a Python UDF holds until the GIL is free
+				res->Close();
+				throw;
 			}
-			collection = res->TakeChunks(CheckSignals);
 		}
 		relation = make_shared_ptr<MaterializedRelation>(connection.context, std::move(collection), res->Names(),
 		                                                 Identifier(alias));
@@ -1945,6 +1958,9 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::UnregisterPythonObject(c
 	if (!registered_objects.count(name)) {
 		return shared_from_this();
 	}
+	// Held from the check to the change, so no result can open in between and be ended by it
+	engine::ConnectionClaim claim(*connection.context);
+	connection.context->VerifyNoOpenResult();
 	D_ASSERT(duckdb::PyUtil::GilCheck());
 	nb::gil_scoped_release release;
 	// FIXME: DROP TEMPORARY VIEW? doesn't exist?
@@ -2032,12 +2048,12 @@ void DuckDBPyConnection::Close() {
 }
 
 void DuckDBPyConnection::Interrupt() {
-	auto &connection = con.GetConnection();
+	auto &connection = con.GetConnectionWhileBusy();
 	connection.Interrupt();
 }
 
 double DuckDBPyConnection::QueryProgress() {
-	auto &connection = con.GetConnection();
+	auto &connection = con.GetConnectionWhileBusy();
 	return connection.GetQueryProgress();
 }
 
@@ -2088,6 +2104,9 @@ void DuckDBPyConnection::InstallExtension(const string &extension, bool force_in
 
 void DuckDBPyConnection::LoadExtension(const string &extension) {
 	auto &connection = con.GetConnection();
+	// Held from the check to the change, so no result can open in between and be ended by it
+	engine::ConnectionClaim claim(*connection.context);
+	connection.context->VerifyNoOpenResult();
 	const ExtensionLoadOptions extension_opts = {extension};
 	ExtensionHelper::LoadExternalExtension(*connection.context, extension_opts);
 }

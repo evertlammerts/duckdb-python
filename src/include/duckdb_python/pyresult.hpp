@@ -88,9 +88,6 @@ private:
 	unique_ptr<DataChunk> TakeBufferedRows();
 	std::unique_ptr<NumpyResultConversion> InitializeNumpyConversion(bool pandas = false);
 
-	//! Has the engine scan a completed chunk result again in the Arrow format
-	void EnsureArrow(idx_t batch_size);
-
 	template <typename T>
 	T RunWithArrowSchema(const std::function<T(const ArrowSchema &)> &fun, bool dedup_col_names);
 	//! The stream's private data owns the result, and its callbacks run without the GIL.
@@ -100,9 +97,6 @@ private:
 	shared_ptr<engine::Result> result;
 	int64_t rowcount_override = -1;
 	idx_t chunk_offset = 0;
-	//! Set only when the result was re-bound (promotion to Arrow de-duplicates column names
-	//! and core exposes no setter), so the original names survive. Empty means "use result's".
-	vector<Identifier> names_override;
 	unique_ptr<DataChunk> current_chunk;
 	// Holds the categories of Categorical/ENUM types
 	unordered_map<idx_t, nb::list> categories;

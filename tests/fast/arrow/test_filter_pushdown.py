@@ -207,7 +207,7 @@ class TestInPushdown:
         """Regression: https://github.com/duckdb/duckdb-python/issues/52."""
         duckdb.register("arrow_table", pa.table({"a": pa.array(range(5000))}))
         in_list = ", ".join(str(i) for i in range(0, 5000, 2))
-        result = duckdb.sql(f"SELECT count(*) FROM arrow_table WHERE a IN ({in_list})").fetchone()
+        result = duckdb.sql(f"SELECT count(*) FROM arrow_table WHERE a IN ({in_list})").fetchall()[0]
         assert result == (2500,)
 
     def test_in_with_no_nulls_in_list(self):

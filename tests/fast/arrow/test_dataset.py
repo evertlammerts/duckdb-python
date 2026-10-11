@@ -29,9 +29,7 @@ class TestArrowDataset:
 
         rel = duckdb_conn.from_arrow(userdata_parquet_dataset)
 
-        assert (
-            rel.filter("first_name='Jose' and salary > 134708.82").aggregate("count(*)").execute().fetchone()[0] == 12
-        )
+        assert rel.filter("first_name='Jose' and salary > 134708.82").aggregate("count(*)").fetchall()[0][0] == 12
 
     def test_parallel_dataset_register(self, duckdb_cursor):
         duckdb_conn = duckdb.connect()

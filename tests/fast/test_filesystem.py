@@ -323,7 +323,7 @@ class TestNanobindFilesystemHardening:
         con.register_filesystem(memory)
         # Must not overflow (ASan) and must count correctly despite the injected trailing bytes.
         query = "SELECT count(*), sum(column0) FROM read_csv('memory://big.csv', sep=';', header=false)"
-        res = con.sql(query).fetchone()
+        res = con.sql(query).fetchall()[0]
         assert res == (200000, sum(range(200000)))
 
     def test_filesystem_object_destructor_swallows_delete_error(self, monkeypatch):
