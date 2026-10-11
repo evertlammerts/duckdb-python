@@ -128,7 +128,10 @@ class Connection:
         null_handling: FunctionNullHandling,
         stability: FunctionStability,
     ) -> None:
-        """Register a Python callable as a scalar SQL function; the type texts reach DuckDB's parser unchanged."""
+        """Register a Python callable as a scalar SQL function.
+
+        The type texts reach DuckDB's parser unchanged, except exactly "ANY", which the parser refuses.
+        """
 
     def register_object(self, name: str, obj: object, one_shot: bool, numpy_scan: bool) -> None:
         """Make `obj` readable as the table `name` on this database.

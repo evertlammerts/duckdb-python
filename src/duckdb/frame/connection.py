@@ -257,7 +257,8 @@ class Connection:
         Args:
             name: The function's bare, unqualified name.
             function: Called once per row, from DuckDB's own threads.
-            parameters: SQL type texts the arguments are cast to before the call.
+            parameters: SQL type texts the arguments are cast to before the call; ANY takes an argument of any type
+                uncast, as the Python value a query returning it gives.
             returns: The SQL type text the returned value is cast to.
             null_handling: "default" makes a NULL argument a NULL result without a call; "special" passes None in.
             stability: "consistent" lets DuckDB reuse results, "volatile" never, "consistent_within_query" per query.
@@ -276,11 +277,8 @@ class Connection:
         if level is None:
             message = "Invalid Input Error: stability must be 'consistent', 'volatile' or 'consistent_within_query'"
             raise InvalidInputError(message)
-        # ANY would leave arguments uncast while values are read by their declared type; DuckDB refuses it obscurely.
-        texts = list(parameters)
-        if any(_is_any(text) for text in texts):
-            message = "Invalid Input Error: ANY parameters are not supported yet"
-            raise InvalidInputError(message)
+        texts = ["ANY" if _is_any(text) else text for text in parameters]
+        # The return type must be known before the first call, and a Python function's is known only after one.
         if _is_any(returns):
             message = "Invalid Input Error: an ANY return type is not supported yet"
             raise InvalidInputError(message)

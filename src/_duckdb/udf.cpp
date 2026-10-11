@@ -22,15 +22,14 @@ namespace {
 /// collector, so a callable that reaches its own connection would keep the database alive forever. The
 /// database that registered the function owns it instead, and by the time that is dropped no query can still run.
 struct PyFunctionData {
-	PyFunctionData(nb::handle callable, std::string name, std::vector<cxx::LogicalType> parameter_types,
-	               TypeTree returns, bool skip_nulls, std::shared_ptr<ModuleState> module)
-	    : callable(callable), name(std::move(name)), parameter_types(std::move(parameter_types)),
-	      returns(std::move(returns)), skip_nulls(skip_nulls), module(std::move(module)) {
+	PyFunctionData(nb::handle callable, std::string name, TypeTree returns, bool skip_nulls,
+	               std::shared_ptr<ModuleState> module)
+	    : callable(callable), name(std::move(name)), returns(std::move(returns)), skip_nulls(skip_nulls),
+	      module(std::move(module)) {
 	}
 
 	nb::handle callable;
 	std::string name;
-	std::vector<cxx::LogicalType> parameter_types;
 	// Described once here; engine threads only read it, and reading the type's children through the C API per row
 	// would serialize the type each time.
 	TypeTree returns;
@@ -38,9 +37,24 @@ struct PyFunctionData {
 	std::shared_ptr<ModuleState> module;
 };
 
-/// Called from DuckDB's own threads, so the GIL is taken here once per batch; the arguments arrive already cast.
+/// The C++ API's Vector exposes no type, so the type an ANY argument arrives in is kept from the bind callback. The
+/// engine merges two identical calls only when their bind data compares equal, which a vector of types does by value.
+using BoundArguments = std::vector<cxx::LogicalType>;
+
+void PyScalarBind(cxx::ScalarFunction::BindInput &input) {
+	std::vector<cxx::LogicalType> types;
+	const auto count = input.GetArgCount();
+	types.reserve(count);
+	for (cxx::idx_t a = 0; a < count; a++) {
+		types.push_back(input.GetArgType(a));
+	}
+	input.SetBindData<BoundArguments>(std::move(types));
+}
+
+/// Called from DuckDB's own threads, so the GIL is taken here once per batch.
 void PyScalarExec(cxx::ScalarFunction::ExecInput &input) {
 	auto &data = input.GetUserData<PyFunctionData>();
+	const auto &bound = input.GetBindData<BoundArguments>();
 	const auto rows = input.GetRowCount();
 	const auto count = input.GetArgCount();
 	auto context = input.GetContext();
@@ -53,7 +67,7 @@ void PyScalarExec(cxx::ScalarFunction::ExecInput &input) {
 		columns.reserve(count);
 		for (cxx::idx_t a = 0; a < count; a++) {
 			auto argument = input.GetArg(a);
-			columns.push_back(VectorElements(argument, data.parameter_types.at(a), 0, rows, data.module->conversion));
+			columns.push_back(VectorElements(argument, bound.at(a), 0, rows, data.module->conversion));
 		}
 		result.SetSize(rows);
 		for (cxx::idx_t r = 0; r < rows; r++) {
@@ -119,7 +133,9 @@ void RegisterScalarFunction(cxx::Connection &connection, const std::string &name
 	std::vector<cxx::LogicalType> parameter_types;
 	parameter_types.reserve(parameters.size());
 	for (const auto &text : parameters) {
-		parameter_types.push_back(connection.ParseType(text));
+		// The type parser refuses ANY, which only a signature may hold.
+		parameter_types.push_back(text == "ANY" ? connection.CreateType(cxx::LogicalTypeId::ANY)
+		                                        : connection.ParseType(text));
 	}
 	auto return_type = connection.ParseType(returns);
 
@@ -131,8 +147,9 @@ void RegisterScalarFunction(cxx::Connection &connection, const std::string &name
 		}
 		signature.SetReturnType(return_type);
 	});
-	function.SetUserData<PyFunctionData>(callable, name, std::move(parameter_types), TypeTreeOf(std::move(return_type)),
+	function.SetUserData<PyFunctionData>(callable, name, TypeTreeOf(std::move(return_type)),
 	                                     nulls == cxx::FunctionNullHandling::DEFAULT, std::move(module));
+	function.SetBindCallback(&PyScalarBind);
 	function.SetExecCallback(&PyScalarExec);
 	function.SetNullHandling(nulls);
 	function.SetStability(level);

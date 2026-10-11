@@ -88,10 +88,11 @@ class TestRegistration:
             con.create_function("f", lambda x: x, ["BIGINT"], "BIGINT")
 
     @pytest.mark.parametrize("text", ["ANY", "any", " ANY "])
-    def test_an_any_parameter_is_refused(self, con: duckdb.frame.Connection, text: str) -> None:
-        with pytest.raises(exceptions.InvalidInputError) as info:
-            con.create_function("f", lambda x, y: x, ["BIGINT", text], "BIGINT")
-        assert str(info.value) == "Invalid Input Error: ANY parameters are not supported yet"
+    def test_an_any_parameter_is_spelled_as_the_parser_spells_types(
+        self, con: duckdb.frame.Connection, text: str
+    ) -> None:
+        con.create_function("f", lambda x, y: f"{x}:{y!r}", ["BIGINT", text], "VARCHAR")
+        assert rows(con, "SELECT f(1, 'y')") == [("1:'y'",)]
 
     @pytest.mark.parametrize("text", ["ANY", "any", " ANY "])
     def test_an_any_return_type_is_refused(self, con: duckdb.frame.Connection, text: str) -> None:
@@ -170,6 +171,155 @@ class TestNulls:
     def test_returning_none_makes_the_result_null(self, con: duckdb.frame.Connection) -> None:
         con.create_function("odd_only", lambda x: x if x % 2 else None, ["BIGINT"], "BIGINT")
         assert rows(con, "SELECT odd_only(i) FROM range(4) t(i)") == [(None,), (1,), (None,), (3,)]
+
+
+def recorder(seen: list[object]) -> Callable[[object], int]:
+    def record(x: object) -> int:
+        seen.append(x)
+        return 0
+
+    return record
+
+
+#: An ANY argument must arrive as `SELECT <value>` returns it, for a value of every type family.
+ANY_VALUES = [
+    "1::TINYINT",
+    "-5::SMALLINT",
+    "7",
+    "2::BIGINT",
+    "255::UTINYINT",
+    "65535::USMALLINT",
+    "4294967295::UINTEGER",
+    "18446744073709551615::UBIGINT",
+    "170141183460469231731687303715884105727::HUGEINT",
+    "340282366920938463463374607431768211455::UHUGEINT",
+    "1.5::FLOAT",
+    "'nan'::DOUBLE",
+    "'-inf'::DOUBLE",
+    "-0.0::DOUBLE",
+    "1.250::DECIMAL(9, 3)",
+    "123456789012345678901234567.5::DECIMAL(38, 1)",
+    "'héllo'",
+    "'a' || chr(0) || 'b'",
+    "'\\x00\\xff'::BLOB",
+    "true",
+    "DATE '2026-01-02'",
+    "TIME '12:34:56.789'",
+    "TIMETZ '12:34:56+05:30'",
+    "TIMESTAMP '2026-01-02 03:04:05.123456'",
+    "TIMESTAMP_S '2026-01-02 03:04:05'",
+    "TIMESTAMP_MS '2026-01-02 03:04:05.123'",
+    "TIMESTAMP_NS '2026-01-02 03:04:05.123456789'",
+    "TIMESTAMPTZ '2026-01-02 03:04:05+00'",
+    "INTERVAL '1 month 2 days 3 seconds'",
+    "'00000000-0000-0000-0000-000000000001'::UUID",
+    "'ok'::mood",
+    "[1, NULL, 3]",
+    "[1, 2]::INTEGER[2]",
+    "{'a': 1, 'b': [true]}",
+    "MAP {'k': [1]}",
+    "union_value(n := 3)",
+    "'101'::BIT",
+    "[{'at': TIMESTAMPTZ '2026-01-02 03:04:05+00', 'mood': 'sad'::mood}]",
+]
+
+
+class TestAnyParameters:
+    """An ANY parameter takes its argument uncast, so each call site converts by the type the caller passed."""
+
+    @pytest.fixture
+    def kept(self, con: duckdb.frame.Connection) -> list[object]:
+        con.run("CREATE TYPE mood AS ENUM ('sad', 'ok')")
+        seen: list[object] = []
+        con.create_function("keep", recorder(seen), ["ANY"], "INTEGER")
+        return seen
+
+    @pytest.mark.parametrize("value", ANY_VALUES)
+    def test_an_argument_arrives_as_a_query_returns_it(
+        self, con: duckdb.frame.Connection, kept: list[object], value: str
+    ) -> None:
+        rows(con, f"SELECT keep({value})")
+        ((expect,),) = rows(con, f"SELECT {value}")
+        # By repr, so a NaN compares, and by type, so 1 and True and 1.0 stay apart.
+        assert [repr(x) for x in kept] == [repr(expect)]
+        assert type(kept[0]) is type(expect)
+
+    def test_each_call_site_converts_by_its_own_type(self, con: duckdb.frame.Connection) -> None:
+        con.create_function("kind", lambda x: type(x).__name__, ["ANY"], "VARCHAR")
+        assert rows(con, "SELECT kind(1), kind('x'), kind([1]), kind({'a': 1.5}), kind(DATE '2026-01-02')") == [
+            ("int", "str", "list", "dict", "date")
+        ]
+        assert rows(con, "SELECT DISTINCT kind(i) FROM range(3) t(i)") == [("int",)]
+        assert rows(con, "SELECT DISTINCT kind(i::VARCHAR) FROM range(3) t(i)") == [("str",)]
+
+    def test_a_declared_parameter_beside_one_is_still_cast(self, con: duckdb.frame.Connection) -> None:
+        con.create_function("pair", lambda a, b: f"{a!r}/{b!r}", ["INTEGER", "ANY"], "VARCHAR")
+        assert rows(con, "SELECT pair('7', '7'), pair(7::SMALLINT, 7.0)") == [("7/'7'", "7/Decimal('7.0')")]
+
+    def test_a_null_argument_follows_the_null_handling(self, con: duckdb.frame.Connection) -> None:
+        calls: list[object] = []
+        con.create_function("skips", recorder(calls), ["ANY"], "INTEGER")
+        con.create_function("sees", lambda x: repr(x), ["ANY"], "VARCHAR", null_handling="special")
+        assert rows(con, "SELECT skips(NULL), sees(NULL), sees(NULL::INTEGER[])") == [(None, "None", "None")]
+        assert calls == []
+
+    def test_parameters_bind_as_their_values(self, con: duckdb.frame.Connection) -> None:
+        con.create_function("seen", lambda x: repr(x), ["ANY"], "VARCHAR", null_handling="special")
+        con.create_function("skips", lambda x: repr(x), ["ANY"], "VARCHAR")
+        for value in (5, "x", [1, 2], {"a": 1}, datetime.date(2026, 1, 2)):
+            with con._execute("SELECT seen($1)", [value]) as result:
+                assert result.fetch_all() == [(repr(value),)]
+        with con._execute("SELECT seen($1), skips($1)", [None]) as result:
+            assert result.fetch_all() == [("None", None)]
+
+    def test_a_prepared_statement_binds_again_for_each_argument_type(self, con: duckdb.frame.Connection) -> None:
+        # Converting by the types of an earlier execution would read one type's data as another's.
+        con.create_function("seen", lambda x: repr(x), ["ANY"], "VARCHAR", null_handling="special")
+        con.run("PREPARE p AS SELECT seen($1)")
+        for value, expect in (("5", 5), ("'x'", "x"), ("[1, 2]", [1, 2]), ("NULL", None), ("5", 5)):
+            assert rows(con, f"EXECUTE p({value})") == [(repr(expect),)]
+
+    def test_every_row_of_a_column_with_nulls_is_converted(self, con: duckdb.frame.Connection) -> None:
+        con.create_function("twice", lambda x: x * 2, ["ANY"], "BIGINT")
+        con.create_function("inner", lambda s: s["v"][0], ["ANY"], "BIGINT")
+        values = "CASE WHEN i % 7 = 0 THEN NULL ELSE i END"
+        got = rows(con, f"SELECT twice(x), inner({{'v': [x]}}) FROM (SELECT {values} AS x FROM range(5000) t(i))")
+        expect = [(None if i % 7 == 0 else 2 * i, None if i % 7 == 0 else i) for i in range(5000)]
+        assert got == expect
+
+    @pytest.mark.parametrize("parameter", ["BIGINT", "ANY"])
+    def test_a_call_repeated_in_a_row_runs_once(self, con: duckdb.frame.Connection, parameter: str) -> None:
+        calls: list[object] = []
+        con.create_function("count_me", recorder(calls), [parameter], "INTEGER")
+        rows(con, "SELECT count_me(i) AS a, count_me(i) AS b FROM range(10) t(i)")
+        assert len(calls) == 10
+
+    def test_engine_workers_convert_by_the_bound_types(self, con: duckdb.frame.Connection) -> None:
+        con.run("SET threads = 4")
+        seen: set[int] = set()
+
+        def length(x: dict[str, object]) -> int:
+            seen.add(threading.get_ident())
+            return len(str(x["s"]))
+
+        con.create_function("length", length, ["ANY"], "BIGINT")
+        con.run("CREATE TABLE big AS SELECT i FROM range(1000000) t(i)")
+        got = rows(con, "SELECT sum(length({'s': i::VARCHAR})) FROM big")
+        assert got == [(sum(len(str(i)) for i in range(1000000)),)]
+        assert len(seen) >= 2
+
+    def test_a_function_is_called_from_a_plan(self, con: duckdb.frame.Connection) -> None:
+        con.create_function("kind", lambda x: type(x).__name__, ["ANY"], "VARCHAR")
+        plan = duckdb.frame.sql("SELECT 1 AS i, 'x' AS s").select(fn("kind", col("i")), fn("kind", col("s")))
+        assert plan.on(con).rows() == [("int", "str")]
+
+    def test_failures_still_name_the_function(self, con: duckdb.frame.Connection) -> None:
+        con.create_function("boom", lambda x: 1 / 0, ["ANY"], "INTEGER")
+        con.create_function("wrong", lambda x: "text", ["ANY"], "INTEGER")
+        with pytest.raises(exceptions.InvalidInputError, match=r"'boom'.*ZeroDivisionError"):
+            rows(con, "SELECT boom([1])")
+        with pytest.raises(exceptions.InvalidInputError, match="'wrong'"):
+            rows(con, "SELECT wrong({'a': 1})")
 
 
 class TestUnbindableReturns:
