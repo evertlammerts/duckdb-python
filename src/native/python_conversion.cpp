@@ -403,14 +403,23 @@ Value TransformDictionary(optional_ptr<ClientContext> context, const PyDictionar
 	return TransformDictionaryToStruct(context, dict);
 }
 
+//! Only an imported pandas can have produced a value, and importing it here would run the import on whichever thread
+//! of the query converts the value. A None entry is how a program blocks the import.
+static bool PandasIsImported(PythonImportCache &import_cache) {
+	if (import_cache.pandas(false)) {
+		return true;
+	}
+	auto module = PyDict_GetItemString(PyImport_GetModuleDict(), "pandas");
+	return module && module != Py_None;
+}
+
 PythonObjectType GetPythonObjectType(nb::handle &ele) {
 	auto &import_cache = *DuckDBPyConnection::ImportCache();
 
 	if (ele.is_none()) {
 		return PythonObjectType::None;
-	} else if (ele.is(import_cache.pandas.NaT())) {
-		return PythonObjectType::None;
-	} else if (ele.is(import_cache.pandas.NA())) {
+	} else if (PandasIsImported(import_cache) &&
+	           (ele.is(import_cache.pandas.NaT()) || ele.is(import_cache.pandas.NA()))) {
 		return PythonObjectType::None;
 	} else if (nb::isinstance<nb::bool_>(ele)) {
 		return PythonObjectType::Bool;

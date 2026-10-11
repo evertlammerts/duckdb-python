@@ -18,6 +18,10 @@ static constexpr const char *BUSY_ERROR =
 static constexpr const char *CALLBACK_ERROR =
     "code running inside a query cannot use that query's connection; use a separate connection from cursor()";
 
+static constexpr const char *UNFINISHED_EXECUTE_ERROR =
+    "connection has an unfinished result from execute(); call complete() or abort(), or fetch until a fetch returns "
+    "no rows, before other work on this connection, or use a separate connection from cursor()";
+
 static thread_local CallbackScope *innermost_callback = nullptr;
 
 CallbackScope::CallbackScope(const ClientContext &context_p) : context(context_p), outer(innermost_callback) {
@@ -157,6 +161,45 @@ void ClaimingContextWrapper::Install(Relation &relation) {
 	relation.context = make_shared_ptr<ClaimingContextWrapper>(relation.context);
 }
 
+void ConnectionState::SetDbapiResult(const shared_ptr<Result> &result) {
+	lock_guard<mutex> guard(lock);
+	dbapi_result = result;
+}
+
+void ConnectionState::NameRefusal(const ErrorData &error) {
+	if (error.Type() != ExceptionType::RESOURCE_IN_USE) {
+		return;
+	}
+	shared_ptr<Result> result;
+	{
+		lock_guard<mutex> guard(lock);
+		result = dbapi_result.lock();
+	}
+	// One result at a time holds the connection, so a running DB-API result is the one the engine refused for
+	if (result && result->Running()) {
+		throw ResourceInUseException(UNFINISHED_EXECUTE_ERROR);
+	}
+}
+
+void VerifyNoOpenResult(ClientContext &context) {
+	try {
+		context.VerifyNoOpenResult();
+	} catch (std::exception &error) {
+		NameRefusal(context, error);
+		throw;
+	}
+}
+
+void NameRefusal(ClientContext &context, const std::exception &error) {
+	ConnectionState::Get(context)->NameRefusal(ErrorData(error));
+}
+
+static void NameRefusal(ConnectionState &state, QueryResult &handle) {
+	if (handle.HasError()) {
+		state.NameRefusal(handle.GetErrorObject());
+	}
+}
+
 Session::Session(shared_ptr<ClientContext> context_p)
     : context(std::move(context_p)), state(ConnectionState::Get(*context)) {
 }
@@ -183,6 +226,7 @@ Prepared Session::Prepare(unique_ptr<SQLStatement> statement) {
 		prepared.tables = guard.End();
 	}
 	if (prepared.statement->HasError()) {
+		state->NameRefusal(prepared.statement->GetErrorObject());
 		prepared.statement->GetErrorObject().Throw();
 	}
 	return prepared;
@@ -192,6 +236,7 @@ shared_ptr<Result> Session::Submit(unique_ptr<SQLStatement> statement, identifie
                                    const Format &format) {
 	ConnectionClaim claim(*state, *context);
 	auto handle = context->Submit(std::move(statement), values, QueryParameters(format.EngineFormat()));
+	NameRefusal(*state, *handle);
 	return make_shared_ptr<Result>(std::move(handle), format, nullptr);
 }
 
@@ -203,6 +248,7 @@ shared_ptr<Result> Session::Submit(Prepared &prepared, identifier_map_t<BoundPar
 		PinGuard guard(*state, prepared.tables);
 		handle = prepared.statement->Submit(values, QueryParameters(format.EngineFormat()));
 	}
+	NameRefusal(*state, *handle);
 	return make_shared_ptr<Result>(std::move(handle), format, nullptr);
 }
 
@@ -211,18 +257,21 @@ shared_ptr<Result> Session::Submit(const shared_ptr<Relation> &relation, const F
 	QueryParameters parameters(format.EngineFormat());
 	if (!relation->IsReadOnly()) {
 		auto handle = context->Submit(relation, parameters);
+		NameRefusal(*state, *handle);
 		return make_shared_ptr<Result>(std::move(handle), format, relation);
 	}
 	auto select = make_uniq<SelectStatement>();
 	select->node = relation->GetQueryNode();
 	select->query = relation->GetQuery();
 	auto handle = context->Submit(std::move(select), parameters);
+	NameRefusal(*state, *handle);
 	return make_shared_ptr<Result>(std::move(handle), format, relation);
 }
 
 void Session::Run(unique_ptr<SQLStatement> statement, const InterruptCheck &check) {
 	ConnectionClaim claim(*state, *context);
 	auto handle = context->Submit(std::move(statement), QueryParameters());
+	NameRefusal(*state, *handle);
 	Complete(*handle, check);
 }
 

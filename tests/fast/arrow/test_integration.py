@@ -81,7 +81,7 @@ class TestArrowIntegration:
 
         arrow_result = duckdb_cursor.execute(
             "SELECT typeof(a), typeof(b), typeof(c),typeof(d) from testarrow"
-        ).fetchone()
+        ).fetchall()[0]
 
         assert arrow_result[0] == "DECIMAL(4,2)"
         assert arrow_result[1] == "DECIMAL(9,2)"

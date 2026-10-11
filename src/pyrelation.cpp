@@ -1333,7 +1333,12 @@ void DuckDBPyRelation::ToCSV(const string &filename, const nb::object &sep, cons
 
 // should this return a rel with the new view?
 std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::CreateView(const string &view_name, bool replace) {
-	rel->CreateView(Identifier(view_name), replace);
+	try {
+		rel->CreateView(Identifier(view_name), replace);
+	} catch (std::exception &error) {
+		engine::NameRefusal(*rel->context->GetContext(), error);
+		throw;
+	}
 	return DeriveRelation(rel);
 }
 
@@ -1349,7 +1354,12 @@ static bool IsDescribeStatement(SQLStatement &statement) {
 }
 
 std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Query(const string &view_name, const string &sql_query) {
-	rel->CreateView(Identifier(view_name), /*replace=*/true, /*temporary=*/true);
+	try {
+		rel->CreateView(Identifier(view_name), /*replace=*/true, /*temporary=*/true);
+	} catch (std::exception &error) {
+		engine::NameRefusal(*rel->context->GetContext(), error);
+		throw;
+	}
 	auto all_dependencies = rel->GetAllDependencies();
 
 	Parser parser(*rel->context->GetContext());
@@ -1442,7 +1452,12 @@ void DuckDBPyRelation::Insert(const nb::object &params) const {
 	D_ASSERT(duckdb::PyUtil::GilCheck());
 	nb::gil_scoped_release release;
 	engine::ConnectionClaim claim(*rel->context->GetContext());
-	rel->Insert(values);
+	try {
+		rel->Insert(values);
+	} catch (std::exception &error) {
+		engine::NameRefusal(*rel->context->GetContext(), error);
+		throw;
+	}
 }
 
 void DuckDBPyRelation::Create(const string &table) {

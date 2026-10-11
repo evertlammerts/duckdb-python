@@ -11,7 +11,7 @@ class TestUDFTransactionality:
         def my_func(x: str) -> int:
             return int(x)
 
-        with pytest.raises(duckdb.ResourceInUseException, match="open result"):
+        with pytest.raises(duckdb.ResourceInUseException, match="unfinished result from execute"):
             duckdb_cursor.create_function("test", my_func)
 
         assert duckdb_cursor.fetchone() == (1,)

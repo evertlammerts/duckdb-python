@@ -91,7 +91,7 @@ class TestAnotherStatement:
         duckdb_cursor.execute(f"SELECT i FROM range({ROWS}) t(i)")
         if read_first:
             assert duckdb_cursor.fetchone() == (0,)
-        with pytest.raises(duckdb.ResourceInUseException, match="open result"):
+        with pytest.raises(duckdb.ResourceInUseException, match="unfinished result from execute"):
             statement(duckdb_cursor)
         assert len(duckdb_cursor.fetchall()) == ROWS - read_first
 

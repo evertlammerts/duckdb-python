@@ -518,7 +518,7 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::UnregisterUDF(const stri
 	auto &context = *connection.context;
 	// Held from the check to the change, so no result can open in between and be ended by it
 	engine::ConnectionClaim claim(context);
-	context.VerifyNoOpenResult();
+	engine::VerifyNoOpenResult(context);
 
 	context.RunFunctionInTransaction([&]() {
 		// create function
@@ -545,7 +545,7 @@ DuckDBPyConnection::RegisterScalarUDF(const string &name, const nb::callable &ud
 	auto &context = *connection.context;
 	// Held from the check to the change, so no result can open in between and be ended by it
 	engine::ConnectionClaim claim(context);
-	context.VerifyNoOpenResult();
+	engine::VerifyNoOpenResult(context);
 
 	if (context.transaction.HasActiveTransaction()) {
 		context.CancelTransaction();
@@ -878,7 +878,7 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::RegisterPythonObject(con
 	auto &client = *connection.context;
 	// Held from the check to the change, so no result can open in between and be ended by it
 	engine::ConnectionClaim claim(client);
-	client.VerifyNoOpenResult();
+	engine::VerifyNoOpenResult(client);
 	auto object = PythonReplacementScan::ReplacementObject(python_object, name, client);
 	auto view_rel = make_shared_ptr<ViewRelation>(connection.context, std::move(object), name);
 	bool replace = registered_objects.count(name);
@@ -1960,7 +1960,7 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::UnregisterPythonObject(c
 	}
 	// Held from the check to the change, so no result can open in between and be ended by it
 	engine::ConnectionClaim claim(*connection.context);
-	connection.context->VerifyNoOpenResult();
+	engine::VerifyNoOpenResult(*connection.context);
 	D_ASSERT(duckdb::PyUtil::GilCheck());
 	nb::gil_scoped_release release;
 	// FIXME: DROP TEMPORARY VIEW? doesn't exist?
@@ -2106,7 +2106,7 @@ void DuckDBPyConnection::LoadExtension(const string &extension) {
 	auto &connection = con.GetConnection();
 	// Held from the check to the change, so no result can open in between and be ended by it
 	engine::ConnectionClaim claim(*connection.context);
-	connection.context->VerifyNoOpenResult();
+	engine::VerifyNoOpenResult(*connection.context);
 	const ExtensionLoadOptions extension_opts = {extension};
 	ExtensionHelper::LoadExternalExtension(*connection.context, extension_opts);
 }

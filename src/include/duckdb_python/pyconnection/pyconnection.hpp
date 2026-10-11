@@ -77,6 +77,9 @@ public:
 	//! Makes way for the next statement: one that may write runs to its end, so its effects are not lost; one
 	//! that reads is cancelled
 	void Supersede();
+	shared_ptr<engine::Result> EngineResult() const {
+		return result ? result->EngineResult() : nullptr;
+	}
 
 private:
 	//! Null once a consuming fetch, complete() or abort() has used the rows up
@@ -169,6 +172,9 @@ public:
 	}
 	void SetResult(std::unique_ptr<DbapiResult> res) {
 		result = std::move(res);
+		if (state) {
+			state->SetDbapiResult(result ? result->EngineResult() : nullptr);
+		}
 	}
 
 private:

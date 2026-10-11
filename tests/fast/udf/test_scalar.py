@@ -308,7 +308,7 @@ class TestScalarUDF:
         con.execute("select * from range(4096)")
         assert con.fetchone() == (0,)
         # The open result holds the connection's transaction, so registering a function is refused until it is read
-        with pytest.raises(duckdb.ResourceInUseException, match="open result"):
+        with pytest.raises(duckdb.ResourceInUseException, match="unfinished result from execute"):
             con.create_function("func", func)
         assert len(con.fetchall()) == 4095
 

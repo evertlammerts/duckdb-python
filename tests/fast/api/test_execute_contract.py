@@ -17,6 +17,8 @@ VECTOR = 2048
 # An undecided result parks its first chunk at the sink, so settling runs about one vector.
 SETTLED = 4 * VECTOR
 OPEN_RESULT = "open result"
+# The refusal while a result of execute() holds the connection, which only the DB-API can end
+UNFINISHED_EXECUTE = "unfinished result from execute"
 BUSY = "is busy with another call"
 INSIDE_A_QUERY = "inside a query cannot use"
 # Which of the two refuses a call from another thread depends on whether it lands during engine work or between it
@@ -280,7 +282,7 @@ class TestSupersede:
         con.execute("CREATE SEQUENCE s")
         con.execute(f"SELECT nextval('s') FROM range({ROWS})")
         con.fetchone()
-        with pytest.raises(duckdb.ResourceInUseException, match=OPEN_RESULT):
+        with pytest.raises(duckdb.ResourceInUseException, match=UNFINISHED_EXECUTE):
             con.sql("SELECT 1").fetchall()
         assert con.execute("SELECT 2").fetchall() == [(2,)]
         assert con.execute("SELECT currval('s')").fetchall() == [(ROWS,)]
@@ -321,7 +323,7 @@ class TestOpenResultIsExclusive:
         con.fetchone()
         # Building a relation only binds, so it succeeds; running it is what conflicts with the open result.
         target = prepare(con)
-        with pytest.raises(duckdb.ResourceInUseException, match=OPEN_RESULT):
+        with pytest.raises(duckdb.ResourceInUseException, match=UNFINISHED_EXECUTE):
             run(target)
         assert con.fetchone() == (1,)
 
@@ -340,13 +342,13 @@ class TestOpenResultIsExclusive:
         frame = pd.DataFrame({"a": [1]})
         con.execute(f"SELECT * FROM range({ROWS})")
         con.fetchone()
-        with pytest.raises(duckdb.ResourceInUseException, match=OPEN_RESULT):
+        with pytest.raises(duckdb.ResourceInUseException, match=UNFINISHED_EXECUTE):
             con.register("v", frame)
         assert con.fetchone() == (1,)
 
     @pytest.mark.parametrize("release", ["complete", "abort", "fetchall"])
     def test_releasing_the_result_frees_the_connection(self, open_result, release):
-        with pytest.raises(duckdb.ResourceInUseException, match=OPEN_RESULT):
+        with pytest.raises(duckdb.ResourceInUseException, match=UNFINISHED_EXECUTE):
             open_result.sql("SELECT 1").fetchall()
         getattr(open_result, release)()
         assert open_result.sql("SELECT 42").fetchall() == [(42,)]
@@ -593,7 +595,7 @@ class TestOpenResultIsExclusive:
         con.register("v", con.sql("SELECT 1"))
         con.execute(f"SELECT * FROM range({ROWS})")
         con.fetchone()
-        with pytest.raises(duckdb.ResourceInUseException, match=OPEN_RESULT):
+        with pytest.raises(duckdb.ResourceInUseException, match=UNFINISHED_EXECUTE):
             call(con)
         assert con.fetchone() == (1,)
 
@@ -603,7 +605,7 @@ class TestOpenResultIsExclusive:
         con.execute("INSERT INTO t VALUES (1)")
         con.execute(f"SELECT * FROM range({ROWS})")
         con.fetchone()
-        with pytest.raises(duckdb.OperationalError, match=OPEN_RESULT):
+        with pytest.raises(duckdb.OperationalError, match=UNFINISHED_EXECUTE):
             con.sql("INSERT INTO t VALUES (2)")
         assert len(con.fetchall()) == ROWS - 1
         con.execute("COMMIT")
@@ -620,7 +622,7 @@ class TestOpenResultIsExclusive:
     def test_materializing_a_relation_while_a_result_is_open_errors(self, con):
         con.execute(f"SELECT * FROM range({ROWS})")
         con.fetchone()
-        with pytest.raises(duckdb.ResourceInUseException, match=OPEN_RESULT):
+        with pytest.raises(duckdb.ResourceInUseException, match=UNFINISHED_EXECUTE):
             con.sql("SELECT 1").materialize()
         assert con.fetchone() == (1,)
 
@@ -631,9 +633,61 @@ class TestOpenResultIsExclusive:
         con.execute("CREATE TABLE t (a BIGINT)")
         con.execute(f"SELECT * FROM range({ROWS})")
         con.fetchone()
-        with pytest.raises(duckdb.ResourceInUseException, match=OPEN_RESULT):
+        with pytest.raises(duckdb.ResourceInUseException, match=UNFINISHED_EXECUTE):
             con.append("t", pd.DataFrame({"a": [1]}))
         assert con.fetchone() == (1,)
+
+    def test_the_refusal_says_how_to_end_the_result(self, con):
+        con.execute(f"SELECT * FROM range({ROWS})")
+        con.fetchone()
+        with pytest.raises(duckdb.ResourceInUseException) as refusal:
+            con.sql("SELECT 1").fetchall()
+        assert re.search(r"complete\(\) or abort\(\).*cursor\(\)", str(refusal.value))
+
+    @pytest.mark.parametrize(
+        "run",
+        [
+            pytest.param(lambda c: c.table("t").insert([2]), id="insert"),
+            pytest.param(lambda c: c.sql("SELECT 1 AS a").create_view("v"), id="create_view"),
+            pytest.param(lambda c: c.sql("SELECT 1 AS a").query("x", "SELECT a FROM x"), id="query"),
+        ],
+    )
+    def test_relation_work_outside_a_statement_names_the_result(self, con, run):
+        con.execute("CREATE TABLE t (a BIGINT)")
+        con.execute(f"SELECT * FROM range({ROWS})")
+        con.fetchone()
+        with pytest.raises(duckdb.ResourceInUseException, match=UNFINISHED_EXECUTE):
+            run(con)
+        assert con.fetchone() == (1,)
+
+    @needs_pyarrow
+    def test_a_reader_that_holds_the_connection_is_not_blamed_on_execute(self, con):
+        con.execute("SELECT 1")
+        assert con.fetchone() == (1,)
+        assert con.fetchone() is None
+        reader = con.sql(f"SELECT * FROM range({ROWS})").to_arrow_reader(1024)
+        reader.read_next_batch()
+        with pytest.raises(duckdb.ResourceInUseException, match=OPEN_RESULT):
+            con.sql("SELECT 1").fetchall()
+        reader.close()
+        assert con.sql("SELECT 42").fetchall() == [(42,)]
+
+    def test_a_single_row_result_holds_the_connection_until_a_fetch_finds_its_end(self, con):
+        con.execute("SELECT count(*) FROM range(10)")
+        assert con.fetchone() == (10,)
+        with pytest.raises(duckdb.ResourceInUseException, match=UNFINISHED_EXECUTE):
+            con.sql("SELECT 1").fetchall()
+        assert con.fetchone() is None
+        assert con.sql("SELECT 42").fetchall() == [(42,)]
+
+    def test_a_cursor_result_holds_only_the_cursor(self, con):
+        cursor = con.cursor()
+        cursor.execute(f"SELECT * FROM range({ROWS})")
+        cursor.fetchone()
+        assert con.sql("SELECT 42").fetchall() == [(42,)]
+        with pytest.raises(duckdb.ResourceInUseException, match=UNFINISHED_EXECUTE):
+            cursor.sql("SELECT 1").fetchall()
+        assert cursor.fetchone() == (1,)
 
     def test_an_interrupted_materialize_does_not_hang(self):
         code, output = run_isolated(
@@ -651,8 +705,6 @@ class TestOpenResultIsExclusive:
             # A builtin runs no bytecode, so the Ctrl-C reaches the client's signal check while the scan's
             # tasks are still in the UDF, instead of raising inside a UDF call and failing the query
             con.create_function("identity", abs, [BIGINT], BIGINT)
-            # The first UDF call imports pandas, and a Ctrl-C landing in that import is lost
-            con.execute("SELECT identity(1)").fetchall()
             rel = con.sql("SELECT identity(i) FROM t")
             print("started", flush=True)
             threading.Timer(0.2, _thread.interrupt_main).start()

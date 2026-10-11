@@ -57,6 +57,11 @@ public:
 public:
 	//! Throws the refusal a claim would get, without claiming
 	void ThrowIfBusy(const ClientContext &context) const;
+	//! The result of the DB-API's execute(). Only the DB-API can end it, so a refusal it causes says how.
+	void SetDbapiResult(const shared_ptr<Result> &result);
+	//! Throws the refusal naming the DB-API's unfinished result, when the error is the engine refusing work because
+	//! that result holds the connection
+	void NameRefusal(const ErrorData &error);
 
 	//! Between the two calls, every table the client's replacement scan resolves is recorded
 	void BeginResolving();
@@ -71,6 +76,7 @@ private:
 
 	atomic<bool> busy {false};
 	mutex lock;
+	weak_ptr<Result> dbapi_result;
 	//! Both belong to the thread binding the statement, so another thread's bind on the context does not see them
 	unique_ptr<ResolvedTables> resolving;
 	std::thread::id resolving_thread;
@@ -92,6 +98,11 @@ public:
 private:
 	ConnectionState &state;
 };
+
+//! The engine's check that no result holds the connection, with its refusal named as ConnectionState::NameRefusal does
+void VerifyNoOpenResult(ClientContext &context);
+//! Names the refusal in an error from engine work that runs outside a Session, as ConnectionState::NameRefusal does
+void NameRefusal(ClientContext &context, const std::exception &error);
 
 //! Claims the connection while a relation binds, so a bind is refused rather than blocked; relations derived
 //! from one that has it inherit it

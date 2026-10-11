@@ -26,6 +26,9 @@ public:
 	~DuckDBPyResult();
 
 public:
+	const shared_ptr<engine::Result> &EngineResult() const {
+		return result;
+	}
 	Optional<nb::tuple> Fetchone();
 
 	nb::list Fetchmany(idx_t size);
