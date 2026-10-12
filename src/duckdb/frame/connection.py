@@ -84,6 +84,16 @@ class LiveArrowStream:
         self.close()
 
 
+def _changes_binding(result: _duckdb.Result) -> bool:
+    """Whether a statement could change what a later query resolves names to, by the kind the engine gives it."""
+    try:
+        kind = result.statement_type
+    except InvalidInputError:
+        # An expanding statement names its kind only once stepping reaches it, so it counts as a change.
+        return True
+    return kind != "select"
+
+
 class _Catalog:
     """A counter of catalog changes, shared by connections to one database so each sees a sibling's change."""
 
@@ -130,9 +140,13 @@ class Connection:
     def _execute(self, sql: str, parameters: Sequence[Any] | Mapping[str, Any] | None = None) -> LiveResult:
         """Run a statement and track its result; every execution comes through here."""
         self._finish_pending_closes()
-        if _may_change_binding(sql):
+        live = self._track(self._engine().execute(sql, parameters))
+        # The engine's own classification of what it is running, not a reading of the text: anything but a plain
+        # read may change what a later query resolves a name to. An EXPLAIN ANALYZE runs the statement it wraps,
+        # and reports EXPLAIN, so it counts too.
+        if _changes_binding(live.result):
             self._catalog.changed()
-        return self._track(self._engine().execute(sql, parameters))
+        return live
 
     def _track(self, result: _duckdb.Result) -> LiveResult:
         live = LiveResult(result)
@@ -150,9 +164,10 @@ class Connection:
     ) -> LiveArrowStream:
         """Run a statement into an Arrow stream and track it, like `_execute` tracks a result."""
         self._finish_pending_closes()
-        if _may_change_binding(sql):
-            self._catalog.changed()
         live = LiveArrowStream(self._engine().execute_arrow(sql, parameters, batch_size), self)
+        if live.stream.statement_type != "select":
+            self._catalog.changed()
+
         with self._live_lock:
             if self._raw is None:
                 live.stream.close()
@@ -376,21 +391,6 @@ _STABILITY = {
 def _is_any(text: str) -> bool:
     """Whether a type text is the word ANY, trimmed of ASCII blanks and in any case."""
     return text.strip(" \t\n\r\f\v").upper() == "ANY"
-
-
-#: First words of a statement that only reads; anything else may change what a later query resolves to.
-_READ_ONLY = frozenset({"SELECT", "WITH", "FROM", "VALUES", "DESCRIBE", "SUMMARIZE", "EXPLAIN", "SHOW"})
-
-
-def _may_change_binding(sql: str) -> bool:
-    """Whether a statement could change what a later query resolves names to, judged by its first keyword."""
-    words = sql.upper().split()
-    # EXPLAIN ANALYZE runs the statement it wraps, so the wrapped one is what counts.
-    if words and words[0] == "EXPLAIN":
-        words = words[1:]
-        if words and words[0] == "ANALYZE":
-            words = words[1:]
-    return bool(words) and words[0] not in _READ_ONLY
 
 
 def connect(database: str | os.PathLike[str] = ":memory:", **options: str) -> Connection:

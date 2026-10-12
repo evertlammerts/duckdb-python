@@ -52,6 +52,12 @@ public:
 	/// The capsule, once; a stream reads front to back exactly once, so a second take would lose rows silently.
 	nb::object Capsule(nb::handle requested_schema);
 
+	/// The kind of statement the stream runs, as lowercase text, empty where an expanding statement has not
+	/// named it yet; read at creation, so a closed stream still answers.
+	const std::string &StatementType() const {
+		return statement_type;
+	}
+
 	/// What ended the stream, as (code, message), or None; codes above zero are the engine's.
 	std::optional<std::pair<int, std::string>> Error() const;
 
@@ -84,6 +90,7 @@ private:
 	void CloseInternal() noexcept;
 
 	nb::ft_mutex handle_lock;
+	std::string statement_type;
 	nb::object database;
 	std::shared_ptr<ModuleState> module;
 	std::shared_ptr<State> state;

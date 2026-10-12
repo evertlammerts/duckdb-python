@@ -9,6 +9,7 @@
 #include "arrow_export.hpp"
 
 #include "arrowc.hpp"
+#include "result.hpp"
 
 #include <atomic>
 #include <cerrno>
@@ -693,10 +694,24 @@ void ExportRelease(ArrowArrayStream *self) {
 
 } // namespace
 
+/// The statement's kind where the result knows it already; an expanding statement names it only once stepping
+/// reaches the statement that produces the result.
+static std::string StatementTypeOf(const cxx::ArrowResult &result) {
+	try {
+		return StatementTypeText(result.GetStatementType());
+	} catch (const cxx::Exception &error) {
+		if (error.GetCode() != DUCKDB_V2_ERROR_INPUT_INVALID) {
+			throw;
+		}
+		return std::string();
+	}
+}
+
 ArrowStream::ArrowStream(nb::object database, std::shared_ptr<ModuleState> module,
                          std::weak_ptr<cxx::Connection> connection, cxx::ArrowResult result,
                          std::vector<nb::object> kept)
-    : database(std::move(database)), module(std::move(module)), state(std::make_shared<State>()) {
+    : statement_type(StatementTypeOf(result)), database(std::move(database)), module(std::move(module)),
+      state(std::make_shared<State>()) {
 	state->result.emplace(std::move(result));
 	state->connection = std::move(connection);
 	state->kept = std::move(kept);

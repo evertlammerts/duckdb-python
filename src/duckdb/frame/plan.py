@@ -377,8 +377,11 @@ class Sql(Step):
     text: str
 
     def render(self, names: tuple[str, ...], shapes: tuple[Shape | None, ...]) -> str:
-        """The text, as written."""
-        return self.text
+        """The text, as written, less a closing semicolon, which no subquery or CTE holding it could take."""
+        text = self.text.rstrip()
+        while text.endswith(";"):
+            text = text[:-1].rstrip()
+        return text
 
 
 @dataclasses.dataclass(frozen=True, eq=False)
@@ -1391,7 +1394,7 @@ class Frame(PlanBase):
         clause = _options_clause(options)
         target = render_literal(os.fspath(path))
         connection = self._on(connection)
-        sql, values = self._sql_and_values(lambda q: f"COPY ({q}) TO {target}{clause}", connection, parameters)
+        sql, values = self._sql_and_values(lambda q: f"COPY (\n{q}\n) TO {target}{clause}", connection, parameters)
         with connection._execute(sql, values) as result:
             return result.fetch_all()
 

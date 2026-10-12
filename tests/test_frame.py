@@ -2329,20 +2329,43 @@ class TestReviewRoundSeven:
     @pytest.mark.parametrize(
         ("statement", "changes"),
         [
-            ("EXPLAIN ANALYZE SET x = 1", True),
-            ("EXPLAIN SET x = 1", True),
-            ("EXPLAIN ANALYZE SELECT 1", False),
-            ("explain select 1", False),
-            ("EXPLAIN", False),
-            ("", False),
-            ("CREATE TABLE t (x INT)", True),
+            ("EXPLAIN ANALYZE SET integer_division = true", True),
+            ("EXPLAIN SET integer_division = true", True),
+            # An EXPLAIN reports EXPLAIN whatever it wraps, and EXPLAIN ANALYZE runs what it wraps, so it counts.
+            ("EXPLAIN ANALYZE SELECT 1", True),
+            ("explain select 1", True),
             ("  select 1", False),
+            ("SHOW TABLES", False),
+            ("DESCRIBE SELECT 1", False),
+            ("SUMMARIZE SELECT 1", False),
+            ("PRAGMA show_tables", False),
+            ("/* a comment */ SELECT 1", False),
+            ("CREATE OR REPLACE TABLE t (x INT)", True),
+            ("SET integer_division = true", True),
+            ("ATTACH ':memory:' AS attached", True),
+            ("CALL pragma_version()", True),
         ],
     )
-    def test_which_statements_are_taken_to_change_binding(self, statement: str, changes: bool) -> None:
-        from duckdb.frame.connection import _may_change_binding
+    def test_which_statements_are_taken_to_change_binding(
+        self, con: duckdb.frame.Connection, statement: str, changes: bool
+    ) -> None:
+        # The engine names the kind of statement it ran, so the cache is dropped without any reading of the text.
+        before = con._catalog.generation
+        duckdb.frame.sql(statement).rows(con)
+        assert (con._catalog.generation > before) is changes
 
-        assert _may_change_binding(statement) is changes
+    def test_a_statement_that_names_its_kind_only_when_it_runs_drops_the_cache(
+        self, con: duckdb.frame.Connection, tmp_path: Path
+    ) -> None:
+        # An expanding statement has no kind until stepping reaches the statement that produces its result.
+        before = con._catalog.generation
+        duckdb.frame.sql(f"EXPORT DATABASE '{tmp_path / 'exported'}' (FORMAT parquet)").rows(con)
+        assert con._catalog.generation > before
+        with con._execute("PIVOT orders ON country USING sum(amount)") as live:
+            with pytest.raises(exceptions.InvalidInputError, match="not yet available"):
+                _ = live.result.statement_type
+            live.result.settle()
+            assert live.result.statement_type == "select"
 
     def test_a_reused_scalar_is_evaluated_once(self, con: duckdb.frame.Connection) -> None:
         # A sequence advanced by the subquery moves by one however often the value is used.

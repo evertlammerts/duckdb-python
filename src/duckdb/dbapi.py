@@ -163,6 +163,7 @@ Parameters = Sequence[Any] | Mapping[str, Any]
 #: time while wrongly cancelling a write fails the transaction.
 _CANCEL_ON_SUPERSEDE = frozenset({"select", "explain"})
 
+
 _BUSY = (
     "connection has an open result being driven by another call; "
     "finish that fetch, complete() or abort() the result, or use a separate connection"
@@ -225,7 +226,9 @@ class Cursor:
             self._description = None
             self._rowcount = -1
             try:
-                connection._claim_result_slot(self)
+                # A rollback discards whatever the open result would still write, so draining it first could only
+                # fail the rollback.
+                connection._claim_result_slot(self, operation)
                 connection._begin_if_needed()
                 result = connection._engine().execute(operation, parameters)
                 try:
@@ -251,26 +254,33 @@ class Cursor:
     def executemany(self, operation: str, seq_of_parameters: Sequence[Parameters]) -> Cursor:
         """Run each parameter set in order; PEP 249 leaves rows undefined here, so none are kept."""
         connection = self._require_open()
-        # A statement run zero times is still the last one asked for, so earlier metadata must not survive it.
-        self._description = None
-        self._rowcount = -1
         with connection._driving():
-            connection._claim_result_slot(self)
+            # A statement run zero times is still the last one asked for, so earlier metadata must not survive it.
+            self._description = None
+            self._rowcount = -1
+            connection._claim_result_slot(self, operation)
         total = 0
         counted = False
         try:
             for parameters in seq_of_parameters:
                 self.execute(operation, parameters)
+                # Each set completes before the next, so an error past a set's first batch raises here.
+                with connection._driving():
+                    result, self._result = self._result, None
+                    if result is not None:
+                        try:
+                            result.drain()
+                        finally:
+                            result.close()
                 if self._rowcount >= 0:
                     total += self._rowcount
                     counted = True
         finally:
             try:
-                # The last set's rows follow the supersede rule too, so a trailing RETURNING is never cut short.
+                # Only an exception between a set's execute and its completion leaves a result here; it is
+                # cancelled rather than run out, since the call is already failing.
                 with connection._driving():
-                    result, self._result = self._result, None
-                    if result is not None:
-                        connection._dispose_superseded(result)
+                    self._release_result()
             finally:
                 self._description = None
                 connection._release_cursor(self)
@@ -311,8 +321,9 @@ class Cursor:
         connection = self._connection
         if connection is None:
             return
-        try:
-            with connection._driving():
+        # A refusal leaves the result and its claim on the connection as they were.
+        with connection._driving():
+            try:
                 result, self._result = self._result, None
                 if result is None:
                     return
@@ -320,8 +331,8 @@ class Cursor:
                     result.drain()
                 finally:
                     result.close()
-        finally:
-            connection._release_cursor(self)
+            finally:
+                connection._release_cursor(self)
 
     def abort(self) -> None:
         """Drop the pending statement: unread rows never arrive, and a cancelled write fails an open transaction.
@@ -331,11 +342,11 @@ class Cursor:
         connection = self._connection
         if connection is None:
             return
-        try:
-            with connection._driving():
+        with connection._driving():
+            try:
                 self._release_result()
-        finally:
-            connection._release_cursor(self)
+            finally:
+                connection._release_cursor(self)
 
     def __iter__(self) -> Cursor:
         return self
@@ -420,8 +431,10 @@ class Connection:
             with self._busy_lock:
                 if self._busy:
                     raise ProgrammingError(_BUSY)
-                self._busy = True
+                # Marked claimed first: an interrupt between the two leaves a release with nothing to undo, never
+                # a claim nothing releases.
                 claimed = True
+                self._busy = True
             yield
         finally:
             if claimed:
@@ -447,18 +460,38 @@ class Connection:
         finally:
             result.close()
 
-    def _claim_result_slot(self, cursor: Cursor) -> None:
-        """Dispose of whoever holds the connection's single result slot, then take it."""
+    def _rolls_back(self, sql: str) -> bool:
+        """Whether `sql` rolls the transaction back, as DuckDB's parser and tokenizer report it.
+
+        The statement type is TRANSACTION for BEGIN, COMMIT and ROLLBACK alike, so the keyword tells them apart.
+        """
+        if not isinstance(sql, str):
+            # A statement of the wrong type fails loudly a moment later, where every other refusal does.
+            return False  # type: ignore[unreachable]
+        kind, keyword = self._engine().classify(sql)
+        return kind == "transaction" and keyword in ("ROLLBACK", "ABORT")
+
+    def _claim_result_slot(self, cursor: Cursor, sql: str) -> None:
+        """Dispose of whoever holds the connection's single result slot, then take it.
+
+        A rollback discards whatever the open result would still write, so draining it first could only fail the
+        rollback; everything else follows the supersede rule.
+        """
         holder = self._open_cursor
         if holder is not None:
             result = holder._result
             holder._result = None
             if result is not None:
-                self._dispose_superseded(result)
+                # Asked of the engine only here, where a result must be disposed of, and never of text.
+                if self._rolls_back(sql):
+                    result.close()
+                else:
+                    self._dispose_superseded(result)
         self._open_cursor = cursor
 
     def _release_cursor(self, cursor: Cursor) -> None:
-        if self._open_cursor is cursor:
+        """Free the result slot, unless this cursor still holds a live result that only it can dispose of."""
+        if self._open_cursor is cursor and cursor._result is None:
             self._open_cursor = None
 
     def _run(self, sql: str) -> None:

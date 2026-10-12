@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, NoReturn
 from ..exceptions import InterfaceError, InvalidInputError, NotSupportedError, OperationalError, class_for_code
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from .connection import Connection, LiveArrowStream
     from .plan import Frame
@@ -102,8 +102,9 @@ def _polars() -> Any:
     except ImportError as error:
         message = "to_polars needs polars, which is not installed"
         raise ImportError(message) from error
-    if _version(polars) < (1, 3):
-        message = "to_polars needs polars 1.3 or newer, where the DataFrame constructor reads an Arrow stream"
+    # Before 1.10 the DataFrame constructor reads only the first batch of an Arrow stream, and says nothing.
+    if _version(polars) < (1, 10):
+        message = f"to_polars needs polars 1.10 or newer, which reads every batch of a stream, not {polars.__version__}"
         raise ImportError(message)
     return polars
 
@@ -236,6 +237,16 @@ class _Predicate:
         """The plan's values, then those the pushed SQL binds."""
         return [value for _, value, _ in self.sink.entries]
 
+    def conjunct(self, node: object) -> str:
+        """The SQL for one conjunct; one left to polars leaves no value bound and no column read on its account."""
+        bound, used = len(self.sink.entries), set(self.used)
+        try:
+            return self.sql(node)
+        except _Untranslatable:
+            del self.sink.entries[bound:]
+            self.used = used
+            raise
+
     def sql(self, node: object, depth: int = 0) -> str:
         if depth > _DEPTH:
             raise _Untranslatable
@@ -324,13 +335,13 @@ class _Predicate:
         series = self._literal(node)
         if series.dtype != dtype or len(series) != 1:
             raise _Untranslatable
-        return self._bound(_value(series[0]))
+        return self._bound(_value(_python(self.polars, lambda: series[0])))
 
     def _list(self, node: object, dtype: Any) -> list[str]:
         series = self._literal(node)
         if series.dtype != self.polars.List(dtype) or len(series) != 1 or series[0] is None:
             raise _Untranslatable
-        values = series[0].to_list()
+        values = _python(self.polars, lambda: series[0].to_list())
         if not values:
             raise _Untranslatable
         return [self._bound(_value(value)) for value in values]
@@ -349,6 +360,19 @@ def _node(node: object) -> tuple[object, object]:
         ((kind, body),) = node.items()
         return kind, body
     return None, None
+
+
+def _python(polars: Any, convert: Callable[[], Any]) -> Any:
+    """A literal as Python values; polars holds dates and times past the years 1 to 9999 Python's can."""
+    # A list of such datetimes panics out of polars rather than raise.
+    refusals: tuple[type[BaseException], ...] = (ValueError, OverflowError)
+    panics = getattr(polars.exceptions, "PanicException", None)
+    if panics is not None:
+        refusals = (*refusals, panics)
+    try:
+        return convert()
+    except refusals as error:
+        raise _Untranslatable from error
 
 
 def _value(value: object) -> object:
@@ -389,7 +413,7 @@ def _split(
         if _dynamic(tree):
             continue
         try:
-            pushed.append(translator.sql(tree))
+            pushed.append(translator.conjunct(tree))
         except _Untranslatable:
             kept.append(expr)
     residual = functools.reduce(operator.and_, kept) if kept else None
@@ -425,13 +449,15 @@ def polars_lazy(plan: Frame, connection: Connection, parameters: Mapping[str, ob
         # over the plan suffixes repeated names, so neither may stand between polars' names and the columns.
         # polars' row limit takes the plan's first rows, and its predicate then filters those.
         tail = f" LIMIT {limit}" if limit is not None else ""
+        # On lines of its own, as a plan's CTEs hold it, so a trailing line comment cannot swallow what follows.
+        plan_sql = f"(\n{sql}\n)"
         if not where:
             select = ", ".join(f"#{position} AS {quote(name)}" for position, name in columns)
-            return f"SELECT {select} FROM ({sql}){tail}"
+            return f"SELECT {select} FROM {plan_sql}{tail}"
         # A filter names its columns too, so it reads them under aliases no two of which can be confused.
         inner = ", ".join(f'#{p} AS "_c{p}"' for p in sorted({p for p, _ in columns} | (used or set())))
         outer = ", ".join(f'"_c{position}" AS {quote(name)}' for position, name in columns)
-        return f"SELECT {outer} FROM (SELECT {inner} FROM ({sql}){tail}) WHERE {' AND '.join(where)}"
+        return f"SELECT {outer} FROM (SELECT {inner} FROM {plan_sql}{tail}) WHERE {' AND '.join(where)}"
 
     every = list(enumerate(names, 1))
     # Through the eager path, so the dtypes are to_polars' and its refusals happen here, before any scan.
@@ -453,11 +479,10 @@ def polars_lazy(plan: Frame, connection: Connection, parameters: Mapping[str, ob
         residual = None
         if predicate is not None:
             pushed, used, bound, residual = _split(polars, predicate, comparable, values)
-        if with_columns is None and n_rows is None and not pushed:
-            query = sql
-        else:
-            columns = every if with_columns is None else [(position[name], name) for name in with_columns]
-            query = projected(columns, n_rows, pushed, used)
+        columns = every if with_columns is None else [(position[name], name) for name in with_columns]
+        query = (
+            sql if with_columns is None and n_rows is None and not pushed else projected(columns, n_rows, pushed, used)
+        )
         try:
             # Positions and dtypes are the schema's, so a plan whose columns moved since must not be read by them.
             now = _result_header(connection, sql, values)
@@ -468,6 +493,15 @@ def polars_lazy(plan: Frame, connection: Connection, parameters: Mapping[str, ob
                 )
                 raise InvalidInputError(message)
             out = polars_frame(connection, query, bound)
+            # A session setting, such as the time zone a TIMESTAMPTZ reads in, can change a dtype the engine's
+            # type text does not show; polars trusts the schema it was given.
+            expected = [(name, schema[name]) for _, name in columns]
+            if list(out.schema.items()) != expected:
+                message = (
+                    f"Invalid Input Error: the plan's columns changed since the LazyFrame was made, from {expected} "
+                    f"to {list(out.schema.items())}; make a new LazyFrame"
+                )
+                raise InvalidInputError(message)
         except OperationalError as error:
             busy = _busy(error)
             if busy is error:

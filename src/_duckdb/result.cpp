@@ -18,8 +18,10 @@ namespace {
 // Stepping does the query's own work, so WAITING means "call again" and sleeping would only serialise it.
 constexpr std::chrono::milliseconds kStepQuantum {20};
 
-/// The kind of SQL statement a result came from, as lowercase text.
-const char *StatementTypeText(cxx::QueryResult::StatementType type) {
+} // namespace
+
+/// The kind of SQL statement, as lowercase text.
+const char *StatementTypeText(cxx::StatementType type) {
 	using Kind = cxx::QueryResult::StatementType;
 	static constexpr std::pair<Kind, const char *> kNames[] = {
 	    {Kind::SELECT, "select"},
@@ -60,8 +62,6 @@ const char *StatementTypeText(cxx::QueryResult::StatementType type) {
 	}
 	return "unknown";
 }
-
-} // namespace
 
 std::vector<std::pair<std::string, std::string>> FieldTexts(const cxx::Schema &schema) {
 	std::vector<std::pair<std::string, std::string>> out;

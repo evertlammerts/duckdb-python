@@ -325,6 +325,8 @@ class TestShape:
             ("SELECT 1 AS a, 2 AS a, 3 AS A", ["a", "a_1", "A_2"]),
             ("SELECT 1 AS a_1, 2 AS a, 3 AS a, 4 AS a_2", ["a_1", "a", "a_2", "a_2_1"]),
             ("SELECT 1 AS a, 2 AS b, 3 AS a, 4 AS a, 5 AS b", ["a", "b", "a_1", "a_2", "b_1"]),
+            # The engine folds only ASCII letters, so these are distinct names to it.
+            ('SELECT 1 AS "é", 2 AS "É", 3 AS "ä", 4 AS "Ä"', ["é", "É", "ä", "Ä"]),
         ],
     )
     def test_repeated_names_take_the_engine_suffix(self, con: frame.Connection, sql: str, names: list[str]) -> None:

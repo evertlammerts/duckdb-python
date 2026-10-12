@@ -8,8 +8,11 @@ free while a result is open.
 
 from __future__ import annotations
 
+import inspect
+import sys
 import threading
 import time
+import types
 from collections.abc import Iterator
 
 import pytest
@@ -222,6 +225,39 @@ class TestSupersede:
         sequenced.execute(f"SELECT nextval('s') FROM range({ROWS})")
         assert currval(con) == ROWS
 
+    @pytest.mark.parametrize(
+        "statement", ["ROLLBACK", "ABORT", "ROLLBACK TRANSACTION", "abort work", "/* why */ -- and\n ROLLBACK"]
+    )
+    def test_a_rollback_cancels_an_open_result_instead_of_draining_it(
+        self, con: dbapi.Connection, statement: str
+    ) -> None:
+        cursor = con.cursor()
+        cursor.execute("BEGIN")
+        # EXECUTE may write, so any other statement would drain it into its failing last row.
+        late = f"CASE WHEN i = {ROWS - 1} THEN error('late') ELSE i END"
+        cursor.execute(f"PREPARE p AS SELECT {late} FROM range({ROWS}) t(i)")
+        cursor.execute("EXECUTE p")
+        cursor.execute(statement)
+        cursor.execute("SELECT 42")
+        assert cursor.fetchall() == [(42,)]
+
+    def test_a_rollback_only_inside_a_comment_is_no_rollback(self, con: dbapi.Connection) -> None:
+        cursor = con.cursor()
+        cursor.execute("BEGIN")
+        late = f"CASE WHEN i = {ROWS - 1} THEN error('late') ELSE i END"
+        cursor.execute(f"PREPARE p AS SELECT {late} FROM range({ROWS}) t(i)")
+        cursor.execute("EXECUTE p")
+        # DuckDB nests block comments, so this is a SELECT, which drains the EXECUTE into its late error.
+        with pytest.raises(exceptions.InvalidInputError, match="late"):
+            cursor.execute("/* kept: /* undo */ ROLLBACK */ SELECT 42")
+
+    def test_many_comments_before_a_statement_cost_no_time(self, con: dbapi.Connection) -> None:
+        cursor = con.cursor()
+        started = time.monotonic()
+        cursor.execute("/* note */ " * 2000 + "SELECT 42")
+        assert cursor.fetchall() == [(42,)]
+        assert time.monotonic() - started < 2
+
     def test_commit_while_a_read_only_result_is_open(self, transactional: dbapi.Connection) -> None:
         cursor = transactional.cursor()
         cursor.execute("CREATE TABLE t AS SELECT 1 AS a")
@@ -267,6 +303,41 @@ class TestCompleteAndAbort:
 
 
 class TestDisposalNeverCutsAWrite:
+    def test_executemany_completes_each_set(self, sequenced: dbapi.Cursor, con: dbapi.Connection) -> None:
+        sequenced.executemany(f"SELECT nextval('s') + ? FROM range({ROWS})", [(0,), (0,)])
+        assert currval(con) == 2 * ROWS
+        late = f"SELECT CASE WHEN i = ? THEN error('late') ELSE i END FROM range({ROWS}) t(i)"
+        with pytest.raises(exceptions.InvalidInputError, match="late"):
+            sequenced.executemany(late, [(ROWS - 1,)])
+
+    def test_an_interrupt_inside_executemany_leaves_the_connection_usable(
+        self, con: dbapi.Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real = dbapi.Cursor.execute
+
+        def interrupted(self: dbapi.Cursor, operation: str, parameters: object = None) -> dbapi.Cursor:
+            # Ctrl-C after a set's execute stored its result, before executemany completes it.
+            real(self, operation, parameters)  # type: ignore[arg-type]
+            raise KeyboardInterrupt
+
+        cursor = con.cursor()
+        monkeypatch.setattr(dbapi.Cursor, "execute", interrupted)
+        with pytest.raises(KeyboardInterrupt):
+            cursor.executemany(f"SELECT * FROM range({ROWS}) t(i) WHERE i >= ?", [(0,)])
+        monkeypatch.undo()
+        other = con.cursor()
+        other.execute("SELECT 42")
+        assert other.fetchall() == [(42,)]
+
+    def test_a_statement_that_is_no_string_leaves_the_connection_usable(self, con: dbapi.Connection) -> None:
+        cursor = con.cursor()
+        cursor.execute(f"SELECT * FROM range({ROWS})")
+        with pytest.raises(TypeError):
+            cursor.execute(42)  # type: ignore[arg-type]
+        other = con.cursor()
+        other.execute("SELECT 42")
+        assert other.fetchall() == [(42,)]
+
     def test_executemany_with_returning_applies_every_set(self, con: dbapi.Connection) -> None:
         cursor = con.cursor()
         cursor.execute("CREATE TABLE t (lo BIGINT, hi BIGINT)")
@@ -319,6 +390,7 @@ class TestBusyRefusal:
     def test_a_driving_connection_refuses_fetches_and_disposal(self, con: dbapi.Connection) -> None:
         cursor = con.cursor()
         cursor.execute(f"SELECT * FROM range({ROWS})")
+        description = cursor.description
         with con._driving():
             with pytest.raises(dbapi.ProgrammingError, match="open result"):
                 cursor.fetchone()
@@ -326,7 +398,46 @@ class TestBusyRefusal:
                 cursor.complete()
             with pytest.raises(dbapi.ProgrammingError, match="open result"):
                 cursor.abort()
+            with pytest.raises(dbapi.ProgrammingError, match="open result"):
+                cursor.executemany("SELECT ?", [(1,)])
+        assert cursor.description == description
         assert cursor.fetchone() == (0,)
+        # The refusals left the result its claim, so the next statement supersedes it rather than collide with it.
+        other = con.cursor()
+        other.execute("SELECT 42")
+        assert other.fetchall() == [(42,)]
+        with pytest.raises(exceptions.InterfaceError):
+            cursor.fetchone()
+
+    def test_an_interrupt_while_claiming_leaves_the_connection_usable(self, con: dbapi.Connection) -> None:
+        # Ctrl-C lands between any two lines of Python; every line from entering the claim up to the work itself
+        # gets one, delivered through a line trace.
+        function = dbapi.Connection._driving.__wrapped__  # type: ignore[attr-defined]
+        source, first = inspect.getsourcelines(function)
+        upto = first + next(i for i, text in enumerate(source) if text.strip() == "yield")
+        code = function.__code__
+        lines = sorted({line for _, _, line in code.co_lines() if line is not None and first < line < upto})
+        for target in lines:
+
+            def trace(frame: types.FrameType, event: str, arg: object, target: int = target) -> object:
+                if frame.f_code is code and event == "line" and frame.f_lineno == target:
+                    raise KeyboardInterrupt
+                return trace
+
+            previous = sys.gettrace()
+            sys.settrace(trace)  # type: ignore[arg-type]
+            try:
+                with con._driving():
+                    pass
+            except KeyboardInterrupt:
+                pass
+            finally:
+                # A coverage tracer, if one runs, carries on.
+                sys.settrace(previous)
+            assert not con._busy, f"an interrupt before line {target} left the connection claimed"
+        cursor = con.cursor()
+        cursor.execute("SELECT 42")
+        assert cursor.fetchall() == [(42,)]
 
     def test_interrupt_bypasses_the_busy_claim(self, con: dbapi.Connection) -> None:
         with con._driving():

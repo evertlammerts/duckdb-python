@@ -984,6 +984,10 @@ class TestPandasShapes:
         assert rows(con, "SELECT a_2, a_2_1 FROM df") == [(3, 4)]
         con.register("cased", pd.DataFrame([(1, 2)], columns=["A", "a"]))
         assert table("cased").columns(con) == ["A", "a_1"]
+        # The engine folds only ASCII letters, as its Arrow import shows.
+        con.register("accented", pd.DataFrame([(1, 2)], columns=["é", "É"]))
+        con.register("accented_arrow", pa.table([pa.array([1]), pa.array([2])], names=["é", "É"]))
+        assert table("accented").columns(con) == table("accented_arrow").columns(con) == ["é", "É"]
 
     def test_a_frame_is_read_as_it_is_at_query_time(self, con: duckdb.frame.Connection) -> None:
         frame = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})

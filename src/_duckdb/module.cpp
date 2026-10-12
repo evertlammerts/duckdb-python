@@ -15,6 +15,7 @@
 #include <nanobind/stl/vector.h>
 
 #include <algorithm>
+#include <cctype>
 #include <memory>
 #include <optional>
 #include <string>
@@ -341,6 +342,32 @@ public:
 		return {FieldTexts(signature.output), FieldTexts(signature.parameters)};
 	}
 
+	/// What DuckDB's parser makes of a statement, without binding or running it: its type as lowercase text and
+	/// its first keyword in upper case, both empty for input with no statement. A trailing statement past the
+	/// first is ignored, since callers ask about the one they are about to run.
+	std::pair<std::string, std::string> Classify(const std::string &sql) {
+		auto held = Live();
+		auto &live = *held.engine;
+		nb::gil_scoped_release release;
+		auto statements = live.ParseSQL(sql);
+		auto statement = statements.Next();
+		if (!statement) {
+			return {std::string(), std::string()};
+		}
+		std::string keyword;
+		for (const auto &token : live.Tokenize(statement.GetText()).tokens) {
+			// Comments and the leading parenthesis of a parenthesised statement carry no keyword.
+			if (token.type == cxx::TokenType::KEYWORD || token.type == cxx::TokenType::IDENTIFIER) {
+				keyword = std::string(statement.GetText().substr(token.start, token.length));
+				for (char &letter : keyword) {
+					letter = static_cast<char>(std::toupper(static_cast<unsigned char>(letter)));
+				}
+				break;
+			}
+		}
+		return {StatementTypeText(statement.GetStatementType()), keyword};
+	}
+
 	/// Register a Python callable as a scalar SQL function on this database.
 	void CreateScalarFunction(const std::string &name, nb::object callable, const std::vector<std::string> &parameters,
 	                          const std::string &returns, cxx::FunctionNullHandling nulls,
@@ -533,6 +560,7 @@ NB_MODULE(_duckdb, m) {
 	    .def_prop_ro("error", &ArrowStream::Error)
 	    .def_prop_ro("live", &ArrowStream::Live)
 	    .def_prop_ro("close_pending", &ArrowStream::ClosePending)
+	    .def_prop_ro("statement_type", &ArrowStream::StatementType)
 	    .def("close", &ArrowStream::Close);
 
 	nb::class_<Connection>(m, "Connection", nb::type_slots(ChildSlots<Connection>()))
@@ -540,6 +568,7 @@ NB_MODULE(_duckdb, m) {
 	    .def("execute_arrow", &Connection::ExecuteArrow, nb::arg("sql"), nb::arg("parameters") = nb::none(),
 	         nb::arg("batch_size") = cxx::idx_t(0))
 	    .def("bind", &Connection::Bind, nb::arg("sql"))
+	    .def("classify", &Connection::Classify, nb::arg("sql"))
 	    .def("create_scalar_function", &Connection::CreateScalarFunction, nb::arg("name"), nb::arg("callable"),
 	         nb::arg("parameters"), nb::arg("returns"), nb::arg("null_handling"), nb::arg("stability"))
 	    .def("register_object", &Connection::RegisterObject, nb::arg("name"), nb::arg("obj"), nb::arg("one_shot"),

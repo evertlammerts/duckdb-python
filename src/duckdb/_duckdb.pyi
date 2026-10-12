@@ -101,6 +101,10 @@ class ArrowStream:
         """Whether the query is still open: False once read out, released by the consumer, or closed."""
 
     @property
+    def statement_type(self) -> str:
+        """The kind of statement the stream runs, as lowercase text; read at creation, so a closed stream answers."""
+
+    @property
     def close_pending(self) -> bool:
         """Whether a close was requested but the stream is still open; its connection finishes the job."""
 
@@ -118,6 +122,9 @@ class Connection:
 
     def bind(self, sql: str) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
         """The output columns and the parameters a statement would have, without running it, as (name, type) pairs."""
+
+    def classify(self, sql: str) -> tuple[str, str]:
+        """A statement's type and its first keyword in upper case, from the parser; both empty for no statement."""
 
     def create_scalar_function(
         self,

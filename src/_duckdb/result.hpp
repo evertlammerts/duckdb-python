@@ -22,6 +22,9 @@
 
 namespace duckdb_python {
 
+/// The kind of SQL statement, as lowercase text.
+const char *StatementTypeText(cxx::StatementType type);
+
 /// Column names paired with the text form of their type.
 std::vector<std::pair<std::string, std::string>> FieldTexts(const cxx::Schema &schema);
 

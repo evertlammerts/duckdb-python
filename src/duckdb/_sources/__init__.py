@@ -101,15 +101,18 @@ def _is(obj: object, library: str, *names: str) -> bool:
 
 def _unique_names(labels: list[str]) -> list[str]:
     """`labels` with a repeat renamed as the engine renames a repeated Arrow field: the first free numbered suffix."""
+    from .._expressions.expr import fold_name
+
     taken: set[str] = set()
     names = []
     for label in labels:
         name = label
         suffix = 0
-        while name.lower() in taken:
+        # The engine folds only ASCII letters, so "é" and "É" are two names to it.
+        while fold_name(name) in taken:
             suffix += 1
             name = f"{label}_{suffix}"
-        taken.add(name.lower())
+        taken.add(fold_name(name))
         names.append(name)
     return names
 

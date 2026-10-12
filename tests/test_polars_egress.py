@@ -6,7 +6,9 @@ import contextlib
 import datetime
 import functools
 import gc
+import importlib.metadata
 import operator
+import pathlib
 import re
 import subprocess
 import sys
@@ -20,7 +22,7 @@ import pytest
 from duckdb import exceptions, frame
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterator, Sequence
 
     import polars as pl
     from _pytest.mark import ParameterSet
@@ -33,6 +35,44 @@ def _polars_major() -> int:
     import polars as pl
 
     return int(pl.__version__.split(".")[0])
+
+
+def _lazy_capable() -> bool:
+    """Whether the installed polars, if any, is one to_polars(lazy=True) accepts."""
+    try:
+        version = importlib.metadata.version("polars")
+    except importlib.metadata.PackageNotFoundError:
+        return True
+    return tuple(int(part) for part in version.split(".")[:2] if part.isdigit()) >= (1, 33)
+
+
+#: The lazy source refuses older polars, whose expressions also lack what its cases are written in.
+lazy_only = pytest.mark.skipif(not _lazy_capable(), reason="to_polars(lazy=True) needs polars 1.33")
+
+
+def _zoned_literals_push() -> bool:
+    """Whether polars hands a source an aware datetime literal it can push, as it does from 1.36."""
+    import polars as pl
+
+    return tuple(int(part) for part in pl.__version__.split(".")[:2]) >= (1, 36)
+
+
+def received(predicate: pl.Expr, schema: dict[str, Any]) -> pl.Expr:
+    """The predicate as polars hands it to a source, typed by its optimizer, whatever shape this version gives."""
+    import polars as pl
+    from polars.io.plugins import register_io_source
+
+    seen: list[pl.Expr] = []
+
+    def source(
+        _columns: list[str] | None, given: pl.Expr | None, _rows: int | None, _size: int | None
+    ) -> Iterator[pl.DataFrame]:
+        assert given is not None
+        seen.append(given)
+        yield pl.DataFrame(schema=schema)
+
+    register_io_source(source, schema=schema).filter(predicate).collect()
+    return seen[0]
 
 
 def raised_by_collect(error: type[Exception], match: str) -> contextlib.AbstractContextManager[object]:
@@ -187,6 +227,7 @@ class TestToPolars:
 
 
 @pytest.mark.requires("polars")
+@lazy_only
 class TestLazy:
     """polars trusts a source with every pushdown it hands over and checks none, so each must hold exactly."""
 
@@ -444,6 +485,32 @@ class TestLazy:
                 query.collect()
         assert not con._live_streams
 
+    def test_a_dtype_a_session_setting_changed_is_refused(self, con: frame.Connection) -> None:
+        import polars as pl
+
+        # The engine's type text stays TIMESTAMP WITH TIME ZONE while polars' dtype follows the session zone.
+        con.run("SET TimeZone = 'UTC'")
+        lazy = frame.sql("SELECT TIMESTAMPTZ '2026-11-01 05:30:00+00' AS t, 1 AS i").to_polars(con, lazy=True)
+        con.run("SET TimeZone = 'America/New_York'")
+        for query in (lazy, lazy.select("t"), lazy.filter(pl.col("i") > 0)):
+            with raised_by_collect(exceptions.InvalidInputError, "columns changed since the LazyFrame was made"):
+                query.collect()
+        assert lazy.select("i").collect()["i"].to_list() == [1]
+
+    @pytest.mark.parametrize(
+        "text", ["SELECT 1 AS i;", "SELECT 1 AS i ;;\n", "SELECT 1 AS i -- note", "SELECT 1 AS i /* note */;"]
+    )
+    def test_sql_closing_with_a_terminator_or_a_comment(
+        self, con: frame.Connection, text: str, tmp_path: pathlib.Path
+    ) -> None:
+        import polars as pl
+
+        plan = frame.sql(text)
+        assert plan.to_polars(con, lazy=True).filter(pl.col("i") > 0).head(1).collect().rows() == [(1,)]
+        assert plan.select(frame.col("i")).rows(con) == [(1,)]
+        plan.to_csv(con, tmp_path / "out.csv")
+        assert (tmp_path / "out.csv").read_text().split() == ["i", "1"]
+
     def test_a_pivot_names_its_columns_by_running(self, con: frame.Connection) -> None:
         con.run("CREATE TABLE s AS SELECT * FROM (VALUES ('x', 1), ('y', 2)) t(k, v)")
         lazy = frame.sql("PIVOT s ON k USING sum(v)").to_polars(con, lazy=True)
@@ -582,6 +649,8 @@ CREATE TABLE p AS SELECT * FROM (VALUES
 
 
 def _pushdown_cases() -> list[ParameterSet]:
+    if not _lazy_capable():
+        return []
     with contextlib.suppress(ModuleNotFoundError):
         import polars as pl
 
@@ -617,8 +686,6 @@ def _pushdown_cases() -> list[ParameterSet]:
             ("date range end", c("d") >= datetime.date(1, 1, 1)),
             ("timestamp", c("ts") > datetime.datetime(2026, 1, 2, 3, 4, 5)),
             ("timestamp microseconds", c("ts") == datetime.datetime(2026, 1, 2, 3, 4, 5, 6)),
-            ("instant", c("tz") == datetime.datetime(2026, 1, 2, 3, 4, 5, tzinfo=utc)),
-            ("instant in another zone", c("tz") > datetime.datetime(2026, 1, 2, 4, 4, 5, tzinfo=plus_one)),
             ("conjunction", (c("i") > 0) & (c("b") == True)),  # noqa: E712
             ("or of conjunctions", ((c("i") > 0) & (c("s") == "abc")) | c("b").is_null()),
         ]
@@ -640,10 +707,15 @@ def _pushdown_cases() -> list[ParameterSet]:
         ]
         # polars before 2.0 casts the list to Int64, and the cast stays with polars.
         uncast = pytest.param(c("i").is_in([0, 5, 7]), _polars_major() >= 2, id="int is_in")
+        zoned = [
+            ("instant", c("tz") == datetime.datetime(2026, 1, 2, 3, 4, 5, tzinfo=utc)),
+            ("instant in another zone", c("tz") > datetime.datetime(2026, 1, 2, 4, 4, 5, tzinfo=plus_one)),
+        ]
         return [
             *(pytest.param(p, True, id=name) for name, p in pushed),
             *(pytest.param(p, False, id=name) for name, p in kept),
             uncast,
+            *(pytest.param(p, _zoned_literals_push(), id=name) for name, p in zoned),
         ]
     return []
 
@@ -661,7 +733,7 @@ TYPED_COLUMNS = [
     ("VARCHAR", ("a", "b", "c"), True),
     ("DATE", (datetime.date(2000, 1, 1), datetime.date(2000, 10, 1), datetime.date(2010, 1, 1)), True),
     ("TIMESTAMP", tuple(datetime.datetime(2008 + year, 1, 1, 0, 0, 1) for year in (0, 2, 12)), True),
-    ("TIMESTAMPTZ", _instants(1, 2, 3), True),
+    ("TIMESTAMPTZ", _instants(1, 2, 3), None),
     ("TIME", (datetime.time(0, 1), datetime.time(0, 10), datetime.time(1, 0)), False),
     *(
         (t, tuple(datetime.datetime(2008 + y, 1, 1) for y in (0, 2, 12)), False)
@@ -686,6 +758,7 @@ AWKWARD_TEXT = [
 
 
 @pytest.mark.requires("polars")
+@lazy_only
 class TestLazyPushdown:
     """A pushed filter must mean exactly what polars' own does, on every row: each case is checked against polars."""
 
@@ -757,7 +830,7 @@ class TestLazyPushdown:
         ):
             queries.clear()
             assert lazy.filter(predicate).collect().equals(eager.filter(predicate)), predicate
-            assert any(" WHERE " in query for query in queries), predicate
+            assert any(" WHERE " in query for query in queries) is _zoned_literals_push(), predicate
 
     def test_strings_compare_byte_wise_on_a_collated_column(self, con: frame.Connection) -> None:
         import polars as pl
@@ -805,7 +878,7 @@ class TestLazyPushdown:
         type_text: str,
         values: tuple[Any, Any, Any],
         *,
-        pushed: bool,
+        pushed: bool | None,
     ) -> None:
         import polars as pl
 
@@ -825,8 +898,9 @@ class TestLazyPushdown:
             (c("a") == high) & (c("b") == mid) & (c("c") == high),
             (c("a") == high) | (c("b") == low),
         ]
-        # A NULL check means the same on a column of any type.
-        cases = [*((p, pushed) for p in comparisons), (c("a").is_null(), True), (c("a").is_not_null(), True)]
+        # A NULL check means the same on a column of any type; None marks the zoned literals pushed from 1.36.
+        reaches_engine = _zoned_literals_push() if pushed is None else pushed
+        cases = [*((p, reaches_engine) for p in comparisons), (c("a").is_null(), True), (c("a").is_not_null(), True)]
         for predicate, reaches in cases:
             queries.clear()
             assert lazy.filter(predicate).collect().equals(eager.filter(predicate)), predicate
@@ -896,6 +970,54 @@ class TestLazyPushdown:
         assert lazy.filter(predicate).collect().equals(eager.filter(predicate))
         assert any(" WHERE " in query for query in queries) is pushed
 
+    @pytest.mark.parametrize("engine", ["in-memory", "streaming"])
+    def test_a_conjunct_left_to_polars_binds_nothing(self, con: frame.Connection, engine: str) -> None:
+        import polars as pl
+
+        con.run("CREATE TABLE t AS SELECT * FROM (VALUES (1, 'x'), (2, 'abc'), (3, 'z'), (4, NULL)) v(i, s)")
+        # Each translates a value before meeting the part polars keeps, so the value must not stay bound.
+        predicates = [
+            (pl.col("s") == "x") | pl.col("s").str.starts_with("a"),
+            pl.col("s").is_in(["x", None]),
+            ((pl.col("s") == "x") | pl.col("s").str.starts_with("a")) & (pl.col("i") > 0),
+        ]
+        for plan, parameters in (
+            (frame.table("t"), None),
+            (frame.table("t").filter(frame.col("i") >= frame.param("floor")), {"floor": 1}),
+        ):
+            lazy = plan.to_polars(con, parameters=parameters, lazy=True)
+            eager = plan.to_polars(con, parameters=parameters)
+            for predicate in predicates:
+                assert lazy.filter(predicate).collect(engine=engine).equals(eager.filter(predicate)), predicate
+
+    @pytest.mark.parametrize(
+        ("column", "literal"),
+        [
+            ("d", ("lit", 2932897, "Date")),
+            ("d", ("lit", -719163, "Date")),
+            ("ts", ("lit", 253402300800000000, "Datetime")),
+            ("d", ("list", 2932897, "Date")),
+            ("ts", ("list", 253402300800000000, "Datetime")),
+        ],
+        ids=["date past 9999", "date before 1", "timestamp past 9999", "date list past 9999", "timestamp list"],
+    )
+    def test_a_literal_past_pythons_dates_stays_with_polars(
+        self, con: frame.Connection, queries: list[str], column: str, literal: tuple[str, int, str]
+    ) -> None:
+        import polars as pl
+
+        kind, raw, dtype_name = literal
+        dtype = pl.Date if dtype_name == "Date" else pl.Datetime("us")
+        value = pl.lit(raw, dtype=dtype) if kind == "lit" else pl.lit([raw], dtype=pl.List(dtype))
+        plan = frame.sql(
+            "SELECT * FROM (VALUES (1, DATE '2000-01-01', TIMESTAMP '2000-01-01'), (2, NULL, NULL)) t(i, d, ts)"
+        )
+        lazy, eager = plan.to_polars(con, lazy=True), plan.to_polars(con)
+        predicate = pl.col(column).is_in(value) if kind == "list" else pl.col(column) < value
+        queries.clear()
+        assert lazy.filter(predicate).collect().equals(eager.filter(predicate))
+        assert not any(" WHERE " in query for query in queries)
+
     def test_parameters_and_pushdown_together(self, con: frame.Connection) -> None:
         import polars as pl
 
@@ -943,7 +1065,7 @@ class TestLazyPushdown:
                 return [Hint(), self.real]
 
         columns = {"i": (1, pl.Int64, True), "f": (2, pl.Float64, True)}
-        typed = pl.col("i") > pl.lit(1, dtype=pl.Int64)
+        typed = received(pl.col("i") > 1, {"i": pl.Int64, "f": pl.Float64})
         assert _arrow._split(pl, WithHint(typed), columns, None) == (['"_c1" > 1'], {1}, [], None)
         # A NaN literal cannot survive a round trip through its serialized form, so the kept part must be the
         # expression itself.
@@ -987,7 +1109,8 @@ class TestLazyPushdown:
         from duckdb.frame import _arrow
 
         # polars puts the column first itself, so only a serialized form can say whether the flip holds.
-        literal = json.loads(pl.lit(1, dtype=pl.Int64).meta.serialize(format="json"))
+        given = json.loads(received(pl.col("i") > 1, {"i": pl.Int64}).meta.serialize(format="json"))
+        literal = given["BinaryExpr"]["right"]
         tree = {"BinaryExpr": {"left": literal, "op": "Lt", "right": {"Column": "i"}}}
         assert _arrow._Predicate(pl, {"i": (1, pl.Int64, True)}, None).sql(tree) == '"_c1" > 1'
 
@@ -998,10 +1121,12 @@ class TestLazyPushdown:
 
         columns = {"s": (2, pl.String, True), "d": (3, pl.Date, True), "i": (1, pl.Int64, True)}
         day = datetime.date(2026, 1, 2)
-        predicate = (pl.col("s") == "x") & pl.col("d").is_in([day]) & (pl.col("i") > pl.lit(4, dtype=pl.Int64))
+        schema = {"s": pl.String, "d": pl.Date, "i": pl.Int64}
+        predicate = received((pl.col("s") == "x") & pl.col("d").is_in([day]) & (pl.col("i") > 4), schema)
         pushed, used, values, residual = _arrow._split(pl, predicate, columns, [7])
+        assert residual is None
         assert values is not None
-        assert (used, len(values), values[0], residual) == ({1, 2, 3}, 3, 7, None)
+        assert (used, len(values), values[0]) == ({1, 2, 3}, 3, 7)
         # Numbers are written in as DuckDB types them; text and dates are bound.
         resolved = sorted(re.sub(r"\$(\d+)", lambda n: repr(values[int(n[1]) - 1]), sql) for sql in pushed)
         assert resolved == ['"_c1" > 4', "(\"_c2\" COLLATE C) = 'x'", '("_c3" IN (datetime.date(2026, 1, 2)))']
@@ -1018,6 +1143,17 @@ def test_a_polars_too_old_for_lazy_frames_is_named(monkeypatch: pytest.MonkeyPat
         frame.sql("SELECT 1 AS a").to_polars(con, lazy=True)
     # The eager path asks for less.
     assert frame.sql("SELECT 1 AS a").to_polars(con)["a"].to_list() == [1]
+
+
+@pytest.mark.requires("polars")
+def test_a_polars_that_reads_one_batch_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    import polars as pl
+
+    con = frame.connect()
+    monkeypatch.setattr(pl, "__version__", "1.9.0")
+    with pytest.raises(ImportError, match=r"polars 1\.10 or newer.*not 1\.9\.0"):
+        frame.sql("SELECT 1 AS a").to_polars(con)
+    assert not con._live_streams
 
 
 def test_missing_polars_is_named() -> None:
