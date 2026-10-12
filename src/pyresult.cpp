@@ -98,12 +98,12 @@ Optional<nb::tuple> DuckDBPyResult::Fetchone() {
 	if (Empty()) {
 		throw InvalidInputException("result closed");
 	}
-	{
+	// Asking the engine on every row costs two locks and a GIL switch, so an interrupt or a failure is reported once
+	// the rows of the current chunk run out
+	if (!current_chunk || chunk_offset >= current_chunk->size()) {
 		nb::gil_scoped_release release;
-		if (!current_chunk || chunk_offset >= current_chunk->size() || result->StreamEnded()) {
-			current_chunk = FetchNext();
-			chunk_offset = 0;
-		}
+		current_chunk = FetchNext();
+		chunk_offset = 0;
 	}
 
 	if (!current_chunk || current_chunk->size() == 0) {

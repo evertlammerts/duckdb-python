@@ -726,3 +726,49 @@ class TestOpenResultIsExclusive:
         assert code == 0, output
         assert "interrupted:" in output
         assert "usable after: [(42,)]" in output
+
+
+def fetch_rows_into(con, rows, limit):
+    while len(rows) < limit:
+        rows.append(con.fetchone())
+
+
+class TestRowFetches:
+    def test_an_interrupt_between_fetches_is_reported_once_the_fetched_chunk_runs_out(self, con):
+        con.execute(f"SELECT * FROM range({ROWS})")
+        assert [con.fetchone() for _ in range(5)] == [(i,) for i in range(5)]
+        con.interrupt()
+        rows = []
+        with pytest.raises(duckdb.InterruptException):
+            fetch_rows_into(con, rows, 2 * VECTOR)
+        # A row fetch asks the engine only for the next chunk, so the rest of the first one comes back first
+        assert rows == [(i,) for i in range(5, VECTOR)]
+        assert con.execute("SELECT 42").fetchall() == [(42,)]
+
+    @pytest.mark.timeout(60)
+    def test_a_failure_on_a_worker_is_reported_once_the_fetched_chunk_runs_out(self, con):
+        # Workers keep running the scan after a fetch returns, until the buffer of rows produced ahead is full
+        con.execute("SET threads = 4")
+        con.execute("SET max_streaming_buffer_size = '1GB'")
+        failing, failed = threading.Event(), threading.Event()
+
+        def checked(i):
+            if failing.is_set():
+                failed.set()
+                msg = "failed between fetches"
+                raise ValueError(msg)
+            return i
+
+        con.create_function("checked", checked, [BIGINT], BIGINT)
+        # A table scan splits into a task per row group; one range() source may only run when a fetch drives it
+        con.execute("CREATE TABLE src AS SELECT range AS i FROM range(5000000)")
+        con.execute("SELECT checked(i) FROM src")
+        assert con.fetchone() == (0,)
+        failing.set()
+        assert failed.wait(10)
+        rows = []
+        with pytest.raises(duckdb.InvalidInputException, match="failed between fetches"):
+            fetch_rows_into(con, rows, ROWS)
+        assert len(rows) >= VECTOR - 1
+        assert rows == [(i,) for i in range(1, len(rows) + 1)]
+        assert con.execute("SELECT 42").fetchall() == [(42,)]
