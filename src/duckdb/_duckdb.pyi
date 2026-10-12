@@ -10,6 +10,15 @@ class FunctionNullHandling(enum.Enum):
     DEFAULT = 0
     SPECIAL = 1
 
+class ParameterKind(enum.Enum):
+    """How a caller passes the argument for a parameter, following Python's parameter kinds."""
+
+    POSITIONAL_ONLY = 0
+    STANDARD = 1
+    POSITIONAL_VARIADIC = 2
+    NAMED_ONLY = 3
+    NAMED_VARIADIC = 4
+
 class FunctionStability(enum.Enum):
     """How far DuckDB may reuse a scalar function's result."""
 
@@ -130,14 +139,16 @@ class Connection:
         self,
         name: str,
         callable: Callable[..., Any],
-        parameters: list[str],
+        parameters: list[tuple[str, ParameterKind, str, bool, object]],
         returns: str,
         null_handling: FunctionNullHandling,
         stability: FunctionStability,
     ) -> None:
         """Register a Python callable as a scalar SQL function.
 
-        The type texts reach DuckDB's parser unchanged, except exactly "ANY", which the parser refuses.
+        Each parameter is (name, kind, type text, whether it has a default, the default); a default is converted to
+        the parameter's type here. The type texts reach DuckDB's parser unchanged, except exactly "ANY", which the
+        parser refuses.
         """
 
     def register_object(self, name: str, obj: object, one_shot: bool, numpy_scan: bool) -> None:

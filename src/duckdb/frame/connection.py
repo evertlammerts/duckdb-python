@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 from .. import _duckdb
 from .._sources import NumpyScanSource, Source, adapt
 from ..exceptions import Error, InterfaceError, InvalidInputError
+from ._signature import sql_signature
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -261,21 +262,28 @@ class Connection:
         self,
         name: str,
         function: Callable[..., Any],
-        parameters: Iterable[str],
-        returns: str,
+        parameters: Sequence[str] | Mapping[str, str] | None = None,
+        returns: str | None = None,
         *,
         null_handling: str = "default",
         stability: str = "consistent",
     ) -> None:
         """Register a Python callable as a scalar SQL function; a macro is orders of magnitude faster where it fits.
 
+        The function's parameters keep their names, kinds and defaults: SQL can pass a standard or named-only one by
+        name (`f(x := 1)`), and extra positional and named arguments reach `*args` and `**kwargs`.
+
         Args:
             name: The function's bare, unqualified name.
             function: Called once per row, from DuckDB's own threads.
-            parameters: SQL type texts the arguments are cast to before the call; ANY takes an argument of any type
-                uncast, as the Python value a query returning it gives.
-            returns: The SQL type text the returned value is cast to.
-            null_handling: "default" makes a NULL argument a NULL result without a call; "special" passes None in.
+            parameters: SQL type texts the arguments are cast to before the call, overriding the annotations: a list
+                with one per parameter in order, or a dict for some by name. A parameter with neither a type here nor
+                an annotation is ANY, which takes an argument of any type uncast. For a callable Python has no
+                signature for, a list of positional parameters, where `*T` types extra positional arguments and
+                `**T` extra named ones.
+            returns: The SQL type text the returned value is cast to; else read from the return annotation.
+            null_handling: "default" makes a NULL argument a NULL result without a call, a default of None included;
+                "special" passes None in.
             stability: "consistent" lets DuckDB reuse results, "volatile" never, "consistent_within_query" per query.
         """
         if not isinstance(name, str):
@@ -292,12 +300,9 @@ class Connection:
         if level is None:
             message = "Invalid Input Error: stability must be 'consistent', 'volatile' or 'consistent_within_query'"
             raise InvalidInputError(message)
-        texts = ["ANY" if _is_any(text) else text for text in parameters]
-        # The return type must be known before the first call, and a Python function's is known only after one.
-        if _is_any(returns):
-            message = "Invalid Input Error: an ANY return type is not supported yet"
-            raise InvalidInputError(message)
-        self._engine().create_scalar_function(name, function, texts, returns, nulls, level)
+        declared, return_type = sql_signature(function, parameters, returns)
+        engine = self._engine()
+        engine.create_scalar_function(name, function, [p.for_engine() for p in declared], return_type, nulls, level)
         # A new function changes what a name in a later query can refer to.
         self._catalog.changed()
 
@@ -386,11 +391,6 @@ _STABILITY = {
     "volatile": _duckdb.FunctionStability.VOLATILE,
     "consistent_within_query": _duckdb.FunctionStability.CONSISTENT_WITHIN_QUERY,
 }
-
-
-def _is_any(text: str) -> bool:
-    """Whether a type text is the word ANY, trimmed of ASCII blanks and in any case."""
-    return text.strip(" \t\n\r\f\v").upper() == "ANY"
 
 
 def connect(database: str | os.PathLike[str] = ":memory:", **options: str) -> Connection:

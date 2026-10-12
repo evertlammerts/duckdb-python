@@ -212,7 +212,7 @@ col(<span class="s">"payload"</span>).json().extract(<span class="s">"$.id"</spa
 col(<span class="s">"name"</span>).str().lower().trim()                <span class="c"># a text result keeps the text methods in scope</span>
 col(<span class="s">"payload"</span>).json().keys().contains(<span class="s">"id"</span>)   <span class="c"># keys() gives a list, so list methods follow</span></code></pre>
   <p>What a method returns is scoped by the engine's own return type for it, so chains keep going without a second entry. The families exist for two reasons: without them every engine function would be a method on every expression, several hundred names after each dot; and the short names could not exist, since <code>.list().min()</code> can mean <code>list_min</code> only while <code>.min()</code> still means the aggregate. Which functions sit where is declared in one table, <code>scripts/func_namespaces.toml</code>, checked against the engine's catalog on every build.</p>
-  <p>Anything else: <code>fn("regexp_extract", col("path"), r"/(\d+)/", 1)</code> calls any function by name.</p>
+  <p>Anything else: <code>fn("regexp_extract", col("path"), r"/(\d+)/", 1)</code> calls any function by name. A keyword argument passes by name, as SQL's <code>:=</code> does: <code>fn("round", col("price"), precision=2)</code> is <code>round("price", "precision" := 2)</code>, for any function that names its parameters, a registered Python function or a macro included.</p>
 
   <p class="lead-in">reaching into a value</p>
   <p>A bracket on an expression reaches into what it holds: a struct field or a map entry by name, a list element by position, in the engine's own convention, where the first element is 1.</p>
@@ -513,7 +513,7 @@ orders.filter(sql_expr(<span class="s">"region = 'emea' AND total &gt; 1000"</sp
     <dt>lit(value)</dt><dd>A value. Needed for lists and dicts (a struct).</dd>
     <dt>param(name)</dt><dd>A value supplied through <code>parameters=</code>.</dd>
     <dt>star(exclude, rename)</dt><dd><code>*</code>, optionally dropping or renaming.</dd>
-    <dt>fn(name, *args)</dt><dd>Any function by name; a tuple names one in a schema.</dd>
+    <dt>fn(name, /, *args, **named)</dt><dd>Any function by name; a tuple names one in a schema. Keyword arguments pass by name, after the positional ones.</dd>
     <dt>expr[key]</dt><dd>A struct field or map entry by name, a list element by position.</dd>
     <dt>sql_expr(text)</dt><dd>A fragment, as SQL.</dd>
     <dt>when(cond).then(v)….otherwise(v)</dt><dd>CASE.</dd>

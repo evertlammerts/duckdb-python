@@ -243,8 +243,8 @@ bool AssumesTimeZone(LogicalTypeId from, LogicalTypeId to) {
 	       (kind_from == TemporalKind::ZONED_INSTANT && kind_to == TemporalKind::ZONED_TIME);
 }
 
-std::optional<Value> TryCastTemporalExactly(duckdb::cxx::Context &context, const Value &value,
-                                            const LogicalType &target) {
+template <class SCOPE>
+std::optional<Value> TryCastTemporalExactly(SCOPE &context, const Value &value, const LogicalType &target) {
 	const auto from = value.GetLogicalType().GetTypeId();
 	const auto to = target.GetTypeId();
 	if (AssumesTimeZone(from, to)) {
@@ -276,6 +276,10 @@ std::optional<Value> TryCastTemporalExactly(duckdb::cxx::Context &context, const
 		return std::nullopt;
 	}
 }
+
+template std::optional<Value> TryCastTemporalExactly<Connection>(Connection &, const Value &, const LogicalType &);
+template std::optional<Value> TryCastTemporalExactly<duckdb::cxx::Context>(duckdb::cxx::Context &, const Value &,
+                                                                           const LogicalType &);
 
 // Where numpy's scaling of a count before printing it overflows int64, numpy refuses on some platforms and wraps to a
 // wrong value on others, so such a count is never handed to it.

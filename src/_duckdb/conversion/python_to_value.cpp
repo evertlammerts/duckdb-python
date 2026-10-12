@@ -412,6 +412,7 @@ ConvertedValue Build(Builder<SCOPE> &builder, nb::handle node) {
 template <class SCOPE>
 Value PythonToValue(SCOPE &scope, nb::handle object, ConversionContext &ctx, TimestampPrecision precision,
                     bool *contains_untyped) {
+	const WalkScope walk;
 	if (!nb::isinstance<nb::list>(object) && !nb::isinstance<nb::tuple>(object) && !nb::isinstance<nb::dict>(object)) {
 		auto value = ScalarValue(scope, object, ctx, precision);
 		if (contains_untyped != nullptr) {

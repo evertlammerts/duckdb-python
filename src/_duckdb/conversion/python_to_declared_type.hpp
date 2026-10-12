@@ -35,7 +35,13 @@ TypeTree TypeTreeOf(duckdb::cxx::LogicalType type);
 /// the engine's cast pairs it with, before anything is combined: a date or timestamp anywhere in it is held
 /// exactly and never meets a time zone it does not name, or a `DeclaredTypeRefusal` is raised; every other part
 /// is cast as CAST would.
-duckdb::cxx::Value PythonToDeclaredType(duckdb::cxx::Context &scope, nb::handle object, const TypeTree &target,
+template <class SCOPE>
+duckdb::cxx::Value PythonToDeclaredType(SCOPE &scope, nb::handle object, const TypeTree &target,
                                         ConversionContext &ctx);
+
+extern template duckdb::cxx::Value PythonToDeclaredType<duckdb::cxx::Connection>(duckdb::cxx::Connection &, nb::handle,
+                                                                                 const TypeTree &, ConversionContext &);
+extern template duckdb::cxx::Value PythonToDeclaredType<duckdb::cxx::Context>(duckdb::cxx::Context &, nb::handle,
+                                                                              const TypeTree &, ConversionContext &);
 
 } // namespace duckdb_python

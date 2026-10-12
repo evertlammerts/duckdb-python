@@ -61,16 +61,20 @@ struct RefusalContext {
 
 // What declared-type conversion carries everywhere: the engine call context and the module's Python
 // constructors. Values keep their own unit here; only query parameters cap at microseconds.
+template <class SCOPE>
 struct Conversion {
-	duckdb::cxx::Context &scope;
+	SCOPE &scope;
 	ConversionContext &ctx;
 };
 
-Value ToDeclared(Conversion &conversion, nb::handle object, const TypeTree &node, const LogicalType &whole);
+template <class SCOPE>
+Value ToDeclared(Conversion<SCOPE> &conversion, nb::handle object, const TypeTree &node, const LogicalType &whole);
 
 // A date, time or timestamp part: never across a time zone, and a date or timestamp exactly or not at all. Between two
 // instants the exact value is returned, since the engine's cast rounds between some units and has none between others.
-std::optional<Value> CastTemporalExactly(Conversion &conversion, const Value &value, const RefusalContext &refusal) {
+template <class SCOPE>
+std::optional<Value> CastTemporalExactly(Conversion<SCOPE> &conversion, const Value &value,
+                                         const RefusalContext &refusal) {
 	const auto from = value.GetLogicalType().GetTypeId();
 	const auto to = refusal.part.GetTypeId();
 	if (AssumesTimeZone(from, to)) {
@@ -86,7 +90,8 @@ std::optional<Value> CastTemporalExactly(Conversion &conversion, const Value &va
 	return exact;
 }
 
-Value TemporalToDeclared(Conversion &conversion, Value value, const RefusalContext &refusal, LogicalTypeId to) {
+template <class SCOPE>
+Value TemporalToDeclared(Conversion<SCOPE> &conversion, Value value, const RefusalContext &refusal, LogicalTypeId to) {
 	if (value.IsNull()) {
 		return Value::CreateNull(conversion.scope, refusal.part);
 	}
@@ -100,7 +105,8 @@ Value TemporalToDeclared(Conversion &conversion, Value value, const RefusalConte
 
 // Each date or time in `from`, followed to where the engine's cast put it in `to`, through the member it chose of each
 // union, and held there as `CastTemporalExactly` holds it. Everything else keeps the cast's meaning.
-void RefuseLossyCast(Conversion &conversion, const Value &from, const Value &to, const RefusalContext &refusal) {
+template <class SCOPE>
+void RefuseLossyCast(Conversion<SCOPE> &conversion, const Value &from, const Value &to, const RefusalContext &refusal) {
 	if (from.IsNull()) {
 		return;
 	}
@@ -149,7 +155,8 @@ void RefuseLossyCast(Conversion &conversion, const Value &from, const Value &to,
 
 // The engine's cast puts a value in the UNION member it converts to most cheaply, as CAST does. A date or time that
 // member holds only by assuming a time zone, or not exactly, refuses the value rather than sending it elsewhere.
-Value UnionToDeclared(Conversion &conversion, nb::handle object, const RefusalContext &refusal) {
+template <class SCOPE>
+Value UnionToDeclared(Conversion<SCOPE> &conversion, nb::handle object, const RefusalContext &refusal) {
 	const auto own = PythonToValue(conversion.scope, object, conversion.ctx);
 	auto cast = own.Cast(conversion.scope, refusal.part);
 	RefuseLossyCast(conversion, own, cast, refusal);
@@ -158,7 +165,9 @@ Value UnionToDeclared(Conversion &conversion, nb::handle object, const RefusalCo
 
 // A dict with text keys as the declared STRUCT, each field converted as the field the engine's cast pairs it with. A
 // field the cast drops is never read: a NULL stands in, keeping its name and place for the cast's own checks.
-Value StructToDeclared(Conversion &conversion, nb::handle object, const TypeTree &node, const LogicalType &whole) {
+template <class SCOPE>
+Value StructToDeclared(Conversion<SCOPE> &conversion, nb::handle object, const TypeTree &node,
+                       const LogicalType &whole) {
 	auto &scope = conversion.scope;
 	std::vector<std::string> names;
 	std::vector<nb::object> parts;
@@ -178,7 +187,8 @@ Value StructToDeclared(Conversion &conversion, nb::handle object, const TypeTree
 	return Value::CreateStruct(scope, fields).Cast(scope, node.type);
 }
 
-Value MapToDeclared(Conversion &conversion, nb::handle object, const TypeTree &node, const LogicalType &whole) {
+template <class SCOPE>
+Value MapToDeclared(Conversion<SCOPE> &conversion, nb::handle object, const TypeTree &node, const LogicalType &whole) {
 	std::vector<std::pair<Value, Value>> entries;
 	ForEachEntry(object, [&](nb::handle key, nb::handle item) {
 		auto fitted_key = ToDeclared(conversion, key, node.parts[0], whole);
@@ -187,7 +197,8 @@ Value MapToDeclared(Conversion &conversion, nb::handle object, const TypeTree &n
 	return Value::CreateMap(conversion.scope, entries);
 }
 
-Value ToDeclared(Conversion &conversion, nb::handle object, const TypeTree &node, const LogicalType &whole) {
+template <class SCOPE>
+Value ToDeclared(Conversion<SCOPE> &conversion, nb::handle object, const TypeTree &node, const LogicalType &whole) {
 	auto &scope = conversion.scope;
 	const auto &target = node.type;
 	if (object.is_none()) {
@@ -266,10 +277,16 @@ TypeTree TypeTreeOf(LogicalType type) {
 	return node;
 }
 
-Value PythonToDeclaredType(duckdb::cxx::Context &scope, nb::handle object, const TypeTree &target,
-                           ConversionContext &ctx) {
-	Conversion conversion {scope, ctx};
+template <class SCOPE>
+Value PythonToDeclaredType(SCOPE &scope, nb::handle object, const TypeTree &target, ConversionContext &ctx) {
+	const WalkScope walk;
+	Conversion<SCOPE> conversion {scope, ctx};
 	return ToDeclared(conversion, object, target, target.type);
 }
+
+template Value PythonToDeclaredType<duckdb::cxx::Connection>(duckdb::cxx::Connection &, nb::handle, const TypeTree &,
+                                                             ConversionContext &);
+template Value PythonToDeclaredType<duckdb::cxx::Context>(duckdb::cxx::Context &, nb::handle, const TypeTree &,
+                                                          ConversionContext &);
 
 } // namespace duckdb_python

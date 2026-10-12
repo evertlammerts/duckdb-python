@@ -345,7 +345,7 @@ payload.select(fn(<span class="s">"json_extract"</span>, col(<span class="s">"pa
     <dt>con.create_macro(name, parameters, body, replace=False, temporary=False)</dt><dd>Define a macro. An expression makes a scalar macro, a plan a table macro. <code>parameters</code> are names or <code>(name, default)</code> pairs; a default is a plain value. <code>col(name)</code> in the body is a parameter; a <code>param()</code> there is refused with <code>TypeError</code>.</dd>
     <dt>con.run("CREATE MACRO name(p) AS ...")</dt><dd>The statement itself. <code>AS TABLE</code> and a plan's <code>render()</code> for a table macro. Several signatures: <code>AS a, (a, b) AS a + b</code>.</dd>
     <dt>con.run("DROP MACRO name") / "DROP MACRO TABLE name"</dt><dd>Remove a scalar or a table macro. <code>IF EXISTS</code> works.</dd>
-    <dt>fn(name, *args)</dt><dd>Call a scalar macro from a plan.</dd>
+    <dt>fn(name, /, *args, **named)</dt><dd>Call a scalar macro from a plan; keyword arguments pass by name, so a parameter with a default can be given alone.</dd>
     <dt>table_function(name, *args, **named)</dt><dd>A table macro as a plan; named arguments render as <code>name := value</code>.</dd>
     <dt>duckdb_functions()</dt><dd>Every function the engine has, macros included: <code>function_type</code> is <code>macro</code> or <code>table_macro</code>, <code>parameters</code> the names without their defaults, <code>macro_definition</code> the body in the engine's spelling, <code>extension_name</code> where it came from.</dd>
   </dl>

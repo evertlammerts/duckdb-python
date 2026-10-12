@@ -24,7 +24,7 @@ from duckdb import _duckdb, exceptions
 from duckdb._expressions.expr import render_literal
 from duckdb.frame import fn, lit, sql
 
-from ._support import Emptying, Failing, NoOffset
+from ._support import Emptying, Failing, NoOffset, refusal_of_a_list_containing_itself
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -661,6 +661,32 @@ def test_a_list_nested_a_thousand_deep_binds_within_seconds() -> None:
     result = subprocess.run([sys.executable, "-c", DEEP], capture_output=True, text=True, timeout=10, check=False)
     assert result.returncode == 0, result.stderr
     assert result.stdout.split() == ["True", "True"]
+
+
+def test_a_conversion_started_inside_another_walks_on_its_own() -> None:
+    # Binding the same list again from inside its own conversion is no list containing itself.
+    con = duckdb.frame.connect()
+    other = con.duplicate()
+    entered: list[bool] = []
+    seen: list[object] = []
+
+    class Reentering(datetime.date):
+        def toordinal(self) -> int:
+            if not entered:
+                entered.append(True)
+                with other._execute("SELECT $1::VARCHAR", [values]) as inner:
+                    seen.append(inner.fetch_all())
+            return super().toordinal()
+
+    values = [Reentering(2026, 1, 2)]
+    with con._execute("SELECT $1", [values]) as result:
+        assert result.fetch_all() == [([datetime.date(2026, 1, 2)],)]
+    assert seen == [[("[2026-01-02]",)]]
+
+
+def test_a_list_that_contains_itself_is_refused() -> None:
+    printed = refusal_of_a_list_containing_itself("con._execute('SELECT $1', [x])")
+    assert "a list or dict that contains itself has no SQL value" in printed
 
 
 # Times that tell the naive and the aware value apart in text.

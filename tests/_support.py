@@ -6,6 +6,7 @@ import contextlib
 import datetime
 import os
 import signal
+import subprocess
 import sys
 import threading
 from typing import TYPE_CHECKING, Any
@@ -117,3 +118,33 @@ def ctrl_c_after(seconds: float, rescue: Callable[[], None]) -> Iterator[None]:
         finally:
             rescuer.cancel()
             signal.signal(signal.SIGINT, previous)
+
+
+#: A child converting a list that contains itself where `use` puts it, printing the refusal.
+_CONTAINS_ITSELF = """
+import duckdb.frame
+from duckdb import exceptions
+con = duckdb.frame.connect()
+x = []
+x.append(x)
+try:
+    {use}
+except exceptions.InvalidInputError as error:
+    print(error)
+"""
+
+
+def refusal_of_a_list_containing_itself(use: str) -> str:
+    """The refusal a child process prints for `x`, a list that contains itself, used by the statement `use`.
+
+    In a child, with a timeout, since a conversion that walks such a list without refusing it never ends.
+    """
+    result = subprocess.run(
+        [sys.executable, "-c", _CONTAINS_ITSELF.format(use=use)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout

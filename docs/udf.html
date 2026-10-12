@@ -31,6 +31,8 @@
   <ol>
     <li><a href="#start">Start here</a></li>
     <li><a href="#register">Registering</a></li>
+    <li><a href="#parameters">Parameters</a></li>
+    <li><a href="#annotations">Types from annotations</a></li>
     <li><a href="#call">Calling it</a></li>
     <li><a href="#types">What a function receives and returns</a></li>
     <li><a href="#null">NULL</a></li>
@@ -57,12 +59,12 @@ sql(<span class="s">"SELECT plus_one(i) FROM range(5) t(i)"</span>).rows(con)   
 
 <section id="register">
   <h2>Registering</h2>
-  <pre><code>con.create_function(name, function, parameters, returns, *, null_handling=<span class="s">"default"</span>, stability=<span class="s">"consistent"</span>)</code></pre>
+  <pre><code>con.create_function(name, function, parameters=<span class="k">None</span>, returns=<span class="k">None</span>, *, null_handling=<span class="s">"default"</span>, stability=<span class="s">"consistent"</span>)</code></pre>
   <dl class="ref">
-    <dt>name</dt><dd>The SQL name, a bare string: the engine registers a Python function by its bare name, so it cannot be schema-qualified. Registering a name that is already registered replaces the function.</dd>
-    <dt>function</dt><dd>Any callable taking one positional argument per parameter: a lambda, a <code>def</code>, a bound method, a <code>functools.partial</code>. A closure keeps its state.</dd>
-    <dt>parameters</dt><dd>The argument types, as SQL type text: <code>["VARCHAR", "BIGINT"]</code>, <code>["STRUCT(a INTEGER)"]</code>, <code>[]</code> for a function of no arguments. Not Python types. <code>ANY</code> takes an argument of any type, uncast; see <a href="#any">ANY</a>.</dd>
-    <dt>returns</dt><dd>The result type, as SQL type text.</dd>
+    <dt>name</dt><dd>The SQL name, a bare string: the engine registers a Python function by its bare name, so it cannot be schema-qualified. Registering the name again with the same parameters, the same types in the same kinds, replaces the function; with other parameters it adds a second version beside the first, and the engine picks between them as for any function with several versions: the one the arguments fit with the cheapest casts, and a call two versions fit equally well is refused as ambiguous.</dd>
+    <dt>function</dt><dd>Any callable: a lambda, a <code>def</code>, a bound method, a <code>functools.partial</code>. Its parameters keep their names, kinds and defaults in SQL; see <a href="#parameters">Parameters</a>. A closure keeps its state.</dd>
+    <dt>parameters</dt><dd>Optional. The argument types, as SQL type text, overriding the annotations: a list for the parameters in order, <code>["VARCHAR", "BIGINT"]</code>, or a dict for some of them by name, <code>{"when": "TIMESTAMPTZ"}</code>. Not Python types. A parameter with neither a type here nor an annotation is <code>ANY</code>, which takes an argument of any type, uncast; see <a href="#annotations">Types from annotations</a> and <a href="#any">ANY</a>.</dd>
+    <dt>returns</dt><dd>Optional. The result type, as SQL type text; without it the return annotation gives it, and one of the two is required.</dd>
     <dt>null_handling</dt><dd><code>"default"</code> or <code>"special"</code>. See <a href="#null">NULL</a>.</dd>
     <dt>stability</dt><dd><code>"consistent"</code>, <code>"consistent_within_query"</code> or <code>"volatile"</code>. See <a href="#stability">Stability</a>.</dd>
   </dl>
@@ -72,13 +74,91 @@ sql(<span class="s">"SELECT plus_one(i) FROM range(5) t(i)"</span>).rows(con)   
 con.create_function(<span class="s">"weave"</span>, weave, [<span class="s">"VARCHAR"</span>, <span class="s">"BIGINT"</span>, <span class="s">"BOOLEAN"</span>], <span class="s">"VARCHAR"</span>)
 sql(<span class="s">"SELECT weave('x', 7, true)"</span>).rows(con)   <span class="c"># [('x-7-True',)]</span>
 
+<span class="k">def</span> shout(text: str, times: int) -&gt; str:
+    <span class="k">return</span> text.upper() * times
+
+con.create_function(<span class="s">"shout"</span>, shout)   <span class="c"># VARCHAR, BIGINT -&gt; VARCHAR, from the annotations</span>
+
 prefix = <span class="s">"state"</span>
 con.create_function(<span class="s">"tag"</span>, <span class="k">lambda</span> x: <span class="s">f"{prefix}:{x}"</span>, [<span class="s">"BIGINT"</span>], <span class="s">"VARCHAR"</span>)
 sql(<span class="s">"SELECT tag(1)"</span>).rows(con)   <span class="c"># [('state:1',)]</span></code></pre>
-  <p>The type texts are parsed by the engine when you register, so a mistake in one is reported here and not at the first call: a type that does not exist raises <code>CatalogError</code> naming it, and an <code>ANY</code> for <code>returns</code> is refused with <code>InvalidInputError</code>: <code>an ANY return type is not supported yet</code>, since the result type must be known before the function is first called. An option that is not one of the choices above raises <code>InvalidInputError</code>. A closed connection raises <code>InterfaceError</code>.</p>
+  <p>Everything is checked when you register, so a mistake is reported here and not at the first call: a type that does not exist raises <code>CatalogError</code> naming it, and an <code>ANY</code> return type, from <code>returns</code> or from <code>-&gt; typing.Any</code>, is refused with <code>InvalidInputError</code>: <code>an ANY return type is not supported yet</code>, since the result type must be known before the function is first called. <code>InvalidInputError</code> also refuses a list with more types than parameters, a shorter list past which a parameter has no default, a dict naming no parameter, an annotation no type is read from, a default its parameter cannot hold, and an option that is not one of the choices above. A <code>function</code> that is not callable, or a <code>parameters</code> that is neither a list nor a dict, raises <code>TypeError</code>. A closed connection raises <code>InterfaceError</code>. Inside a transaction you opened, a registration the engine refuses, for a type text it does not know or a default its parameter cannot hold, aborts the transaction, as a failed statement does: the next statement fails until you <code>ROLLBACK</code>.</p>
   <div class="note">
     <p><strong>The function belongs to the database, not to the connection.</strong> Every connection to that database sees it, <code>con.duplicate()</code> included, and the engine keeps it until the database closes. There is no way to remove one; register the same name again to replace it. A fresh <code>duckdb.frame.connect()</code> is a different database, and does not have it.</p>
   </div>
+</section>
+
+<section id="parameters">
+  <h2>Parameters</h2>
+  <p>Each parameter keeps its kind, its name and its default, so a call from SQL reaches the function as the same call from Python would. DuckDB's parameter kinds are Python's:</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Python parameter</th><th>Passed from SQL</th></tr></thead>
+      <tbody>
+        <tr><td>before <code>/</code>, positional-only</td><td>by position only</td></tr>
+        <tr><td>plain, positional or keyword</td><td>by position, or by name: <code>f(x := 1)</code> or <code>f(x =&gt; 1)</code></td></tr>
+        <tr><td><code>*args</code></td><td>the positional arguments left over, as a tuple</td></tr>
+        <tr><td>after <code>*</code> or <code>*args</code>, keyword-only</td><td>by name only</td></tr>
+        <tr><td><code>**kwargs</code></td><td>the named arguments no other parameter takes, as a dict</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <pre><code><span class="k">def</span> label(value, /, prefix=<span class="s">"id"</span>, *parts, sep=<span class="s">"-"</span>, **extra):
+    tags = <span class="s">""</span>.join(<span class="s">f"[{k}={v}]"</span> <span class="k">for</span> k, v <span class="k">in</span> extra.items())
+    <span class="k">return</span> sep.join([prefix, str(value), *map(str, parts)]) + tags
+
+con.create_function(<span class="s">"label"</span>, label, returns=<span class="s">"VARCHAR"</span>)
+sql(<span class="s">"SELECT label(7)"</span>).rows(con)                                      <span class="c"># [('id-7',)]</span>
+sql(<span class="s">"SELECT label(7, 'x', 1, 2, sep := '/', loud := true)"</span>).rows(con)   <span class="c"># [('x/7/1/2[loud=True]',)]</span></code></pre>
+  <p>A call that does not fit the signature, one missing a parameter without a default, naming one that does not exist, passing too many positional arguments, or a positional one after a named one, is refused when the query is planned with <code>ProgrammingError</code>. Where no version of the function fits, the message shows the signature as the engine sees it, in Python's notation; a positional argument after a named one, or a name given twice, gets a message of its own.</p>
+  <p>Names are matched ignoring case, as everywhere in DuckDB: <code>f(Value := 1)</code> reaches a parameter <code>value</code>, and two parameters whose names differ only in case cannot be registered. A name <code>**kwargs</code> receives keeps the spelling the caller wrote. A positional-only parameter's name is not visible to callers, so a named argument of the same name goes to <code>**kwargs</code>, as in Python.</p>
+  <p>The type of <code>*args</code> is the type of each extra positional argument, and that of <code>**kwargs</code> the type of each extra named one, as their annotations mean in Python: <code>*rest: int</code> casts every extra argument to <code>BIGINT</code>.</p>
+
+  <h3>Defaults</h3>
+  <p>A parameter with a default may be left out, and the function then receives its default. The default is converted when you register: to a declared type by the same rules as a returned value, so <code>x: float = 1</code> arrives as <code>1.0</code>; for an <code>ANY</code> parameter as a query parameter would be, keeping its own type. A default its parameter cannot hold, or one that is no SQL value at all, such as a <code>sentinel = object()</code>, is refused at registration naming the parameter. The function receives a fresh copy of the default on every call, so a list or dict default, nested ones included, is never shared between calls. The conversion happens once, with the settings of the connection registering the function, as Python evaluates a default once when the <code>def</code> runs: a text default for a <code>TIMESTAMPTZ</code> parameter is read in that connection's time zone, and every connection then receives that instant.</p>
+  <div class="note">
+    <p><strong>A default of <code>None</code> is a NULL argument.</strong> Under <code>null_handling="default"</code> a call that leaves the parameter out is NULL without calling the function, as is any NULL argument; register with <code>null_handling="special"</code> for the function to receive <code>None</code>. See <a href="#null">NULL</a>.</p>
+  </div>
+
+  <h3>Giving some types</h3>
+  <p>A list of types goes through the parameters in order, <code>*args</code> and <code>**kwargs</code> included. A dict gives the types of some parameters by name, and the others are read from their annotations.</p>
+  <p>A list may stop before the last parameter. SQL then sees only the parameters it covers, and Python fills in the rest from their defaults, as for any call that leaves them out; each of them needs a default, or must be <code>*args</code> or <code>**kwargs</code>, which receive nothing. This is how a default that only keeps a value for the function stays out of SQL:</p>
+  <pre><code><span class="k">for</span> offset <span class="k">in</span> range(<span class="s">3</span>):
+    con.create_function(<span class="s">f"plus_{offset}"</span>, <span class="k">lambda</span> x, offset=offset: x + offset, [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT"</span>)
+sql(<span class="s">"SELECT plus_2(1)"</span>).rows(con)   <span class="c"># [(3,)]; plus_2(1, 5) is refused, SQL has no offset</span></code></pre>
+  <p>Such a default is the function's own object, held on the function since it was defined: every call, on every engine thread, gets that same object, as it gets the objects a closure or a global names. A default SQL sees is different: it is converted to a SQL value at registration and arrives as a fresh Python value on each call. See <a href="#threads">Threads</a> for what sharing an object across threads asks of it.</p>
+  <p>A type in the list may carry the kind's mark, <code>"*BIGINT"</code> for <code>*args</code> and <code>"**BIGINT"</code> for <code>**kwargs</code>; one that does not match the parameter's kind is refused.</p>
+
+  <h3>Callables without a signature</h3>
+  <p>Some built-in functions, such as <code>max</code> and <code>dict</code>, have no signature Python can read. For them <code>parameters</code> must be a list, its plain types positional-only parameters, then at most one <code>"*T"</code> giving the type of extra positional arguments, then at most one <code>"**T"</code> giving the type of extra named ones; <code>returns</code> is then required.</p>
+  <pre><code>con.create_function(<span class="s">"biggest"</span>, max, [<span class="s">"*BIGINT"</span>], <span class="s">"BIGINT"</span>)
+con.create_function(<span class="s">"pack"</span>, dict, [<span class="s">"**BIGINT"</span>], <span class="s">"MAP(VARCHAR, BIGINT)"</span>)
+sql(<span class="s">"SELECT biggest(1, 5, 3), pack(a := 1, b := 2)"</span>).rows(con)   <span class="c"># [(5, {'a': 1, 'b': 2})]</span></code></pre>
+</section>
+
+<section id="annotations">
+  <h2>Types from annotations</h2>
+  <p>A parameter <code>parameters</code> gives no type for takes it from its annotation, and one without an annotation is <code>ANY</code>. The return type is read the same way when <code>returns</code> is left out. An annotation names the type a value of that class gets as a query parameter:</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Annotation</th><th>SQL type</th></tr></thead>
+      <tbody>
+        <tr><td><code>bool</code>, <code>int</code>, <code>float</code>, <code>str</code>, <code>bytes</code></td><td><code>BOOLEAN</code>, <code>BIGINT</code>, <code>DOUBLE</code>, <code>VARCHAR</code>, <code>BLOB</code></td></tr>
+        <tr><td><code>datetime</code>, <code>date</code>, <code>time</code>, <code>timedelta</code>, <code>UUID</code></td><td><code>TIMESTAMP</code>, <code>DATE</code>, <code>TIME</code>, <code>INTERVAL</code>, <code>UUID</code></td></tr>
+        <tr><td><code>list[T]</code>, <code>tuple[T, ...]</code></td><td><code>T[]</code></td></tr>
+        <tr><td><code>dict[K, V]</code></td><td><code>MAP(K, V)</code></td></tr>
+        <tr><td><code>T | None</code>, <code>Optional[T]</code></td><td><code>T</code>; every SQL value can be NULL</td></tr>
+        <tr><td><code>typing.Any</code>, or none</td><td><code>ANY</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The classes are matched exactly: a subclass, an <code>IntEnum</code> say, is a different annotation, since the function would be handed the base class's values and not its own. A <code>datetime</code> is <code>TIMESTAMP</code>, without a time zone, so a <code>TIMESTAMPTZ</code> argument does not fit it; give <code>"TIMESTAMPTZ"</code> in <code>parameters</code> for that. An annotation in quotes, or under <code>from __future__ import annotations</code>, is evaluated as Python evaluates it.</p>
+  <p>Anything else is refused at registration with <code>InvalidInputError</code> naming the parameter and the reason, unless <code>parameters</code> gives that parameter's type: a <code>Decimal</code>, whose width and scale its class does not say, a bare <code>list</code>, <code>tuple</code> or <code>dict</code>, a union of two types, <code>ANY</code> inside another type, and any other class.</p>
+  <p>Python evaluates a function's annotations together, so when one cannot be evaluated, a name that is only imported for type checking say, none of them is read: every parameter with an annotation, and the return, then needs its type in <code>parameters</code> and <code>returns</code>, and the refusal names the annotation and Python's error. On Python 3.14 an annotation whose code raises an error other than a missing name leaves Python no signature at all, and the registration is refused whatever <code>parameters</code> gives.</p>
+  <pre><code><span class="k">def</span> price(amount: Decimal, when: datetime) -&gt; str:
+    ...
+
+con.create_function(<span class="s">"price"</span>, price, {<span class="s">"amount"</span>: <span class="s">"DECIMAL(18, 2)"</span>, <span class="s">"when"</span>: <span class="s">"TIMESTAMPTZ"</span>})</code></pre>
 </section>
 
 <section id="call">
@@ -91,6 +171,7 @@ con.run(<span class="s">"CREATE TABLE next_ids AS SELECT plus_one(id) AS id FROM
 
 table(<span class="s">"orders"</span>).with_columns(next_id=fn(<span class="s">"plus_one"</span>, col(<span class="s">"id"</span>))).rows(con)
 table(<span class="s">"orders"</span>).filter(fn(<span class="s">"plus_one"</span>, col(<span class="s">"id"</span>)) &gt; <span class="s">1</span>).rows(con)
+table(<span class="s">"orders"</span>).select(fn(<span class="s">"label"</span>, col(<span class="s">"id"</span>), sep=<span class="s">"/"</span>)).rows(con)   <span class="c"># label("id", "sep" := '/')</span>
 
 sql(<span class="s">"SELECT plus_one(3) AS v"</span>).types(con)   <span class="c"># ['BIGINT']: the engine knows it like any function</span></code></pre>
   <p>The call renders as <code>plus_one("id")</code> in the SQL, and nothing about it differs from a call to an engine function. DuckDB matches the arguments to the declared parameters as it does for every function: a <code>TINYINT</code> or an <code>INTEGER</code> passed to a <code>BIGINT</code> parameter is cast on the way in; a <code>DECIMAL</code> passed to it is refused when the query is planned, with the usual <code>ProgrammingError</code> that no function matches the given name and argument types.</p>
@@ -194,6 +275,13 @@ calls                                                                    <span c
   <p>With <code>null_handling="special"</code>, <code>None</code> arrives and the function decides:</p>
   <pre><code>con.create_function(<span class="s">"backfill"</span>, <span class="k">lambda</span> x: -<span class="s">1</span> <span class="k">if</span> x <span class="k">is</span> <span class="k">None</span> <span class="k">else</span> x, [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT"</span>, null_handling=<span class="s">"special"</span>)
 sql(<span class="s">"SELECT backfill(x) FROM (VALUES (1), (NULL)) t(x)"</span>).rows(con)   <span class="c"># [(1,), (-1,)]</span></code></pre>
+  <p>Every argument counts, however it was passed: a parameter left out whose default is <code>None</code>, an extra one in <code>*args</code>, and a NULL passed by name into <code>**kwargs</code> all make the result NULL without a call under <code>"default"</code>:</p>
+  <pre><code>con.create_function(<span class="s">"tagged"</span>, <span class="k">lambda</span> x, tag=<span class="k">None</span>: <span class="s">f"{x}:{tag}"</span>, [<span class="s">"BIGINT"</span>, <span class="s">"VARCHAR"</span>], <span class="s">"VARCHAR"</span>)
+sql(<span class="s">"SELECT tagged(1), tagged(1, 'a')"</span>).rows(con)   <span class="c"># [(None, '1:a')]</span>
+
+con.create_function(<span class="s">"tagged"</span>, <span class="k">lambda</span> x, tag=<span class="k">None</span>: <span class="s">f"{x}:{tag}"</span>, [<span class="s">"BIGINT"</span>, <span class="s">"VARCHAR"</span>], <span class="s">"VARCHAR"</span>,
+                    null_handling=<span class="s">"special"</span>)
+sql(<span class="s">"SELECT tagged(1), tagged(1, 'a')"</span>).rows(con)   <span class="c"># [('1:None', '1:a')]</span></code></pre>
   <p>Returning <code>None</code> makes the result NULL under either setting:</p>
   <pre><code>con.create_function(<span class="s">"odd_only"</span>, <span class="k">lambda</span> x: x <span class="k">if</span> x % <span class="s">2</span> <span class="k">else</span> <span class="k">None</span>, [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT"</span>)
 sql(<span class="s">"SELECT odd_only(i) FROM range(4) t(i)"</span>).rows(con)   <span class="c"># [(None,), (1,), (None,), (3,)]</span></code></pre>
@@ -248,6 +336,7 @@ con.run(<span class="s">"CREATE TABLE big AS SELECT i FROM range(1000000) t(i)"<
 sql(<span class="s">"SELECT sum(bump(i)) FROM big"</span>).rows(con)   <span class="c"># [(500000500000,)]</span>
 len(seen)                                          <span class="c"># 4 on this machine; the test asserts at least 2</span></code></pre>
   <p>What this means for the function: it may be entered from any thread, and from several over the course of one query. The GIL serialises bytecode, not calls, so two workers can be inside the function at once, interleaved. State it shares across calls, a list it appends to, a counter, a client, needs to be safe for that, or the function needs to take a lock.</p>
+  <p>The objects a function reaches through its globals, its closure and its defaults are the same objects on every thread. What belongs to a thread is not: a <code>threading.local</code> or a <code>contextvars.ContextVar</code> the calling thread set reads as unset on an engine worker, while the calling thread, which may run part of the query too, still sees its own value. Pass such a value in as an argument, or capture the object itself.</p>
   <div class="note caution">
     <p><strong>Free-threaded Python is untested here.</strong> The free-threaded wheel builds and imports with the GIL off, and that is all that has been verified. Nothing yet exercises a function being called from several engine workers at once without a GIL to serialise them.</p>
   </div>
@@ -293,10 +382,10 @@ sql(<span class="s">"SELECT sum(bump(i)) FROM big"</span>).rows(con)       <span
 
   <h3>Registration</h3>
   <dl class="ref">
-    <dt>con.create_function(name, function, parameters, returns, *, null_handling, stability)</dt><dd>Register <code>function</code> as scalar SQL function <code>name</code> on the database. Returns nothing. A name already registered is replaced.</dd>
-    <dt>parameters</dt><dd>SQL type texts, one per positional argument. Empty for no arguments. <code>ANY</code> takes an argument of any type, uncast.</dd>
-    <dt>returns</dt><dd>One SQL type text. The returned value is cast to it.</dd>
-    <dt>null_handling="default"</dt><dd>A NULL argument gives NULL without a call.</dd>
+    <dt>con.create_function(name, function, parameters=None, returns=None, *, null_handling, stability)</dt><dd>Register <code>function</code> as scalar SQL function <code>name</code> on the database, its parameters keeping their names, kinds and defaults. Returns nothing. A name already registered with the same parameters is replaced; with other parameters a second version is added.</dd>
+    <dt>parameters</dt><dd>SQL type texts overriding the annotations: a list for the parameters in order, the ones past its end left to Python's defaults, or a dict by parameter name. <code>ANY</code> takes an argument of any type, uncast. For a callable without a signature, a list of positional types, then <code>"*T"</code>, then <code>"**T"</code>.</dd>
+    <dt>returns</dt><dd>One SQL type text, else the return annotation. The returned value is cast to it.</dd>
+    <dt>null_handling="default"</dt><dd>A NULL argument gives NULL without a call, a <code>None</code> default included.</dd>
     <dt>null_handling="special"</dt><dd><code>None</code> is passed in; the function decides.</dd>
     <dt>stability="consistent"</dt><dd>Pure. The engine may compute a call once and reuse the value, and may treat repeated calls as one.</dd>
     <dt>stability="consistent_within_query"</dt><dd>Stable within one query, free to change between queries.</dd>
@@ -306,14 +395,15 @@ sql(<span class="s">"SELECT sum(bump(i)) FROM big"</span>).rows(con)       <span
 
   <h3>Calling</h3>
   <dl class="ref">
-    <dt>fn(name, *args)</dt><dd>Any function by name, in an expression. A registered function is one.</dd>
+    <dt>fn(name, /, *args, **named)</dt><dd>Any function by name, in an expression; keyword arguments pass by name. A registered function is one.</dd>
     <dt>sql(text).rows(con) / con.run(text)</dt><dd>SQL that names the function, on a connection to the database it was registered on.</dd>
   </dl>
 
   <h3>Errors</h3>
   <dl class="ref">
     <dt>CatalogError</dt><dd>A type text names a type that does not exist. At registration.</dd>
-    <dt>InvalidInputError</dt><dd>At registration: an <code>ANY</code> return type, or an option value that is not one of the choices. At run time: an exception inside the function, a returned value that cannot be read, or one that cannot be cast to <code>returns</code>.</dd>
+    <dt>TypeError</dt><dd>A <code>function</code> that is not callable, or a <code>parameters</code> that is neither a list nor a dict. At registration.</dd>
+    <dt>InvalidInputError</dt><dd>At registration: an <code>ANY</code> return type, a list of types that does not fit the parameters, a dict naming no parameter, an annotation no type is read from, a default its parameter cannot hold, two parameter names equal ignoring case, or an option value that is not one of the choices. At run time: an exception inside the function, a returned value that cannot be read, or one that cannot be cast to <code>returns</code>.</dd>
     <dt>InterfaceError</dt><dd>The connection is closed.</dd>
     <dt>ProgrammingError</dt><dd>The engine found no function taking the arguments given in the query.</dd>
   </dl>
@@ -330,48 +420,39 @@ con.remove_function(name)       <span class="c"># and duckdb.remove_function(nam
     <table>
       <thead><tr><th>Old</th><th>Native</th></tr></thead>
       <tbody>
-        <tr><td><code>return_type=</code>, optional</td><td><code>returns</code>, positional and required</td></tr>
-        <tr><td><code>parameters=None</code>: types inferred from the function's annotations</td><td>required, as SQL type text; nothing is inferred</td></tr>
-        <tr><td>a function with no annotations and no types fell back to <code>ANY</code> parameters</td><td>declare each one, <code>"ANY"</code> for any type; a variadic <code>*args</code> has no declaration</td></tr>
+        <tr><td><code>return_type=</code>, optional</td><td><code>returns</code>, optional the same way</td></tr>
+        <tr><td><code>parameters=None</code>: types inferred from the function's annotations</td><td>the same, with a dict for some types by name; an annotation no type is read from is refused, where the old client made it <code>ANY</code>, and <code>bytearray</code> is no longer <code>BLOB</code>, since a <code>BLOB</code> arrives as <code>bytes</code></td></tr>
+        <tr><td>every parameter, keyword-only and <code>**kwargs</code> included, was one positional parameter; defaults were ignored and arguments could not be named</td><td>each parameter keeps its kind, name and default: <code>f(x := 1)</code>, <code>*args</code> and <code>**kwargs</code> work as in Python</td></tr>
         <tr><td><code>type="native"</code> or <code>"arrow"</code></td><td>no <code>type</code>; every function is called per row with Python values</td></tr>
         <tr><td><code>null_handling</code> took a string or one of the client's enum values</td><td>the strings <code>"default"</code> and <code>"special"</code></td></tr>
         <tr><td>under <code>"default"</code>, returning <code>None</code> was refused: "The UDF is not expected to return NULL values"</td><td>returning <code>None</code> makes the result NULL under either setting</td></tr>
         <tr><td><code>exception_handling="return_null"</code>: an exception inside the function became NULL</td><td>gone; an exception fails the query. Catch it in the function and return <code>None</code></td></tr>
         <tr><td><code>side_effects=True</code> / <code>False</code></td><td><code>stability="volatile"</code> / <code>"consistent"</code>, plus <code>"consistent_within_query"</code></td></tr>
         <tr><td>returned the connection, for chaining</td><td>returns <code>None</code></td></tr>
-        <tr><td>registering a name twice was refused, "already created"; <code>remove_function</code> first</td><td>registering again replaces; there is no <code>remove_function</code>, the engine keeps a function until the database closes</td></tr>
+        <tr><td>registering a name twice was refused, "already created"; <code>remove_function</code> first</td><td>registering again with the same parameters replaces, with other parameters adds a version; there is no <code>remove_function</code>, the engine keeps a function until the database closes</td></tr>
         <tr><td><code>duckdb.create_function</code> on an implicit default connection</td><td>no module-level function; a connection is always explicit</td></tr>
         <tr><td><code>InvalidInputException</code></td><td><code>InvalidInputError</code></td></tr>
       </tbody>
     </table>
   </div>
-  <p>The inference the old client did read <code>bool</code>, <code>int</code>, <code>float</code>, <code>str</code>, <code>bytes</code>, <code>bytearray</code>, <code>datetime</code>, <code>date</code>, <code>time</code>, <code>timedelta</code> and <code>UUID</code> as <code>BOOLEAN</code>, <code>BIGINT</code>, <code>DOUBLE</code>, <code>VARCHAR</code>, <code>BLOB</code>, <code>BLOB</code>, <code>TIMESTAMP</code>, <code>DATE</code>, <code>TIME</code>, <code>INTERVAL</code> and <code>UUID</code>; <code>list[T]</code> as <code>T[]</code>, <code>dict[K, V]</code> as <code>MAP(K, V)</code>, and <code>T | None</code> as <code>T</code>. Write those texts yourself. The rule is simple enough that a helper in your own code can do it, and the registration then says what the engine will see.</p>
   <div class="pair">
     <div class="bad">
       <div class="tag">old</div>
-      <pre><code><span class="k">def</span> shout(text: str, times: int) -&gt; str:
-    <span class="k">return</span> text.upper() * times
-
-con.create_function(<span class="s">"shout"</span>, shout)
-con.create_function(<span class="s">"brittle"</span>, brittle,
+      <pre><code>con.create_function(<span class="s">"brittle"</span>, brittle,
     exception_handling=<span class="s">"return_null"</span>)
 con.create_function(<span class="s">"tick"</span>, tick, [], <span class="s">"BIGINT"</span>,
     side_effects=<span class="k">True</span>)</code></pre>
     </div>
     <div class="good">
       <div class="tag">native</div>
-      <pre><code><span class="k">def</span> shout(text, times):
-    <span class="k">return</span> text.upper() * times
-
-con.create_function(<span class="s">"shout"</span>, shout, [<span class="s">"VARCHAR"</span>, <span class="s">"BIGINT"</span>], <span class="s">"VARCHAR"</span>)
-con.create_function(<span class="s">"brittle"</span>, safe(brittle), [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT"</span>)
+      <pre><code>con.create_function(<span class="s">"brittle"</span>, safe(brittle), [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT"</span>)
     <span class="c"># where safe() catches and returns None</span>
 con.create_function(<span class="s">"tick"</span>, tick, [], <span class="s">"BIGINT"</span>,
     stability=<span class="s">"volatile"</span>)</code></pre>
     </div>
   </div>
   <p>One more difference is recorded in the behaviour notes: a <code>KeyboardInterrupt</code> raised inside the function is now the query's <code>InvalidInputError</code>, like any other exception in it, since the engine owns the call and sees only its failure.</p>
-  <p>One thing the old client had is not here in any form: Arrow functions, <code>type="arrow"</code>. An <code>ANY</code> parameter is declared by its type text, where the old client made one of every unannotated parameter, and a variadic <code>*args</code> has no declaration yet.</p>
+  <p>One thing the old client had is not here in any form: Arrow functions, <code>type="arrow"</code>.</p>
 </section>
 
 <footer>

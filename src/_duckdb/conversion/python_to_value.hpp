@@ -10,6 +10,7 @@
 
 #include <nanobind/nanobind.h>
 
+#include <algorithm>
 #include <string>
 #include <utility>
 #include <vector>
@@ -52,10 +53,55 @@ inline Form FormOf(nb::handle object) {
 	return Form::STRUCT;
 }
 
+/// Marks a list or dict as being walked on this thread for as long as it lives, and refuses one already being walked
+/// further up, which contains itself and would never end.
+class WalkGuard {
+public:
+	explicit WalkGuard(nb::handle object) : object(object.ptr()) {
+		auto &path = Path();
+		if (std::find(path.begin(), path.end(), this->object) != path.end()) {
+			ThrowInvalidInput("a list or dict that contains itself has no SQL value");
+		}
+		path.push_back(this->object);
+	}
+	~WalkGuard() {
+		Path().pop_back();
+	}
+	WalkGuard(const WalkGuard &) = delete;
+	WalkGuard &operator=(const WalkGuard &) = delete;
+
+	/// The containers on the current walk; a conversion run from Python code inside another starts a path of its own.
+	static std::vector<PyObject *> &Path() {
+		thread_local std::vector<PyObject *> path;
+		return path;
+	}
+
+private:
+	PyObject *object;
+};
+
+/// Gives one top-level conversion its own walk path for as long as it lives, so a conversion that Python code
+/// started inside another, such as a tzinfo binding a query parameter, never sees the outer walk's containers.
+class WalkScope {
+public:
+	WalkScope() {
+		saved.swap(WalkGuard::Path());
+	}
+	~WalkScope() {
+		saved.swap(WalkGuard::Path());
+	}
+	WalkScope(const WalkScope &) = delete;
+	WalkScope &operator=(const WalkScope &) = delete;
+
+private:
+	std::vector<PyObject *> saved;
+};
+
 // A list's elements and a dict's entries are all held before any is converted: converting one may run Python code, such
 // as a tzinfo's, that changes the list or dict, which would cut the walk short or free a part only it held.
 template <class EACH>
 void ForEachElement(nb::handle object, const EACH &each) {
+	const WalkGuard guard(object);
 	std::vector<nb::object> elements;
 	for (nb::handle item : object) {
 		elements.push_back(nb::borrow(item));
@@ -67,6 +113,7 @@ void ForEachElement(nb::handle object, const EACH &each) {
 
 template <class EACH>
 void ForEachField(nb::handle object, const EACH &each) {
+	const WalkGuard guard(object);
 	std::vector<std::pair<std::string, nb::object>> fields;
 	for (auto entry : nb::borrow<nb::dict>(object)) {
 		fields.emplace_back(nb::cast<std::string>(entry.first), nb::borrow(entry.second));
@@ -78,6 +125,7 @@ void ForEachField(nb::handle object, const EACH &each) {
 
 template <class EACH>
 void ForEachEntry(nb::handle object, const EACH &each) {
+	const WalkGuard guard(object);
 	std::vector<std::pair<nb::object, nb::object>> entries;
 	for (auto entry : nb::borrow<nb::dict>(object)) {
 		entries.emplace_back(nb::borrow(entry.first), nb::borrow(entry.second));

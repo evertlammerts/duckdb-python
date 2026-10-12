@@ -9,8 +9,10 @@
 #include "udf.hpp"
 
 #include "conversion/python_to_declared_type.hpp"
+#include "conversion/python_to_value.hpp"
 #include "conversion/value_to_python.hpp"
 
+#include <optional>
 #include <utility>
 
 namespace duckdb_python {
@@ -37,26 +39,75 @@ struct PyFunctionData {
 	std::shared_ptr<ModuleState> module;
 };
 
-/// The C++ API's Vector exposes no type, so the type an ANY argument arrives in is kept from the bind callback. The
-/// engine merges two identical calls only when their bind data compares equal, which a vector of types does by value.
-using BoundArguments = std::vector<cxx::LogicalType>;
+/// What only the bind callback can read about a call: the type each argument arrives in, since the C++ API's Vector
+/// exposes none, and the names of the arguments passed by name, which follow the positional ones. The engine merges
+/// two identical calls only when their bind data compares equal.
+struct BoundCall {
+	std::vector<cxx::LogicalType> types;
+	std::vector<std::string> keywords;
+
+	bool operator==(const BoundCall &other) const {
+		return types == other.types && keywords == other.keywords;
+	}
+};
 
 void PyScalarBind(cxx::ScalarFunction::BindInput &input) {
-	std::vector<cxx::LogicalType> types;
+	BoundCall call;
 	const auto count = input.GetArgCount();
-	types.reserve(count);
+	const auto named = input.GetArgumentCounts().NamedOffset();
+	call.types.reserve(count);
 	for (cxx::idx_t a = 0; a < count; a++) {
-		types.push_back(input.GetArgType(a));
+		call.types.push_back(input.GetArgType(a));
+		if (a >= named) {
+			call.keywords.push_back(input.GetArgName(a));
+		}
 	}
-	input.SetBindData<BoundArguments>(std::move(types));
+	input.SetBindData<BoundCall>(std::move(call));
+}
+
+/// Why a Python value did not become a value of the declared type, for the conversion failure being handled, told
+/// after `subject` ("the UDF 'f' returned"); `declared` is null for ANY. Any other exception propagates.
+std::string ConversionFailure(const std::string &subject, const cxx::LogicalType *declared) {
+	try {
+		throw;
+	} catch (const DeclaredTypeRefusal &refusal) {
+		return subject + " " + refusal.GetRawMessage();
+	} catch (const UnsupportedTypeException &error) {
+		return subject + " a value of type " + error.TypeName() + ", which cannot be converted to a DuckDB value";
+	} catch (const cxx::Exception &error) {
+		const auto &body = error.GetRawMessage();
+		const auto into = declared ? " to its declared type " + declared->ToText() : std::string();
+		return subject + " a value that cannot be converted" + into + ": " + (body.empty() ? error.what() : body);
+	}
+}
+
+/// A Python default as the engine keeps it, converted as a returned value is, or for ANY as a query parameter is, so
+/// a default its parameter cannot hold is refused once here rather than by every call that leaves it out.
+cxx::Value DefaultValue(cxx::Connection &connection, const ParameterSpec &parameter, const TypeTree &type,
+                        ConversionContext &conversion) {
+	const auto subject = "the default of parameter '" + parameter.name + "'";
+	const bool any = type.id == cxx::LogicalTypeId::ANY;
+	try {
+		if (any) {
+			return PythonToValue(connection, parameter.default_value, conversion, TimestampPrecision::MICROSECONDS);
+		}
+		return PythonToDeclaredType(connection, parameter.default_value, type, conversion);
+	} catch (const cxx::Exception &) {
+		ThrowInvalidInput(ConversionFailure(subject + " is", any ? nullptr : &type.type));
+	} catch (nb::python_error &error) {
+		ThrowInvalidInput(subject + " cannot be converted: " + DescribePythonError(error));
+	} catch (const std::exception &error) {
+		ThrowInvalidInput(subject + " cannot be converted: " + error.what());
+	}
 }
 
 /// Called from DuckDB's own threads, so the GIL is taken here once per batch.
 void PyScalarExec(cxx::ScalarFunction::ExecInput &input) {
 	auto &data = input.GetUserData<PyFunctionData>();
-	const auto &bound = input.GetBindData<BoundArguments>();
+	const auto &bound = input.GetBindData<BoundCall>();
 	const auto rows = input.GetRowCount();
 	const auto count = input.GetArgCount();
+	const auto positional = count - bound.keywords.size();
 	auto context = input.GetContext();
 	auto result = input.GetResult();
 
@@ -67,30 +118,41 @@ void PyScalarExec(cxx::ScalarFunction::ExecInput &input) {
 		columns.reserve(count);
 		for (cxx::idx_t a = 0; a < count; a++) {
 			auto argument = input.GetArg(a);
-			columns.push_back(VectorElements(argument, bound.at(a), 0, rows, data.module->conversion));
+			columns.push_back(VectorElements(argument, bound.types.at(a), 0, rows, data.module->conversion));
 		}
-		result.SetSize(rows);
-		for (cxx::idx_t r = 0; r < rows; r++) {
-			PyObject *raw = PyTuple_New(static_cast<Py_ssize_t>(count));
-			if (raw == nullptr) {
+		nb::object keywords;
+		if (!bound.keywords.empty()) {
+			keywords = nb::steal(PyTuple_New(static_cast<Py_ssize_t>(bound.keywords.size())));
+			if (!keywords.is_valid()) {
 				throw nb::python_error();
 			}
-			auto arguments = nb::steal<nb::tuple>(raw);
-			bool any_null = false;
-			for (cxx::idx_t a = 0; a < count; a++) {
-				PyObject *item = PyList_GetItem(columns[a].ptr(), static_cast<Py_ssize_t>(r));
-				any_null = any_null || item == Py_None;
-				// SetItem steals the new reference whatever it returns.
-				if (PyTuple_SetItem(raw, static_cast<Py_ssize_t>(a), Py_NewRef(item)) != 0) {
+			for (size_t k = 0; k < bound.keywords.size(); k++) {
+				const auto &keyword = bound.keywords[k];
+				PyObject *name = PyUnicode_FromStringAndSize(keyword.data(), static_cast<Py_ssize_t>(keyword.size()));
+				if (name == nullptr) {
 					throw nb::python_error();
 				}
+				// SetItem steals the new reference whatever it returns.
+				if (PyTuple_SetItem(keywords.ptr(), static_cast<Py_ssize_t>(k), name) != 0) {
+					throw nb::python_error();
+				}
+			}
+		}
+		result.SetSize(rows);
+		// Borrowed from the columns, which outlive every call.
+		std::vector<PyObject *> arguments(count);
+		for (cxx::idx_t r = 0; r < rows; r++) {
+			bool any_null = false;
+			for (cxx::idx_t a = 0; a < count; a++) {
+				arguments[a] = PyList_GetItem(columns[a].ptr(), static_cast<Py_ssize_t>(r));
+				any_null = any_null || arguments[a] == Py_None;
 			}
 			// NULL in means NULL out, but DuckDB still runs the batch over those rows, so the skip is here.
 			if (any_null && data.skip_nulls) {
 				result.SetNull(r);
 				continue;
 			}
-			PyObject *returned = PyObject_CallObject(data.callable.ptr(), raw);
+			PyObject *returned = PyObject_Vectorcall(data.callable.ptr(), arguments.data(), positional, keywords.ptr());
 			if (returned == nullptr) {
 				throw nb::python_error();
 			}
@@ -101,16 +163,9 @@ void PyScalarExec(cxx::ScalarFunction::ExecInput &input) {
 			}
 			try {
 				result.SetValue(r, PythonToDeclaredType(context, object, data.returns, data.module->conversion));
-			} catch (const DeclaredTypeRefusal &refusal) {
-				throw cxx::InvalidInputException("the UDF '" + data.name + "' returned " + refusal.GetRawMessage());
-			} catch (const UnsupportedTypeException &error) {
-				throw cxx::InvalidInputException("the UDF '" + data.name + "' returned a value of type " +
-				                                 error.TypeName() + ", which cannot be converted to a DuckDB value");
-			} catch (const cxx::Exception &error) {
-				const auto &body = error.GetRawMessage();
+			} catch (const cxx::Exception &) {
 				throw cxx::InvalidInputException(
-				    "the UDF '" + data.name + "' returned a value that cannot be converted to its declared type " +
-				    data.returns.type.ToText() + ": " + (body.empty() ? error.what() : body));
+				    ConversionFailure("the UDF '" + data.name + "' returned", &data.returns.type));
 			}
 		}
 	} catch (const cxx::Exception &error) {
@@ -127,23 +182,32 @@ void PyScalarExec(cxx::ScalarFunction::ExecInput &input) {
 } // namespace
 
 void RegisterScalarFunction(cxx::Connection &connection, const std::string &name, nb::handle callable,
-                            const std::vector<std::string> &parameters, const std::string &returns,
+                            const std::vector<ParameterSpec> &parameters, const std::string &returns,
                             cxx::FunctionNullHandling nulls, cxx::FunctionStability level,
                             std::shared_ptr<ModuleState> module) {
-	std::vector<cxx::LogicalType> parameter_types;
-	parameter_types.reserve(parameters.size());
-	for (const auto &text : parameters) {
+	std::vector<TypeTree> types;
+	std::vector<std::optional<cxx::Value>> defaults;
+	types.reserve(parameters.size());
+	defaults.reserve(parameters.size());
+	for (const auto &parameter : parameters) {
 		// The type parser refuses ANY, which only a signature may hold.
-		parameter_types.push_back(text == "ANY" ? connection.CreateType(cxx::LogicalTypeId::ANY)
-		                                        : connection.ParseType(text));
+		types.push_back(TypeTreeOf(parameter.type == "ANY" ? connection.CreateType(cxx::LogicalTypeId::ANY)
+		                                                   : connection.ParseType(parameter.type)));
+		defaults.push_back(parameter.has_default
+		                       ? std::optional(DefaultValue(connection, parameter, types.back(), module->conversion))
+		                       : std::nullopt);
 	}
 	auto return_type = connection.ParseType(returns);
 
 	auto function = cxx::ScalarFunction::Create(connection);
 	function.SetName(name);
 	function.WithSignature([&](cxx::FunctionSignature &signature) {
-		for (size_t i = 0; i < parameter_types.size(); i++) {
-			signature.AddParameter("arg" + std::to_string(i), parameter_types[i]);
+		for (size_t i = 0; i < parameters.size(); i++) {
+			if (defaults[i]) {
+				signature.AddParameter(parameters[i].name, types[i].type, *defaults[i], parameters[i].kind);
+			} else {
+				signature.AddParameter(parameters[i].name, types[i].type, parameters[i].kind);
+			}
 		}
 		signature.SetReturnType(return_type);
 	});

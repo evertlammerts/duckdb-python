@@ -303,6 +303,70 @@ struct VectorSink {
 	}
 };
 
+// Whether a value of the type converts to a list, dict or tuple, or may: a union's member or a variant's value can.
+bool ConvertsToContainer(LogicalTypeId id) {
+	switch (id) {
+	case LogicalTypeId::LIST:
+	case LogicalTypeId::ARRAY:
+	case LogicalTypeId::MAP:
+	case LogicalTypeId::STRUCT:
+	case LogicalTypeId::TUPLE:
+	case LogicalTypeId::UNION:
+	case LogicalTypeId::VARIANT:
+		return true;
+	default:
+		return false;
+	}
+}
+
+// A list, dict or tuple rebuilt around the same leaves; the converted leaves are immutable, so the copy shares nothing
+// that can change.
+nb::object FreshCopy(PyObject *object) {
+	if (PyList_Check(object)) {
+		const auto size = PyList_Size(object);
+		auto copy = nb::steal(PyList_New(size));
+		if (!copy.is_valid()) {
+			throw nb::python_error();
+		}
+		for (Py_ssize_t i = 0; i < size; i++) {
+			// SetItem steals the new reference whatever it returns.
+			if (PyList_SetItem(copy.ptr(), i, FreshCopy(PyList_GetItem(object, i)).release().ptr()) != 0) {
+				throw nb::python_error();
+			}
+		}
+		return copy;
+	}
+	if (PyTuple_Check(object)) {
+		const auto size = PyTuple_Size(object);
+		auto copy = nb::steal(PyTuple_New(size));
+		if (!copy.is_valid()) {
+			throw nb::python_error();
+		}
+		for (Py_ssize_t i = 0; i < size; i++) {
+			if (PyTuple_SetItem(copy.ptr(), i, FreshCopy(PyTuple_GetItem(object, i)).release().ptr()) != 0) {
+				throw nb::python_error();
+			}
+		}
+		return copy;
+	}
+	if (PyDict_Check(object)) {
+		auto copy = nb::steal(PyDict_New());
+		if (!copy.is_valid()) {
+			throw nb::python_error();
+		}
+		Py_ssize_t position = 0;
+		PyObject *key = nullptr;
+		PyObject *value = nullptr;
+		while (PyDict_Next(object, &position, &key, &value)) {
+			if (PyDict_SetItem(copy.ptr(), key, FreshCopy(value).ptr()) != 0) {
+				throw nb::python_error();
+			}
+		}
+		return copy;
+	}
+	return nb::borrow(object);
+}
+
 // Elements [first, last) of one column, each handed to `sink(position, object)` as a new reference with
 // `position` relative to `first`. Limited-API calls only, since the extension builds against the stable ABI.
 template <class SINK>
@@ -499,7 +563,15 @@ void EmitElements(cxx::Vector &vector, const LogicalType &type, cxx::idx_t first
 				EmitElements(child, child_type, lo, hi, ctx, VectorSink {values});
 			}
 		}
-		// Unhashable keys become (key, value) pairs, decided from the type so every row of the column matches.
+		// The rows of a flattened constant share their child slots. A later row reaching a slot again gets its own
+		// copy of a list or dict there, so changing one row's value never changes another's.
+		const bool copies = is_map ? ConvertsToContainer(type.GetMapKeyType().GetTypeId()) ||
+		                                 ConvertsToContainer(type.GetMapValueType().GetTypeId())
+		                           : ConvertsToContainer(type.GetListChildType().GetTypeId());
+		std::vector<bool> taken(copies ? hi - lo : 0, false);
+		const auto own = [&](const std::vector<nb::object> &converted, uint64_t slot) {
+			return copies && taken[slot] ? FreshCopy(converted[slot].ptr()) : converted[slot];
+		};
 		const bool hashable = is_map && KeysHashable(type.GetMapKeyType());
 		for (cxx::idx_t e = first; e < last; e++) {
 			const auto element = view.SelAt(e);
@@ -509,6 +581,12 @@ void EmitElements(cxx::Vector &vector, const LogicalType &type, cxx::idx_t first
 			}
 			const auto &entry = entries[element];
 			const auto base = entry.offset - lo;
+			const auto value_at = [&](uint64_t j) {
+				return own(values, base + j);
+			};
+			const auto key_at = [&](uint64_t j) {
+				return own(keys, base + j);
+			};
 			nb::object row;
 			if (!is_map) {
 				row = nb::steal(PyList_New(static_cast<Py_ssize_t>(entry.length)));
@@ -516,7 +594,7 @@ void EmitElements(cxx::Vector &vector, const LogicalType &type, cxx::idx_t first
 					throw nb::python_error();
 				}
 				for (uint64_t j = 0; j < entry.length; j++) {
-					if (PyList_SetItem(row.ptr(), static_cast<Py_ssize_t>(j), Py_NewRef(values[base + j].ptr())) != 0) {
+					if (PyList_SetItem(row.ptr(), static_cast<Py_ssize_t>(j), value_at(j).release().ptr()) != 0) {
 						throw nb::python_error();
 					}
 				}
@@ -526,7 +604,7 @@ void EmitElements(cxx::Vector &vector, const LogicalType &type, cxx::idx_t first
 					throw nb::python_error();
 				}
 				for (uint64_t j = 0; j < entry.length; j++) {
-					if (PyDict_SetItem(row.ptr(), keys[base + j].ptr(), values[base + j].ptr()) != 0) {
+					if (PyDict_SetItem(row.ptr(), keys[base + j].ptr(), value_at(j).ptr()) != 0) {
 						throw nb::python_error();
 					}
 				}
@@ -540,14 +618,17 @@ void EmitElements(cxx::Vector &vector, const LogicalType &type, cxx::idx_t first
 					if (!pair.is_valid()) {
 						throw nb::python_error();
 					}
-					if (PyTuple_SetItem(pair.ptr(), 0, Py_NewRef(keys[base + j].ptr())) != 0 ||
-					    PyTuple_SetItem(pair.ptr(), 1, Py_NewRef(values[base + j].ptr())) != 0) {
+					if (PyTuple_SetItem(pair.ptr(), 0, key_at(j).release().ptr()) != 0 ||
+					    PyTuple_SetItem(pair.ptr(), 1, value_at(j).release().ptr()) != 0) {
 						throw nb::python_error();
 					}
 					if (PyList_SetItem(row.ptr(), static_cast<Py_ssize_t>(j), pair.release().ptr()) != 0) {
 						throw nb::python_error();
 					}
 				}
+			}
+			for (uint64_t j = 0; copies && j < entry.length; j++) {
+				taken[base + j] = true;
 			}
 			sink(static_cast<size_t>(e - first), row.release().ptr());
 		}

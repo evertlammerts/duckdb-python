@@ -368,18 +368,25 @@ public:
 		return {StatementTypeText(statement.GetStatementType()), keyword};
 	}
 
-	/// Register a Python callable as a scalar SQL function on this database.
-	void CreateScalarFunction(const std::string &name, nb::object callable, const std::vector<std::string> &parameters,
-	                          const std::string &returns, cxx::FunctionNullHandling nulls,
-	                          cxx::FunctionStability level) {
+	/// Register a Python callable as a scalar SQL function on this database; each parameter is (name, kind, type text,
+	/// whether it has a default, the default).
+	void CreateScalarFunction(
+	    const std::string &name, nb::object callable,
+	    const std::vector<std::tuple<std::string, cxx::FunctionParameterKind, std::string, bool, nb::object>>
+	        &parameters,
+	    const std::string &returns, cxx::FunctionNullHandling nulls, cxx::FunctionStability level) {
+		std::vector<ParameterSpec> specs;
+		specs.reserve(parameters.size());
+		for (const auto &[parameter, kind, type, has_default, value] : parameters) {
+			specs.push_back(ParameterSpec {parameter, kind, type, has_default, value});
+		}
 		auto held = Live();
 		auto &owner = Database::From(held.database);
 		// Kept BEFORE the engine can hand the name to anyone: a stream on another connection snapshots the
 		// kept callables when it starts, so a function must never be visible without its lifetime pin.
 		owner.KeepCallable(callable);
 		try {
-			RegisterScalarFunction(*held.engine, name, callable, parameters, returns, nulls, level,
-			                       connection.Module());
+			RegisterScalarFunction(*held.engine, name, callable, specs, returns, nulls, level, connection.Module());
 		} catch (...) {
 			owner.AbandonCallable(callable);
 			throw;
@@ -531,6 +538,13 @@ NB_MODULE(_duckdb, m) {
 	// Created per import, so each interpreter gets its own and reaches it only through the bindings below.
 	auto state = std::make_shared<ModuleState>();
 	nb::register_exception_translator(&TranslateException, state.get());
+
+	nb::enum_<cxx::FunctionParameterKind>(m, "ParameterKind")
+	    .value("POSITIONAL_ONLY", cxx::FunctionParameterKind::POSITIONAL_ONLY)
+	    .value("STANDARD", cxx::FunctionParameterKind::STANDARD)
+	    .value("POSITIONAL_VARIADIC", cxx::FunctionParameterKind::POSITIONAL_VARIADIC)
+	    .value("NAMED_ONLY", cxx::FunctionParameterKind::NAMED_ONLY)
+	    .value("NAMED_VARIADIC", cxx::FunctionParameterKind::NAMED_VARIADIC);
 
 	nb::enum_<cxx::FunctionNullHandling>(m, "FunctionNullHandling")
 	    .value("DEFAULT", cxx::FunctionNullHandling::DEFAULT)

@@ -21,7 +21,7 @@ from duckdb import _duckdb, exceptions
 from duckdb._expressions.expr import render_literal
 from duckdb.frame import col, fn
 
-from ._support import Emptying, Failing
+from ._support import Emptying, Failing, refusal_of_a_list_containing_itself
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -40,6 +40,10 @@ def rows(con: duckdb.frame.Connection, sql: str) -> list[tuple[object, ...]]:
 # The extension module takes enum values; the string forms belong to duckdb.frame.Connection.
 DEFAULT = _duckdb.FunctionNullHandling.DEFAULT
 CONSISTENT = _duckdb.FunctionStability.CONSISTENT
+#: One BIGINT parameter, as the extension module takes a parameter: name, kind, type, whether it has a default, it.
+ONE_BIGINT: list[tuple[str, _duckdb.ParameterKind, str, bool, object]] = [
+    ("x", _duckdb.ParameterKind.STANDARD, "BIGINT", False, None)
+]
 
 
 class TestRegistration:
@@ -127,6 +131,31 @@ class TestValues:
             )
         ]
 
+    @pytest.mark.parametrize(
+        ("sql_type", "value"),
+        [
+            ("BIGINT[][]", "[[]]"),
+            ("BIGINT[][2]", "[[], []]"),
+            ("MAP(VARCHAR, BIGINT[])", "MAP {'k': []}"),
+            ("STRUCT(a BIGINT[])", "{'a': []}"),
+            ("MAP(BIGINT[], BIGINT)", "MAP {[]: 1}"),
+        ],
+    )
+    def test_a_constant_nested_argument_is_every_rows_own(
+        self, con: duckdb.frame.Connection, sql_type: str, value: str
+    ) -> None:
+        # A constant is one value the engine hands every row; a row changing its copy must not change the next one's.
+        def grow(x: object) -> int:
+            inner = x[0] if isinstance(x, list) else next(iter(x.values())) if isinstance(x, dict) else None
+            if isinstance(inner, tuple):
+                inner = inner[0]
+            assert isinstance(inner, list)
+            inner.append(1)
+            return len(inner)
+
+        con.create_function("grow", grow, [sql_type], "BIGINT", stability="volatile")
+        assert rows(con, f"SELECT grow({value}::{sql_type}) FROM range(3)") == [(1,), (1,), (1,)]
+
     def test_nested_arguments_arrive_as_python_values(self, con: duckdb.frame.Connection) -> None:
         con.create_function("total", lambda xs: sum(xs), ["BIGINT[]"], "BIGINT")
         con.create_function("field", lambda s: s["a"], ["STRUCT(a INTEGER)"], "INTEGER")
@@ -140,6 +169,10 @@ class TestValues:
     def test_the_return_is_cast_to_the_declared_type(self, con: duckdb.frame.Connection) -> None:
         con.create_function("half", lambda x: x / 2, ["BIGINT"], "INTEGER")
         assert rows(con, "SELECT half(9)") == [(4,)]
+
+    def test_a_return_that_contains_itself_is_refused(self) -> None:
+        use = "con.create_function('r', lambda: x, [], 'BIGINT[]'); con._execute('SELECT r()').fetch_all()"
+        assert "a list or dict that contains itself has no SQL value" in refusal_of_a_list_containing_itself(use)
 
     def test_an_uncastable_return_fails_loudly(self, con: duckdb.frame.Connection) -> None:
         con.create_function("wide", lambda x: 2**70, ["BIGINT"], "INTEGER")
@@ -629,7 +662,7 @@ class TestClosedHandles:
         calls: list[Callable[[], object]] = [
             lambda: connection.execute("SELECT 1"),
             lambda: connection.bind("SELECT 1"),
-            lambda: connection.create_scalar_function("f", abs, ["BIGINT"], "BIGINT", DEFAULT, CONSISTENT),
+            lambda: connection.create_scalar_function("f", abs, ONE_BIGINT, "BIGINT", DEFAULT, CONSISTENT),
             connection.interrupt,
             lambda: connection.get_option("threads"),
             lambda: connection.set_option("threads", "1"),
@@ -648,7 +681,7 @@ class TestClosedHandles:
             return x
 
         # The database owns its registered callables, so one outliving its last reference shows it is alive.
-        connection.create_scalar_function("probe", probe, ["BIGINT"], "BIGINT", DEFAULT, CONSISTENT)
+        connection.create_scalar_function("probe", probe, ONE_BIGINT, "BIGINT", DEFAULT, CONSISTENT)
         ref = weakref.ref(probe)
         del database, probe
         gc.collect()
@@ -669,7 +702,7 @@ class TestClosedHandles:
             release.wait(timeout=30)
             return x
 
-        connection.create_scalar_function("gate", gate, ["BIGINT"], "BIGINT", DEFAULT, CONSISTENT)
+        connection.create_scalar_function("gate", gate, ONE_BIGINT, "BIGINT", DEFAULT, CONSISTENT)
         outcome: list[object] = []
 
         def run() -> None:

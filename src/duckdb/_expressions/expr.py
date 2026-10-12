@@ -1054,17 +1054,22 @@ class Between(Expr):
 
 
 class Func(Expr):
-    """A function call."""
+    """A function call, its named arguments after the positional ones."""
 
-    def __init__(self, name: str | tuple[str, ...], args: list[Expr]) -> None:
+    def __init__(
+        self, name: str | tuple[str, ...], args: list[Expr], named: list[tuple[str, Expr]] | None = None
+    ) -> None:
         super().__init__()
         self.name = name_parts(name, "function name")
         self.args = args
+        self.named = named or []
         self._ignore_nulls = False
         self._filter: Expr | None = None
 
     def fragment(self) -> str:
-        rendered = ", ".join(a.fragment() for a in self.args)
+        rendered = ", ".join(
+            [a.fragment() for a in self.args] + [f"{quote(k)} := {v.fragment()}" for k, v in self.named]
+        )
         # IGNORE NULLS goes inside the call, where DuckDB reads it; after the closing parenthesis it is a syntax error.
         tail = " IGNORE NULLS" if self._ignore_nulls else ""
         return f"{function_name(self.name)}({rendered}{tail})" + _filter_clause(self._filter)
@@ -1221,9 +1226,12 @@ def star(exclude: Iterable[str] = (), rename: dict[str, str] | None = None) -> E
     return Star(exclude, rename)
 
 
-def fn(name: str | tuple[str, ...], *args: object) -> Expr:
-    """Any SQL function by name, a tuple for a schema-qualified one, with the arguments treated as anywhere else."""
-    return Func(name, [_lift(a) for a in args])
+def fn(name: str | tuple[str, ...], /, *args: object, **named: object) -> Expr:
+    """Any SQL function by name, a tuple for a schema-qualified one, with the arguments treated as anywhere else.
+
+    A keyword argument passes by name: `fn("round", col("x"), precision=1)` is `round("x", "precision" := 1)`.
+    """
+    return Func(name, [_lift(a) for a in args], [(key, _lift(value)) for key, value in named.items()])
 
 
 def sql_expr(sql: str) -> Expr:

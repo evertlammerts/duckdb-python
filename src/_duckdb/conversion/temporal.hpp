@@ -148,8 +148,16 @@ bool AssumesTimeZone(duckdb::cxx::LogicalTypeId from, duckdb::cxx::LogicalTypeId
 
 /// `value` cast to `target` when the cast loses nothing, and nullopt otherwise; the engine's own cast rounds rather
 /// than refuses.
-std::optional<duckdb::cxx::Value> TryCastTemporalExactly(duckdb::cxx::Context &context, const duckdb::cxx::Value &value,
+template <class SCOPE>
+std::optional<duckdb::cxx::Value> TryCastTemporalExactly(SCOPE &context, const duckdb::cxx::Value &value,
                                                          const duckdb::cxx::LogicalType &target);
+
+extern template std::optional<duckdb::cxx::Value>
+TryCastTemporalExactly<duckdb::cxx::Connection>(duckdb::cxx::Connection &, const duckdb::cxx::Value &,
+                                                const duckdb::cxx::LogicalType &);
+extern template std::optional<duckdb::cxx::Value>
+TryCastTemporalExactly<duckdb::cxx::Context>(duckdb::cxx::Context &, const duckdb::cxx::Value &,
+                                             const duckdb::cxx::LogicalType &);
 
 /// Which kind of date or time a type is: an instant without or with a time zone, a time of day without or with
 /// one, or none of these.
