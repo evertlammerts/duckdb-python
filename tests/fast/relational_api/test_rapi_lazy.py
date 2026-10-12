@@ -107,3 +107,50 @@ class TestMaterialize:
         materialized = rel.materialize()
         assert materialized.columns == rel.columns
         assert materialized.types == rel.types
+
+
+class TestSqlThatRunsOnce:
+    """A SELECT with params, and any other statement, runs at the call; its relation reads the rows back."""
+
+    @pytest.mark.parametrize(
+        ("query", "params"),
+        [
+            pytest.param("SELECT nextval('s') AS v, ? AS p", [1], id="positional"),
+            pytest.param("SELECT nextval('s') AS v, $p AS p", {"p": 1}, id="named"),
+        ],
+    )
+    def test_a_select_with_params_runs_at_the_call_and_never_again(self, con, query, params):
+        rel = con.sql(query, params=params)
+        assert currval(con) == 1
+        assert rel.fetchall() == [(1, 1)]
+        assert rel.fetchall() == [(1, 1)]
+        assert rel.filter("p = 1").fetchall() == [(1, 1)]
+        assert currval(con) == 1
+
+    def test_it_reads_the_rows_of_the_call_not_the_table_now(self, con):
+        con.execute("CREATE TABLE t AS SELECT range AS i FROM range(5)")
+        rel = con.sql("SELECT i FROM t WHERE i < ? ORDER BY i", params=[3])
+        con.execute("DROP TABLE t")
+        assert rel.fetchall() == [(0,), (1,), (2,)]
+
+    def test_an_error_raises_at_the_call(self, con):
+        with pytest.raises(duckdb.InvalidInputException, match="boom"):
+            con.sql("SELECT error(?)", params=["boom"])
+
+    def test_a_statement_without_rows_runs_and_returns_none(self, con):
+        con.execute("CREATE TABLE log (v BIGINT)")
+        assert con.sql("INSERT INTO log VALUES (?)", params=[5]) is None
+        assert con.execute("SELECT * FROM log").fetchall() == [(5,)]
+
+    def test_a_statement_other_than_select_runs_once_without_params_too(self, con):
+        con.execute("CREATE TABLE log (v BIGINT)")
+        rel = con.sql("INSERT INTO log VALUES (nextval('s')) RETURNING v")
+        assert rel.fetchall() == [(1,)]
+        assert rel.fetchall() == [(1,)]
+        assert con.execute("SELECT * FROM log").fetchall() == [(1,)]
+
+    def test_statements_before_the_last_one_run_at_the_call(self, con):
+        con.execute("CREATE TABLE log (v BIGINT)")
+        rel = con.sql("INSERT INTO log VALUES (1); SELECT ? AS x", params=[2])
+        assert con.execute("SELECT * FROM log").fetchall() == [(1,)]
+        assert rel.fetchall() == [(2,)]

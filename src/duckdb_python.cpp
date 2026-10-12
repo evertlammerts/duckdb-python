@@ -649,8 +649,10 @@ static void InitializeConnectionMethods(nb::module_ &m) {
 		    }
 		    return conn->RunQuery(query, alias, params);
 	    },
-	    "Run a SQL query. If it is a SELECT statement, create a relation object from the given SQL query, otherwise "
-	    "run the query as-is.",
+	    "Run a SQL query. A SELECT with no parameter values (params None or empty) returns a relation that runs the "
+	    "query each time it is read. Any other statement, and a SELECT with parameter values, runs once, now: one "
+	    "that returns rows gives a relation over those rows, which reads them back without running again, and "
+	    "one that does not returns None. Statements before the last one run immediately.",
 	    nb::arg("query"), nb::kw_only(), nb::arg("alias") = "", nb::arg("params") = nb::none(),
 	    nb::arg("connection").none() = nb::none());
 	m.def(
@@ -662,8 +664,10 @@ static void InitializeConnectionMethods(nb::module_ &m) {
 		    }
 		    return conn->RunQuery(query, alias, params);
 	    },
-	    "Run a SQL query. If it is a SELECT statement, create a relation object from the given SQL query, otherwise "
-	    "run the query as-is.",
+	    "Run a SQL query. A SELECT with no parameter values (params None or empty) returns a relation that runs the "
+	    "query each time it is read. Any other statement, and a SELECT with parameter values, runs once, now: one "
+	    "that returns rows gives a relation over those rows, which reads them back without running again, and "
+	    "one that does not returns None. Statements before the last one run immediately.",
 	    nb::arg("query"), nb::kw_only(), nb::arg("alias") = "", nb::arg("params") = nb::none(),
 	    nb::arg("connection").none() = nb::none());
 	m.def(
@@ -675,8 +679,10 @@ static void InitializeConnectionMethods(nb::module_ &m) {
 		    }
 		    return conn->RunQuery(query, alias, params);
 	    },
-	    "Run a SQL query. If it is a SELECT statement, create a relation object from the given SQL query, otherwise "
-	    "run the query as-is.",
+	    "Run a SQL query. A SELECT with no parameter values (params None or empty) returns a relation that runs the "
+	    "query each time it is read. Any other statement, and a SELECT with parameter values, runs once, now: one "
+	    "that returns rows gives a relation over those rows, which reads them back without running again, and "
+	    "one that does not returns None. Statements before the last one run immediately.",
 	    nb::arg("query"), nb::kw_only(), nb::arg("alias") = "", nb::arg("params") = nb::none(),
 	    nb::arg("connection").none() = nb::none());
 	// nanobind's all-or-nothing nb::arg rule forbids naming just the source parameter alongside **kwargs, so the

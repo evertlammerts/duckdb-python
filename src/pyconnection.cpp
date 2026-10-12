@@ -348,16 +348,22 @@ static void InitializeConnectionMethods(nb::class_<DuckDBPyConnection> &m) {
 	m.def("extract_statements", &DuckDBPyConnection::ExtractStatements,
 	      "Parse the query string and extract the Statement object(s) produced", nb::arg("query"));
 	m.def("sql", &DuckDBPyConnection::RunQuery,
-	      "Run a SQL query. If it is a SELECT statement, create a relation object from the given SQL query, otherwise "
-	      "run the query as-is.",
+	      "Run a SQL query. A SELECT with no parameter values (params None or empty) returns a relation that runs the "
+	      "query each time it is read. Any other statement, and a SELECT with parameter values, runs once, now: one "
+	      "that returns rows gives a relation over those rows, which reads them back without running again, and "
+	      "one that does not returns None. Statements before the last one run immediately.",
 	      nb::arg("query"), nb::kw_only(), nb::arg("alias") = "", nb::arg("params") = nb::none());
 	m.def("query", &DuckDBPyConnection::RunQuery,
-	      "Run a SQL query. If it is a SELECT statement, create a relation object from the given SQL query, otherwise "
-	      "run the query as-is.",
+	      "Run a SQL query. A SELECT with no parameter values (params None or empty) returns a relation that runs the "
+	      "query each time it is read. Any other statement, and a SELECT with parameter values, runs once, now: one "
+	      "that returns rows gives a relation over those rows, which reads them back without running again, and "
+	      "one that does not returns None. Statements before the last one run immediately.",
 	      nb::arg("query"), nb::kw_only(), nb::arg("alias") = "", nb::arg("params") = nb::none());
 	m.def("from_query", &DuckDBPyConnection::RunQuery,
-	      "Run a SQL query. If it is a SELECT statement, create a relation object from the given SQL query, otherwise "
-	      "run the query as-is.",
+	      "Run a SQL query. A SELECT with no parameter values (params None or empty) returns a relation that runs the "
+	      "query each time it is read. Any other statement, and a SELECT with parameter values, runs once, now: one "
+	      "that returns rows gives a relation over those rows, which reads them back without running again, and "
+	      "one that does not returns None. Statements before the last one run immediately.",
 	      nb::arg("query"), nb::kw_only(), nb::arg("alias") = "", nb::arg("params") = nb::none());
 	// read_csv takes a positional source plus **kwargs of options. Bind via a nb::args lambda so None is accepted as
 	// the source: a typed nb::object param would be rejected by nanobind before ReadCSV's body runs (and .none()
