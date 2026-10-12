@@ -509,6 +509,8 @@ class TestOpenResultIsExclusive:
             import duckdb
             from duckdb.sqltypes import BIGINT
             con = duckdb.connect()
+            # Workers are what runs the scan between fetches, so a one-CPU host must still get some
+            con.execute("SET threads = 4")
             fetched, called = threading.Event(), threading.Event()
             def inner(x):
                 if fetched.is_set() and not called.is_set():
@@ -520,14 +522,18 @@ class TestOpenResultIsExclusive:
                         print("refused:", error, flush=True)
                 return x
             con.create_function("inner", inner, [BIGINT], BIGINT)
+            # A table scan splits into a task per row group; one range() source may only run when a fetch drives it
+            con.execute("CREATE TABLE src AS SELECT range AS i FROM range(5000000)")
             print("started", flush=True)
-            con.execute("SELECT inner(i) FROM range(100000000) t(i)")
+            con.execute("SELECT inner(i) FROM src")
             con.fetchone()
             fetched.set()
             assert called.wait(10)
             con.abort()
             print("usable after:", con.execute("SELECT 42").fetchall())
-            """
+            """,
+            # Ending the query waits for its running scan tasks, each in the UDF, which takes long under sanitizers
+            timeout=60,
         )
         assert code == 0, output
         assert "refused:" in output

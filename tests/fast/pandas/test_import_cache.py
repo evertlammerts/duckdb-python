@@ -104,3 +104,25 @@ def test_nat_and_na_convert_to_null_once_pandas_is_imported():
         """
     )
     assert "converted" in output
+
+
+@pytest.mark.parametrize("source", ["numpy_dict", "pandas_frame"])
+def test_nat_and_na_in_a_string_object_column_scan_as_null(source):
+    output = run_without_pandas(
+        """
+        import sys
+        import duckdb
+        import numpy as np
+        import pandas as pd
+
+        values = np.array(["x"] * 100000, dtype=object)
+        values[1], values[2], values[-1] = pd.NA, pd.NaT, pd.NA
+        frame = {"a": values} if sys.argv[1] == "numpy_dict" else pd.DataFrame({"a": values})
+        con = duckdb.connect()
+        query = "SELECT count(*) FILTER (a IS NULL), count(*) FILTER (a IN ('<NA>', 'NaT')) FROM frame"
+        rows = con.execute(query).fetchall()
+        print("nulls, strings:", rows)
+        """,
+        source,
+    )
+    assert "nulls, strings: [(3, 0)]" in output
