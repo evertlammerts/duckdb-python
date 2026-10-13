@@ -235,9 +235,10 @@ Prepared Session::Prepare(unique_ptr<SQLStatement> statement) {
 shared_ptr<Result> Session::Submit(unique_ptr<SQLStatement> statement, identifier_map_t<BoundParameterData> &values,
                                    const Format &format) {
 	ConnectionClaim claim(*state, *context);
+	auto written_type = statement->type;
 	auto handle = context->Submit(std::move(statement), values, QueryParameters(format.EngineFormat()));
 	NameRefusal(*state, *handle);
-	return make_shared_ptr<Result>(std::move(handle), format, nullptr);
+	return make_shared_ptr<Result>(std::move(handle), written_type, format, nullptr);
 }
 
 shared_ptr<Result> Session::Submit(Prepared &prepared, identifier_map_t<BoundParameterData> &values,
@@ -249,7 +250,7 @@ shared_ptr<Result> Session::Submit(Prepared &prepared, identifier_map_t<BoundPar
 		handle = prepared.statement->Submit(values, QueryParameters(format.EngineFormat()));
 	}
 	NameRefusal(*state, *handle);
-	return make_shared_ptr<Result>(std::move(handle), format, nullptr);
+	return make_shared_ptr<Result>(std::move(handle), prepared.statement->GetStatementType(), format, nullptr);
 }
 
 shared_ptr<Result> Session::Submit(const shared_ptr<Relation> &relation, const Format &format) {
@@ -258,14 +259,15 @@ shared_ptr<Result> Session::Submit(const shared_ptr<Relation> &relation, const F
 	if (!relation->IsReadOnly()) {
 		auto handle = context->Submit(relation, parameters);
 		NameRefusal(*state, *handle);
-		return make_shared_ptr<Result>(std::move(handle), format, relation);
+		// A relation that writes is no SELECT, so it runs to its end like any other write
+		return make_shared_ptr<Result>(std::move(handle), StatementType::INVALID_STATEMENT, format, relation);
 	}
 	auto select = make_uniq<SelectStatement>();
 	select->node = relation->GetQueryNode();
 	select->query = relation->GetQuery();
 	auto handle = context->Submit(std::move(select), parameters);
 	NameRefusal(*state, *handle);
-	return make_shared_ptr<Result>(std::move(handle), format, relation);
+	return make_shared_ptr<Result>(std::move(handle), StatementType::SELECT_STATEMENT, format, relation);
 }
 
 void Session::Run(unique_ptr<SQLStatement> statement, const InterruptCheck &check) {

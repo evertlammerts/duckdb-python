@@ -53,7 +53,8 @@ void Complete(QueryResult &result, const InterruptCheck &check) {
 	}
 }
 
-Result::Result(unique_ptr<QueryResult> submitted, Format format_p, shared_ptr<Relation> relation_p)
+Result::Result(unique_ptr<QueryResult> submitted, StatementType written_type, Format format_p,
+               shared_ptr<Relation> relation_p)
     : handle(std::move(submitted)), format(std::move(format_p)), state(State::PENDING),
       relation(std::move(relation_p)) {
 	if (!handle) {
@@ -65,6 +66,7 @@ Result::Result(unique_ptr<QueryResult> submitted, Format format_p, shared_ptr<Re
 	names = handle->GetNames();
 	types = handle->GetTypes();
 	properties = handle->GetStatementProperties();
+	completes_before_returning = !StreamsByDefault(written_type, properties);
 	client_properties = handle->client_properties;
 	if (!client_properties.client_context) {
 		throw InternalException("engine::Result created without a client context");

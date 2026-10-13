@@ -58,7 +58,8 @@ class ConnectionClaim;
 //! lock and may wait for running tasks, so callers must not hold a lock those tasks need.
 class Result {
 public:
-	Result(unique_ptr<QueryResult> submitted, Format format, shared_ptr<Relation> relation);
+	//! written_type is the statement as written: a prepared execution reports the EXECUTE that runs it
+	Result(unique_ptr<QueryResult> submitted, StatementType written_type, Format format, shared_ptr<Relation> relation);
 	~Result();
 
 	Result(const Result &) = delete;
@@ -85,9 +86,9 @@ public:
 	}
 	//! Whether the query still runs on its connection with rows left to produce. Takes the client context lock.
 	bool Running() const;
-	//! The planner settles such a statement before its result is returned. Goes away with planner eagerness.
+	//! Only a SELECT that returns rows streams; any other statement runs to its end before its result is returned
 	bool CompletesBeforeReturning() const {
-		return properties.result_eagerness == ResultEagerness::FORCED;
+		return completes_before_returning;
 	}
 
 	//! Keeps every row: drives the query to its end unless it already ended
@@ -144,6 +145,7 @@ private:
 	vector<Identifier> names;
 	vector<LogicalType> types;
 	StatementProperties properties;
+	bool completes_before_returning = false;
 	ClientProperties client_properties;
 	//! Copied at submission, while the producing transaction is live
 	ArrowSchemaWrapper arrow_schema;
