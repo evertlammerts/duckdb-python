@@ -24,6 +24,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, ClassVar
 
 if TYPE_CHECKING:
+    from ..frame.typing import ValueOrExpr
     from .expr import Expr
 
 
@@ -44,7 +45,7 @@ def render() -> str:
     out.append("    def _call(self, function: str, *args: object) -> Expr:  # pragma: no cover (Expr defines it)\n")
     out.append("        raise NotImplementedError\n")
     for method, (function, doc) in AGGREGATES.items():
-        out.append(f"\n    def {method}(self, *args: object) -> Expr:\n")
+        out.append(f"\n    def {method}(self, *args: ValueOrExpr) -> Expr:\n")
         out.append(f'        """{doc} SQL: `{function}`."""\n')
         out.append(f'        return self._call("{function}", *args)\n')
     return "".join(out)

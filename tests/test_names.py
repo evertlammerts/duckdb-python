@@ -216,7 +216,7 @@ class TestBracketsReachIntoValues:
 
     def test_keys_are_names_or_positions(self) -> None:
         with pytest.raises(TypeError, match="field name or a position"):
-            col("x")[1.5]
+            col("x")[1.5]  # type: ignore[index]
         with pytest.raises(TypeError, match="field name or a position"):
             col("x")[True]
 
@@ -271,7 +271,7 @@ class TestJoinSidesAreTheConditionsArguments:
         with pytest.raises(AttributeError, match=r"\['id'\]"):
             rows.join(rows, on=lambda left, right: left.id == right.id)
         with pytest.raises(TypeError, match="column name"):
-            rows.join(rows, on=lambda left, right: left[0] == right[0])
+            rows.join(rows, on=lambda left, right: left[0] == right[0])  # type: ignore[index]
         assert Side("l").alias == "l"
 
     def test_using_takes_names_not_expressions(self) -> None:

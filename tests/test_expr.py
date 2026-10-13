@@ -33,6 +33,7 @@ from duckdb._expressions.expr import (
     star,
     when,
 )
+from duckdb.frame.typing import PythonValue
 
 from ._support import Emptying, NoOffset
 
@@ -97,7 +98,7 @@ class TestNoneAndUnknownOperands:
 
     def test_arithmetic_with_an_unconvertible_object_raises(self) -> None:
         with pytest.raises(TypeError):
-            col("x") + object()
+            col("x") + object()  # type: ignore[operator]
 
 
 class TestParameterSink:
@@ -315,7 +316,7 @@ class TestRichLiteralTypes:
             (uuid.UUID(int=1), "UUID"),
         ],
     )
-    def test_binds_with_its_type(self, value: object, expected_type: str) -> None:
+    def test_binds_with_its_type(self, value: PythonValue, expected_type: str) -> None:
         with ParamSink() as sink:
             rendered = (col("x") > value).fragment()
         assert rendered == '("x" > $1)'
@@ -521,7 +522,7 @@ class TestTemporalLiterals:
         [(np.datetime64("2020-01-02", "D"), "DATE"), (np.datetime64("2020-01-01", "ns"), "TIMESTAMP")],
         ids=["days", "nanoseconds"],
     )
-    def test_a_numpy_scalar_reaches_its_parameter_unchanged(self, value: object, type_text: str) -> None:
+    def test_a_numpy_scalar_reaches_its_parameter_unchanged(self, value: PythonValue, type_text: str) -> None:
         with ParamSink() as sink:
             compared = (col("x") > value).fragment()
             called = fn("year", value).fragment()
@@ -530,7 +531,7 @@ class TestTemporalLiterals:
         assert all(bound is value for _, bound, _ in sink.entries)
 
     def test_a_numpy_scalar_on_the_left_reaches_its_parameter_unchanged(self) -> None:
-        value: object = np.datetime64("2020-06-01", "ms")
+        value: PythonValue = np.datetime64("2020-06-01", "ms")
         with ParamSink() as sink:
             rendered = (value > col("x")).fragment()
         assert rendered == '("x" < $1)'
@@ -539,7 +540,7 @@ class TestTemporalLiterals:
         assert bound is value
 
     @pytest.mark.parametrize("missing", [pd.NaT, np.timedelta64("NaT", "ns"), np.datetime64("NaT", "ms")], ids=str)
-    def test_a_missing_operand_is_written_in_as_null(self, con: _duckdb.Connection, missing: object) -> None:
+    def test_a_missing_operand_is_written_in_as_null(self, con: _duckdb.Connection, missing: PythonValue) -> None:
         with ParamSink() as sink:
             rendered = (col("x") + missing).fragment()
         assert (rendered, sink.entries) == ('("x" + NULL)', [])
@@ -658,7 +659,7 @@ class TestNumpyScalarsAreTheirPythonValues:
     """A numpy bool, integer or float stands for its Python value wherever an expression takes a value."""
 
     @pytest.mark.parametrize("number", [np.int8(3), np.int64(3), np.uint64(3)], ids=lambda v: type(v).__name__)
-    def test_a_numpy_integer_compares_as_its_value(self, con: _duckdb.Connection, number: object) -> None:
+    def test_a_numpy_integer_compares_as_its_value(self, con: _duckdb.Connection, number: PythonValue) -> None:
         source = " FROM (SELECT 3 AS id)"
         assert (col("id") == number).fragment() == '("id" = 3)'
         assert evaluate(con, col("id") == number, source) is True

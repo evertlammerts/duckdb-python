@@ -6,16 +6,34 @@ import contextlib
 import os
 import threading
 import weakref
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from .. import _duckdb
+from .._expressions.expr import _as_name, _as_sql, _items
 from .._sources import NumpyScanSource, Source, adapt
 from ..exceptions import Error, InterfaceError, InvalidInputError
 from ._signature import sql_signature
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+    from collections.abc import Callable, Iterator, Mapping, Sequence
     from types import TracebackType
+
+    from .._expressions.expr import Expr
+    from .plan import Frame
+    from .typing import (
+        FilePath,
+        Parameters,
+        QualifiedName,
+        SqlText,
+        _FunctionParameters,
+        _MacroParameters,
+        _NullHandling,
+        _ObjectName,
+        _Pair,
+        _SettingValue,
+        _Stability,
+        _TableSource,
+    )
 
 __all__ = ["Connection", "connect"]
 
@@ -108,6 +126,47 @@ class _Catalog:
             self.generation += 1
 
 
+def _as_parameters(parameters: object) -> object:
+    """A statement's placeholder values: a mapping by name, or any iterable in order, but not one string."""
+    if isinstance(parameters, (str, bytes)):
+        message = (
+            f"parameters is a list of values or a mapping from name to value, not the {type(parameters).__name__} "
+            f"{parameters!r}; for one value write [{parameters!r}]"
+        )
+        raise TypeError(message)
+    return parameters
+
+
+def _as_macro_parameters(parameters: object) -> list[str | tuple[str, object]]:
+    """A macro's parameters, names or (name, default) pairs, where a bare string is one name."""
+    items = (
+        iter([parameters])
+        if isinstance(parameters, str)
+        else None
+        if isinstance(parameters, bytes)
+        else _items(parameters)
+    )
+    if items is None:
+        message = f"a macro's parameters are names or (name, default) pairs, not {parameters!r}"
+        raise TypeError(message)
+    out: list[str | tuple[str, object]] = []
+    for item in items:
+        if isinstance(item, str):
+            out.append(_as_name(item, "macro parameter"))
+            continue
+        message = f"a macro parameter is a name or a (name, default) pair, not {item!r}"
+        if isinstance(item, bytes):
+            raise TypeError(message)
+        # A pair is read by position, so a numpy row serves as well as a tuple.
+        try:
+            pair = cast("_Pair", item)
+            name, default = pair[0], pair[1]
+        except (TypeError, IndexError, KeyError):
+            raise TypeError(message) from None
+        out.append((_as_name(name, "macro parameter"), default))
+    return out
+
+
 class Connection:
     """A connection to a database."""
 
@@ -187,10 +246,11 @@ class Connection:
             raise InterfaceError(message)
         return raw
 
-    def run(self, sql: str, parameters: Sequence[Any] | Mapping[str, Any] | None = None) -> int:
+    def run(self, sql: SqlText, parameters: Parameters | None = None) -> int:
         """Run a statement and report how many rows it changed; use `sql()` for statements that produce rows."""
+        checked = cast("Sequence[Any] | Mapping[str, Any] | None", _as_parameters(parameters))
         # A result left open by a failed run would block the connection's next statement.
-        with self._execute(sql, parameters) as result:
+        with self._execute(_as_sql(sql, "run"), checked) as result:
             return result.drain()
 
     def interrupt(self) -> None:
@@ -213,9 +273,9 @@ class Connection:
 
     def create_macro(
         self,
-        name: str | tuple[str, ...],
-        parameters: Iterable[str | tuple[str, object]],
-        body: object,
+        name: QualifiedName,
+        parameters: _MacroParameters,
+        body: Expr | Frame,
         *,
         replace: bool = False,
         temporary: bool = False,
@@ -241,7 +301,8 @@ class Connection:
         from .plan import Frame
 
         signature = ", ".join(
-            quote(p) if isinstance(p, str) else f"{quote(p[0])} := {render_literal(p[1])}" for p in parameters
+            quote(p) if isinstance(p, str) else f"{quote(p[0])} := {render_literal(p[1])}"
+            for p in _as_macro_parameters(parameters)
         )
         refusal = "param() has no value inside a macro body; a macro parameter is col(name)"
         with suspended_sinks(), refusing_parameters(refusal):
@@ -252,7 +313,7 @@ class Connection:
                 # only exists once the macro does.
                 definition = "TABLE " + body._definition(self)
             else:
-                message = f"a macro body is an expression or a plan, not {type(body).__name__}"
+                message = f"a macro body is an expression or a plan, not {type(body).__name__}"  # type: ignore[unreachable]
                 raise TypeError(message)
         prefix = "CREATE OR REPLACE" if replace else "CREATE"
         kind = "TEMP MACRO" if temporary else "MACRO"
@@ -260,13 +321,13 @@ class Connection:
 
     def create_function(
         self,
-        name: str,
+        name: _ObjectName,
         function: Callable[..., Any],
-        parameters: Sequence[str] | Mapping[str, str] | None = None,
-        returns: str | None = None,
+        parameters: _FunctionParameters | None = None,
+        returns: SqlText | None = None,
         *,
-        null_handling: str = "default",
-        stability: str = "consistent",
+        null_handling: _NullHandling = "default",
+        stability: _Stability = "consistent",
     ) -> None:
         """Register a Python callable as a scalar SQL function; a macro is orders of magnitude faster where it fits.
 
@@ -306,7 +367,7 @@ class Connection:
         # A new function changes what a name in a later query can refer to.
         self._catalog.changed()
 
-    def register(self, name: str, obj: object) -> None:
+    def register(self, name: _ObjectName, obj: _TableSource) -> None:
         """Make a Python object readable as the table `name`, on every connection to this database.
 
         Accepted: anything exporting an Arrow stream or array (a pyarrow Table, RecordBatch or Array, a polars
@@ -327,7 +388,7 @@ class Connection:
         # A new name changes what a later query resolves it to.
         self._catalog.changed()
 
-    def unregister(self, name: str) -> None:
+    def unregister(self, name: _ObjectName) -> None:
         """Forget the object registered as `name`; a query bound over it before this still runs."""
         if not self._engine().unregister_object(name):
             message = f"Invalid Input Error: nothing is registered as {name!r}"
@@ -393,6 +454,6 @@ _STABILITY = {
 }
 
 
-def connect(database: str | os.PathLike[str] = ":memory:", **options: str) -> Connection:
+def connect(database: FilePath = ":memory:", **options: _SettingValue) -> Connection:
     """Open a connection to a database file or ":memory:", applying any settings given as keyword arguments."""
     return Connection(_duckdb.Database(os.fspath(database), [(k, str(v)) for k, v in options.items()]))

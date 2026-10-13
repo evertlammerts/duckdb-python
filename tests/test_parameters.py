@@ -901,7 +901,7 @@ class TestATypedNullKeepsItsType:
         attempts: dict[str, Callable[[], object]] = {
             "bound": lambda: run("SELECT $1", [value]),
             "written in": lambda: run(f"SELECT {render_literal(value)}"),
-            "lit": lambda: sql("SELECT 1").select(lit(value)).rows(con),
+            "lit": lambda: sql("SELECT 1").select(lit(value)).rows(con),  # type: ignore[arg-type]
             "returned": lambda: run("SELECT returned()"),
             "returned in a union": lambda: run("SELECT chosen()"),
         }
@@ -957,7 +957,7 @@ class TestEveryEntryPointAgrees:
         return [
             lambda: run("SELECT typeof($1), $1::VARCHAR", [value]),
             lambda: run(f"SELECT typeof(v), v::VARCHAR FROM (SELECT {render_literal(value)} AS v)"),
-            lambda: sql("SELECT 1").select(fn("typeof", lit(value)), lit(value).cast("VARCHAR")).rows(con),
+            lambda: sql("SELECT 1").select(fn("typeof", lit(value)), lit(value).cast("VARCHAR")).rows(con),  # type: ignore[arg-type]
             lambda: run("SELECT typeof(returned()), returned()::VARCHAR"),
             lambda: run("SELECT typeof(v), v::VARCHAR FROM cells"),
         ]

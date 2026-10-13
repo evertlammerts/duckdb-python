@@ -33,9 +33,12 @@ HEADER = '''\
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from .expr import Expr, FamilyExpr
+
+if TYPE_CHECKING:
+    from duckdb.frame.typing import ValueOrExpr
 '''
 
 
@@ -269,19 +272,19 @@ def _method(method: str, m: dict[str, Any]) -> str:
     wrap = m["returns"]
     tail = f" SQL: `{m['function']}`."
     if m["lambda"]:
-        head = f"\n    def {method}(self, function: object, *args: object) -> {wrap}:\n"
+        head = f"\n    def {method}(self, function: ValueOrExpr, *args: ValueOrExpr) -> {wrap}:\n"
         call = f'self._call("{m["function"]}", function, *args)'
     else:
         if m["params"]:
             tail = f" Arguments: {', '.join(m['params'])}." + tail
         subject = m["subject"]
         if subject > 0:
-            leading = ", ".join(f"{p}: object" for p in m["params"][:subject])
-            head = f"\n    def {method}(self, {leading}, *args: object) -> {wrap}:\n"
+            leading = ", ".join(f"{p}: ValueOrExpr" for p in m["params"][:subject])
+            head = f"\n    def {method}(self, {leading}, *args: ValueOrExpr) -> {wrap}:\n"
             names = ", ".join(m["params"][:subject])
             call = f'self._call_at("{m["function"]}", {subject}, {names}, *args)'
         else:
-            head = f"\n    def {method}(self, *args: object) -> {wrap}:\n"
+            head = f"\n    def {method}(self, *args: ValueOrExpr) -> {wrap}:\n"
             call = f'self._call("{m["function"]}", *args)'
     room = LINE_LIMIT - len('        """') - len(tail) - len('"""')
     doc = f'        """{_fit(_sentence(m["doc"]), room)}{tail}"""\n'

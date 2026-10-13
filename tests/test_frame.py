@@ -19,6 +19,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+    from duckdb.frame.typing import ColumnsOrExprs, JoinHow, PythonValue
+
 
 @pytest.fixture
 def con() -> duckdb.frame.Connection:
@@ -146,7 +148,7 @@ class TestProjection:
 
     def test_select_refuses_anything_else(self, orders: duckdb.frame.Frame) -> None:
         with pytest.raises(TypeError, match="column name or expression"):
-            orders.select(3.5)
+            orders.select(3.5)  # type: ignore[arg-type]
 
     def test_star_can_exclude(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         assert orders.select(star(exclude=["amount"])).columns(con) == ["id", "country"]
@@ -215,7 +217,7 @@ class TestRows:
         with pytest.raises(TypeError, match="needs a connection"):
             list(duckdb.frame.table("orders"))
         with pytest.raises(TypeError, match="not by int"):
-            _ = duckdb.frame.table("orders")[0]
+            _ = duckdb.frame.table("orders")[0]  # type: ignore[index]
 
     def test_first_on_an_empty_result(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         assert orders.filter(col("id") < 0).first(con) is None
@@ -365,7 +367,7 @@ class TestJoins:
         [("inner", 4), ("left", 5), ("semi", 4), ("anti", 1), ("outer", 5)],
     )
     def test_join_kinds(
-        self, orders: duckdb.frame.Frame, con: duckdb.frame.Connection, how: str, expected: int
+        self, orders: duckdb.frame.Frame, con: duckdb.frame.Connection, how: JoinHow, expected: int
     ) -> None:
         joined = orders.join(
             duckdb.frame.table("countries"), on=lambda left, right: left["country"] == right["code"], how=how
@@ -375,7 +377,7 @@ class TestJoins:
     @pytest.mark.parametrize("how", ["inner", "left", "right", "outer", "semi", "anti"])
     @pytest.mark.parametrize(("left_type", "right_type"), [("INTEGER", "BIGINT"), ("BIGINT", "INTEGER")])
     def test_a_using_key_takes_the_type_the_engine_binds(
-        self, con: duckdb.frame.Connection, how: str, left_type: str, right_type: str
+        self, con: duckdb.frame.Connection, how: JoinHow, left_type: str, right_type: str
     ) -> None:
         left = duckdb.frame.sql(f"SELECT 1::{left_type} AS k, 'l' AS a")
         right = duckdb.frame.sql(f"SELECT 1::{right_type} AS k, 'r' AS b")
@@ -411,7 +413,7 @@ class TestJoinOnNamesWithASuffix:
         ],
     )
     def test_the_key_comes_from_whichever_side_has_the_row(
-        self, con: duckdb.frame.Connection, how: str, expected: list[tuple[object, ...]]
+        self, con: duckdb.frame.Connection, how: JoinHow, expected: list[tuple[object, ...]]
     ) -> None:
         joined = self.LEFT.join(self.RIGHT, on="id", how=how, suffix="_r")
         assert joined.columns(con) == ["id", "x", "x_r"]
@@ -421,7 +423,7 @@ class TestJoinOnNamesWithASuffix:
     @pytest.mark.parametrize(("how", "key"), [("inner", "ID"), ("left", "ID"), ("right", "id"), ("outer", "ID")])
     @pytest.mark.parametrize("suffix", [None, "_r"])
     def test_the_merged_key_is_spelled_as_every_output_spells_it(
-        self, con: duckdb.frame.Connection, how: str, key: str, suffix: str | None
+        self, con: duckdb.frame.Connection, how: JoinHow, key: str, suffix: str | None
     ) -> None:
         left = duckdb.frame.values([(1, 10)], ["ID", "x"])
         right = duckdb.frame.values([(1, 20), (2, 30)], ["id", "x" if suffix else "y"])
@@ -563,8 +565,8 @@ class TestSample:
 
     def test_a_method_name_cannot_be_syntax(self, orders: duckdb.frame.Frame) -> None:
         # The method is a bare word in the SQL and cannot be quoted, so it is checked instead.
-        with pytest.raises(ValueError, match="copy option name"):
-            orders.sample(2, method="reservoir); DROP TABLE orders; --")
+        with pytest.raises(ValueError, match=r"unknown sample method 'reservoir\); DROP TABLE orders;"):
+            orders.sample(2, method="reservoir); DROP TABLE orders; --")  # type: ignore[arg-type]
 
 
 class TestReshaping:
@@ -1077,7 +1079,7 @@ class TestReviewRoundTwo:
     def test_with_columns_refuses_a_list(self, orders: duckdb.frame.Frame) -> None:
         # A list was read as positional arguments, so only its first element survived.
         with pytest.raises(TypeError, match="wrap a value in lit"):
-            orders.with_columns(tags=["id", "country"])
+            orders.with_columns(tags=["id", "country"])  # type: ignore[arg-type]
 
     def test_with_columns_takes_a_list_through_lit(
         self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame
@@ -1332,15 +1334,17 @@ class TestJoinKindIsAClosedSet:
 
     def test_a_typo_is_refused_at_the_call(self) -> None:
         with pytest.raises(ValueError, match="unknown join kind 'innner'"):
-            duckdb.frame.table("a").join(duckdb.frame.table("b"), on="id", how="innner")
+            duckdb.frame.table("a").join(duckdb.frame.table("b"), on="id", how="innner")  # type: ignore[arg-type]
 
     def test_text_cannot_ride_in(self) -> None:
         with pytest.raises(ValueError, match="unknown join kind"):
-            duckdb.frame.table("a").join(duckdb.frame.table("b"), on="id", how="inner JOIN evil ON true --")
+            duckdb.frame.table("a").join(duckdb.frame.table("b"), on="id", how="inner JOIN evil ON true --")  # type: ignore[arg-type]
 
     def test_case_does_not_matter(self, con: duckdb.frame.Connection) -> None:
         plan = duckdb.frame.table("orders").join(
-            duckdb.frame.table("countries"), on=lambda left, right: left["country"] == right["code"], how="LEFT"
+            duckdb.frame.table("countries"),
+            on=lambda left, right: left["country"] == right["code"],
+            how="LEFT",  # type: ignore[arg-type]
         )
         assert plan.count(con) == 5
 
@@ -1512,7 +1516,7 @@ class TestParametersAreSupplied:
         plan = duckdb.frame.sql("SELECT 1").select(param("p").cast("VARCHAR"))
         expected = [("[" * 1000 + "1" + "]" * 1000,)]
         for leaf in (1, np.int64(1)):
-            nested: object = leaf
+            nested: PythonValue = leaf
             for _ in range(1000):
                 nested = [nested]
             assert plan.rows(con, parameters={"p": nested}) == expected
@@ -1793,7 +1797,7 @@ class TestReviewRoundThree:
 
     @pytest.mark.parametrize("make", [lambda names: (n for n in names), set, frozenset, lambda names: map(str, names)])
     def test_any_iterable_of_names_is_a_column_list(
-        self, con: duckdb.frame.Connection, make: Callable[[list[str]], object]
+        self, con: duckdb.frame.Connection, make: Callable[[list[str]], ColumnsOrExprs]
     ) -> None:
         # Only lists and tuples counted, so a generator or a set was wrapped whole and refused.
         keys = make(["country"])
@@ -1910,7 +1914,7 @@ class TestReviewRoundFour:
         assert ".." not in inspect.getsource(func_namespaces).replace("...", "")
 
     @pytest.mark.parametrize("how", sorted(["semi", "anti"]))
-    def test_a_join_kind_row_decides_what_it_keeps(self, con: duckdb.frame.Connection, how: str) -> None:
+    def test_a_join_kind_row_decides_what_it_keeps(self, con: duckdb.frame.Connection, how: JoinHow) -> None:
         # Whether a join kind keeps the right side is read from one record per kind.
         joined = duckdb.frame.table("orders").join(duckdb.frame.table("orders"), on="id", how=how)
         assert joined.columns(con) == ["id", "country", "amount"]
@@ -1949,7 +1953,7 @@ class TestScopeStepOne:
         ],
     )
     def test_group_by_takes_one_expression_or_a_list_or_nothing(
-        self, con: duckdb.frame.Connection, keys: object, expected: list[str]
+        self, con: duckdb.frame.Connection, keys: ColumnsOrExprs | None, expected: list[str]
     ) -> None:
         # `if group_by` asked an expression for its truth value, which it refuses to give.
         plan = duckdb.frame.table("orders").aggregate(col("amount").sum().alias("total"), group_by=keys)
@@ -1964,7 +1968,7 @@ class TestErrorModel:
         with pytest.raises(TypeError):
             bool(col("x") == 1)
         with pytest.raises(TypeError):
-            orders.with_columns(t=["a"])
+            orders.with_columns(t=["a"])  # type: ignore[arg-type]
         with pytest.raises(TypeError):
             orders.filter("x = 1")  # type: ignore[arg-type]
         with pytest.raises(TypeError):
@@ -1992,7 +1996,7 @@ class TestErrorModel:
         with pytest.raises(ValueError, match="more than once"):
             orders.select(col("id"), col("id")).columns(con)
         with pytest.raises(ValueError, match="unknown join kind"):
-            orders.join(orders, on="id", how="sideways")
+            orders.join(orders, on="id", how="sideways")  # type: ignore[arg-type]
         with pytest.raises(ValueError, match="no value for parameter"):
             orders.filter(col("id") == param("n")).rows(con)
         with pytest.raises(ValueError, match="not used by this plan"):
@@ -2141,7 +2145,7 @@ class TestScopeStepFour:
 
     def test_a_macro_body_must_be_an_expression_or_a_plan(self, con: duckdb.frame.Connection) -> None:
         with pytest.raises(TypeError, match="expression or a plan"):
-            con.create_macro("bad", ["a"], "a + 1")
+            con.create_macro("bad", ["a"], "a + 1")  # type: ignore[arg-type]
 
     def test_a_param_in_an_expression_body_is_refused_and_nothing_is_created(
         self, con: duckdb.frame.Connection
@@ -2370,7 +2374,7 @@ class TestReviewRoundFive:
         with pytest.raises(TypeError, match="needs `on`"):
             plan.join(duckdb.frame.sql("SELECT 1 AS b"), on=[])
         with pytest.raises(ValueError, match="unknown join kind"):
-            plan.join(duckdb.frame.sql("SELECT 1 AS b"), on="a", how="sideways")
+            plan.join(duckdb.frame.sql("SELECT 1 AS b"), on="a", how="sideways")  # type: ignore[arg-type]
         typed = duckdb.frame.values([], columns=[("a", "INTEGER")])
         assert typed.aggregate(group_by="a").columns() == ["a"]
         assert typed.distinct().columns() == ["a"]

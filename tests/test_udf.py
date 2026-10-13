@@ -80,11 +80,11 @@ class TestRegistration:
 
     def test_a_bad_null_handling_is_refused(self, con: duckdb.frame.Connection) -> None:
         with pytest.raises(exceptions.InvalidInputError, match="null_handling"):
-            con.create_function("f", lambda x: x, ["BIGINT"], "BIGINT", null_handling="never")
+            con.create_function("f", lambda x: x, ["BIGINT"], "BIGINT", null_handling="never")  # type: ignore[arg-type]
 
     def test_a_bad_stability_is_refused(self, con: duckdb.frame.Connection) -> None:
         with pytest.raises(exceptions.InvalidInputError, match="stability"):
-            con.create_function("f", lambda x: x, ["BIGINT"], "BIGINT", stability="jittery")
+            con.create_function("f", lambda x: x, ["BIGINT"], "BIGINT", stability="jittery")  # type: ignore[arg-type]
 
     def test_a_closed_connection_refuses(self, con: duckdb.frame.Connection) -> None:
         con.close()

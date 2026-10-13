@@ -25,6 +25,8 @@ from ._support import Failing, refusal_of_a_list_containing_itself
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from duckdb.frame.typing import ValueOrExpr
+
 
 @pytest.fixture
 def con() -> duckdb.frame.Connection:
@@ -817,7 +819,7 @@ class TestNamedArguments:
         ],
     )
     def test_a_call_the_function_does_not_fit_is_refused_at_run_time(
-        self, con: duckdb.frame.Connection, named: dict[str, object], error: str
+        self, con: duckdb.frame.Connection, named: dict[str, ValueOrExpr], error: str
     ) -> None:
         con.create_function("take", lambda x, *, k=0: x, ["BIGINT", "BIGINT"], "BIGINT")
         con.create_function("gather", lambda x, **rest: x, ["BIGINT", "ANY"], "BIGINT")

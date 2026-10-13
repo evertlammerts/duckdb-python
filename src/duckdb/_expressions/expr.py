@@ -17,6 +17,7 @@ import re
 import string
 import sys
 import uuid
+from collections.abc import Iterable, Iterator, Mapping
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, cast
 
 from .. import _duckdb, exceptions
@@ -24,8 +25,25 @@ from .aggregates import AggregateMethods
 from .keywords import KEYWORDS
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Iterator, Sequence
+    from collections.abc import Callable, Sequence
 
+    from ..frame.connection import Connection
+    from ..frame.plan import Frame
+    from ..frame.typing import (
+        ColumnName,
+        ColumnNames,
+        Exprs,
+        NewName,
+        PythonValue,
+        QualifiedName,
+        SqlText,
+        ValueOrExpr,
+        ValueSequence,
+        _AttributeName,
+        _FieldKey,
+        _Renames,
+        _TextValue,
+    )
     from .func_namespaces import DtExpr, JsonExpr, ListExpr, StrExpr
 
 __all__ = [
@@ -61,7 +79,7 @@ def fold_name(name: str) -> str:
 class PlanBase:
     """What an expression needs of a query; a base class, so nothing else with a `render` method can be spliced in."""
 
-    def render(self, connection: Any = None) -> str:  # pragma: no cover (abstract)
+    def render(self, connection: Connection | None = None) -> str:  # pragma: no cover (abstract)
         raise NotImplementedError
 
 
@@ -75,6 +93,80 @@ def name_parts(name: object, what: str = "name") -> tuple[str, ...]:
         message = f"a {what} cannot be empty: {name!r}"
         raise ValueError(message)
     return parts
+
+
+def _as_name(name: object, what: str) -> str:
+    """One name, whole: a string, never split and never empty."""
+    if not isinstance(name, str):
+        message = f"a {what} is a string, not {name!r}"
+        raise TypeError(message)
+    if not name:
+        message = f"a {what} cannot be empty"
+        raise ValueError(message)
+    return name
+
+
+def _items(value: object) -> Iterator[object] | None:
+    """The items of what Python can iterate, through `__iter__` or `__getitem__`, or None; text is the caller's."""
+    try:
+        return iter(cast("Iterable[object]", value))
+    except TypeError:
+        return None
+
+
+def _as_names(names: object, what: str) -> tuple[str, ...]:
+    """One name or several, where a bare string is one name and not its characters."""
+    if isinstance(names, str):
+        return (_as_name(names, what),)
+    items = None if isinstance(names, bytes) else _items(names)
+    if items is None:
+        message = f"expected a {what} or a list of them, not {names!r}"
+        raise TypeError(message)
+    return tuple(_as_name(name, what) for name in items)
+
+
+def _as_renames(renames: object) -> dict[str, str] | None:
+    """Old names to new, as a mapping or as (old, new) pairs; a string is never a pair of names."""
+    if renames is None or isinstance(renames, Mapping):
+        pairs: Iterator[object] | None = iter(renames.items()) if renames is not None else iter(())
+    else:
+        pairs = None if isinstance(renames, (str, bytes)) else _items(renames)
+    if pairs is None:
+        message = f"rename takes a dict from old name to new, or (old, new) pairs, not {renames!r}"
+        raise TypeError(message)
+    out: dict[str, str] = {}
+    for pair in pairs:
+        both = None if isinstance(pair, (str, bytes)) else _items(pair)
+        named = tuple(both) if both is not None else ()
+        if len(named) != 2:
+            message = f"a rename is an (old, new) pair of names, not {pair!r}"
+            raise TypeError(message)
+        out[_as_name(named[0], "column name")] = _as_name(named[1], "column name")
+    return out or None
+
+
+def _as_sql(text: object, what: str) -> str:
+    """SQL text, taken as written."""
+    if not isinstance(text, str):
+        message = f"{what} takes SQL as a string, not {text!r}"
+        raise TypeError(message)
+    return text
+
+
+def _as_text(value: object, what: str) -> str:
+    """A value that must be text."""
+    if not isinstance(value, str):
+        message = f"{what} is text, not {value!r}"
+        raise TypeError(message)
+    return value
+
+
+def _as_field_key(key: object) -> str | int:
+    """A struct field's name, a map key, or a list position."""
+    if isinstance(key, bool) or not isinstance(key, (str, int)):
+        message = f"an expression is indexed by a field name or a position, not by {type(key).__name__}"
+        raise TypeError(message)
+    return key
 
 
 def identifier(parts: tuple[str, ...]) -> str:
@@ -593,8 +685,24 @@ def _lift(value: object) -> Expr:
     return coerced
 
 
-def _as_list(value: object) -> list[Any]:
-    return list(value) if isinstance(value, (list, tuple)) else [value]
+def _as_expression(value: object, what: str) -> Expr:
+    """An argument only an expression can fill, such as a condition, where a string would silently be a constant."""
+    if isinstance(value, Expr):
+        return value
+    if isinstance(value, str):
+        message = (
+            f"{what} takes an expression, not the string {value!r}; "
+            f"name a column with col() or write SQL with sql_expr()"
+        )
+        raise TypeError(message)
+    message = f"{what} takes an expression, not {type(value).__name__}; wrap a value in lit()"
+    raise TypeError(message)
+
+
+def _as_expressions(values: object, what: str) -> list[Expr]:
+    """One expression, or a list or tuple of them; a set has no order to give a window, so it is not several."""
+    items = list(values) if isinstance(values, (list, tuple)) else [values]
+    return [_as_expression(item, what) for item in items]
 
 
 class FuncNamespaces:
@@ -664,9 +772,9 @@ class Expr(AggregateMethods, FuncNamespaces):
 
     # -- presentation
 
-    def alias(self, name: str) -> Expr:
+    def alias(self, name: NewName) -> Expr:
         """Name the column in the output."""
-        return self._with(_alias=name)
+        return self._with(_alias=_as_name(name, "column name"))
 
     def asc(self) -> Expr:
         """Sort ascending."""
@@ -704,55 +812,55 @@ class Expr(AggregateMethods, FuncNamespaces):
         # Raised rather than deferred: Python answers an unknown operand by identity, a False no condition can tell.
         return Binary(op, self, _lift(other))
 
-    def __lt__(self, other: object) -> Expr | Any:
+    def __lt__(self, other: ValueOrExpr) -> Expr | Any:
         return self._binary("<", other)
 
-    def __le__(self, other: object) -> Expr | Any:
+    def __le__(self, other: ValueOrExpr) -> Expr | Any:
         return self._binary("<=", other)
 
-    def __gt__(self, other: object) -> Expr | Any:
+    def __gt__(self, other: ValueOrExpr) -> Expr | Any:
         return self._binary(">", other)
 
-    def __ge__(self, other: object) -> Expr | Any:
+    def __ge__(self, other: ValueOrExpr) -> Expr | Any:
         return self._binary(">=", other)
 
-    def __add__(self, other: object) -> Expr | Any:
+    def __add__(self, other: ValueOrExpr) -> Expr | Any:
         return self._binary("+", other)
 
-    def __radd__(self, other: object) -> Expr | Any:
+    def __radd__(self, other: ValueOrExpr) -> Expr | Any:
         return self._binary("+", other, reverse=True)
 
-    def __sub__(self, other: object) -> Expr | Any:
+    def __sub__(self, other: ValueOrExpr) -> Expr | Any:
         return self._binary("-", other)
 
-    def __rsub__(self, other: object) -> Expr | Any:
+    def __rsub__(self, other: ValueOrExpr) -> Expr | Any:
         return self._binary("-", other, reverse=True)
 
-    def __mul__(self, other: object) -> Expr | Any:
+    def __mul__(self, other: ValueOrExpr) -> Expr | Any:
         return self._binary("*", other)
 
-    def __rmul__(self, other: object) -> Expr | Any:
+    def __rmul__(self, other: ValueOrExpr) -> Expr | Any:
         return self._binary("*", other, reverse=True)
 
-    def __truediv__(self, other: object) -> Expr | Any:
+    def __truediv__(self, other: ValueOrExpr) -> Expr | Any:
         return self._binary("/", other)
 
-    def __rtruediv__(self, other: object) -> Expr | Any:
+    def __rtruediv__(self, other: ValueOrExpr) -> Expr | Any:
         return self._binary("/", other, reverse=True)
 
-    def __floordiv__(self, other: object) -> Expr | Any:
+    def __floordiv__(self, other: ValueOrExpr) -> Expr | Any:
         return self._binary("//", other)
 
-    def __mod__(self, other: object) -> Expr | Any:
+    def __mod__(self, other: ValueOrExpr) -> Expr | Any:
         return self._binary("%", other)
 
-    def __pow__(self, other: object) -> Expr | Any:
+    def __pow__(self, other: ValueOrExpr) -> Expr | Any:
         return self._binary("**", other)
 
-    def __and__(self, other: object) -> Expr | Any:
+    def __and__(self, other: ValueOrExpr) -> Expr | Any:
         return self._binary("AND", other)
 
-    def __or__(self, other: object) -> Expr | Any:
+    def __or__(self, other: ValueOrExpr) -> Expr | Any:
         return self._binary("OR", other)
 
     def __invert__(self) -> Expr:
@@ -761,13 +869,9 @@ class Expr(AggregateMethods, FuncNamespaces):
     def __neg__(self) -> Expr:
         return Unary("-", self)
 
-    def __getitem__(self, key: object) -> Expr:
+    def __getitem__(self, key: _FieldKey) -> Expr:
         """A struct field by name, a list element by position, or a map entry by key."""
-        key = _as_python(key)
-        if isinstance(key, bool) or not isinstance(key, (str, int)):
-            message = f"an expression is indexed by a field name or a position, not by {type(key).__name__}"
-            raise TypeError(message)
-        return Index(self, key)
+        return Index(self, _as_field_key(_as_python(key)))
 
     def __iter__(self) -> Iterator[Any]:
         # Without this, `for x in e` would fall back to e[0], e[1] and never stop.
@@ -790,7 +894,7 @@ class Expr(AggregateMethods, FuncNamespaces):
         # count(DISTINCT x) is syntax, not a function name, so it cannot go in the table with the others.
         return Distinct("count", self)
 
-    def concat(self, *others: object) -> Expr:
+    def concat(self, *others: ValueOrExpr) -> Expr:
         """Join text values."""
         # SQL concatenates with ||, and an expression carries no types, so + cannot tell which was meant.
         return Concat([self, *(_lift(o) for o in others)])
@@ -803,7 +907,7 @@ class Expr(AggregateMethods, FuncNamespaces):
         """Whether this is not NULL."""
         return Postfix("IS NOT NULL", self)
 
-    def isin(self, values: Iterable[object] | PlanBase | Expr) -> Expr:
+    def isin(self, values: ValueSequence | Frame | Expr) -> Expr:
         """Membership of a list of values, a one-column query, or a list-typed column; an empty list never matches."""
         if isinstance(values, PlanBase):
             return Binary("IN", self, SubQuery(values))
@@ -817,37 +921,37 @@ class Expr(AggregateMethods, FuncNamespaces):
             raise TypeError(message)
         return In(self, [_lift(v) for v in values])
 
-    def like(self, pattern: object, *, escape: str | None = None) -> Expr:
+    def like(self, pattern: ValueOrExpr, *, escape: _TextValue | None = None) -> Expr:
         """Text match where `%` is any run of characters and `_` is any one; negate with `~`."""
-        return Like("LIKE", self, _lift(pattern), escape)
+        return Like("LIKE", self, _lift(pattern), _as_text(escape, "escape") if escape is not None else None)
 
-    def ilike(self, pattern: object, *, escape: str | None = None) -> Expr:
+    def ilike(self, pattern: ValueOrExpr, *, escape: _TextValue | None = None) -> Expr:
         """`like`, ignoring case."""
-        return Like("ILIKE", self, _lift(pattern), escape)
+        return Like("ILIKE", self, _lift(pattern), _as_text(escape, "escape") if escape is not None else None)
 
-    def between(self, low: object, high: object) -> Expr:
+    def between(self, low: ValueOrExpr, high: ValueOrExpr) -> Expr:
         """Inclusive range."""
         return Between(self, _lift(low), _lift(high))
 
-    def cast(self, type_text: str) -> Expr:
-        """Cast to a SQL type, written as text."""
-        return Cast(self, type_text)
+    def cast(self, type_text: SqlText) -> Expr:
+        """Cast to a SQL type, written as text and spliced in as SQL, so never taken from untrusted input."""
+        return Cast(self, _as_sql(type_text, "cast"))
 
-    def try_cast(self, type_text: str) -> Expr:
-        """Cast to a SQL type, giving NULL where the cast would fail."""
-        return Cast(self, type_text, safe=True)
+    def try_cast(self, type_text: SqlText) -> Expr:
+        """Cast to a SQL type, giving NULL where the cast would fail; the type is SQL text, as for `cast`."""
+        return Cast(self, _as_sql(type_text, "try_cast"), safe=True)
 
-    def where(self, predicate: object) -> Expr:
+    def where(self, predicate: Expr) -> Expr:
         """Aggregate only rows where the predicate holds; goes before `.over()`, and a scalar call fails at run time."""
         if not isinstance(self, (Func, Distinct)):
             message = "where() applies to an aggregate call, as col('x').sum() or fn('sum', ...)"
             raise TypeError(message)
-        return self._with(_filter=_lift(predicate))
+        return self._with(_filter=_as_expression(predicate, "where"))
 
     def over(
         self,
-        partition_by: Iterable[object] | object | None = None,
-        order_by: Iterable[object] | object | None = None,
+        partition_by: Exprs | None = None,
+        order_by: Exprs | None = None,
         *,
         rows: tuple[int | None, int | None] | None = None,
         range: tuple[int | None, int | None] | None = None,
@@ -857,8 +961,8 @@ class Expr(AggregateMethods, FuncNamespaces):
         `rows` and `range` bound it as (start, end), counted from the current row, with None meaning unbounded.
         So `rows=(-2, 0)` is the current row and the two before it.
         """
-        partitions = [_lift(e) for e in _as_list(partition_by)] if partition_by is not None else []
-        orders = [_lift(e) for e in _as_list(order_by)] if order_by is not None else []
+        partitions = _as_expressions(partition_by, "partition_by") if partition_by is not None else []
+        orders = _as_expressions(order_by, "order_by") if order_by is not None else []
         if rows is not None and range is not None:
             message = "a window is bounded by rows or by range, not both"
             raise TypeError(message)
@@ -905,16 +1009,16 @@ class Col(Expr):
 class Side:
     """One side of a join, inside its condition, where `l["id"]` is that side's column."""
 
-    def __init__(self, alias: str) -> None:
+    def __init__(self, alias: NewName) -> None:
         self.alias = alias
 
-    def __getitem__(self, name: object) -> Expr:
+    def __getitem__(self, name: ColumnName) -> Expr:
         if not isinstance(name, str):
-            message = f"a join side is indexed by column name, not by {type(name).__name__}"
+            message = f"a join side is indexed by column name, not by {type(name).__name__}"  # type: ignore[unreachable]
             raise TypeError(message)
         return Col((self.alias, *name_parts(name, "column name")))
 
-    def __getattr__(self, name: str) -> Any:
+    def __getattr__(self, name: _AttributeName) -> Any:
         if name.startswith("__") or name == "alias":
             raise AttributeError(name)
         message = f"a join side has no attribute {name!r}; its columns are reached as {self.alias}[{name!r}]"
@@ -954,7 +1058,7 @@ class FamilyExpr(Expr):
 
     # These check what the call really is, which only the wrapped expression can answer, then wrap the result again.
 
-    def where(self, predicate: object) -> Expr:
+    def where(self, predicate: Expr) -> Expr:
         """`Expr.where`, applied to the wrapped aggregate call."""
         return self._rewrapped(self.inner.where(predicate))
 
@@ -972,7 +1076,7 @@ class FamilyExpr(Expr):
 class Star(Expr):
     """`*`, optionally excluding or renaming columns."""
 
-    def __init__(self, exclude: Iterable[str] = (), rename: dict[str, str] | None = None) -> None:
+    def __init__(self, exclude: Iterable[str] = (), rename: Mapping[str, str] | None = None) -> None:
         super().__init__()
         self.exclude = list(exclude)
         self.rename = dict(rename or {})
@@ -1304,7 +1408,7 @@ class CaseBuilder:
         self._branches = branches
         self._condition = condition
 
-    def then(self, result: object) -> ThenBuilder:
+    def then(self, result: ValueOrExpr) -> ThenBuilder:
         """The value for the condition just given."""
         return ThenBuilder([*self._branches, (self._condition, _lift(result))])
 
@@ -1315,11 +1419,11 @@ class ThenBuilder:
     def __init__(self, branches: list[tuple[Expr, Expr]]) -> None:
         self._branches = branches
 
-    def when(self, condition: object) -> CaseBuilder:
+    def when(self, condition: Expr) -> CaseBuilder:
         """Another condition."""
-        return CaseBuilder(self._branches, _lift(condition))
+        return CaseBuilder(self._branches, _as_expression(condition, "when"))
 
-    def otherwise(self, result: object) -> Expr:
+    def otherwise(self, result: ValueOrExpr) -> Expr:
         """The fallback, completing the expression."""
         return Case(self._branches, _lift(result))
 
@@ -1331,7 +1435,7 @@ class ThenBuilder:
 # --- constructors ----------------------------------------------------------
 
 
-def col(name: str) -> Expr:
+def col(name: ColumnName) -> Expr:
     """A column by name, quoted whole so any name works and none is split; a struct field is `col("st")["field"]`."""
     if not isinstance(name, str):
         message = f"col() takes one column name, not {name!r}; a join side's column is l[name] inside the join's on"  # type: ignore[unreachable]
@@ -1339,22 +1443,22 @@ def col(name: str) -> Expr:
     return Col(name_parts(name, "column name"))
 
 
-def lit(value: object) -> Expr:
+def lit(value: PythonValue) -> Expr:
     """A Python value. Rarely needed, since operators accept values directly."""
     return Lit(value)
 
 
-def param(name: str) -> Expr:
+def param(name: NewName) -> Expr:
     """A placeholder whose value is supplied when the query runs."""
-    return Param(name)
+    return Param(_as_name(name, "parameter name"))
 
 
-def star(exclude: Iterable[str] = (), rename: dict[str, str] | None = None) -> Expr:
-    """`*`, optionally dropping or renaming columns."""
-    return Star(exclude, rename)
+def star(exclude: ColumnNames = (), rename: _Renames | None = None) -> Expr:
+    """`*`, optionally dropping or renaming columns; `exclude="id"` drops the one column `id`."""
+    return Star(_as_names(exclude, "column name"), _as_renames(rename))
 
 
-def fn(name: str | tuple[str, ...], /, *args: object, **named: object) -> Expr:
+def fn(name: QualifiedName, /, *args: ValueOrExpr, **named: ValueOrExpr) -> Expr:
     """Any SQL function by name, a tuple for a schema-qualified one, with the arguments treated as anywhere else.
 
     A keyword argument passes by name: `fn("round", col("x"), precision=1)` is `round("x", "precision" := 1)`.
@@ -1362,17 +1466,17 @@ def fn(name: str | tuple[str, ...], /, *args: object, **named: object) -> Expr:
     return Func(name, [_lift(a) for a in args], [(key, _lift(value)) for key, value in named.items()])
 
 
-def sql_expr(sql: str) -> Expr:
+def sql_expr(sql: SqlText) -> Expr:
     """A raw SQL fragment, spliced in unchanged and never escaped, so never build one from untrusted input."""
-    return Raw(sql)
+    return Raw(_as_sql(sql, "sql_expr"))
 
 
-def when(condition: object) -> CaseBuilder:
+def when(condition: Expr) -> CaseBuilder:
     """Begins a CASE. Continue with `.then(...)`."""
-    return CaseBuilder([], _lift(condition))
+    return CaseBuilder([], _as_expression(condition, "when"))
 
 
-def coalesce(*values: object) -> Expr:
+def coalesce(*values: ValueOrExpr) -> Expr:
     """The first argument that is not NULL."""
     return Coalesce([_lift(v) for v in values])
 
@@ -1383,7 +1487,7 @@ def count_all() -> Expr:
 
 
 def _window(name: str) -> Any:
-    def make(*args: object) -> Expr:
+    def make(*args: ValueOrExpr) -> Expr:
         return Func(name, [_lift(a) for a in args])
 
     make.__name__ = name
@@ -1394,11 +1498,32 @@ def _window(name: str) -> Any:
 row_number = _window("row_number")
 rank = _window("rank")
 dense_rank = _window("dense_rank")
-lag = _window("lag")
-lead = _window("lead")
 ntile = _window("ntile")
-first_value = _window("first_value")
-last_value = _window("last_value")
+
+
+def _over_subject(name: str, subject: Expr, args: tuple[ValueOrExpr, ...]) -> Expr:
+    return Func(name, [_as_expression(subject, name), *(_lift(a) for a in args)])
+
+
+def lag(subject: Expr, /, *args: ValueOrExpr) -> Expr:
+    """The `lag` window function: `subject` some rows back, `lag(col("x"))` or `lag(col("x"), 2, 0)`."""
+    return _over_subject("lag", subject, args)
+
+
+def lead(subject: Expr, /, *args: ValueOrExpr) -> Expr:
+    """The `lead` window function: `subject` some rows ahead, `lead(col("x"))` or `lead(col("x"), 2, 0)`."""
+    return _over_subject("lead", subject, args)
+
+
+def first_value(subject: Expr, /, *args: ValueOrExpr) -> Expr:
+    """The `first_value` window function: `subject` at the first row of the window frame."""
+    return _over_subject("first_value", subject, args)
+
+
+def last_value(subject: Expr, /, *args: ValueOrExpr) -> Expr:
+    """The `last_value` window function: `subject` at the last row of the window frame."""
+    return _over_subject("last_value", subject, args)
+
 
 __all__ += [
     "Untranslatable",

@@ -43,6 +43,7 @@
     <li><a href="#look">Looking at a plan</a></li>
     <li><a href="#nested">Plans inside plans</a></li>
     <li><a href="#reuse">Reusing plans</a></li>
+    <li><a href="#strings">How strings are read</a></li>
     <li><a href="#safety">Values, names and SQL text</a></li>
     <li><a href="#sql">Writing SQL yourself</a></li>
     <li><a href="#reference">Reference</a></li>
@@ -206,7 +207,7 @@ recent.with_columns(half=col(<span class="s">"total"</span>) / <span class="s">2
     </table>
   </div>
   <div class="note">
-    <p><strong>In these methods, a string names a column.</strong> <code>select("customer", "total")</code> picks two columns, and <code>with_columns(copy="total")</code> adds a copy of the column <code>total</code>. For a value, use <code>lit()</code>: <code>with_columns(source=lit("web"), one=lit(1))</code>.</p>
+    <p><strong>In these methods, a string names a column.</strong> <code>select("customer", "total")</code> picks two columns, and <code>with_columns(copy="total")</code> adds a copy of the column <code>total</code>. For a value, use <code>lit()</code>: <code>with_columns(source=lit("web"), one=lit(1))</code>. See <a href="#strings">How strings are read</a>.</p>
   </div>
   <div class="note">
     <p><strong><code>filter()</code> takes an expression, not text.</strong> <code>filter("total &gt; 1000")</code> raises <code>TypeError</code>. Write <code>filter(col("total") &gt; 1000)</code>, or <code>filter(sql_expr("total &gt; 1000"))</code> to write the condition as SQL.</p>
@@ -274,7 +275,7 @@ orders.select(
     <p><strong>Combine conditions with <code>&amp;</code>, <code>|</code> and <code>~</code>, each part in parentheses:</strong> <code>(col("a") &gt; 1) &amp; (col("b") &lt; 9)</code>. Python's <code>and</code>, <code>or</code> and <code>not</code> do not work on expressions; using one raises <code>TypeError</code>.</p>
   </div>
   <div class="note">
-    <p><strong>Inside an expression, a string is a value.</strong> <code>col("state") == "active"</code> compares with the text <code>active</code>. For the column called <code>active</code>, write <code>col("active")</code>.</p>
+    <p><strong>Inside an expression, a string is a value.</strong> <code>col("state") == "active"</code> compares with the text <code>active</code>. For the column called <code>active</code>, write <code>col("active")</code>. See <a href="#strings">How strings are read</a>.</p>
   </div>
   <div class="note">
     <p><strong>Join text with <code>.concat()</code>.</strong> <code>+</code> on two text values fails with an error from DuckDB. If any part is NULL, the whole result is NULL; to treat a missing part as empty text, write <code>col("first").concat(" ", coalesce(col("last"), ""))</code>.</p>
@@ -434,7 +435,7 @@ orders.select(
 <span class="c"># [(1, 2, Decimal('1400.00'), None), (2, 2, Decimal('1720.00'), Decimal('1400.00')), (3, 1, Decimal('4320.00'), Decimal('320.00'))]</span></code></pre>
   <p><code>partition_by</code> splits the rows into groups that are computed separately, and <code>order_by</code> orders the rows inside each. <code>rows=(start, end)</code> says which rows around the current one count: a negative number is that many rows before it, a positive number that many after, <code>0</code> is the current row and <code>None</code> means no limit. So <code>rows=(None, 0)</code> is a running total, and <code>rows=(-2, 0)</code> covers the current row and the two before it. <code>range=(start, end)</code> works the same way, but by the values in <code>order_by</code> instead of by counting rows, in that column's own units: on a <code>DATE</code> column, <code>range=(-30, 0)</code> covers the current row's date and the 30 days before it.</p>
   <div class="note">
-    <p><strong>In <code>.over()</code>, give columns with <code>col()</code>.</strong> Write <code>partition_by=col("customer")</code>, not <code>partition_by="customer"</code>. A plain string there is a text value, the same for every row, so all rows end up in one group, without an error.</p>
+    <p><strong>In <code>.over()</code>, give columns with <code>col()</code>.</strong> Write <code>partition_by=col("customer")</code>. A plain string, <code>partition_by="customer"</code>, raises <code>TypeError</code>: as a text value it would be the same for every row and put all rows in one group. <code>lag()</code>, <code>lead()</code>, <code>first_value()</code> and <code>last_value()</code> work the same way: write <code>lag(col("total"))</code>.</p>
   </div>
   <p>Without <code>order_by</code>, an aggregate covers its whole partition: <code>col("total").sum().over(partition_by=col("region"))</code> gives each order its region's total, and a bare <code>.over()</code> gives every row the total of all rows. Without <code>rows=</code> or <code>range=</code>, an aggregate with <code>order_by</code> covers every row up to the current one, and also the rows that tie with it in <code>order_by</code>:</p>
   <pre><code>sales = values([(<span class="s">1</span>, <span class="s">10</span>), (<span class="s">1</span>, <span class="s">20</span>), (<span class="s">2</span>, <span class="s">30</span>)], columns=[<span class="s">"day"</span>, <span class="s">"amount"</span>])
@@ -928,6 +929,30 @@ sql(<span class="s">"SELECT add_up(2) AS three, * FROM orders_over(2000)"</span>
   <p>DuckDB checks the body when you create the macro: a table or column it cannot find makes <code>CREATE MACRO</code> or <code>create_macro</code> fail. Problems that depend on the arguments' types show at the first call. A macro gets its values from its arguments, never from <code>param()</code>: in <code>create_macro</code> a <code>param()</code> raises <code>TypeError</code>, and through <code>render()</code> it would quietly become <code>NULL</code>. <a href="extend.html">Macros &amp; Extensions</a> has more on macros.</p>
 </section>
 
+<section id="strings">
+  <h2>How strings are read</h2>
+  <p>A Python string you pass to a method means one thing, and each argument always reads it the same way. These are the ones you meet most:</p>
+  <ul>
+    <li><strong>A column name</strong> in the methods that choose columns: <code>select</code>, <code>sort</code>, <code>group_by</code>, <code>aggregate</code>, <code>distinct(on=...)</code>, <code>drop</code>, <code>unnest</code>, <code>unpivot</code>, <code>join(on=...)</code>, <code>star(exclude=...)</code> and <code>plan["name"]</code>. In <code>with_columns(copy="total")</code>, the string is the column to copy.</li>
+    <li><strong>A new name</strong> where you name something: <code>.alias()</code>, the new names in <code>rename()</code>, <code>unpivot(name=..., value=...)</code>, the columns of <code>values()</code>, <code>param()</code> and the parameters of a macro.</li>
+    <li><strong>A value</strong> inside an expression: <code>col("state") == "active"</code> compares with the text <code>active</code>. The same goes for <code>lit()</code>, <code>isin()</code>, <code>like()</code>, <code>between()</code>, <code>concat()</code>, <code>.then()</code> and the arguments of functions such as <code>.str().replace("a", "b")</code>.</li>
+    <li><strong>SQL text</strong> in <code>sql()</code>, <code>sql_expr()</code>, <code>con.run()</code> and type names such as <code>cast("INTEGER")</code>. It is used exactly as you write it.</li>
+  </ul>
+  <p>A name is always one name. It is never split at a dot, and where a list of names is allowed, a single string is one name, not a list of its letters: <code>star(exclude="placed")</code> leaves out the column <code>placed</code>. A table or function name is one name too, and a tuple adds its schema (see <a href="#safety">Values, names and SQL text</a>).</p>
+  <pre><code><span class="k">from</span> duckdb.frame <span class="k">import</span> lag, star
+
+orders.select(star(exclude=<span class="s">"placed"</span>)).columns(con)    <span class="c"># ['id', 'customer', 'region', 'total']</span>
+orders.select(lag(<span class="s">"total"</span>).over(order_by=col(<span class="s">"placed"</span>)))
+<span class="c"># TypeError: lag takes an expression, not the string 'total'; name a column with col() or write SQL with sql_expr()</span></code></pre>
+  <p>Where a string makes no sense, it raises <code>TypeError</code>, and the message says what to write instead:</p>
+  <ul>
+    <li>A condition, in <code>filter()</code>, <code>when()</code> and <code>.where()</code>, is an expression: <code>col("paid")</code> for a column, or <code>sql_expr("total &gt; 100")</code> for SQL. A plain <code>True</code> raises too; write <code>lit(True)</code>.</li>
+    <li>The columns of <code>.over()</code>, and the column that <code>lag()</code>, <code>lead()</code>, <code>first_value()</code> and <code>last_value()</code> read, are expressions: <code>partition_by=col("region")</code>, <code>lag(col("total"))</code>. For a fixed text, write <code>lag(lit("x"))</code>.</li>
+    <li>Where a method takes a list of values, a single string is not such a list: the rows of <code>values()</code>, <code>isin()</code>, and <code>parameters</code> of <code>con.run()</code> and of a plan. For one value, put it in a list: <code>con.run(sql, ["x"])</code>.</li>
+  </ul>
+  <p>To annotate your own functions that pass arguments on to these methods, import the types from <code>duckdb.frame.typing</code>. Each type names how its argument reads a string: <code>ColumnOrExpr</code> is a column name or an expression, <code>ValueOrExpr</code> a value or an expression, <code>Exprs</code> one expression or a list of them, and <code>SqlText</code> SQL.</p>
+</section>
+
 <section id="safety">
   <h2>Values, names and SQL text</h2>
   <p>Text, bytes, lists, tuples and dicts that you put in a plan, in an expression or in <code>values()</code>, are never pasted into the SQL that runs. They are sent to DuckDB separately, as parameters, so a value cannot change what the query does. Dates, times, intervals, decimals and UUIDs are sent the same way, so they arrive exactly as they are, with the limits listed under "what is refused" on <a href="dbapi.html#values">DB-API 2.0</a>: for example a timestamp with nanoseconds is refused. A <code>Decimal</code> wider than 38 digits raises <code>TypeError</code> here. Numbers, booleans and <code>None</code> are written into the SQL; a Python float is written as a <code>DOUBLE</code>, never a <code>DECIMAL</code>. A numpy bool, integer or float, such as <code>np.int64(3)</code> or <code>np.float32(0.5)</code>, counts as the Python value its <code>.item()</code> gives, and so does one passed to a plan with <code>parameters=</code>. A DB-API cursor's <code>execute()</code> does not convert them: there <code>np.int64</code> is refused (see <a href="dbapi.html#values">DB-API 2.0</a>). A value an expression cannot hold, such as a <code>Fraction</code>, raises <code>TypeError</code>, with <code>==</code> and <code>!=</code> as with every other operator.</p>
@@ -984,7 +1009,7 @@ pivoted.sort(<span class="s">"customer"</span>).rows(con)
   <dl class="ref">
     <dt>table(name)</dt><dd>A table or view by name, or a file or file pattern. A tuple gives a name with its schema.</dd>
     <dt>sql(text)</dt><dd>A query, written as SQL, without placeholders.</dd>
-    <dt>values(rows, columns)</dt><dd>Rows given in Python. <code>columns</code> holds names, or <code>(name, type)</code> pairs; a type given converts the column.</dd>
+    <dt>values(rows, columns)</dt><dd>Rows given in Python. <code>columns</code> holds names, or <code>(name, type)</code> pairs; a type given converts the column. A single string as <code>columns</code> is one column.</dd>
     <dt>read_csv / read_parquet / read_json(path, **options)</dt><dd>A file, a list of files, or a pattern, read by DuckDB's reader. Options use the reader's own names.</dd>
     <dt>table_function(name, *args, **named)</dt><dd>Any table function. Keyword arguments are passed by name.</dd>
   </dl>
@@ -1046,7 +1071,7 @@ pivoted.sort(<span class="s">"customer"</span>).rows(con)
     <dt>col(name)</dt><dd>A column, by its one name.</dd>
     <dt>lit(value)</dt><dd>A value. Needed where a method expects a column.</dd>
     <dt>param(name)</dt><dd>A value given through <code>parameters=</code> when the plan runs.</dd>
-    <dt>star(exclude=(), rename=None)</dt><dd>SQL's <code>*</code>, leaving out or renaming some columns.</dd>
+    <dt>star(exclude=(), rename=None)</dt><dd>SQL's <code>*</code>, leaving out or renaming some columns. A single string in <code>exclude</code> is one column.</dd>
     <dt>fn(name, /, *args, **named)</dt><dd>Any function by name. A tuple names one in a schema. Keyword arguments are passed by name, after the positional ones.</dd>
     <dt>sql_expr(text)</dt><dd>A piece of SQL.</dd>
     <dt>when(condition).then(value)...otherwise(value)</dt><dd>SQL's <code>CASE</code>. <code>.end()</code> in place of <code>.otherwise()</code> gives NULL when nothing matches.</dd>
@@ -1054,8 +1079,8 @@ pivoted.sort(<span class="s">"customer"</span>).rows(con)
     <dt>count_all()</dt><dd>The number of rows, SQL's <code>count(*)</code>. Takes <code>.where()</code> and <code>.over()</code> like any aggregate.</dd>
     <dt>row_number(), rank(), dense_rank()</dt><dd>Window functions without arguments: the row's number, or its rank by <code>order_by</code>, with gaps after ties for <code>rank</code>. Add <code>.over()</code>.</dd>
     <dt>ntile(n)</dt><dd>Splits the rows, in <code>order_by</code>'s order, into <code>n</code> groups of nearly equal size, and gives each row its group's number, from 1: <code>ntile(4).over(order_by=col("total"))</code>.</dd>
-    <dt>lag(value, offset=1, default=None, /) / lead(value, offset=1, default=None, /)</dt><dd>The value from <code>offset</code> rows before (<code>lag</code>) or after (<code>lead</code>) the current row, or <code>default</code> where there is no such row: <code>lag(col("total"), 2, 0).over(order_by=col("placed"))</code>.</dd>
-    <dt>first_value(value) / last_value(value)</dt><dd>The value from the first or last row of the window. Add <code>.over()</code>.</dd>
+    <dt>lag(expr, offset=1, default=None, /) / lead(expr, offset=1, default=None, /)</dt><dd>The value of <code>expr</code> from <code>offset</code> rows before (<code>lag</code>) or after (<code>lead</code>) the current row, or <code>default</code> where there is no such row: <code>lag(col("total"), 2, 0).over(order_by=col("placed"))</code>. <code>expr</code> is an expression; a string raises <code>TypeError</code>.</dd>
+    <dt>first_value(expr) / last_value(expr)</dt><dd>The value of <code>expr</code> from the first or last row of the window. Add <code>.over()</code>.</dd>
   </dl>
   <dl class="ref">
     <dt>== != &lt; &lt;= &gt; &gt;=</dt><dd>Comparisons. A comparison with NULL gives NULL.</dd>
@@ -1072,8 +1097,8 @@ pivoted.sort(<span class="s">"customer"</span>).rows(con)
     <dt>.str() / .dt() / .list() / .json()</dt><dd>The text, date and time, list or JSON functions, as methods.</dd>
     <dt>.list().transform / .filter / .reduce(function)</dt><dd>Keep, change or combine the elements with a Python <code>lambda</code>. Python calls it once, with a stand-in for an element; DuckDB applies the result to every element.</dd>
     <dt>.sum() .mean() .min() .max() .count() .median() .std() .var() .n_unique() ...</dt><dd>Aggregates; the full list is in <a href="#group">Grouping and aggregating</a>.</dd>
-    <dt>.where(condition)</dt><dd>On an aggregate: use only the rows where the condition is true.</dd>
-    <dt>.over(partition_by=None, order_by=None, *, rows=None, range=None)</dt><dd>Make an aggregate a window function.</dd>
+    <dt>.where(condition)</dt><dd>On an aggregate: use only the rows where the condition, an expression, is true.</dd>
+    <dt>.over(partition_by=None, order_by=None, *, rows=None, range=None)</dt><dd>Make an aggregate a window function. <code>partition_by</code> and <code>order_by</code> take an expression or a list of them.</dd>
     <dt>.ignore_nulls()</dt><dd>On <code>first_value</code>, <code>last_value</code>, <code>lag</code> and <code>lead</code>: skip NULL values.</dd>
   </dl>
 </section>

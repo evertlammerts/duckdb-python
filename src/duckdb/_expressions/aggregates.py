@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, ClassVar
 
 if TYPE_CHECKING:
+    from ..frame.typing import ValueOrExpr
     from .expr import Expr
 
 
@@ -44,106 +45,106 @@ class AggregateMethods:
     def _call(self, function: str, *args: object) -> Expr:  # pragma: no cover (Expr defines it)
         raise NotImplementedError
 
-    def sum(self, *args: object) -> Expr:
+    def sum(self, *args: ValueOrExpr) -> Expr:
         """The sum of the values. SQL: `sum`."""
         return self._call("sum", *args)
 
-    def mean(self, *args: object) -> Expr:
+    def mean(self, *args: ValueOrExpr) -> Expr:
         """The average of the values. SQL: `avg`."""
         return self._call("avg", *args)
 
-    def avg(self, *args: object) -> Expr:
+    def avg(self, *args: ValueOrExpr) -> Expr:
         """The average of the values. The same as `mean`. SQL: `avg`."""
         return self._call("avg", *args)
 
-    def min(self, *args: object) -> Expr:
+    def min(self, *args: ValueOrExpr) -> Expr:
         """The smallest value. SQL: `min`."""
         return self._call("min", *args)
 
-    def max(self, *args: object) -> Expr:
+    def max(self, *args: ValueOrExpr) -> Expr:
         """The largest value. SQL: `max`."""
         return self._call("max", *args)
 
-    def count(self, *args: object) -> Expr:
+    def count(self, *args: ValueOrExpr) -> Expr:
         """How many values are not NULL. For rows, use `count_all()`. SQL: `count`."""
         return self._call("count", *args)
 
-    def median(self, *args: object) -> Expr:
+    def median(self, *args: ValueOrExpr) -> Expr:
         """The middle value. SQL: `median`."""
         return self._call("median", *args)
 
-    def std(self, *args: object) -> Expr:
+    def std(self, *args: ValueOrExpr) -> Expr:
         """The sample standard deviation. SQL: `stddev_samp`."""
         return self._call("stddev_samp", *args)
 
-    def var(self, *args: object) -> Expr:
+    def var(self, *args: ValueOrExpr) -> Expr:
         """The sample variance. SQL: `var_samp`."""
         return self._call("var_samp", *args)
 
-    def first(self, *args: object) -> Expr:
+    def first(self, *args: ValueOrExpr) -> Expr:
         """The first value seen. Order it with `.over()` or `sort` to make that mean something. SQL: `first`."""
         return self._call("first", *args)
 
-    def last(self, *args: object) -> Expr:
+    def last(self, *args: ValueOrExpr) -> Expr:
         """The last value seen. SQL: `last`."""
         return self._call("last", *args)
 
-    def any_value(self, *args: object) -> Expr:
+    def any_value(self, *args: ValueOrExpr) -> Expr:
         """Any one of the values, whichever is cheapest. SQL: `any_value`."""
         return self._call("any_value", *args)
 
-    def bit_and(self, *args: object) -> Expr:
+    def bit_and(self, *args: ValueOrExpr) -> Expr:
         """The bitwise AND of the values. SQL: `bit_and`."""
         return self._call("bit_and", *args)
 
-    def bit_or(self, *args: object) -> Expr:
+    def bit_or(self, *args: ValueOrExpr) -> Expr:
         """The bitwise OR of the values. SQL: `bit_or`."""
         return self._call("bit_or", *args)
 
-    def bool_and(self, *args: object) -> Expr:
+    def bool_and(self, *args: ValueOrExpr) -> Expr:
         """Whether every value is true. SQL: `bool_and`."""
         return self._call("bool_and", *args)
 
-    def bool_or(self, *args: object) -> Expr:
+    def bool_or(self, *args: ValueOrExpr) -> Expr:
         """Whether any value is true. SQL: `bool_or`."""
         return self._call("bool_or", *args)
 
-    def product(self, *args: object) -> Expr:
+    def product(self, *args: ValueOrExpr) -> Expr:
         """The product of the values. SQL: `product`."""
         return self._call("product", *args)
 
-    def string_agg(self, *args: object) -> Expr:
+    def string_agg(self, *args: ValueOrExpr) -> Expr:
         """The values joined as text. Pass the separator as an argument. SQL: `string_agg`."""
         return self._call("string_agg", *args)
 
-    def skewness(self, *args: object) -> Expr:
+    def skewness(self, *args: ValueOrExpr) -> Expr:
         """The skewness of the distribution. SQL: `skewness`."""
         return self._call("skewness", *args)
 
-    def kurtosis(self, *args: object) -> Expr:
+    def kurtosis(self, *args: ValueOrExpr) -> Expr:
         """The kurtosis of the distribution. SQL: `kurtosis`."""
         return self._call("kurtosis", *args)
 
-    def entropy(self, *args: object) -> Expr:
+    def entropy(self, *args: ValueOrExpr) -> Expr:
         """The entropy of the distribution. SQL: `entropy`."""
         return self._call("entropy", *args)
 
-    def array_agg(self, *args: object) -> Expr:
+    def array_agg(self, *args: ValueOrExpr) -> Expr:
         """The values gathered into a list. SQL: `array_agg`."""
         return self._call("array_agg", *args)
 
-    def mode(self, *args: object) -> Expr:
+    def mode(self, *args: ValueOrExpr) -> Expr:
         """The most frequent value. SQL: `mode`."""
         return self._call("mode", *args)
 
-    def quantile(self, *args: object) -> Expr:
+    def quantile(self, *args: ValueOrExpr) -> Expr:
         """The value at a quantile, interpolated. Pass the quantile, 0 to 1. SQL: `quantile_cont`."""
         return self._call("quantile_cont", *args)
 
-    def arg_min(self, *args: object) -> Expr:
+    def arg_min(self, *args: ValueOrExpr) -> Expr:
         """The value of the argument where this is smallest. SQL: `arg_min`."""
         return self._call("arg_min", *args)
 
-    def arg_max(self, *args: object) -> Expr:
+    def arg_max(self, *args: ValueOrExpr) -> Expr:
         """The value of the argument where this is largest. SQL: `arg_max`."""
         return self._call("arg_max", *args)

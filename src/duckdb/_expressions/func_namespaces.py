@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from .expr import Expr, FamilyExpr
+
+if TYPE_CHECKING:
+    from duckdb.frame.typing import ValueOrExpr
 
 
 class StrExpr(FamilyExpr):
@@ -80,267 +83,267 @@ class StrExpr(FamilyExpr):
         "url_encode": ("url_encode", 0, ["VARCHAR"]),
     }
 
-    def ascii(self, *args: object) -> Expr:
+    def ascii(self, *args: ValueOrExpr) -> Expr:
         """The Unicode code point of the first character. SQL: `ascii`."""
         return self._call("ascii", *args)
 
-    def bin(self, *args: object) -> StrExpr:
+    def bin(self, *args: ValueOrExpr) -> StrExpr:
         """Converts the `string` to binary representation. SQL: `bin`."""
         return StrExpr(self._call("bin", *args))
 
-    def bit_length(self, *args: object) -> Expr:
+    def bit_length(self, *args: ValueOrExpr) -> Expr:
         """Number of bits in a `string`. SQL: `bit_length`."""
         return self._call("bit_length", *args)
 
-    def concat_ws(self, separator: object, *args: object) -> StrExpr:
+    def concat_ws(self, separator: ValueOrExpr, *args: ValueOrExpr) -> StrExpr:
         """Concatenates many strings, separated by `separator`. Arguments: separator. SQL: `concat_ws`."""
         return StrExpr(self._call_at("concat_ws", 1, separator, *args))
 
-    def contains(self, *args: object) -> Expr:
+    def contains(self, *args: ValueOrExpr) -> Expr:
         """Returns `true` if `search_string` is found within `string`. Arguments: search_string. SQL: `contains`."""
         return self._call("contains", *args)
 
-    def damerau_levenshtein(self, *args: object) -> Expr:
+    def damerau_levenshtein(self, *args: ValueOrExpr) -> Expr:
         """Edit distance, counting a swap of neighbours as one edit. Arguments: s2. SQL: `damerau_levenshtein`."""
         return self._call("damerau_levenshtein", *args)
 
-    def format(self, *args: object) -> StrExpr:
+    def format(self, *args: ValueOrExpr) -> StrExpr:
         """Formats a string using the fmt syntax. SQL: `format`."""
         return StrExpr(self._call("format", *args))
 
-    def from_base64(self, *args: object) -> Expr:
+    def from_base64(self, *args: ValueOrExpr) -> Expr:
         """Converts a base64 encoded `string` to a character string (`BLOB`). SQL: `from_base64`."""
         return self._call("from_base64", *args)
 
-    def hamming(self, *args: object) -> Expr:
+    def hamming(self, *args: ValueOrExpr) -> Expr:
         """How many positions differ, for two strings of equal length. Arguments: s2. SQL: `hamming`."""
         return self._call("hamming", *args)
 
-    def ilike_escape(self, *args: object) -> Expr:
+    def ilike_escape(self, *args: ValueOrExpr) -> Expr:
         """Matches the pattern, ignoring case. Arguments: like_specifier, escape_character. SQL: `ilike_escape`."""
         return self._call("ilike_escape", *args)
 
-    def instr(self, *args: object) -> Expr:
+    def instr(self, *args: ValueOrExpr) -> Expr:
         """Where the search string first occurs, or 0. Arguments: search_string. SQL: `instr`."""
         return self._call("instr", *args)
 
-    def jaccard(self, *args: object) -> Expr:
+    def jaccard(self, *args: ValueOrExpr) -> Expr:
         """The Jaccard similarity between two strings. Arguments: s2. SQL: `jaccard`."""
         return self._call("jaccard", *args)
 
-    def jaro_similarity(self, *args: object) -> Expr:
+    def jaro_similarity(self, *args: ValueOrExpr) -> Expr:
         """The Jaro similarity between two strings. Arguments: s2. SQL: `jaro_similarity`."""
         return self._call("jaro_similarity", *args)
 
-    def jaro_winkler_similarity(self, *args: object) -> Expr:
+    def jaro_winkler_similarity(self, *args: ValueOrExpr) -> Expr:
         """The Jaro-Winkler similarity between two strings. Arguments: s2. SQL: `jaro_winkler_similarity`."""
         return self._call("jaro_winkler_similarity", *args)
 
-    def left(self, *args: object) -> StrExpr:
+    def left(self, *args: ValueOrExpr) -> StrExpr:
         """Extracts the left-most count characters. Arguments: count. SQL: `left`."""
         return StrExpr(self._call("left", *args))
 
-    def left_grapheme(self, *args: object) -> StrExpr:
+    def left_grapheme(self, *args: ValueOrExpr) -> StrExpr:
         """Extracts the left-most count grapheme clusters. Arguments: count. SQL: `left_grapheme`."""
         return StrExpr(self._call("left_grapheme", *args))
 
-    def length(self, *args: object) -> Expr:
+    def length(self, *args: ValueOrExpr) -> Expr:
         """Number of characters in `string`. SQL: `length`."""
         return self._call("length", *args)
 
-    def length_grapheme(self, *args: object) -> Expr:
+    def length_grapheme(self, *args: ValueOrExpr) -> Expr:
         """Number of grapheme clusters in `string`. SQL: `length_grapheme`."""
         return self._call("length_grapheme", *args)
 
-    def levenshtein(self, *args: object) -> Expr:
+    def levenshtein(self, *args: ValueOrExpr) -> Expr:
         """The number of single-character edits between two strings. Arguments: s2. SQL: `levenshtein`."""
         return self._call("levenshtein", *args)
 
-    def like_escape(self, *args: object) -> Expr:
+    def like_escape(self, *args: ValueOrExpr) -> Expr:
         """Whether it matches the pattern. Arguments: like_specifier, escape_character. SQL: `like_escape`."""
         return self._call("like_escape", *args)
 
-    def lower(self, *args: object) -> StrExpr:
+    def lower(self, *args: ValueOrExpr) -> StrExpr:
         """Converts `string` to lower case. SQL: `lower`."""
         return StrExpr(self._call("lower", *args))
 
-    def lpad(self, *args: object) -> StrExpr:
+    def lpad(self, *args: ValueOrExpr) -> StrExpr:
         """Padded on the left with the character, to a total length. Arguments: count, character. SQL: `lpad`."""
         return StrExpr(self._call("lpad", *args))
 
-    def ltrim(self, *args: object) -> StrExpr:
+    def ltrim(self, *args: ValueOrExpr) -> StrExpr:
         """Trimmed on the left of any of the characters, spaces by default. SQL: `ltrim`."""
         return StrExpr(self._call("ltrim", *args))
 
-    def md5(self, *args: object) -> StrExpr:
+    def md5(self, *args: ValueOrExpr) -> StrExpr:
         """Returns the MD5 hash of the `string` as a `VARCHAR`. SQL: `md5`."""
         return StrExpr(self._call("md5", *args))
 
-    def md5_number(self, *args: object) -> Expr:
+    def md5_number(self, *args: ValueOrExpr) -> Expr:
         """Returns the MD5 hash of the `string` as a `HUGEINT`. SQL: `md5_number`."""
         return self._call("md5_number", *args)
 
-    def nfc_normalize(self, *args: object) -> StrExpr:
+    def nfc_normalize(self, *args: ValueOrExpr) -> StrExpr:
         """Converts `string` to Unicode NFC normalized string. SQL: `nfc_normalize`."""
         return StrExpr(self._call("nfc_normalize", *args))
 
-    def not_ilike_escape(self, *args: object) -> Expr:
+    def not_ilike_escape(self, *args: ValueOrExpr) -> Expr:
         """Does not match, ignoring case. Arguments: like_specifier, escape_character. SQL: `not_ilike_escape`."""
         return self._call("not_ilike_escape", *args)
 
-    def not_like_escape(self, *args: object) -> Expr:
+    def not_like_escape(self, *args: ValueOrExpr) -> Expr:
         """Does not match the pattern. Arguments: like_specifier, escape_character. SQL: `not_like_escape`."""
         return self._call("not_like_escape", *args)
 
-    def overlay(self, *args: object) -> StrExpr:
+    def overlay(self, *args: ValueOrExpr) -> StrExpr:
         """The replacement written over the string, at a position. Arguments: replacement, start. SQL: `overlay`."""
         return StrExpr(self._call("overlay", *args))
 
-    def parse_dirname(self, *args: object) -> StrExpr:
+    def parse_dirname(self, *args: ValueOrExpr) -> StrExpr:
         """Returns the top-level directory name from the given `path`. SQL: `parse_dirname`."""
         return StrExpr(self._call("parse_dirname", *args))
 
-    def parse_dirpath(self, *args: object) -> StrExpr:
+    def parse_dirpath(self, *args: ValueOrExpr) -> StrExpr:
         """The path up to the last separator, as Python's os.path.dirname gives it. SQL: `parse_dirpath`."""
         return StrExpr(self._call("parse_dirpath", *args))
 
-    def parse_filename(self, *args: object) -> StrExpr:
+    def parse_filename(self, *args: ValueOrExpr) -> StrExpr:
         """The last component of the path, optionally without its extension. SQL: `parse_filename`."""
         return StrExpr(self._call("parse_filename", *args))
 
-    def parse_formatted_bytes(self, *args: object) -> Expr:
+    def parse_formatted_bytes(self, *args: ValueOrExpr) -> Expr:
         """A human-readable size such as '4KB' as a number of bytes. SQL: `parse_formatted_bytes`."""
         return self._call("parse_formatted_bytes", *args)
 
-    def parse_path(self, *args: object) -> ListExpr:
+    def parse_path(self, *args: ValueOrExpr) -> ListExpr:
         """The path split into its directories and filename. SQL: `parse_path`."""
         return ListExpr(self._call("parse_path", *args))
 
-    def path_join(self, *args: object) -> StrExpr:
+    def path_join(self, *args: ValueOrExpr) -> StrExpr:
         """The path components joined with the platform's separator. SQL: `path_join`."""
         return StrExpr(self._call("path_join", *args))
 
-    def prefix(self, *args: object) -> Expr:
+    def prefix(self, *args: ValueOrExpr) -> Expr:
         """Returns `true` if `string` starts with `search_string`. Arguments: search_string. SQL: `prefix`."""
         return self._call("prefix", *args)
 
-    def printf(self, *args: object) -> StrExpr:
+    def printf(self, *args: ValueOrExpr) -> StrExpr:
         """Formats a `string` using printf syntax. SQL: `printf`."""
         return StrExpr(self._call("printf", *args))
 
-    def regexp_escape(self, *args: object) -> StrExpr:
+    def regexp_escape(self, *args: ValueOrExpr) -> StrExpr:
         """The string escaped so it matches itself as a regular expression. SQL: `regexp_escape`."""
         return StrExpr(self._call("regexp_escape", *args))
 
-    def regexp_extract(self, *args: object) -> StrExpr:
+    def regexp_extract(self, *args: ValueOrExpr) -> StrExpr:
         """The first match of the pattern, or an empty string. Arguments: regex. SQL: `regexp_extract`."""
         return StrExpr(self._call("regexp_extract", *args))
 
-    def regexp_extract_all(self, *args: object) -> ListExpr:
+    def regexp_extract_all(self, *args: ValueOrExpr) -> ListExpr:
         """Every match of the pattern, as a list. Arguments: regex. SQL: `regexp_extract_all`."""
         return ListExpr(self._call("regexp_extract_all", *args))
 
-    def regexp_full_match(self, *args: object) -> Expr:
+    def regexp_full_match(self, *args: ValueOrExpr) -> Expr:
         """Returns `true` if the entire `string` matches the `regex`. Arguments: regex. SQL: `regexp_full_match`."""
         return self._call("regexp_full_match", *args)
 
-    def regexp_matches(self, *args: object) -> Expr:
+    def regexp_matches(self, *args: ValueOrExpr) -> Expr:
         """Whether the pattern matches anywhere in the string. Arguments: regex. SQL: `regexp_matches`."""
         return self._call("regexp_matches", *args)
 
-    def regexp_replace(self, *args: object) -> StrExpr:
+    def regexp_replace(self, *args: ValueOrExpr) -> StrExpr:
         """The first match of the pattern replaced. Arguments: regex, replacement. SQL: `regexp_replace`."""
         return StrExpr(self._call("regexp_replace", *args))
 
-    def replace(self, *args: object) -> StrExpr:
+    def replace(self, *args: ValueOrExpr) -> StrExpr:
         """Every occurrence of the source replaced by the target. Arguments: source, target. SQL: `replace`."""
         return StrExpr(self._call("replace", *args))
 
-    def reverse(self, *args: object) -> StrExpr:
+    def reverse(self, *args: ValueOrExpr) -> StrExpr:
         """Reverses the `string`. SQL: `reverse`."""
         return StrExpr(self._call("reverse", *args))
 
-    def right(self, *args: object) -> StrExpr:
+    def right(self, *args: ValueOrExpr) -> StrExpr:
         """Extract the right-most `count` characters. Arguments: count. SQL: `right`."""
         return StrExpr(self._call("right", *args))
 
-    def right_grapheme(self, *args: object) -> StrExpr:
+    def right_grapheme(self, *args: ValueOrExpr) -> StrExpr:
         """Extracts the right-most `count` grapheme clusters. Arguments: count. SQL: `right_grapheme`."""
         return StrExpr(self._call("right_grapheme", *args))
 
-    def rpad(self, *args: object) -> StrExpr:
+    def rpad(self, *args: ValueOrExpr) -> StrExpr:
         """Padded on the right with the character, to a total length. Arguments: count, character. SQL: `rpad`."""
         return StrExpr(self._call("rpad", *args))
 
-    def rtrim(self, *args: object) -> StrExpr:
+    def rtrim(self, *args: ValueOrExpr) -> StrExpr:
         """Trimmed on the right of any of the characters, spaces by default. SQL: `rtrim`."""
         return StrExpr(self._call("rtrim", *args))
 
-    def sha1(self, *args: object) -> StrExpr:
+    def sha1(self, *args: ValueOrExpr) -> StrExpr:
         """Returns a `VARCHAR` with the SHA-1 hash of the `value`. SQL: `sha1`."""
         return StrExpr(self._call("sha1", *args))
 
-    def sha256(self, *args: object) -> StrExpr:
+    def sha256(self, *args: ValueOrExpr) -> StrExpr:
         """Returns a `VARCHAR` with the SHA-256 hash of the `value`. SQL: `sha256`."""
         return StrExpr(self._call("sha256", *args))
 
-    def string_split(self, *args: object) -> ListExpr:
+    def string_split(self, *args: ValueOrExpr) -> ListExpr:
         """Splits the `string` along the `separator`. Arguments: separator. SQL: `string_split`."""
         return ListExpr(self._call("string_split", *args))
 
-    def string_split_regex(self, *args: object) -> ListExpr:
+    def string_split_regex(self, *args: ValueOrExpr) -> ListExpr:
         """Splits the `string` along the `regex`. Arguments: regex. SQL: `string_split_regex`."""
         return ListExpr(self._call("string_split_regex", *args))
 
-    def strip_accents(self, *args: object) -> StrExpr:
+    def strip_accents(self, *args: ValueOrExpr) -> StrExpr:
         """Strips accents from `string`. SQL: `strip_accents`."""
         return StrExpr(self._call("strip_accents", *args))
 
-    def strlen(self, *args: object) -> Expr:
+    def strlen(self, *args: ValueOrExpr) -> Expr:
         """Number of bytes in `string`. SQL: `strlen`."""
         return self._call("strlen", *args)
 
-    def substring(self, *args: object) -> StrExpr:
+    def substring(self, *args: ValueOrExpr) -> StrExpr:
         """The rest of the string from a start position. Arguments: start. SQL: `substring`."""
         return StrExpr(self._call("substring", *args))
 
-    def substring_grapheme(self, *args: object) -> StrExpr:
+    def substring_grapheme(self, *args: ValueOrExpr) -> StrExpr:
         """The rest of the string, counting grapheme clusters. Arguments: start. SQL: `substring_grapheme`."""
         return StrExpr(self._call("substring_grapheme", *args))
 
-    def suffix(self, *args: object) -> Expr:
+    def suffix(self, *args: ValueOrExpr) -> Expr:
         """Returns `true` if `string` ends with `search_string`. Arguments: search_string. SQL: `suffix`."""
         return self._call("suffix", *args)
 
-    def translate(self, *args: object) -> StrExpr:
+    def translate(self, *args: ValueOrExpr) -> StrExpr:
         """Each character in `from` replaced by the one in `to`. Arguments: from, to. SQL: `translate`."""
         return StrExpr(self._call("translate", *args))
 
-    def trim(self, *args: object) -> StrExpr:
+    def trim(self, *args: ValueOrExpr) -> StrExpr:
         """Trimmed on both sides of any of the characters, spaces by default. SQL: `trim`."""
         return StrExpr(self._call("trim", *args))
 
-    def unbin(self, *args: object) -> Expr:
+    def unbin(self, *args: ValueOrExpr) -> Expr:
         """Converts a `value` from binary representation to a blob. SQL: `unbin`."""
         return self._call("unbin", *args)
 
-    def unhex(self, *args: object) -> Expr:
+    def unhex(self, *args: ValueOrExpr) -> Expr:
         """Converts a `value` from hexadecimal representation to a blob. SQL: `unhex`."""
         return self._call("unhex", *args)
 
-    def unicode(self, *args: object) -> Expr:
+    def unicode(self, *args: ValueOrExpr) -> Expr:
         """The Unicode code point of the first character, as an INTEGER. SQL: `unicode`."""
         return self._call("unicode", *args)
 
-    def upper(self, *args: object) -> StrExpr:
+    def upper(self, *args: ValueOrExpr) -> StrExpr:
         """Converts `string` to upper case. SQL: `upper`."""
         return StrExpr(self._call("upper", *args))
 
-    def url_decode(self, *args: object) -> StrExpr:
+    def url_decode(self, *args: ValueOrExpr) -> StrExpr:
         """Decodes a URL from a representation using Percent-Encoding. SQL: `url_decode`."""
         return StrExpr(self._call("url_decode", *args))
 
-    def url_encode(self, *args: object) -> StrExpr:
+    def url_encode(self, *args: ValueOrExpr) -> StrExpr:
         """Encodes a URL to a representation using Percent-Encoding. SQL: `url_encode`."""
         return StrExpr(self._call("url_encode", *args))
 
@@ -395,175 +398,175 @@ class DtExpr(FamilyExpr):
         "yearweek": ("yearweek", 0, ["DATE"]),
     }
 
-    def age(self, *args: object) -> DtExpr:
+    def age(self, *args: ValueOrExpr) -> DtExpr:
         """The time between two timestamps, or between one and now. SQL: `age`."""
         return DtExpr(self._call("age", *args))
 
-    def century(self, *args: object) -> Expr:
+    def century(self, *args: ValueOrExpr) -> Expr:
         """Extract the century component from a date or timestamp. SQL: `century`."""
         return self._call("century", *args)
 
-    def day(self, *args: object) -> Expr:
+    def day(self, *args: ValueOrExpr) -> Expr:
         """Extract the day component from a date or timestamp. SQL: `day`."""
         return self._call("day", *args)
 
-    def dayname(self, *args: object) -> StrExpr:
+    def dayname(self, *args: ValueOrExpr) -> StrExpr:
         """The (English) name of the weekday. SQL: `dayname`."""
         return StrExpr(self._call("dayname", *args))
 
-    def dayofmonth(self, *args: object) -> Expr:
+    def dayofmonth(self, *args: ValueOrExpr) -> Expr:
         """Extract the dayofmonth component from a date or timestamp. SQL: `dayofmonth`."""
         return self._call("dayofmonth", *args)
 
-    def dayofweek(self, *args: object) -> Expr:
+    def dayofweek(self, *args: ValueOrExpr) -> Expr:
         """Extract the dayofweek component from a date or timestamp. SQL: `dayofweek`."""
         return self._call("dayofweek", *args)
 
-    def dayofyear(self, *args: object) -> Expr:
+    def dayofyear(self, *args: ValueOrExpr) -> Expr:
         """Extract the dayofyear component from a date or timestamp. SQL: `dayofyear`."""
         return self._call("dayofyear", *args)
 
-    def days_in_month(self, *args: object) -> Expr:
+    def days_in_month(self, *args: ValueOrExpr) -> Expr:
         """How many days the date's month has. SQL: `days_in_month`."""
         return self._call("days_in_month", *args)
 
-    def decade(self, *args: object) -> Expr:
+    def decade(self, *args: ValueOrExpr) -> Expr:
         """Extract the decade component from a date or timestamp. SQL: `decade`."""
         return self._call("decade", *args)
 
-    def diff(self, part: object, *args: object) -> Expr:
+    def diff(self, part: ValueOrExpr, *args: ValueOrExpr) -> Expr:
         """The number of partition boundaries between the timestamps. Arguments: part, enddate. SQL: `date_diff`."""
         return self._call_at("date_diff", 1, part, *args)
 
-    def epoch(self, *args: object) -> Expr:
+    def epoch(self, *args: ValueOrExpr) -> Expr:
         """Extract the epoch component from a temporal type. SQL: `epoch`."""
         return self._call("epoch", *args)
 
-    def epoch_ns(self, *args: object) -> Expr:
+    def epoch_ns(self, *args: ValueOrExpr) -> Expr:
         """Extract the epoch component in nanoseconds from a temporal type. SQL: `epoch_ns`."""
         return self._call("epoch_ns", *args)
 
-    def epoch_us(self, *args: object) -> Expr:
+    def epoch_us(self, *args: ValueOrExpr) -> Expr:
         """Extract the epoch component in microseconds from a temporal type. SQL: `epoch_us`."""
         return self._call("epoch_us", *args)
 
-    def era(self, *args: object) -> Expr:
+    def era(self, *args: ValueOrExpr) -> Expr:
         """Extract the era component from a date or timestamp. SQL: `era`."""
         return self._call("era", *args)
 
-    def hour(self, *args: object) -> Expr:
+    def hour(self, *args: ValueOrExpr) -> Expr:
         """Extract the hour component from a date or timestamp. SQL: `hour`."""
         return self._call("hour", *args)
 
-    def isodow(self, *args: object) -> Expr:
+    def isodow(self, *args: ValueOrExpr) -> Expr:
         """Extract the isodow component from a date or timestamp. SQL: `isodow`."""
         return self._call("isodow", *args)
 
-    def isoyear(self, *args: object) -> Expr:
+    def isoyear(self, *args: ValueOrExpr) -> Expr:
         """Extract the isoyear component from a date or timestamp. SQL: `isoyear`."""
         return self._call("isoyear", *args)
 
-    def julian(self, *args: object) -> Expr:
+    def julian(self, *args: ValueOrExpr) -> Expr:
         """Extract the Julian Day number from a date or timestamp. SQL: `julian`."""
         return self._call("julian", *args)
 
-    def last_day(self, *args: object) -> DtExpr:
+    def last_day(self, *args: ValueOrExpr) -> DtExpr:
         """Returns the last day of the month. SQL: `last_day`."""
         return DtExpr(self._call("last_day", *args))
 
-    def microsecond(self, *args: object) -> Expr:
+    def microsecond(self, *args: ValueOrExpr) -> Expr:
         """Extract the microsecond component from a date or timestamp. SQL: `microsecond`."""
         return self._call("microsecond", *args)
 
-    def millennium(self, *args: object) -> Expr:
+    def millennium(self, *args: ValueOrExpr) -> Expr:
         """Extract the millennium component from a date or timestamp. SQL: `millennium`."""
         return self._call("millennium", *args)
 
-    def millisecond(self, *args: object) -> Expr:
+    def millisecond(self, *args: ValueOrExpr) -> Expr:
         """Extract the millisecond component from a date or timestamp. SQL: `millisecond`."""
         return self._call("millisecond", *args)
 
-    def minute(self, *args: object) -> Expr:
+    def minute(self, *args: ValueOrExpr) -> Expr:
         """Extract the minute component from a date or timestamp. SQL: `minute`."""
         return self._call("minute", *args)
 
-    def month(self, *args: object) -> Expr:
+    def month(self, *args: ValueOrExpr) -> Expr:
         """Extract the month component from a date or timestamp. SQL: `month`."""
         return self._call("month", *args)
 
-    def monthname(self, *args: object) -> StrExpr:
+    def monthname(self, *args: ValueOrExpr) -> StrExpr:
         """The (English) name of the month. SQL: `monthname`."""
         return StrExpr(self._call("monthname", *args))
 
-    def nanosecond(self, *args: object) -> Expr:
+    def nanosecond(self, *args: ValueOrExpr) -> Expr:
         """Extract the nanosecond component from a date or timestamp. SQL: `nanosecond`."""
         return self._call("nanosecond", *args)
 
-    def normalized_interval(self, *args: object) -> DtExpr:
+    def normalized_interval(self, *args: ValueOrExpr) -> DtExpr:
         """Normalizes an INTERVAL to an equivalent interval. SQL: `normalized_interval`."""
         return DtExpr(self._call("normalized_interval", *args))
 
-    def part(self, part: object, *args: object) -> Expr:
+    def part(self, part: ValueOrExpr, *args: ValueOrExpr) -> Expr:
         """Get subfield (equivalent to extract). Arguments: part. SQL: `date_part`."""
         return self._call_at("date_part", 1, part, *args)
 
-    def quarter(self, *args: object) -> Expr:
+    def quarter(self, *args: ValueOrExpr) -> Expr:
         """Extract the quarter component from a date or timestamp. SQL: `quarter`."""
         return self._call("quarter", *args)
 
-    def second(self, *args: object) -> Expr:
+    def second(self, *args: ValueOrExpr) -> Expr:
         """Extract the second component from a date or timestamp. SQL: `second`."""
         return self._call("second", *args)
 
-    def strftime(self, *args: object) -> StrExpr:
+    def strftime(self, *args: ValueOrExpr) -> StrExpr:
         """Format as text, with a strftime pattern. Arguments: format. SQL: `strftime`."""
         return StrExpr(self._call("strftime", *args))
 
-    def sub(self, part: object, *args: object) -> Expr:
+    def sub(self, part: ValueOrExpr, *args: ValueOrExpr) -> Expr:
         """The number of complete partitions between the timestamps. Arguments: part, enddate. SQL: `date_sub`."""
         return self._call_at("date_sub", 1, part, *args)
 
-    def time_bucket(self, bucket_width: object, *args: object) -> DtExpr:
+    def time_bucket(self, bucket_width: ValueOrExpr, *args: ValueOrExpr) -> DtExpr:
         """Truncate TIMESTAMPTZ by the specified interval bucket_width. Arguments: bucket_width. SQL: `time_bucket`."""
         return DtExpr(self._call_at("time_bucket", 1, bucket_width, *args))
 
-    def timetz_byte_comparable(self, *args: object) -> Expr:
+    def timetz_byte_comparable(self, *args: ValueOrExpr) -> Expr:
         """Converts a TIME WITH TIME ZONE to an integer sort key. SQL: `timetz_byte_comparable`."""
         return self._call("timetz_byte_comparable", *args)
 
-    def timezone(self, *args: object) -> Expr:
+    def timezone(self, *args: ValueOrExpr) -> Expr:
         """The time zone offset, in seconds. SQL: `timezone`."""
         return self._call("timezone", *args)
 
-    def timezone_hour(self, *args: object) -> Expr:
+    def timezone_hour(self, *args: ValueOrExpr) -> Expr:
         """Extract the timezone_hour component from a date or timestamp. SQL: `timezone_hour`."""
         return self._call("timezone_hour", *args)
 
-    def timezone_minute(self, *args: object) -> Expr:
+    def timezone_minute(self, *args: ValueOrExpr) -> Expr:
         """Extract the timezone_minute component from a date or timestamp. SQL: `timezone_minute`."""
         return self._call("timezone_minute", *args)
 
-    def trunc(self, part: object, *args: object) -> DtExpr:
+    def trunc(self, part: ValueOrExpr, *args: ValueOrExpr) -> DtExpr:
         """Truncate to specified precision. Arguments: part. SQL: `date_trunc`."""
         return DtExpr(self._call_at("date_trunc", 1, part, *args))
 
-    def week(self, *args: object) -> Expr:
+    def week(self, *args: ValueOrExpr) -> Expr:
         """Extract the week component from a date or timestamp. SQL: `week`."""
         return self._call("week", *args)
 
-    def weekday(self, *args: object) -> Expr:
+    def weekday(self, *args: ValueOrExpr) -> Expr:
         """Extract the weekday component from a date or timestamp. SQL: `weekday`."""
         return self._call("weekday", *args)
 
-    def weekofyear(self, *args: object) -> Expr:
+    def weekofyear(self, *args: ValueOrExpr) -> Expr:
         """Extract the weekofyear component from a date or timestamp. SQL: `weekofyear`."""
         return self._call("weekofyear", *args)
 
-    def year(self, *args: object) -> Expr:
+    def year(self, *args: ValueOrExpr) -> Expr:
         """Extract the year component from a date or timestamp. SQL: `year`."""
         return self._call("year", *args)
 
-    def yearweek(self, *args: object) -> Expr:
+    def yearweek(self, *args: ValueOrExpr) -> Expr:
         """Extract the yearweek component from a date or timestamp. SQL: `yearweek`."""
         return self._call("yearweek", *args)
 
@@ -631,227 +634,227 @@ class ListExpr(FamilyExpr):
         "var_samp": ("list_var_samp", 0, []),
     }
 
-    def aggregate(self, *args: object) -> Expr:
+    def aggregate(self, *args: ValueOrExpr) -> Expr:
         """The named aggregate applied to the elements. Arguments: function_name. SQL: `list_aggregate`."""
         return self._call("list_aggregate", *args)
 
-    def any_value(self, *args: object) -> Expr:
+    def any_value(self, *args: ValueOrExpr) -> Expr:
         """Any one element, whichever is cheapest. SQL: `list_any_value`."""
         return self._call("list_any_value", *args)
 
-    def append(self, *args: object) -> ListExpr:
+    def append(self, *args: ValueOrExpr) -> ListExpr:
         """The `list_append` function. Arguments: e. SQL: `list_append`."""
         return ListExpr(self._call("list_append", *args))
 
-    def approx_count_distinct(self, *args: object) -> Expr:
+    def approx_count_distinct(self, *args: ValueOrExpr) -> Expr:
         """An approximate count of the distinct elements. SQL: `list_approx_count_distinct`."""
         return self._call("list_approx_count_distinct", *args)
 
-    def avg(self, *args: object) -> Expr:
+    def avg(self, *args: ValueOrExpr) -> Expr:
         """The average of the elements. SQL: `list_avg`."""
         return self._call("list_avg", *args)
 
-    def bit_and(self, *args: object) -> Expr:
+    def bit_and(self, *args: ValueOrExpr) -> Expr:
         """The bitwise AND of the elements. SQL: `list_bit_and`."""
         return self._call("list_bit_and", *args)
 
-    def bit_or(self, *args: object) -> Expr:
+    def bit_or(self, *args: ValueOrExpr) -> Expr:
         """The bitwise OR of the elements. SQL: `list_bit_or`."""
         return self._call("list_bit_or", *args)
 
-    def bit_xor(self, *args: object) -> Expr:
+    def bit_xor(self, *args: ValueOrExpr) -> Expr:
         """The bitwise XOR of the elements. SQL: `list_bit_xor`."""
         return self._call("list_bit_xor", *args)
 
-    def bool_and(self, *args: object) -> Expr:
+    def bool_and(self, *args: ValueOrExpr) -> Expr:
         """Whether every element is true. SQL: `list_bool_and`."""
         return self._call("list_bool_and", *args)
 
-    def bool_or(self, *args: object) -> Expr:
+    def bool_or(self, *args: ValueOrExpr) -> Expr:
         """Whether any element is true. SQL: `list_bool_or`."""
         return self._call("list_bool_or", *args)
 
-    def contains(self, *args: object) -> Expr:
+    def contains(self, *args: ValueOrExpr) -> Expr:
         """Returns true if the list contains the element. Arguments: element. SQL: `list_contains`."""
         return self._call("list_contains", *args)
 
-    def cosine_distance(self, *args: object) -> Expr:
+    def cosine_distance(self, *args: ValueOrExpr) -> Expr:
         """Computes the cosine distance between two same-sized lists. Arguments: list2. SQL: `list_cosine_distance`."""
         return self._call("list_cosine_distance", *args)
 
-    def cosine_similarity(self, *args: object) -> Expr:
+    def cosine_similarity(self, *args: ValueOrExpr) -> Expr:
         """The cosine similarity of two lists of numbers. Arguments: list2. SQL: `list_cosine_similarity`."""
         return self._call("list_cosine_similarity", *args)
 
-    def count(self, *args: object) -> Expr:
+    def count(self, *args: ValueOrExpr) -> Expr:
         """How many elements are not NULL. SQL: `list_count`."""
         return self._call("list_count", *args)
 
-    def distance(self, *args: object) -> Expr:
+    def distance(self, *args: ValueOrExpr) -> Expr:
         """The Euclidean distance between two lists of numbers. Arguments: list2. SQL: `list_distance`."""
         return self._call("list_distance", *args)
 
-    def distinct(self, *args: object) -> ListExpr:
+    def distinct(self, *args: ValueOrExpr) -> ListExpr:
         """Removes all duplicates and `NULL` values from a list. SQL: `list_distinct`."""
         return ListExpr(self._call("list_distinct", *args))
 
-    def entropy(self, *args: object) -> Expr:
+    def entropy(self, *args: ValueOrExpr) -> Expr:
         """The entropy of the elements. SQL: `list_entropy`."""
         return self._call("list_entropy", *args)
 
-    def extract(self, *args: object) -> Expr:
+    def extract(self, *args: ValueOrExpr) -> Expr:
         """Extract the `index`th (1-based) value from the list. Arguments: index. SQL: `list_extract`."""
         return self._call("list_extract", *args)
 
-    def filter(self, function: object, *args: object) -> ListExpr:
+    def filter(self, function: ValueOrExpr, *args: ValueOrExpr) -> ListExpr:
         """The elements the function holds for: `lambda x: x > 0`. SQL: `list_filter`."""
         return ListExpr(self._call("list_filter", function, *args))
 
-    def first(self, *args: object) -> Expr:
+    def first(self, *args: ValueOrExpr) -> Expr:
         """The first element. SQL: `list_first`."""
         return self._call("list_first", *args)
 
-    def flatten(self, *args: object) -> ListExpr:
+    def flatten(self, *args: ValueOrExpr) -> ListExpr:
         """Flattens a nested list by one level. SQL: `flatten`."""
         return ListExpr(self._call("flatten", *args))
 
-    def grade_up(self, *args: object) -> ListExpr:
+    def grade_up(self, *args: ValueOrExpr) -> ListExpr:
         """The positions the elements would take once sorted, rather than the elements. SQL: `list_grade_up`."""
         return ListExpr(self._call("list_grade_up", *args))
 
-    def has_all(self, *args: object) -> Expr:
+    def has_all(self, *args: ValueOrExpr) -> Expr:
         """Returns true if all elements of list2 are in list1. Arguments: list2. SQL: `list_has_all`."""
         return self._call("list_has_all", *args)
 
-    def has_any(self, *args: object) -> Expr:
+    def has_any(self, *args: ValueOrExpr) -> Expr:
         """Returns true if the lists have any element in common. Arguments: list2. SQL: `list_has_any`."""
         return self._call("list_has_any", *args)
 
-    def histogram(self, *args: object) -> Expr:
+    def histogram(self, *args: ValueOrExpr) -> Expr:
         """How often each element occurs, as a map. SQL: `list_histogram`."""
         return self._call("list_histogram", *args)
 
-    def inner_product(self, *args: object) -> Expr:
+    def inner_product(self, *args: ValueOrExpr) -> Expr:
         """Computes the inner product between two same-sized lists. Arguments: list2. SQL: `list_inner_product`."""
         return self._call("list_inner_product", *args)
 
-    def intersect(self, *args: object) -> ListExpr:
+    def intersect(self, *args: ValueOrExpr) -> ListExpr:
         """The distinct elements present in both lists. Arguments: list2. SQL: `list_intersect`."""
         return ListExpr(self._call("list_intersect", *args))
 
-    def kurtosis(self, *args: object) -> Expr:
+    def kurtosis(self, *args: ValueOrExpr) -> Expr:
         """The kurtosis of the elements. SQL: `list_kurtosis`."""
         return self._call("list_kurtosis", *args)
 
-    def kurtosis_pop(self, *args: object) -> Expr:
+    def kurtosis_pop(self, *args: ValueOrExpr) -> Expr:
         """The population kurtosis of the elements. SQL: `list_kurtosis_pop`."""
         return self._call("list_kurtosis_pop", *args)
 
-    def last(self, *args: object) -> Expr:
+    def last(self, *args: ValueOrExpr) -> Expr:
         """The last element. SQL: `list_last`."""
         return self._call("list_last", *args)
 
-    def mad(self, *args: object) -> Expr:
+    def mad(self, *args: ValueOrExpr) -> Expr:
         """The median absolute deviation of the elements. SQL: `list_mad`."""
         return self._call("list_mad", *args)
 
-    def mask(self, *args: object) -> ListExpr:
+    def mask(self, *args: ValueOrExpr) -> ListExpr:
         """The elements where the matching boolean is true. Arguments: mask_list. SQL: `list_where`."""
         return ListExpr(self._call("list_where", *args))
 
-    def max(self, *args: object) -> Expr:
+    def max(self, *args: ValueOrExpr) -> Expr:
         """The largest element. SQL: `list_max`."""
         return self._call("list_max", *args)
 
-    def median(self, *args: object) -> Expr:
+    def median(self, *args: ValueOrExpr) -> Expr:
         """The middle element. SQL: `list_median`."""
         return self._call("list_median", *args)
 
-    def min(self, *args: object) -> Expr:
+    def min(self, *args: ValueOrExpr) -> Expr:
         """The smallest element. SQL: `list_min`."""
         return self._call("list_min", *args)
 
-    def mode(self, *args: object) -> Expr:
+    def mode(self, *args: ValueOrExpr) -> Expr:
         """The most frequent element. SQL: `list_mode`."""
         return self._call("list_mode", *args)
 
-    def negative_inner_product(self, *args: object) -> Expr:
+    def negative_inner_product(self, *args: ValueOrExpr) -> Expr:
         """The inner product of two lists, negated. Arguments: list2. SQL: `list_negative_inner_product`."""
         return self._call("list_negative_inner_product", *args)
 
-    def position(self, *args: object) -> Expr:
+    def position(self, *args: ValueOrExpr) -> Expr:
         """The index of the element, or NULL when absent. Arguments: element. SQL: `list_position`."""
         return self._call("list_position", *args)
 
-    def prepend(self, e: object, *args: object) -> ListExpr:
+    def prepend(self, e: ValueOrExpr, *args: ValueOrExpr) -> ListExpr:
         """The `list_prepend` function. Arguments: e. SQL: `list_prepend`."""
         return ListExpr(self._call_at("list_prepend", 1, e, *args))
 
-    def product(self, *args: object) -> Expr:
+    def product(self, *args: ValueOrExpr) -> Expr:
         """The product of the elements. SQL: `list_product`."""
         return self._call("list_product", *args)
 
-    def reduce(self, function: object, *args: object) -> Expr:
+    def reduce(self, function: ValueOrExpr, *args: ValueOrExpr) -> Expr:
         """The list folded to one value, left to right: `lambda acc, x: acc + x`. SQL: `list_reduce`."""
         return self._call("list_reduce", function, *args)
 
-    def resize(self, *args: object) -> ListExpr:
+    def resize(self, *args: ValueOrExpr) -> ListExpr:
         """Resizes the `list` to contain `size` elements. Arguments: size. SQL: `list_resize`."""
         return ListExpr(self._call("list_resize", *args))
 
-    def reverse(self, *args: object) -> ListExpr:
+    def reverse(self, *args: ValueOrExpr) -> ListExpr:
         """The elements in reverse order. SQL: `list_reverse`."""
         return ListExpr(self._call("list_reverse", *args))
 
-    def reverse_sort(self, *args: object) -> ListExpr:
+    def reverse_sort(self, *args: ValueOrExpr) -> ListExpr:
         """Sorts the elements of the list in reverse order. SQL: `list_reverse_sort`."""
         return ListExpr(self._call("list_reverse_sort", *args))
 
-    def select(self, *args: object) -> ListExpr:
+    def select(self, *args: ValueOrExpr) -> ListExpr:
         """The elements at the given indexes. Arguments: index_list. SQL: `list_select`."""
         return ListExpr(self._call("list_select", *args))
 
-    def sem(self, *args: object) -> Expr:
+    def sem(self, *args: ValueOrExpr) -> Expr:
         """The standard error of the mean of the elements. SQL: `list_sem`."""
         return self._call("list_sem", *args)
 
-    def skewness(self, *args: object) -> Expr:
+    def skewness(self, *args: ValueOrExpr) -> Expr:
         """The skewness of the elements. SQL: `list_skewness`."""
         return self._call("list_skewness", *args)
 
-    def sort(self, *args: object) -> ListExpr:
+    def sort(self, *args: ValueOrExpr) -> ListExpr:
         """Sorts the elements of the list. SQL: `list_sort`."""
         return ListExpr(self._call("list_sort", *args))
 
-    def stddev_pop(self, *args: object) -> Expr:
+    def stddev_pop(self, *args: ValueOrExpr) -> Expr:
         """The population standard deviation of the elements. SQL: `list_stddev_pop`."""
         return self._call("list_stddev_pop", *args)
 
-    def stddev_samp(self, *args: object) -> Expr:
+    def stddev_samp(self, *args: ValueOrExpr) -> Expr:
         """The sample standard deviation of the elements. SQL: `list_stddev_samp`."""
         return self._call("list_stddev_samp", *args)
 
-    def string_agg(self, *args: object) -> StrExpr:
+    def string_agg(self, *args: ValueOrExpr) -> StrExpr:
         """The elements joined as text, separated by commas. SQL: `list_string_agg`."""
         return StrExpr(self._call("list_string_agg", *args))
 
-    def sum(self, *args: object) -> Expr:
+    def sum(self, *args: ValueOrExpr) -> Expr:
         """The sum of the elements. SQL: `list_sum`."""
         return self._call("list_sum", *args)
 
-    def transform(self, function: object, *args: object) -> ListExpr:
+    def transform(self, function: ValueOrExpr, *args: ValueOrExpr) -> ListExpr:
         """Each element through the function: `lambda x: x * 2`. SQL: `list_transform`."""
         return ListExpr(self._call("list_transform", function, *args))
 
-    def unique(self, *args: object) -> Expr:
+    def unique(self, *args: ValueOrExpr) -> Expr:
         """Counts the unique elements of a `list`. SQL: `list_unique`."""
         return self._call("list_unique", *args)
 
-    def var_pop(self, *args: object) -> Expr:
+    def var_pop(self, *args: ValueOrExpr) -> Expr:
         """The population variance of the elements. SQL: `list_var_pop`."""
         return self._call("list_var_pop", *args)
 
-    def var_samp(self, *args: object) -> Expr:
+    def var_samp(self, *args: ValueOrExpr) -> Expr:
         """The sample variance of the elements. SQL: `list_var_samp`."""
         return self._call("list_var_samp", *args)
 
@@ -887,98 +890,98 @@ class JsonExpr(StrExpr):
         "value": ("json_value", 0, ["JSON", "VARCHAR"]),
     }
 
-    def array_length(self, *args: object) -> Expr:
+    def array_length(self, *args: ValueOrExpr) -> Expr:
         """How many elements the array holds. SQL: `json_array_length`."""
         return self._call("json_array_length", *args)
 
-    def contains(self, *args: object) -> Expr:
+    def contains(self, *args: ValueOrExpr) -> Expr:
         """The `json_contains` function. Arguments: needle. SQL: `json_contains`."""
         return self._call("json_contains", *args)
 
-    def deep_merge(self, *args: object) -> JsonExpr:
+    def deep_merge(self, *args: ValueOrExpr) -> JsonExpr:
         """The `json_deep_merge` function. Arguments: json2. SQL: `json_deep_merge`."""
         return JsonExpr(self._call("json_deep_merge", *args))
 
-    def exists(self, *args: object) -> Expr:
+    def exists(self, *args: ValueOrExpr) -> Expr:
         """The `json_exists` function. Arguments: path. SQL: `json_exists`."""
         return self._call("json_exists", *args)
 
-    def extract(self, *args: object) -> JsonExpr:
+    def extract(self, *args: ValueOrExpr) -> JsonExpr:
         """The `json_extract` function. Arguments: path. SQL: `json_extract`."""
         return JsonExpr(self._call("json_extract", *args))
 
-    def extract_path(self, *args: object) -> JsonExpr:
+    def extract_path(self, *args: ValueOrExpr) -> JsonExpr:
         """The `json_extract_path` function. Arguments: path. SQL: `json_extract_path`."""
         return JsonExpr(self._call("json_extract_path", *args))
 
-    def extract_path_text(self, *args: object) -> StrExpr:
+    def extract_path_text(self, *args: ValueOrExpr) -> StrExpr:
         """The `json_extract_path_text` function. Arguments: path. SQL: `json_extract_path_text`."""
         return StrExpr(self._call("json_extract_path_text", *args))
 
-    def extract_string(self, *args: object) -> StrExpr:
+    def extract_string(self, *args: ValueOrExpr) -> StrExpr:
         """The `json_extract_string` function. Arguments: path. SQL: `json_extract_string`."""
         return StrExpr(self._call("json_extract_string", *args))
 
-    def insert(self, *args: object) -> JsonExpr:
+    def insert(self, *args: ValueOrExpr) -> JsonExpr:
         """The `json_insert` function. Arguments: path, value. SQL: `json_insert`."""
         return JsonExpr(self._call("json_insert", *args))
 
-    def keys(self, *args: object) -> ListExpr:
+    def keys(self, *args: ValueOrExpr) -> ListExpr:
         """The keys of the object, as a list. SQL: `json_keys`."""
         return ListExpr(self._call("json_keys", *args))
 
-    def merge_patch_diff(self, *args: object) -> JsonExpr:
+    def merge_patch_diff(self, *args: ValueOrExpr) -> JsonExpr:
         """The `json_merge_patch_diff` function. Arguments: new. SQL: `json_merge_patch_diff`."""
         return JsonExpr(self._call("json_merge_patch_diff", *args))
 
-    def normalize(self, *args: object) -> StrExpr:
+    def normalize(self, *args: ValueOrExpr) -> StrExpr:
         """The document minified, with object keys sorted. SQL: `json_normalize`."""
         return StrExpr(self._call("json_normalize", *args))
 
-    def parse(self, *args: object) -> JsonExpr:
+    def parse(self, *args: ValueOrExpr) -> JsonExpr:
         """The text parsed as a JSON document, minified. SQL: `json`."""
         return JsonExpr(self._call("json", *args))
 
-    def pretty(self, *args: object) -> StrExpr:
+    def pretty(self, *args: ValueOrExpr) -> StrExpr:
         """The document printed with indentation. SQL: `json_pretty`."""
         return StrExpr(self._call("json_pretty", *args))
 
-    def remove(self, *args: object) -> JsonExpr:
+    def remove(self, *args: ValueOrExpr) -> JsonExpr:
         """The `json_remove` function. Arguments: path. SQL: `json_remove`."""
         return JsonExpr(self._call("json_remove", *args))
 
-    def replace(self, *args: object) -> JsonExpr:
+    def replace(self, *args: ValueOrExpr) -> JsonExpr:
         """The `json_replace` function. Arguments: path, value. SQL: `json_replace`."""
         return JsonExpr(self._call("json_replace", *args))
 
-    def set(self, *args: object) -> JsonExpr:
+    def set(self, *args: ValueOrExpr) -> JsonExpr:
         """The `json_set` function. Arguments: path, value. SQL: `json_set`."""
         return JsonExpr(self._call("json_set", *args))
 
-    def strip_nulls(self, *args: object) -> JsonExpr:
+    def strip_nulls(self, *args: ValueOrExpr) -> JsonExpr:
         """The document without its null-valued object fields. SQL: `json_strip_nulls`."""
         return JsonExpr(self._call("json_strip_nulls", *args))
 
-    def structure(self, *args: object) -> JsonExpr:
+    def structure(self, *args: ValueOrExpr) -> JsonExpr:
         """The shape of the document, with types in place of values. SQL: `json_structure`."""
         return JsonExpr(self._call("json_structure", *args))
 
-    def transform(self, *args: object) -> Expr:
+    def transform(self, *args: ValueOrExpr) -> Expr:
         """The `json_transform` function. Arguments: structure. SQL: `json_transform`."""
         return self._call("json_transform", *args)
 
-    def transform_strict(self, *args: object) -> Expr:
+    def transform_strict(self, *args: ValueOrExpr) -> Expr:
         """The `json_transform_strict` function. Arguments: structure. SQL: `json_transform_strict`."""
         return self._call("json_transform_strict", *args)
 
-    def type(self, *args: object) -> StrExpr:
+    def type(self, *args: ValueOrExpr) -> StrExpr:
         """The type of the top value: OBJECT, ARRAY, VARCHAR and so on. SQL: `json_type`."""
         return StrExpr(self._call("json_type", *args))
 
-    def valid(self, *args: object) -> Expr:
+    def valid(self, *args: ValueOrExpr) -> Expr:
         """Whether the text is valid JSON. SQL: `json_valid`."""
         return self._call("json_valid", *args)
 
-    def value(self, *args: object) -> StrExpr:
+    def value(self, *args: ValueOrExpr) -> StrExpr:
         """The `json_value` function. Arguments: path. SQL: `json_value`."""
         return StrExpr(self._call("json_value", *args))

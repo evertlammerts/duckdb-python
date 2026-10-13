@@ -16,7 +16,7 @@ from __future__ import annotations
 import dataclasses
 import html
 import os
-from collections.abc import Iterable, Sized
+from collections.abc import Iterable, Mapping, Sized
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from .._expressions.expr import (
@@ -29,6 +29,9 @@ from .._expressions.expr import (
     Side,
     Star,
     SubQuery,
+    _as_name,
+    _as_sql,
+    _items,
     col,
     count_all,
     fold_name,
@@ -48,7 +51,27 @@ from ..exceptions import Error
 from .connection import Connection, LiveResult
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping
+    from collections.abc import Callable, Iterator
+
+    from .typing import (
+        ColumnName,
+        ColumnNames,
+        ColumnOrExpr,
+        ColumnsOrExprs,
+        FilePath,
+        JoinHow,
+        NewName,
+        QualifiedName,
+        SqlText,
+        _Heading,
+        _NamedParameters,
+        _OptionValue,
+        _RequestedSchema,
+        _Rows,
+        _SampleMethod,
+        _StepState,
+        _TableArgument,
+    )
 
 __all__ = [
     "Bound",
@@ -69,8 +92,8 @@ __all__ = [
 class Column(NamedTuple):
     """One output column, whose `type` is None when only DuckDB can say what it is."""
 
-    name: str
-    type: str | None = None
+    name: ColumnName
+    type: SqlText | None = None
 
 
 #: The columns a step produces, name and type, in order.
@@ -258,7 +281,7 @@ def _option_value(name: str, value: object) -> str:
     return render_literal(value)
 
 
-def _options_clause(options: dict[str, object]) -> str:
+def _options_clause(options: Mapping[str, object]) -> str:
     """The `(NAME value, ...)` of a COPY, with values written into the text because COPY cannot bind any."""
     if not options:
         return ""
@@ -293,6 +316,70 @@ def _as_exprs(values: Iterable[object] | object) -> list[Expr]:
     return out
 
 
+def _as_rows(rows: object) -> tuple[tuple[Expr, ...], ...]:
+    """The rows of `values()`; a string is one value, so it can be neither the rows nor one row."""
+    every = None if isinstance(rows, (str, bytes)) else _items(rows)
+    if every is None:
+        message = f"values() takes a list of rows, not {rows!r}; one row of one value is [(value,)]"
+        raise TypeError(message)
+    out: list[tuple[Expr, ...]] = []
+    for row in every:
+        cells = None if isinstance(row, (str, bytes)) else _items(row)
+        if cells is None:
+            message = f"a row of values() is a tuple of values, not {row!r}; a row of one value is ({row!r},)"
+            raise TypeError(message)
+        out.append(tuple(Lit(v) for v in cells))
+    return tuple(out)
+
+
+def _as_heading(columns: object) -> Shape:
+    """The columns of `values()`: names or (name, type) pairs, where a bare string is one column."""
+    items = iter([columns]) if isinstance(columns, str) else None if isinstance(columns, bytes) else _items(columns)
+    if items is None:
+        message = f"the columns of values() are names or (name, type) pairs, not {columns!r}"
+        raise TypeError(message)
+    heading: list[Column] = []
+    for item in items:
+        if isinstance(item, str):
+            heading.append(Column(_as_name(item, "column name"), None))
+            continue
+        # Any iterable but text is a pair, a numpy row included; a type left out or None leaves the column untyped.
+        both = None if isinstance(item, bytes) else _items(item)
+        pair = tuple(both) if both is not None else ()
+        if len(pair) not in (1, 2):
+            message = f"a column of values() is a name or a (name, type) pair, not {item!r}"
+            raise TypeError(message)
+        type_text = pair[1] if len(pair) == 2 else None
+        heading.append(
+            Column(_as_name(pair[0], "column name"), None if type_text is None else _as_sql(type_text, "a column type"))
+        )
+    return tuple(heading)
+
+
+def _as_named_parameters(parameters: object) -> dict[str, object]:
+    """The values for a plan's `param()`s, by name."""
+    if parameters is None:
+        return {}
+    if not isinstance(parameters, Mapping):
+        message = f"parameters is a mapping from each param() name to its value, not {parameters!r}"
+        raise TypeError(message)
+    return dict(parameters)
+
+
+_SAMPLE_METHODS = ("bernoulli", "reservoir", "system")
+
+
+def _as_sample_method(method: object) -> str:
+    """A sampling method's keyword, in any case."""
+    if not isinstance(method, str):
+        message = f"a sample method is a string, not {method!r}"
+        raise TypeError(message)
+    if method.lower() not in _SAMPLE_METHODS:
+        message = f"unknown sample method {method!r}; one of {', '.join(_SAMPLE_METHODS)}"
+        raise ValueError(message)
+    return method.upper()
+
+
 def _type_name(value: object) -> str:
     """The type of a value by name, qualified by its module unless it is a builtin."""
     kind = type(value)
@@ -313,12 +400,12 @@ class Step:
     def __post_init__(self) -> None:
         """Checks on the arguments. Steps with arguments to check override this."""
 
-    def __setstate__(self, state: dict[str, object]) -> None:
+    def __setstate__(self, state: _StepState) -> None:
         """Restore a pickled step and run the checks construction runs."""
         self.__dict__.update(state)
         self.__post_init__()
 
-    def render(self, names: tuple[str, ...], shapes: tuple[Shape | None, ...]) -> str:
+    def render(self, names: tuple[SqlText, ...], shapes: tuple[Shape | None, ...]) -> str:
         """The SQL for this step, given the names of its inputs and their columns where those are known."""
         raise NotImplementedError
 
@@ -911,7 +998,7 @@ class Frame(PlanBase):
         return self._render(shapes, order, connection)
 
     def render_parameterized(
-        self, connection: Connection | None = None, *, parameters: Mapping[str, object] | None = None
+        self, connection: Connection | None = None, *, parameters: _NamedParameters | None = None
     ) -> tuple[str, list[Any]]:
         """The SQL with `$n` placeholders and the values in order; every `param()` must be given one."""
         sql, values = self._sql_and_values(connection=connection, parameters=parameters)
@@ -1050,23 +1137,23 @@ class Frame(PlanBase):
             raise TypeError(message)
         return self._derive(Filter(predicate))
 
-    def select(self, *columns: object) -> Frame:
+    def select(self, *columns: ColumnOrExpr) -> Frame:
         """Keep only these columns or expressions; it projects and never groups."""
         return self._derive(Select(tuple(_as_exprs(list(columns)))))
 
-    def with_columns(self, **columns: object) -> Frame:
+    def with_columns(self, **columns: ColumnOrExpr) -> Frame:
         """Add columns, replacing any of the same name."""
         return self._derive(WithColumns(tuple((name, _as_expr(value)) for name, value in columns.items())))
 
-    def drop(self, *columns: str) -> Frame:
+    def drop(self, *columns: ColumnName) -> Frame:
         """Remove columns."""
-        return self._derive(Drop(tuple(columns)))
+        return self._derive(Drop(tuple(_as_name(c, "column name") for c in columns)))
 
-    def rename(self, **columns: str) -> Frame:
+    def rename(self, **columns: NewName) -> Frame:
         """Rename columns, given as old=new."""
-        return self._derive(Rename(tuple(columns.items())))
+        return self._derive(Rename(tuple((old, _as_name(new, "column name")) for old, new in columns.items())))
 
-    def sort(self, *columns: object) -> Frame:
+    def sort(self, *columns: ColumnOrExpr) -> Frame:
         """Order the rows. Use `.desc()` and `.nulls_last()` on the columns."""
         return self._derive(Sort(tuple(_as_exprs(list(columns)))))
 
@@ -1082,7 +1169,7 @@ class Frame(PlanBase):
         """Skip `count` rows."""
         return self._derive(Limit(None, int(count)))
 
-    def distinct(self, on: Iterable[object] | object | None = None) -> Frame:
+    def distinct(self, on: ColumnsOrExprs | None = None) -> Frame:
         """Remove duplicate rows, or duplicates of `on`; right after `sort()`, the first of each by it, in its order."""
         keys = None if on is None else tuple(_as_exprs(on))
         if isinstance(self._step, Sort):
@@ -1095,7 +1182,7 @@ class Frame(PlanBase):
         *,
         percent: float | None = None,
         seed: int | None = None,
-        method: str | None = None,
+        method: _SampleMethod | None = None,
     ) -> Frame:
         """A random subset: `n` rows, or `percent` of them, with `seed` repeating a draw."""
         if (n is None) == (percent is None):
@@ -1103,34 +1190,35 @@ class Frame(PlanBase):
             raise TypeError(message)
         # Only reservoir can hit an exact count; the others sample each row independently.
         size = f"{int(n)} ROWS" if n is not None else f"{float(percent or 0)} PERCENT"
-        chosen = _option(method) if method else ("RESERVOIR" if n is not None else "BERNOULLI")
+        chosen = _as_sample_method(method) if method else ("RESERVOIR" if n is not None else "BERNOULLI")
         arguments = f"{chosen}, {int(seed)}" if seed is not None else chosen
         return self._derive(Sample(size, arguments))
 
-    def unnest(self, *columns: str) -> Frame:
+    def unnest(self, *columns: ColumnName) -> Frame:
         """Expand list columns to one row per element; two unnested together walk in step, not paired."""
-        return self._derive(Unnest(tuple(columns)))
+        return self._derive(Unnest(tuple(_as_name(c, "column name") for c in columns)))
 
-    def unpivot(self, *columns: str, name: str = "name", value: str = "value") -> Frame:
+    def unpivot(self, *columns: ColumnName, name: NewName = "name", value: NewName = "value") -> Frame:
         """Turn the named columns into rows; the others repeat, and `name` and `value` name the two new columns."""
-        return self._derive(Unpivot(tuple(columns), name, value))
+        folded = tuple(_as_name(c, "column name") for c in columns)
+        return self._derive(Unpivot(folded, _as_name(name, "column name"), _as_name(value, "column name")))
 
-    def aggregate(self, *aggregates: object, group_by: Iterable[object] | object | None = None) -> Frame:
+    def aggregate(self, *aggregates: ColumnOrExpr, group_by: ColumnsOrExprs | None = None) -> Frame:
         """Group and aggregate. Group keys come first in the output."""
         # `is None`, not truthiness: an expression refuses to be a condition.
         keys = () if group_by is None else tuple(_as_exprs(group_by))
         return self._derive(Aggregate(keys, tuple(_as_exprs(list(aggregates)))))
 
-    def group_by(self, *columns: object) -> GroupedFrame:
+    def group_by(self, *columns: ColumnOrExpr) -> GroupedFrame:
         """Begin a grouped aggregation. Continue with `.agg(...)`."""
         return GroupedFrame(self, _as_exprs(list(columns)))
 
     def join(
         self,
         other: Frame,
-        on: Expr | str | Iterable[str] | Callable[[Side, Side], object] | None = None,
-        how: str = "inner",
-        suffix: str | None = None,
+        on: Expr | ColumnNames | Callable[[Side, Side], object] | None = None,
+        how: JoinHow = "inner",
+        suffix: NewName | None = None,
     ) -> Frame:
         """Join to another frame, on a column name or a list of them for a USING join, which merges the column.
 
@@ -1186,11 +1274,11 @@ class Frame(PlanBase):
         """Rows in this frame and not the other."""
         return Frame(SetOp("EXCEPT"), (self, other))
 
-    def __getitem__(self, name: object) -> Frame:
+    def __getitem__(self, name: ColumnName) -> Frame:
         """A single column as a plan; `plan["x"]` narrows the plan, where `expr["x"]` reaches inside a value."""
         if not isinstance(name, str):
             # Without this, `for row in plan` would fall back to plan[0], plan[1] and never stop.
-            message = f"a plan is indexed by column name, not by {type(name).__name__}"
+            message = f"a plan is indexed by column name, not by {type(name).__name__}"  # type: ignore[unreachable]
             raise TypeError(message)
         return self.select(col(name))
 
@@ -1220,7 +1308,7 @@ class Frame(PlanBase):
             sql = self._render(shapes, order, connection)
             if wrap is not None:
                 sql = wrap(sql)
-        supplied = dict(parameters or {})
+        supplied = _as_named_parameters(parameters)
         values: list[Any] = []
         used: set[str] = set()
         missing: list[str] = []
@@ -1269,35 +1357,31 @@ class Frame(PlanBase):
         with connection._execute(sql, values) as result:
             return result.drain()
 
-    def rows(self, connection: Connection, *, parameters: Mapping[str, object] | None = None) -> list[tuple[Any, ...]]:
+    def rows(self, connection: Connection, *, parameters: _NamedParameters | None = None) -> list[tuple[Any, ...]]:
         """Every row, as tuples."""
         with self._execute(connection, parameters) as result:
             return result.fetch_all()
 
-    def first(
-        self, connection: Connection, *, parameters: Mapping[str, object] | None = None
-    ) -> tuple[Any, ...] | None:
+    def first(self, connection: Connection, *, parameters: _NamedParameters | None = None) -> tuple[Any, ...] | None:
         """The first row, or None if there are none."""
         with self._execute(connection, parameters) as result:
             rows = result.fetch_rows(1)
         return rows[0] if rows else None
 
     def iter_rows(
-        self, connection: Connection, *, parameters: Mapping[str, object] | None = None
+        self, connection: Connection, *, parameters: _NamedParameters | None = None
     ) -> Iterator[tuple[Any, ...]]:
         """Every row, a batch at a time."""
         with self._execute(connection, parameters) as result:
             while batch := result.fetch_rows(1024):
                 yield from batch
 
-    def to_dicts(
-        self, connection: Connection, *, parameters: Mapping[str, object] | None = None
-    ) -> list[dict[str, Any]]:
+    def to_dicts(self, connection: Connection, *, parameters: _NamedParameters | None = None) -> list[dict[str, Any]]:
         """Every row, as a dict keyed by column name."""
         names = self.columns(connection)
         return [dict(zip(names, row, strict=True)) for row in self.rows(connection, parameters=parameters)]
 
-    def to_numpy(self, connection: Connection, *, parameters: Mapping[str, object] | None = None) -> dict[str, Any]:
+    def to_numpy(self, connection: Connection, *, parameters: _NamedParameters | None = None) -> dict[str, Any]:
         """Every column as a numpy array; NULLs come back masked and values come straight from DuckDB's buffers."""
         # Imported here so that importing duckdb does not require numpy.
         from ._numpy import fetch_numpy
@@ -1311,7 +1395,7 @@ class Frame(PlanBase):
         self,
         connection: Connection,
         *,
-        parameters: Mapping[str, object] | None = None,
+        parameters: _NamedParameters | None = None,
         date_as_object: bool = False,
     ) -> Any:  # noqa: ANN401
         """Every row as a pandas DataFrame, converted from DuckDB's vectors without Arrow; needs pandas installed.
@@ -1328,7 +1412,7 @@ class Frame(PlanBase):
         with connection._execute(sql, values) as result:
             return fetch_pandas(result.result, time_zone=time_zone, date_as_object=date_as_object)
 
-    def to_arrow(self, connection: Connection, *, parameters: Mapping[str, object] | None = None) -> Any:  # noqa: ANN401
+    def to_arrow(self, connection: Connection, *, parameters: _NamedParameters | None = None) -> Any:  # noqa: ANN401
         """Every row as a pyarrow Table; needs pyarrow installed."""
         # Imported here so that importing duckdb does not require pyarrow.
         from . import _arrow
@@ -1338,7 +1422,7 @@ class Frame(PlanBase):
         return _arrow.table(connection, sql, values)
 
     def to_polars(
-        self, connection: Connection, *, parameters: Mapping[str, object] | None = None, lazy: bool = False
+        self, connection: Connection, *, parameters: _NamedParameters | None = None, lazy: bool = False
     ) -> Any:  # noqa: ANN401
         """Every row as a polars DataFrame; needs polars installed.
 
@@ -1358,7 +1442,7 @@ class Frame(PlanBase):
         self,
         connection: Connection,
         *,
-        parameters: Mapping[str, object] | None = None,
+        parameters: _NamedParameters | None = None,
         batch_size: int | None = None,
     ) -> Any:  # noqa: ANN401
         """A pyarrow RecordBatchReader streaming the rows, at most `batch_size` per batch.
@@ -1376,7 +1460,7 @@ class Frame(PlanBase):
         """This plan with a connection filled in, so `plan.on(con).rows()` takes no argument; the plan is unchanged."""
         return Bound(self, self._on(connection))
 
-    def count(self, connection: Connection, *, parameters: Mapping[str, object] | None = None) -> int:
+    def count(self, connection: Connection, *, parameters: _NamedParameters | None = None) -> int:
         """How many rows this plan produces. Runs a count."""
         counted = self._derive(Aggregate((), (count_all().alias("count"),)))
         row = counted.first(connection, parameters=parameters)
@@ -1387,11 +1471,11 @@ class Frame(PlanBase):
     def create(
         self,
         connection: Connection,
-        name: str | tuple[str, ...],
+        name: QualifiedName,
         *,
         replace: bool = False,
         temporary: bool = False,
-        parameters: Mapping[str, object] | None = None,
+        parameters: _NamedParameters | None = None,
     ) -> int:
         """Store the rows in a new table, a tuple naming a qualified one. Returns how many were written."""
         prefix = "CREATE OR REPLACE" if replace else "CREATE"
@@ -1400,7 +1484,7 @@ class Frame(PlanBase):
         return self._run(connection, lambda q: f"{prefix} {kind} {target} AS {q}", parameters)
 
     def insert_into(
-        self, connection: Connection, name: str | tuple[str, ...], *, parameters: Mapping[str, object] | None = None
+        self, connection: Connection, name: QualifiedName, *, parameters: _NamedParameters | None = None
     ) -> int:
         """Append the rows to a table that exists, a tuple naming a qualified one. Returns how many were added."""
         target = identifier(name_parts(name, "table name"))
@@ -1409,10 +1493,10 @@ class Frame(PlanBase):
     def copy_to(
         self,
         connection: Connection,
-        path: str | os.PathLike[str],
+        path: FilePath,
         *,
-        parameters: Mapping[str, object] | None = None,
-        **options: object,
+        parameters: _NamedParameters | None = None,
+        **options: _OptionValue,
     ) -> list[tuple[Any, ...]]:
         """`COPY (this plan) TO path (options)`, returning the rows the statement returns.
 
@@ -1430,10 +1514,10 @@ class Frame(PlanBase):
     def to_parquet(
         self,
         connection: Connection,
-        path: str | os.PathLike[str],
+        path: FilePath,
         *,
-        parameters: Mapping[str, object] | None = None,
-        **options: object,
+        parameters: _NamedParameters | None = None,
+        **options: _OptionValue,
     ) -> list[tuple[Any, ...]]:
         """Write a Parquet file: `copy_to` with `format="parquet"`."""
         return self.copy_to(connection, path, parameters=parameters, format="parquet", **options)
@@ -1441,10 +1525,10 @@ class Frame(PlanBase):
     def to_csv(
         self,
         connection: Connection,
-        path: str | os.PathLike[str],
+        path: FilePath,
         *,
-        parameters: Mapping[str, object] | None = None,
-        **options: object,
+        parameters: _NamedParameters | None = None,
+        **options: _OptionValue,
     ) -> list[tuple[Any, ...]]:
         """Write a CSV file: `copy_to` with `format="csv"`."""
         return self.copy_to(connection, path, parameters=parameters, format="csv", **options)
@@ -1452,10 +1536,10 @@ class Frame(PlanBase):
     def to_json(
         self,
         connection: Connection,
-        path: str | os.PathLike[str],
+        path: FilePath,
         *,
-        parameters: Mapping[str, object] | None = None,
-        **options: object,
+        parameters: _NamedParameters | None = None,
+        **options: _OptionValue,
     ) -> list[tuple[Any, ...]]:
         """Write newline-delimited JSON, or one array with `array=True`; `copy_to` with `format="json"`."""
         return self.copy_to(connection, path, parameters=parameters, format="json", **options)
@@ -1463,7 +1547,7 @@ class Frame(PlanBase):
     # -- looking at it
 
     def explain(
-        self, connection: Connection, *, analyze: bool = False, parameters: Mapping[str, object] | None = None
+        self, connection: Connection, *, analyze: bool = False, parameters: _NamedParameters | None = None
     ) -> str:
         """How DuckDB will run the query, as text; with `analyze` it runs and each step carries what it cost."""
         connection = self._on(connection)
@@ -1473,13 +1557,11 @@ class Frame(PlanBase):
             rows = result.fetch_all()
         return str(rows[0][1]) if rows else ""
 
-    def show(self, connection: Connection, limit: int = 10, *, parameters: Mapping[str, object] | None = None) -> None:
+    def show(self, connection: Connection, limit: int = 10, *, parameters: _NamedParameters | None = None) -> None:
         """Print the first rows."""
         print(self.preview(connection, limit, parameters=parameters))
 
-    def preview(
-        self, connection: Connection, limit: int = 10, *, parameters: Mapping[str, object] | None = None
-    ) -> str:
+    def preview(self, connection: Connection, limit: int = 10, *, parameters: _NamedParameters | None = None) -> str:
         """The first rows drawn as a table. What `show` prints."""
         # One row past the limit, so the footer can say there are more without counting them all.
         head = self.limit(limit + 1)
@@ -1507,47 +1589,47 @@ class Bound:
         self.plan = plan
         self.connection = connection
 
-    def render_parameterized(self, *, parameters: Mapping[str, object] | None = None) -> tuple[str, list[Any]]:
+    def render_parameterized(self, *, parameters: _NamedParameters | None = None) -> tuple[str, list[Any]]:
         """The query as it is sent to run: SQL with `$n` placeholders, and the values in order."""
         return self.plan.render_parameterized(self.connection, parameters=parameters)
 
-    def rows(self, *, parameters: Mapping[str, object] | None = None) -> list[tuple[Any, ...]]:
+    def rows(self, *, parameters: _NamedParameters | None = None) -> list[tuple[Any, ...]]:
         """Every row, as tuples."""
         return self.plan.rows(self.connection, parameters=parameters)
 
-    def first(self, *, parameters: Mapping[str, object] | None = None) -> tuple[Any, ...] | None:
+    def first(self, *, parameters: _NamedParameters | None = None) -> tuple[Any, ...] | None:
         """The first row, or None if there are none."""
         return self.plan.first(self.connection, parameters=parameters)
 
-    def iter_rows(self, *, parameters: Mapping[str, object] | None = None) -> Iterator[tuple[Any, ...]]:
+    def iter_rows(self, *, parameters: _NamedParameters | None = None) -> Iterator[tuple[Any, ...]]:
         """Every row, a batch at a time."""
         return self.plan.iter_rows(self.connection, parameters=parameters)
 
-    def to_dicts(self, *, parameters: Mapping[str, object] | None = None) -> list[dict[str, Any]]:
+    def to_dicts(self, *, parameters: _NamedParameters | None = None) -> list[dict[str, Any]]:
         """Every row, as a dict keyed by column name."""
         return self.plan.to_dicts(self.connection, parameters=parameters)
 
-    def to_numpy(self, *, parameters: Mapping[str, object] | None = None) -> dict[str, Any]:
+    def to_numpy(self, *, parameters: _NamedParameters | None = None) -> dict[str, Any]:
         """Every column as a numpy array; columns holding NULLs come back masked."""
         return self.plan.to_numpy(self.connection, parameters=parameters)
 
-    def to_pandas(self, *, parameters: Mapping[str, object] | None = None, date_as_object: bool = False) -> Any:  # noqa: ANN401
+    def to_pandas(self, *, parameters: _NamedParameters | None = None, date_as_object: bool = False) -> Any:  # noqa: ANN401
         """Every row as a pandas DataFrame; needs pandas installed."""
         return self.plan.to_pandas(self.connection, parameters=parameters, date_as_object=date_as_object)
 
-    def to_arrow(self, *, parameters: Mapping[str, object] | None = None) -> Any:  # noqa: ANN401
+    def to_arrow(self, *, parameters: _NamedParameters | None = None) -> Any:  # noqa: ANN401
         """Every row as a pyarrow Table; needs pyarrow installed."""
         return self.plan.to_arrow(self.connection, parameters=parameters)
 
-    def to_polars(self, *, parameters: Mapping[str, object] | None = None, lazy: bool = False) -> Any:  # noqa: ANN401
+    def to_polars(self, *, parameters: _NamedParameters | None = None, lazy: bool = False) -> Any:  # noqa: ANN401
         """Every row as a polars DataFrame, or with `lazy` a LazyFrame running the plan per collect."""
         return self.plan.to_polars(self.connection, parameters=parameters, lazy=lazy)
 
-    def to_reader(self, *, parameters: Mapping[str, object] | None = None, batch_size: int | None = None) -> Any:  # noqa: ANN401
+    def to_reader(self, *, parameters: _NamedParameters | None = None, batch_size: int | None = None) -> Any:  # noqa: ANN401
         """A pyarrow RecordBatchReader streaming the rows, at most `batch_size` per batch."""
         return self.plan.to_reader(self.connection, parameters=parameters, batch_size=batch_size)
 
-    def __arrow_c_stream__(self, requested_schema: object | None = None) -> Any:  # noqa: ANN401
+    def __arrow_c_stream__(self, requested_schema: _RequestedSchema = None) -> Any:  # noqa: ANN401
         """The rows as an Arrow C stream capsule, so pyarrow and polars consume them zero-copy.
 
         Each call runs the plan again, and a capsule reads front to back exactly once. `requested_schema` is
@@ -1556,7 +1638,7 @@ class Bound:
         sql, values = self.plan._sql_and_values(connection=self.connection, parameters=None)
         return self.connection._execute_arrow(sql, values, 0).__arrow_c_stream__(requested_schema)
 
-    def count(self, *, parameters: Mapping[str, object] | None = None) -> int:
+    def count(self, *, parameters: _NamedParameters | None = None) -> int:
         """How many rows the plan produces."""
         return self.plan.count(self.connection, parameters=parameters)
 
@@ -1580,53 +1662,53 @@ class Bound:
         """The SQL as it will run on this connection."""
         return self.plan.render(self.connection)
 
-    def explain(self, *, analyze: bool = False, parameters: Mapping[str, object] | None = None) -> str:
+    def explain(self, *, analyze: bool = False, parameters: _NamedParameters | None = None) -> str:
         """How DuckDB will run the query, as text."""
         return self.plan.explain(self.connection, analyze=analyze, parameters=parameters)
 
-    def show(self, limit: int = 10, *, parameters: Mapping[str, object] | None = None) -> None:
+    def show(self, limit: int = 10, *, parameters: _NamedParameters | None = None) -> None:
         """Print the first rows."""
         self.plan.show(self.connection, limit, parameters=parameters)
 
-    def preview(self, limit: int = 10, *, parameters: Mapping[str, object] | None = None) -> str:
+    def preview(self, limit: int = 10, *, parameters: _NamedParameters | None = None) -> str:
         """The first rows drawn as a table."""
         return self.plan.preview(self.connection, limit, parameters=parameters)
 
     def create(
         self,
-        name: str | tuple[str, ...],
+        name: QualifiedName,
         *,
         replace: bool = False,
         temporary: bool = False,
-        parameters: Mapping[str, object] | None = None,
+        parameters: _NamedParameters | None = None,
     ) -> int:
         """Store the rows in a new table."""
         return self.plan.create(self.connection, name, replace=replace, temporary=temporary, parameters=parameters)
 
-    def insert_into(self, name: str | tuple[str, ...], *, parameters: Mapping[str, object] | None = None) -> int:
+    def insert_into(self, name: QualifiedName, *, parameters: _NamedParameters | None = None) -> int:
         """Append the rows to a table that exists."""
         return self.plan.insert_into(self.connection, name, parameters=parameters)
 
     def copy_to(
-        self, path: str | os.PathLike[str], *, parameters: Mapping[str, object] | None = None, **options: object
+        self, path: FilePath, *, parameters: _NamedParameters | None = None, **options: _OptionValue
     ) -> list[tuple[Any, ...]]:
         """`COPY (this plan) TO path (options)`, returning what the statement returns."""
         return self.plan.copy_to(self.connection, path, parameters=parameters, **options)
 
     def to_parquet(
-        self, path: str | os.PathLike[str], *, parameters: Mapping[str, object] | None = None, **options: object
+        self, path: FilePath, *, parameters: _NamedParameters | None = None, **options: _OptionValue
     ) -> list[tuple[Any, ...]]:
         """Write a Parquet file."""
         return self.plan.to_parquet(self.connection, path, parameters=parameters, **options)
 
     def to_csv(
-        self, path: str | os.PathLike[str], *, parameters: Mapping[str, object] | None = None, **options: object
+        self, path: FilePath, *, parameters: _NamedParameters | None = None, **options: _OptionValue
     ) -> list[tuple[Any, ...]]:
         """Write a CSV file."""
         return self.plan.to_csv(self.connection, path, parameters=parameters, **options)
 
     def to_json(
-        self, path: str | os.PathLike[str], *, parameters: Mapping[str, object] | None = None, **options: object
+        self, path: FilePath, *, parameters: _NamedParameters | None = None, **options: _OptionValue
     ) -> list[tuple[Any, ...]]:
         """Write JSON."""
         return self.plan.to_json(self.connection, path, parameters=parameters, **options)
@@ -1666,7 +1748,7 @@ class GroupedFrame:
         self._frame = frame
         self._keys = keys
 
-    def agg(self, *aggregates: object) -> Frame:
+    def agg(self, *aggregates: ColumnOrExpr) -> Frame:
         """Apply aggregates to each group."""
         return self._frame.aggregate(*aggregates, group_by=self._keys)
 
@@ -1703,17 +1785,17 @@ def _box(columns: list[str], types: list[str], rows: list[tuple[Any, ...]], *, m
     return "\n".join(drawn)
 
 
-def sql(query: str) -> Frame:
+def sql(query: SqlText) -> Frame:
     """A plan from SQL text, used exactly as written, so never build one from input you do not trust."""
-    return Frame(Sql(query))
+    return Frame(Sql(_as_sql(query, "sql()")))
 
 
-def table(name: str | tuple[str, ...]) -> Frame:
+def table(name: QualifiedName) -> Frame:
     """A plan reading a table, view or file by name; a string is never split, so a qualified name is a tuple."""
     return Frame(Table(name_parts(name, "table name")))
 
 
-def table_function(name: str | tuple[str, ...], *args: object, **named: object) -> Frame:
+def table_function(name: QualifiedName, *args: _TableArgument, **named: _TableArgument) -> Frame:
     """A plan over a table function: `table_function("read_csv", "x.csv", header=True)`, `table_function("range", 10)`.
 
     Any table function DuckDB has, with positional arguments as given and named ones written as `name := value`.
@@ -1725,22 +1807,21 @@ def table_function(name: str | tuple[str, ...], *args: object, **named: object) 
     )
 
 
-def read_csv(path: object, **named: object) -> Frame:
+def read_csv(path: _TableArgument, **named: _TableArgument) -> Frame:
     """A plan over `read_csv(path, ...)`: one file, a list of them or a glob, with the reader's own named arguments."""
     return table_function("read_csv", path, **named)
 
 
-def read_parquet(path: object, **named: object) -> Frame:
+def read_parquet(path: _TableArgument, **named: _TableArgument) -> Frame:
     """A plan over `read_parquet(path, ...)`: one file, a list of them or a glob."""
     return table_function("read_parquet", path, **named)
 
 
-def read_json(path: object, **named: object) -> Frame:
+def read_json(path: _TableArgument, **named: _TableArgument) -> Frame:
     """A plan over `read_json(path, ...)`: one file, a list of them or a glob."""
     return table_function("read_json", path, **named)
 
 
-def values(rows: Iterable[Iterable[object]], columns: Iterable[str | tuple[str, str]]) -> Frame:
-    """A plan over rows given here; `columns` are names or (name, type) pairs."""
-    heading = tuple(Column(c, None) if isinstance(c, str) else Column(*c) for c in columns)
-    return Frame(Values(tuple(tuple(Lit(v) for v in row) for row in rows), heading))
+def values(rows: _Rows, columns: _Heading) -> Frame:
+    """A plan over rows given here; `columns` are names or (name, type) pairs, a type being SQL text spliced in."""
+    return Frame(Values(_as_rows(rows), _as_heading(columns)))
