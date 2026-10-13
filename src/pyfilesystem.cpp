@@ -250,7 +250,15 @@ bool PythonFilesystem::ListFiles(const string &directory, const std::function<vo
 
 	for (auto item : filesystem.attr("ls")(nb::str(directory.c_str(), directory.size()))) {
 		bool is_dir = nb::cast<std::string>(item["type"]) == "directory";
-		callback(nb::cast<std::string>(item["name"]), is_dir);
+		// fsspec names an entry by its full path, and the engine joins the name it gets onto the directory
+		auto path = nb::cast<std::string>(item["name"]);
+		auto end = path.find_last_not_of('/');
+		if (end == string::npos) {
+			continue;
+		}
+		auto separator = path.find_last_of('/', end);
+		auto begin = separator == string::npos ? 0 : separator + 1;
+		callback(path.substr(begin, end - begin + 1), is_dir);
 		nonempty = true;
 	}
 

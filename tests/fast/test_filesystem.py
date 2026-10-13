@@ -196,6 +196,31 @@ class TestPythonFilesystem:
 
         assert memory.open("/root/a=1/data_0.csv").read() == b"2\n"
 
+    def test_copy_into_a_directory_that_has_files(self, duckdb_cursor, memory):
+        duckdb_cursor.register_filesystem(memory)
+        duckdb_cursor.execute("CREATE TABLE t AS SELECT range AS i, range % 3 AS p FROM range(30)")
+        duckdb_cursor.execute("COPY t TO 'memory://root' (FORMAT parquet, PARTITION_BY (p))")
+
+        with pytest.raises(duckdb.IOException, match="is not empty"):
+            duckdb_cursor.execute("COPY t TO 'memory://root' (FORMAT parquet, PARTITION_BY (p))")
+
+        duckdb_cursor.execute(
+            "COPY (FROM t WHERE p = 0) TO 'memory://root' (FORMAT parquet, PARTITION_BY (p), OVERWRITE)"
+        )
+        assert sorted(memory.find("/root")) == ["/root/p=0/data_0.parquet"]
+        assert duckdb_cursor.sql("SELECT count(*) FROM 'memory://root/*/*.parquet'").fetchall() == [(10,)]
+
+    def test_copy_into_a_flat_directory_that_has_files(self, duckdb_cursor, memory):
+        duckdb_cursor.register_filesystem(memory)
+        copy = "COPY (SELECT range AS i FROM range(10)) TO 'memory://flat' (FORMAT parquet, FILE_SIZE_BYTES 1000{})"
+        duckdb_cursor.execute(copy.format(""))
+
+        with pytest.raises(duckdb.IOException, match="is not empty"):
+            duckdb_cursor.execute(copy.format(""))
+
+        duckdb_cursor.execute(copy.format(", OVERWRITE"))
+        assert duckdb_cursor.sql("SELECT count(*) FROM 'memory://flat/*.parquet'").fetchall() == [(10,)]
+
     def test_copy_partition_with_columns_written(
         self, duckdb_cursor: DuckDBPyConnection, memory: fsspec.AbstractFileSystem
     ):
