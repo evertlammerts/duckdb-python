@@ -101,6 +101,15 @@ class TestLiteralsAreBound:
         assert "100" in sql
         assert values is None
 
+    def test_a_numpy_value_binds_and_runs_as_its_python_value(self, con: duckdb.frame.Connection) -> None:
+        import numpy as np
+
+        plan = duckdb.frame.values([(np.int64(1), np.float32(0.5), np.bool_(True))], ["a", "b", "c"])
+        assert plan.rows(con) == [(1, 0.5, True)]
+        assert plan.types(con) == ["INTEGER", "DOUBLE", "BOOLEAN"]
+        ids = duckdb.frame.values([(1,), (3,)], ["id"])
+        assert ids.filter(col("id").isin(lit([np.int64(3)]))).rows(con) == [(3,)]
+
 
 class TestSchema:
     """Column names and types come from DuckDB, without running the query."""
@@ -212,6 +221,74 @@ class TestRows:
         assert orders.filter(col("id") < 0).first(con) is None
 
 
+#: Enough rows that DuckDB reads them on several threads, where a DISTINCT ON over a sorted subquery keeps any row.
+MANY_ROWS_SQL = "SELECT i % 100 AS k, (hash(i) >> 1)::BIGINT AS v FROM range(300000) t(i)"
+
+
+def _per_key(con: duckdb.frame.Connection, aggregate: str, direction: str) -> list[tuple[object, ...]]:
+    query = f"SELECT k, {aggregate}(v) AS v FROM ({MANY_ROWS_SQL}) GROUP BY k ORDER BY v {direction}"
+    return duckdb.frame.sql(query).rows(con)
+
+
+class TestDistinctAfterASort:
+    """`distinct()` straight after `sort()` shares its SELECT, the only place DISTINCT ON obeys an ORDER BY."""
+
+    @pytest.fixture
+    def threaded(self) -> duckdb.frame.Connection:
+        return duckdb.frame.connect(threads="4")
+
+    def test_distinct_on_keeps_the_first_row_of_each_key_by_the_sort(self, threaded: duckdb.frame.Connection) -> None:
+        plan = duckdb.frame.sql(MANY_ROWS_SQL).sort(col("v").desc()).distinct(on="k")
+        assert plan.rows(threaded) == _per_key(threaded, "max", "DESC")
+        assert plan.render(threaded).splitlines()[-1] == 'SELECT DISTINCT ON ("k") * FROM "_s0" ORDER BY "v" DESC'
+
+    def test_distinct_keeps_the_order_of_the_sort(self, threaded: duckdb.frame.Connection) -> None:
+        plan = duckdb.frame.sql("SELECT hash(i) % 1000 AS v FROM range(100000) t(i)").sort("v").distinct()
+        assert plan.rows(threaded) == [(v,) for v in range(1000)]
+        assert plan.render(threaded).splitlines()[-1] == 'SELECT DISTINCT ON (COLUMNS(*)) * FROM "_s0" ORDER BY "v"'
+
+    @pytest.mark.parametrize("threads", ["1", "4"])
+    def test_distinct_keeps_the_first_of_duplicates_whose_sort_values_differ(self, threads: str) -> None:
+        # A window gives the two rows (1,) different sort values, so which of them comes first decides the order.
+        con = duckdb.frame.connect(threads=threads)
+        rows = duckdb.frame.values([(1,), (1,), (2,)], ["k"])
+        sorted_rows = rows.sort(duckdb.frame.row_number().over(order_by=col("k")) % 2, col("k").desc())
+        assert sorted_rows.rows(con) == [(1,), (2,), (1,)]
+        assert sorted_rows.distinct().rows(con) == [(1,), (2,)]
+        assert sorted_rows.distinct(on="k").rows(con) == [(1,), (2,)]
+        assert "SELECT DISTINCT ON (COLUMNS(*)) * FROM" in sorted_rows.distinct().render()
+
+    def test_nulls_and_ties_follow_every_sort_key(self, threaded: duckdb.frame.Connection) -> None:
+        rows = duckdb.frame.values(
+            [("a", None, 1), ("a", 5, 2), ("a", 5, 3), ("b", None, 4), ("b", None, 5)], ["k", "v", "id"]
+        )
+        plan = rows.sort(col("v").desc().nulls_last(), col("id").desc()).distinct(on="k").select("k", "id")
+        assert plan.rows(threaded) == [("a", 3), ("b", 5)]
+        assert 'ORDER BY "v" DESC NULLS LAST, "id" DESC' in plan.render(threaded)
+
+    def test_a_parameter_in_the_sort_is_bound_once(self, threaded: duckdb.frame.Connection) -> None:
+        plan = duckdb.frame.sql(MANY_ROWS_SQL).sort(col("v") * param("sign")).distinct(on="k")
+        text, bound = plan.render_parameterized(threaded, parameters={"sign": -1})
+        assert text.splitlines()[-1] == 'SELECT DISTINCT ON ("k") * FROM "_s0" ORDER BY ("v" * $1)'
+        assert bound == [-1]
+        assert plan.rows(threaded, parameters={"sign": -1}) == _per_key(threaded, "max", "DESC")
+
+    def test_a_subquery_in_the_sort_still_runs(self, threaded: duckdb.frame.Connection) -> None:
+        sign = duckdb.frame.sql("SELECT -1 AS sign").scalar()
+        plan = duckdb.frame.sql(MANY_ROWS_SQL).sort(col("v") * sign).distinct(on="k")
+        assert plan.rows(threaded) == _per_key(threaded, "max", "DESC")
+
+    def test_a_step_between_leaves_the_sort_a_step_of_its_own(self, threaded: duckdb.frame.Connection) -> None:
+        plan = duckdb.frame.sql(MANY_ROWS_SQL).sort(col("v").desc()).filter(col("k") >= 0).distinct(on="k")
+        assert plan.render(threaded).splitlines()[-1] == 'SELECT DISTINCT ON ("k") * FROM "_s2"'
+
+    def test_the_sort_survives_pickling_and_counts_in_comparison(self) -> None:
+        plan = duckdb.frame.table("t").sort(col("v").desc()).distinct(on="k")
+        assert pickle.loads(pickle.dumps(plan)).render() == plan.render()
+        assert plan.step == duckdb.frame.table("t").sort(col("v").desc()).distinct(on="k").step
+        assert plan.step != duckdb.frame.table("t").sort(col("v")).distinct(on="k").step
+
+
 class TestAggregation:
     def test_aggregate_without_keys(self, con: duckdb.frame.Connection, orders: duckdb.frame.Frame) -> None:
         assert orders.aggregate(col("amount").sum().alias("total")).rows(con) == [(550,)]
@@ -315,6 +392,110 @@ class TestJoins:
     ) -> None:
         with pytest.raises(TypeError, match="needs `on`"):
             orders.join(duckdb.frame.table("countries"))
+
+
+class TestJoinOnNamesWithASuffix:
+    """A join on column names keeps one key per name, from whichever side has the row, with or without a suffix."""
+
+    LEFT = duckdb.frame.values([(1, "a"), (2, "b")], ["id", "x"])
+    RIGHT = duckdb.frame.values([(2, "B"), (3, "C")], ["id", "x"])
+
+    @pytest.mark.parametrize(
+        ("how", "expected"),
+        [
+            ("inner", [(2, "b", "B")]),
+            ("left", [(1, "a", None), (2, "b", "B")]),
+            ("right", [(2, "b", "B"), (3, None, "C")]),
+            ("outer", [(1, "a", None), (2, "b", "B"), (3, None, "C")]),
+            ("full", [(1, "a", None), (2, "b", "B"), (3, None, "C")]),
+        ],
+    )
+    def test_the_key_comes_from_whichever_side_has_the_row(
+        self, con: duckdb.frame.Connection, how: str, expected: list[tuple[object, ...]]
+    ) -> None:
+        joined = self.LEFT.join(self.RIGHT, on="id", how=how, suffix="_r")
+        assert joined.columns(con) == ["id", "x", "x_r"]
+        assert joined.sort("id").rows(con) == expected
+
+    @pytest.mark.requires("pandas", "pyarrow")
+    @pytest.mark.parametrize(("how", "key"), [("inner", "ID"), ("left", "ID"), ("right", "id"), ("outer", "ID")])
+    @pytest.mark.parametrize("suffix", [None, "_r"])
+    def test_the_merged_key_is_spelled_as_every_output_spells_it(
+        self, con: duckdb.frame.Connection, how: str, key: str, suffix: str | None
+    ) -> None:
+        left = duckdb.frame.values([(1, 10)], ["ID", "x"])
+        right = duckdb.frame.values([(1, 20), (2, 30)], ["id", "x" if suffix else "y"])
+        joined = left.join(right, on="id", how=how, suffix=suffix)
+        names = joined.columns(con)
+        assert names[0] == key
+        assert names == [name for name, _ in con._engine().bind(joined.render(con))[0]]
+        assert names == list(joined.to_numpy(con))
+        assert names == joined.to_arrow(con).column_names
+        assert names == list(joined.to_pandas(con).columns)
+        assert all(list(row) == names for row in joined.to_dicts(con))
+
+    def test_the_bare_star_merges_the_key(self, con: duckdb.frame.Connection) -> None:
+        joined = self.LEFT.join(self.RIGHT, on="id", how="outer", suffix="_r")
+        assert joined.render(con).splitlines()[-1] == (
+            'SELECT * RENAME (r."x" AS "x_r") FROM "_s0" AS l FULL OUTER JOIN "_s1" AS r USING ("id")'
+        )
+
+    def test_names_and_types_line_up_when_the_key_is_not_first(self, con: duckdb.frame.Connection) -> None:
+        left = duckdb.frame.values([("a", 1, 10), ("b", 2, 20)], ["x", "id", "z"])
+        right = duckdb.frame.values([(100, 2, "B"), (300, 3, "C")], ["w", ("id", "BIGINT"), "x"])
+        joined = left.join(right, on="id", how="outer", suffix="_r")
+        assert joined.schema(con) == [
+            ("x", "VARCHAR"),
+            ("id", "BIGINT"),
+            ("z", "INTEGER"),
+            ("w", "INTEGER"),
+            ("x_r", "VARCHAR"),
+        ]
+        assert joined.filter(col("id") == 3).to_dicts(con) == [{"x": None, "id": 3, "z": None, "w": 300, "x_r": "C"}]
+
+    def test_every_key_of_a_join_on_several_names_is_merged(self, con: duckdb.frame.Connection) -> None:
+        left = duckdb.frame.values([(1, 1, "a"), (1, 2, "b")], ["g", "id", "x"])
+        right = duckdb.frame.values([(1, 2, "B"), (2, 2, "C")], ["g", "id", "x"])
+        joined = left.join(right, on=["g", "id"], how="right", suffix="_r")
+        assert joined.sort("g", "id").rows(con) == [(1, 2, "b", "B"), (2, 2, None, "C")]
+
+    def test_an_asof_join_on_names_keeps_the_left_sides_inequality_key(self, con: duckdb.frame.Connection) -> None:
+        trades = duckdb.frame.values([(1, 10, "a"), (2, 20, "b")], ["id", "t", "x"])
+        quotes = duckdb.frame.values([(1, 5, "A"), (2, 25, "B"), (2, 15, "C")], ["id", "t", "x"])
+        joined = trades.join(quotes, on=["id", "t"], how="asof", suffix="_r")
+        assert joined.columns(con) == ["id", "t", "x", "x_r"]
+        assert joined.sort("id").rows(con) == [(1, 10, "a", "A"), (2, 20, "b", "C")]
+        assert joined.render(con).splitlines()[-1] == (
+            'SELECT * RENAME (r."x" AS "x_r") FROM "_s0" AS l ASOF JOIN "_s1" AS r USING ("id", "t")'
+        )
+
+    def test_a_join_on_a_condition_keeps_both_keys(self, con: duckdb.frame.Connection) -> None:
+        joined = self.LEFT.join(self.RIGHT, on=lambda left, right: left["id"] == right["id"], how="outer", suffix="_r")
+        assert joined.columns(con) == ["id", "x", "id_r", "x_r"]
+        assert joined.sort("id", "id_r").rows(con) == [(1, "a", None, None), (2, "b", 2, "B"), (None, None, 3, "C")]
+
+
+class TestJoinKindsWithoutACondition:
+    """A cross, positional or natural join takes no condition, so one given is refused rather than dropped."""
+
+    LEFT = duckdb.frame.values([(1, "a"), (2, "b")], ["id", "x"])
+    RIGHT = duckdb.frame.values([(2, "B"), (3, "C")], ["id", "x"])
+
+    @pytest.mark.parametrize("how", ["cross", "positional", "natural", "CROSS"])
+    @pytest.mark.parametrize(
+        "on",
+        ["id", ["id"], lambda left, right: left["id"] == right["id"], col("id") == 1],
+        ids=["name", "names", "function", "expression"],
+    )
+    def test_a_condition_is_refused_when_the_join_is_built(self, how: str, on: object) -> None:
+        with pytest.raises(TypeError, match=f"a {how.lower()} join takes no `on`"):
+            self.LEFT.join(self.RIGHT, on=on, how=how)  # type: ignore[arg-type]
+
+    def test_without_a_condition_they_still_join(self, con: duckdb.frame.Connection) -> None:
+        other = self.RIGHT.rename(id="rid", x="rx")
+        assert self.LEFT.join(other, how="positional").rows(con) == [(1, "a", 2, "B"), (2, "b", 3, "C")]
+        assert len(self.LEFT.cross(other).rows(con)) == 4
+        assert self.LEFT.join(self.RIGHT.rename(x="rx"), how="natural", suffix="_r").count(con) == 1
 
 
 class TestSetOperations:
@@ -1313,6 +1494,29 @@ class TestParametersAreSupplied:
         assert plan.explain(con, parameters=values)
         assert "nl" in plan.preview(con, parameters=values)
 
+    def test_a_numpy_value_is_supplied_as_its_python_value(self, con: duckdb.frame.Connection) -> None:
+        import numpy as np
+
+        plan = duckdb.frame.table("orders").filter(col("amount") > param("floor")).select("id")
+        _, bound = plan.render_parameterized(con, parameters={"floor": np.int64(200)})
+        assert [(value, type(value)) for value in bound] == [(200, int)]
+        assert plan.rows(con, parameters={"floor": np.int64(200)}) == [(3,)]
+        listed = duckdb.frame.table("orders").filter(col("id").isin(param("ids"))).select("id")
+        assert listed.rows(con, parameters={"ids": [np.int64(1), np.int64(3)]}) == [(1,), (3,)]
+
+    def test_a_value_nested_a_thousand_lists_deep_is_supplied_with_numpy_loaded(
+        self, con: duckdb.frame.Connection
+    ) -> None:
+        import numpy as np
+
+        plan = duckdb.frame.sql("SELECT 1").select(param("p").cast("VARCHAR"))
+        expected = [("[" * 1000 + "1" + "]" * 1000,)]
+        for leaf in (1, np.int64(1)):
+            nested: object = leaf
+            for _ in range(1000):
+                nested = [nested]
+            assert plan.rows(con, parameters={"p": nested}) == expected
+
 
 class TestAggregatesAreRealMethods:
     """Written out one by one, so they type-check and autocomplete."""
@@ -2078,6 +2282,15 @@ class TestStepsAsData:
         assert a.step == b.step
         assert a.inputs[0].step == b.inputs[0].step
         assert a.step != duckdb.frame.table("orders").filter(col("amount") > 101).step
+
+    def test_steps_differing_only_in_sort_direction_differ(self) -> None:
+        ascending = duckdb.frame.table("orders").sort(col("amount")).step
+        descending = duckdb.frame.table("orders").sort(col("amount").desc()).step
+        assert ascending != descending
+        assert hash(ascending) != hash(descending)
+        assert duckdb.frame.table("orders").sort(col("amount").nulls_last()).step != ascending
+        renamed = duckdb.frame.table("orders").select(col("amount").alias("a")).step
+        assert renamed != duckdb.frame.table("orders").select(col("amount").alias("b")).step
 
 
 class TestReviewRoundFive:

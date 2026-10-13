@@ -37,6 +37,7 @@ from .._expressions.expr import (
     name_parts,
     parameters_in,
     plain_identifier,
+    plain_value,
     quote,
     render_literal,
     rendering_steps,
@@ -206,18 +207,23 @@ def _contributed(expression: Expr, source: Shape) -> list[Column] | None:
 
 
 class JoinKind(NamedTuple):
-    """One join kind: its keyword, whether it needs a condition, and whether it keeps the right side's columns."""
+    """One join kind: its keyword, whether it needs a condition, and whether it keeps the right side's columns.
+
+    `key_from_right` says whether a key merged by USING takes the right side's spelling, as DuckDB's binder gives it
+    the right side's binding in a right join and the left side's in every other.
+    """
 
     keyword: str
     needs_on: bool
     keeps_right: bool
+    key_from_right: bool = False
 
 
 #: The join kinds, listed once and closed, so `how` can never carry caller text into the SQL.
 _JOIN_KINDS = {
     "inner": JoinKind("INNER", needs_on=True, keeps_right=True),
     "left": JoinKind("LEFT", needs_on=True, keeps_right=True),
-    "right": JoinKind("RIGHT", needs_on=True, keeps_right=True),
+    "right": JoinKind("RIGHT", needs_on=True, keeps_right=True, key_from_right=True),
     "outer": JoinKind("FULL OUTER", needs_on=True, keeps_right=True),
     "full": JoinKind("FULL OUTER", needs_on=True, keeps_right=True),
     "semi": JoinKind("SEMI", needs_on=True, keeps_right=False),
@@ -344,9 +350,9 @@ def _comparable(value: object) -> object:
         return (type(value).__name__, tuple(_comparable(getattr(value, f.name)) for f in dataclasses.fields(value)))
     if isinstance(value, Expr):
         with ParamSink() as sink:
-            text = value.as_select()
+            text = value.as_order()
         bound = tuple((kind, name if kind == "reference" else repr(name)) for kind, name, _ in sink.entries)
-        return (text, bound)
+        return (text, value._alias, bound)
     if isinstance(value, tuple):
         return tuple(_comparable(v) for v in value)
     return value
@@ -591,21 +597,29 @@ class Limit(Step):
 @dataclasses.dataclass(frozen=True, eq=False)
 class Distinct(Step):
     keys: tuple[Expr, ...] | None
+    #: The keys of a sort this step took over, since DISTINCT ON obeys only an ORDER BY in its own SELECT.
+    order: tuple[Expr, ...] = ()
 
     def __post_init__(self) -> None:
         if self.keys is not None:
             _at_least_one(self.keys, "distinct(on=...)")
 
     def render(self, names: tuple[str, ...], shapes: tuple[Shape | None, ...]) -> str:
-        if self.keys is None:
-            return f"SELECT DISTINCT * FROM {names[0]}"
-        return f"SELECT DISTINCT ON ({', '.join(e.fragment() for e in self.keys)}) * FROM {names[0]}"
+        if self.keys is None and self.order:
+            # Plain DISTINCT sorts each row by any one of its duplicates' sort values; DISTINCT ON takes the first.
+            selected = "SELECT DISTINCT ON (COLUMNS(*)) *"
+        elif self.keys is None:
+            selected = "SELECT DISTINCT *"
+        else:
+            selected = f"SELECT DISTINCT ON ({', '.join(e.fragment() for e in self.keys)}) *"
+        ordered = f" ORDER BY {', '.join(e.as_order() for e in self.order)}" if self.order else ""
+        return f"{selected} FROM {names[0]}{ordered}"
 
     def shape(self, shapes: tuple[Shape, ...]) -> Shape | None:
         return shapes[0]
 
     def expressions(self) -> tuple[Expr, ...]:
-        return self.keys or ()
+        return (*(self.keys or ()), *self.order)
 
 
 @dataclasses.dataclass(frozen=True, eq=False)
@@ -702,8 +716,12 @@ class Join(Step):
         if self.how not in _JOIN_KINDS:
             message = f"unknown join kind {self.how!r}; one of {', '.join(sorted(_JOIN_KINDS))}"
             raise ValueError(message)
-        if self._kind().needs_on and self.on is None and not self.using:
+        given = self.on is not None or bool(self.using)
+        if self._kind().needs_on and not given:
             message = f"a {self.how} join needs `on`"
+            raise TypeError(message)
+        if not self._kind().needs_on and given:
+            message = f"a {self.how} join takes no `on`"
             raise TypeError(message)
 
     def _kind(self) -> JoinKind:
@@ -740,11 +758,14 @@ class Join(Step):
             else []
         )
         projection = "*"
-        if shared:
-            # Listed out only when renaming, so a plain star keeps USING's merging intact; the keys are already in l.*.
-            excluded = f" EXCLUDE ({', '.join(keys)})" if keys else ""
+        if shared and keys:
+            # Only the bare star merges a USING key; l.* is the left side's own copy, NULL on a row only r has.
+            renamed = ", ".join(f"r.{quote(name)} AS {quote(name + str(self.suffix))}" for name in shared)
+            projection = f"* RENAME ({renamed})"
+        elif shared:
+            # Both stars, as a natural join's bare star would merge the shared names that `shape` counts twice.
             renamed = ", ".join(f"{quote(name)} AS {quote(name + str(self.suffix))}" for name in shared)
-            projection = f"l.*, r.*{excluded} RENAME ({renamed})"
+            projection = f"l.*, r.* RENAME ({renamed})"
         # Both sides are aliased so a frame can join to itself and a condition can tell the sides apart, as l["id"].
         return f"SELECT {projection} FROM {names[0]} AS l {kind.keyword} JOIN {names[1]} AS r{clause}"
 
@@ -763,10 +784,9 @@ class Join(Step):
             raise ValueError(message)
         renamed = {fold_name(name): name + str(self.suffix) for name in shared}
         folded = {fold_name(key) for key in self.using}
-        right_types = {fold_name(c.name): c.type for c in right_shape}
-        # A merged key takes the type both sides promote to, which only DuckDB knows unless the two already agree.
+        right_columns = {fold_name(c.name): c for c in right_shape}
         left = [
-            Column(c.name, None) if fold_name(c.name) in folded and right_types.get(fold_name(c.name)) != c.type else c
+            self._merged(c, right_columns.get(fold_name(c.name))) if fold_name(c.name) in folded else c
             for c in left_shape
         ]
         carried = [
@@ -776,6 +796,12 @@ class Join(Step):
         ]
         # The renamed copies must be free too: suffixing onto a name the left already holds only moves the clash.
         return _require_unique((*left, *carried), "join")
+
+    def _merged(self, left: Column, right: Column | None) -> Column:
+        """A key merged by USING, at the left side's place."""
+        name = right.name if right is not None and self._kind().key_from_right else left.name
+        # It takes the type both sides promote to, which only DuckDB knows unless the two already agree.
+        return Column(name, left.type if right is not None and right.type == left.type else None)
 
     def expressions(self) -> tuple[Expr, ...]:
         return (self.on,) if self.on is not None else ()
@@ -1057,8 +1083,11 @@ class Frame(PlanBase):
         return self._derive(Limit(None, int(count)))
 
     def distinct(self, on: Iterable[object] | object | None = None) -> Frame:
-        """Remove duplicate rows, or duplicates of `on` only."""
-        return self._derive(Distinct(None if on is None else tuple(_as_exprs(on))))
+        """Remove duplicate rows, or duplicates of `on`; right after `sort()`, the first of each by it, in its order."""
+        keys = None if on is None else tuple(_as_exprs(on))
+        if isinstance(self._step, Sort):
+            return Frame(Distinct(keys, self._step.keys), self._inputs)
+        return self._derive(Distinct(keys))
 
     def sample(
         self,
@@ -1199,7 +1228,7 @@ class Frame(PlanBase):
             if kind == "literal":
                 values.append(value)
             elif value in supplied:
-                values.append(supplied[value])
+                values.append(plain_value(supplied[value]))
                 used.add(value)
             else:
                 missing.append(value)

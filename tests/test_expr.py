@@ -7,13 +7,15 @@ import datetime
 import decimal
 import subprocess
 import sys
+import types
 import uuid
+from fractions import Fraction
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from duckdb import _duckdb, exceptions
+from duckdb import _duckdb, exceptions, frame
 from duckdb._expressions.expr import (
     Expr,
     ParamSink,
@@ -22,6 +24,7 @@ from duckdb._expressions.expr import (
     fn,
     lit,
     param,
+    plain_value,
     quote,
     render_literal,
     row_number,
@@ -76,9 +79,21 @@ class TestNoneAndUnknownOperands:
         # Comparing with NULL is never true in SQL, and surfacing that beats inventing something friendlier.
         assert evaluate(con, col("v") == None, " FROM (SELECT 1 AS v)") is None  # noqa: E711
 
-    def test_equality_with_an_unconvertible_object_falls_back_to_python(self) -> None:
-        # Python falls back to identity, so this is False rather than an error or a nonsense expression.
-        assert (col("x") == object()) is False
+    @pytest.mark.parametrize(
+        "operand",
+        [object(), Fraction(1, 2), np.array([1, 2]), np.longdouble(1), frame.sql("SELECT 1")],
+        ids=["object", "fraction", "array", "longdouble", "plan"],
+    )
+    def test_equality_with_an_unconvertible_object_raises(self, operand: object) -> None:
+        # Python's fallback would answer by identity, and that False combined into a condition reads as SQL's FALSE.
+        with pytest.raises(TypeError, match="as an expression operand"):
+            col("x") == operand  # noqa: B015
+        with pytest.raises(TypeError, match="as an expression operand"):
+            col("x") != operand  # noqa: B015
+        with pytest.raises(TypeError, match="as an expression operand"):
+            operand == col("x")  # noqa: B015
+        with pytest.raises(TypeError, match="as an expression operand"):
+            operand != col("x")  # noqa: B015
 
     def test_arithmetic_with_an_unconvertible_object_raises(self) -> None:
         with pytest.raises(TypeError):
@@ -637,6 +652,104 @@ class TestNumpyLiteralRange:
     def test_a_value_its_engine_type_cannot_hold_is_refused(self, value: object) -> None:
         with pytest.raises(exceptions.InvalidInputError, match="beyond the range of its engine type"):
             render_literal(value)
+
+
+class TestNumpyScalarsAreTheirPythonValues:
+    """A numpy bool, integer or float stands for its Python value wherever an expression takes a value."""
+
+    @pytest.mark.parametrize("number", [np.int8(3), np.int64(3), np.uint64(3)], ids=lambda v: type(v).__name__)
+    def test_a_numpy_integer_compares_as_its_value(self, con: _duckdb.Connection, number: object) -> None:
+        source = " FROM (SELECT 3 AS id)"
+        assert (col("id") == number).fragment() == '("id" = 3)'
+        assert evaluate(con, col("id") == number, source) is True
+        assert evaluate(con, col("id") > number, source) is False
+        assert evaluate(con, number == col("id"), source) is True
+        assert evaluate(con, number < col("id"), source) is False
+
+    def test_a_numpy_float_is_written_as_its_value(self, con: _duckdb.Connection) -> None:
+        assert (col("x") + np.float64(1000.0)).fragment() == '("x" + 1000.0::DOUBLE)'
+        assert (col("x") + np.float32(0.5)).fragment() == '("x" + 0.5::DOUBLE)'
+        assert evaluate(con, col("x") + np.float64(1000.0), " FROM (SELECT 1.0 AS x)") == 1001.0
+
+    def test_a_numpy_bool_is_a_boolean(self) -> None:
+        assert (col("b") == np.bool_(True)).fragment() == '("b" = TRUE)'
+
+    def test_numpy_on_the_left_reaches_the_reflected_operator(self) -> None:
+        assert (np.int64(3) + col("x")).fragment() == '(3 + "x")'
+        assert (np.int64(3) - col("x")).fragment() == '(3 - "x")'
+        assert (np.float64(2.5) * col("x")).fragment() == '(2.5::DOUBLE * "x")'
+
+    def test_isin_between_function_arguments_and_lit_take_numpy(self, con: _duckdb.Connection) -> None:
+        source = " FROM (SELECT 3 AS id)"
+        assert evaluate(con, col("id").isin([np.int64(3), np.int64(5)]), source) is True
+        assert evaluate(con, col("id").between(np.int64(2), np.int64(4)), source) is True
+        assert evaluate(con, fn("greatest", col("id"), np.int64(4)), source) == 4
+        assert lit(np.int16(7)).fragment() == "7"
+
+    def test_a_list_or_dict_holding_numpy_binds_plain_values(self) -> None:
+        with ParamSink() as sink:
+            lit([np.int64(1), np.int64(2)]).fragment()
+            lit({"a": np.float32(0.5)}).fragment()
+        listed, keyed = (value for _, value, _ in sink.entries)
+        assert (listed, keyed) == ([1, 2], {"a": 0.5})
+        assert [type(v) for v in [*listed, *keyed.values()]] == [int, int, float]
+
+    def test_numpy_written_into_the_text_is_its_value(self) -> None:
+        assert render_literal([np.int64(1), np.float64(0.5)]) == "[1, 0.5::DOUBLE]"
+        assert render_literal({np.int64(1): np.bool_(False)}) == "MAP {1: FALSE}"
+        day = datetime.date(2020, 1, 1)
+        assert render_literal({"n": np.int64(1), "d": day}) == render_literal({"n": 1, "d": day})
+
+    def test_a_numpy_integer_is_a_position(self, con: _duckdb.Connection) -> None:
+        assert col("xs")[np.int64(1)].fragment() == col("xs")[1].fragment()
+        assert evaluate(con, col("xs")[np.int64(2)], " FROM (SELECT [10, 20] AS xs)") == 20
+        with pytest.raises(TypeError, match="not by bool"):
+            col("xs")[np.bool_(True)]
+
+    def test_a_lambda_may_return_a_numpy_value(self, con: _duckdb.Connection) -> None:
+        ones = fn("list_transform", col("xs"), lambda x: np.int64(1))
+        assert evaluate(con, ones, " FROM (SELECT [1, 2] AS xs)") == [1, 1]
+
+    def test_a_numpy_still_importing_elsewhere_leaves_python_values_alone(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Another thread's import puts numpy in sys.modules before its scalar types exist.
+        partial = types.ModuleType("numpy")
+        partial.bool_ = np.bool_  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "numpy", partial)
+        assert lit(1).fragment() == "1"
+        assert (col("x") + 1.5).fragment() == '("x" + 1.5::DOUBLE)'
+        assert render_literal([1, [2, {"a": 3}]]) == "[1, [2, {'a': 3}]]"
+        with ParamSink() as sink:
+            lit([1, 2]).fragment()
+            lit({"a": [3]}).fragment()
+        assert [value for _, value, _ in sink.entries] == [[1, 2], {"a": [3]}]
+
+    def test_a_container_without_numpy_values_comes_back_as_itself(self) -> None:
+        nested = [[1, 2.5, "a"], {"k": (3, None)}, (datetime.date(2020, 1, 1),)]
+        assert plain_value(nested) is nested
+        mixed = [[1, np.int64(2)], {"k": 3}]
+        converted = plain_value(mixed)
+        assert isinstance(converted, list)
+        assert converted == [[1, 2], {"k": 3}]
+        assert type(converted[0][1]) is int
+        assert converted[1] is mixed[1]
+
+    def test_a_container_holding_itself_is_walked_once(self) -> None:
+        cyclic: list[object] = [np.int64(1)]
+        cyclic.append(cyclic)
+        converted = plain_value(cyclic)
+        assert isinstance(converted, list)
+        assert type(converted[0]) is int
+        assert converted[1] is cyclic
+
+    def test_a_numpy_value_without_a_sql_counterpart_is_refused(self) -> None:
+        with pytest.raises(TypeError):
+            col("x") + np.complex128(1)
+        with pytest.raises(TypeError, match="cannot render a literal of type complex"):
+            lit(np.complex128(1)).fragment()
+        with pytest.raises(TypeError, match="cannot render a literal of type longdouble"):
+            lit(np.longdouble(1)).fragment()
 
 
 # A time zone whose offset writes another value into SQL, on this thread and on another, and one whose offset fails.

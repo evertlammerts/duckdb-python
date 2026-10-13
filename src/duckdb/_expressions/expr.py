@@ -15,15 +15,16 @@ import decimal
 import inspect
 import re
 import string
+import sys
 import uuid
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, cast
 
 from .. import _duckdb, exceptions
 from .aggregates import AggregateMethods
 from .keywords import KEYWORDS
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Iterator
+    from collections.abc import Callable, Iterable, Iterator, Sequence
 
     from .func_namespaces import DtExpr, JsonExpr, ListExpr, StrExpr
 
@@ -141,6 +142,125 @@ def _is_numpy_temporal(value: object) -> bool:
     return cls.__module__ == "numpy" and cls.__name__ in ("datetime64", "timedelta64")
 
 
+#: Exact types no numpy scalar can have, so a value of one needs no numpy check; a subclass such as np.float64 does.
+_NATIVE = frozenset(
+    {
+        type(None),
+        bool,
+        int,
+        float,
+        str,
+        bytes,
+        decimal.Decimal,
+        uuid.UUID,
+        datetime.date,
+        datetime.datetime,
+        datetime.time,
+        datetime.timedelta,
+    }
+)
+
+_CONTAINERS = (list, tuple, dict)
+
+
+class _NumpyTypes(NamedTuple):
+    scalars: tuple[type, ...]
+    duration: type
+
+
+def _numpy_types() -> _NumpyTypes | None:
+    """The scalar types of numpy, or None when no value can be a numpy scalar."""
+    # Looked up rather than imported, so that importing duckdb does not import numpy; without it there are no scalars.
+    numpy = sys.modules.get("numpy")
+    # A numpy still importing on another thread can lack these, and then nothing has made one of its scalars yet.
+    found = [getattr(numpy, name, None) for name in ("bool_", "integer", "floating", "timedelta64")]
+    if numpy is None or not all(isinstance(kind, type) for kind in found):
+        return None
+    *scalars, duration = cast("list[type]", found)
+    return _NumpyTypes(tuple(scalars), duration)
+
+
+def _converted(value: object, numpy: _NumpyTypes) -> object:
+    """One value that is no container, a numpy bool, integer or float scalar becoming its Python value."""
+    if not isinstance(value, numpy.scalars):
+        return value
+    # A timedelta64 is a numpy integer too, and its unit would be lost.
+    return value if isinstance(value, numpy.duration) else cast("Any", value).item()
+
+
+def _as_python(value: object) -> object:
+    """A numpy bool, integer or float scalar as the Python value it stands for, and anything else as it is."""
+    if type(value) in _NATIVE:
+        return value
+    numpy = _numpy_types()
+    return value if numpy is None else _converted(value, numpy)
+
+
+def _all_native(container: list[Any] | tuple[Any, ...] | dict[Any, Any]) -> bool:
+    """Whether a list, tuple or dict holds only values of the native types, so nothing in it needs converting."""
+    if isinstance(container, dict):
+        return _NATIVE.issuperset(map(type, container)) and _NATIVE.issuperset(map(type, container.values()))
+    return _NATIVE.issuperset(map(type, container))
+
+
+def _container_values(container: list[Any] | tuple[Any, ...] | dict[Any, Any]) -> Sequence[object]:
+    """A container's values in order, a dict's keys and values alternating."""
+    if isinstance(container, dict):
+        return [part for entry in container.items() for part in entry]
+    return container
+
+
+def _rebuilt(container: object, children: list[object]) -> object:
+    """A container of the same kind holding `children`, in the order `_container_values` gives them."""
+    if isinstance(container, dict):
+        return dict(zip(children[::2], children[1::2], strict=True))
+    return children if isinstance(container, list) else tuple(children)
+
+
+def plain_value(value: object) -> object:
+    """`value` with every numpy bool, integer and float scalar in it, however deeply nested, as its Python value.
+
+    A container holding none comes back as the same object, so a caller still sees whatever happens to it later.
+    """
+    if type(value) in _NATIVE:
+        return value
+    numpy = _numpy_types()
+    if numpy is None:
+        return value
+    if not isinstance(value, _CONTAINERS):
+        return _converted(value, numpy)
+    if _all_native(value):
+        return value
+    # A stack, not recursion, so a value nested deeper than Python's recursion limit still binds as it did before.
+    # Each entry holds a container, its values, where the walk over them stands, and the values converted so far.
+    first = _container_values(value)
+    stack: list[tuple[object, Sequence[object], Iterator[object], list[object]]] = [(value, first, iter(first), [])]
+    open_ids = {id(value)}
+    while True:
+        container, values, pending, done = stack[-1]
+        for child in pending:
+            if type(child) in _NATIVE:
+                done.append(child)
+            elif not isinstance(child, _CONTAINERS):
+                done.append(_converted(child, numpy))
+            elif id(child) in open_ids or _all_native(child):
+                # A container met again inside itself stays as it is, so a cycle cannot keep the walk going.
+                done.append(child)
+            else:
+                inner = _container_values(child)
+                stack.append((child, inner, iter(inner), []))
+                open_ids.add(id(child))
+                break
+        else:
+            stack.pop()
+            open_ids.discard(id(container))
+            unchanged = all(new is old for new, old in zip(done, values, strict=True))
+            rebuilt = container if unchanged else _rebuilt(container, done)
+            if not stack:
+                return rebuilt
+            stack[-1][3].append(rebuilt)
+
+
 def _is_temporal(value: object) -> bool:
     """Whether `value` is a date, time or duration of Python's, pandas' or numpy's, which the engine module converts."""
     return isinstance(value, (datetime.date, datetime.time, datetime.timedelta)) or _is_numpy_temporal(value)
@@ -243,6 +363,7 @@ def render_literal(value: object) -> str:
     A date, time or duration, alone or anywhere in a list or dict, is converted by the engine module as it would be
     bound as a parameter, so it means the same written in, and is refused where a parameter would be.
     """
+    value = plain_value(value)
     if isinstance(value, (list, tuple, dict)) and _holds_temporal(value):
         _duckdb.literal_type(value)
     return _rendered(value)
@@ -418,6 +539,7 @@ def refusing_parameters(message: str) -> Iterator[None]:
 
 def _coerce(other: object) -> Expr | Any:
     """An Expr passes through, a literal wraps, a callable becomes a lambda, anything else defers to Python."""
+    other = _as_python(other)
     if isinstance(other, Expr):
         return other
     if other is None or isinstance(other, LITERAL_TYPES) or _is_numpy_temporal(other):
@@ -453,6 +575,7 @@ def _as_lambda(function: Callable[..., object]) -> Expr:
     except TypeError as reason:
         message = f"while building a SQL lambda from {label}: {reason}"
         raise TypeError(message) from reason
+    body = _as_python(body)
     if not isinstance(body, Expr) and not (body is None or isinstance(body, LITERAL_TYPES) or _is_numpy_temporal(body)):
         message = (
             f"the lambda returned {body!r}, which is not an expression; it runs once, at build "
@@ -570,12 +693,16 @@ class Expr(AggregateMethods, FuncNamespaces):
         left, right = (coerced, self) if reverse else (self, coerced)
         return Binary(op, left, right)
 
-    def __eq__(self, other: object) -> Expr | Any:  # type: ignore[override]
+    def __eq__(self, other: object) -> Expr:  # type: ignore[override]
         # `col("x") == None` is a SQL NULL comparison and never true, which is SQL's answer rather than an invented one.
-        return self._binary("=", other)
+        return self._equality("=", other)
 
-    def __ne__(self, other: object) -> Expr | Any:  # type: ignore[override]
-        return self._binary("!=", other)
+    def __ne__(self, other: object) -> Expr:  # type: ignore[override]
+        return self._equality("!=", other)
+
+    def _equality(self, op: str, other: object) -> Expr:
+        # Raised rather than deferred: Python answers an unknown operand by identity, a False no condition can tell.
+        return Binary(op, self, _lift(other))
 
     def __lt__(self, other: object) -> Expr | Any:
         return self._binary("<", other)
@@ -636,6 +763,7 @@ class Expr(AggregateMethods, FuncNamespaces):
 
     def __getitem__(self, key: object) -> Expr:
         """A struct field by name, a list element by position, or a map entry by key."""
+        key = _as_python(key)
         if isinstance(key, bool) or not isinstance(key, (str, int)):
             message = f"an expression is indexed by a field name or a position, not by {type(key).__name__}"
             raise TypeError(message)
@@ -866,7 +994,7 @@ class Lit(Expr):
         super().__init__()
         # A snapshot, so a list or dict the caller goes on changing cannot change the query with it.
         try:
-            self.value = copy.deepcopy(value) if isinstance(value, (list, tuple, dict)) else value
+            self.value = plain_value(copy.deepcopy(value) if isinstance(value, (list, tuple, dict)) else value)
         except (TypeError, copy.Error) as reason:
             message = f"a literal holds a value that is not plain data: {reason}"
             raise TypeError(message) from None

@@ -211,7 +211,10 @@ recent.with_columns(half=col(<span class="s">"total"</span>) / <span class="s">2
   <div class="note">
     <p><strong><code>filter()</code> takes an expression, not text.</strong> <code>filter("total &gt; 1000")</code> raises <code>TypeError</code>. Write <code>filter(col("total") &gt; 1000)</code>, or <code>filter(sql_expr("total &gt; 1000"))</code> to write the condition as SQL.</p>
   </div>
-  <p>Without <code>sort()</code>, the order of the rows is not fixed, and neither is which rows <code>head()</code> keeps. Sort first when it matters: <code>orders.sort(col("placed").desc()).head(2)</code> gives the two newest orders. In the same way, <code>distinct(on="customer")</code> keeps one row per customer, but not a fixed one, even after a <code>sort()</code>. To keep the newest order of each customer, number each customer's orders from new to old with a <a href="#group">window function</a> and keep number 1:</p>
+  <p>Without <code>sort()</code>, the order of the rows is not fixed, and neither is which rows <code>head()</code> keeps. Sort first when it matters: <code>orders.sort(col("placed").desc()).head(2)</code> gives the two newest orders. <code>distinct(on="customer")</code> keeps one row per customer. Straight after a <code>sort()</code>, it keeps the first row of each customer in that order, so this keeps each customer's newest order:</p>
+  <pre><code>orders.sort(col(<span class="s">"placed"</span>).desc(), col(<span class="s">"id"</span>).desc()).distinct(on=<span class="s">"customer"</span>).select(<span class="s">"customer"</span>, <span class="s">"id"</span>).sort(<span class="s">"customer"</span>).rows(con)
+<span class="c"># [('acme', 3), ('bolt', 5), ('cora', 4)]</span></code></pre>
+  <p>With any other step between the <code>sort()</code> and the <code>distinct()</code>, such as a <code>filter()</code>, which row it keeps is not fixed. A <a href="#group">window function</a> does the same job anywhere: number each customer's orders from new to old and keep number 1:</p>
   <pre><code><span class="k">from</span> duckdb.frame <span class="k">import</span> row_number
 
 newest_first = row_number().over(partition_by=col(<span class="s">"customer"</span>), order_by=[col(<span class="s">"placed"</span>).desc(), col(<span class="s">"id"</span>).desc()])
@@ -473,10 +476,10 @@ orders.join(customers, on=<span class="s">"customer"</span>, how=<span class="s"
       <tbody>
         <tr><td><code>"inner"</code> (the default)</td><td>Rows that have a match on both sides.</td></tr>
         <tr><td><code>"left"</code>, <code>"right"</code></td><td>Every row of that side, with NULL where the other side has no match.</td></tr>
-        <tr><td><code>"outer"</code> or <code>"full"</code></td><td>Every row of both sides. With <code>suffix=</code>, here and with <code>"right"</code>, a row only the right side has gets NULL in the <code>on</code> column: rename the clashing columns before the join instead.</td></tr>
+        <tr><td><code>"outer"</code> or <code>"full"</code></td><td>Every row of both sides.</td></tr>
         <tr><td><code>"semi"</code></td><td>The left rows that have a match. No columns are added.</td></tr>
         <tr><td><code>"anti"</code></td><td>The left rows that have no match. No columns are added.</td></tr>
-        <tr><td><code>"cross"</code></td><td>Every combination of rows. An <code>on</code> given here is ignored, without an error. <code>.cross(other)</code> does the same.</td></tr>
+        <tr><td><code>"cross"</code></td><td>Every combination of rows. No <code>on</code>. <code>.cross(other)</code> does the same.</td></tr>
         <tr><td><code>"positional"</code></td><td>The first row of each side together, then the second, and so on, with NULL where one side runs out. No <code>on</code>.</td></tr>
         <tr><td><code>"natural"</code></td><td>Joins on every column name the two sides share. No <code>on</code>. See the Details below.</td></tr>
         <tr><td><code>"asof"</code></td><td>For each left row, the nearest right row that meets a condition with <code>&gt;=</code>, <code>&gt;</code>, <code>&lt;=</code> or <code>&lt;</code>. Left rows without one are left out.</td></tr>
@@ -519,8 +522,8 @@ later.except_(early).rows(con)                             <span class="c"># [('
     <li>With a condition function, both sides keep their own key columns, so <code>suffix=</code> renames the right one too: <code>on=lambda a, b: a["id"] == b["id"], suffix="_r"</code> gives <code>id</code> and <code>id_r</code>.</li>
     <li>The renamed column must not clash either; if it does, the join raises <code>ValueError</code>. Two names that differ only in case count as the same name.</li>
     <li><code>how="asof"</code> takes a condition function with one inequality, and optionally <code>==</code> conditions joined to it with <code>&amp;</code>. With a table of exchange rates, <code>on=lambda o, r: o["placed"] &gt;= r["since"]</code> gives each order the latest rate that started on or before its date.</li>
-    <li><code>how="natural"</code> raises <code>ValueError</code> for the shared columns unless you pass <code>suffix=</code>, and then keeps both copies of them. <code>on=</code> with the shared names gives the same rows with one copy.</li>
-    <li>An unknown <code>how</code> raises <code>ValueError</code>. A join that needs <code>on</code> but has none raises <code>TypeError</code>, and so does a condition function that returns something other than an expression.</li>
+    <li><code>how="natural"</code> raises <code>ValueError</code> for the shared columns unless you pass <code>suffix=</code>, and then keeps both copies of them. An inner join with <code>on=</code> the shared names gives the same rows with one copy.</li>
+    <li>An unknown <code>how</code> raises <code>ValueError</code>. A join that needs <code>on</code> but has none raises <code>TypeError</code>, and so do an <code>on</code> given to a cross, positional or natural join and a condition function that returns something other than an expression.</li>
     <li>For type annotations, the sides are <code>Side</code> objects: <code>def condition(left: Side, right: Side) -&gt; Expr</code>, with <code>Side</code> and <code>Expr</code> imported from <code>duckdb.frame</code>.</li>
   </ul>
 </section>
@@ -927,7 +930,7 @@ sql(<span class="s">"SELECT add_up(2) AS three, * FROM orders_over(2000)"</span>
 
 <section id="safety">
   <h2>Values, names and SQL text</h2>
-  <p>Text, bytes, lists, tuples and dicts that you put in a plan, in an expression or in <code>values()</code>, are never pasted into the SQL that runs. They are sent to DuckDB separately, as parameters, so a value cannot change what the query does. Dates, times, intervals, decimals and UUIDs are sent the same way, so they arrive exactly as they are, with the limits listed under "what is refused" on <a href="dbapi.html#values">DB-API 2.0</a>: for example a timestamp with nanoseconds is refused. A <code>Decimal</code> wider than 38 digits raises <code>TypeError</code> here. Numbers, booleans and <code>None</code> are written into the SQL; a Python float is written as a <code>DOUBLE</code>, never a <code>DECIMAL</code>. numpy numbers are not accepted: <code>col("id") == np.int64(3)</code> is a plain <code>False</code>, other operators raise <code>TypeError</code>, and an <code>np.float64</code> makes the query fail with <code>CatalogError</code>, so convert them first with <code>.item()</code>, <code>int()</code> or <code>float()</code>.</p>
+  <p>Text, bytes, lists, tuples and dicts that you put in a plan, in an expression or in <code>values()</code>, are never pasted into the SQL that runs. They are sent to DuckDB separately, as parameters, so a value cannot change what the query does. Dates, times, intervals, decimals and UUIDs are sent the same way, so they arrive exactly as they are, with the limits listed under "what is refused" on <a href="dbapi.html#values">DB-API 2.0</a>: for example a timestamp with nanoseconds is refused. A <code>Decimal</code> wider than 38 digits raises <code>TypeError</code> here. Numbers, booleans and <code>None</code> are written into the SQL; a Python float is written as a <code>DOUBLE</code>, never a <code>DECIMAL</code>. A numpy bool, integer or float, such as <code>np.int64(3)</code> or <code>np.float32(0.5)</code>, counts as the Python value its <code>.item()</code> gives, and so does one passed to a plan with <code>parameters=</code>. A DB-API cursor's <code>execute()</code> does not convert them: there <code>np.int64</code> is refused (see <a href="dbapi.html#values">DB-API 2.0</a>). A value an expression cannot hold, such as a <code>Fraction</code>, raises <code>TypeError</code>, with <code>==</code> and <code>!=</code> as with every other operator.</p>
   <pre><code>name = <span class="s">"x' OR '1'='1"</span>
 orders.filter(col(<span class="s">"customer"</span>) == name).count(con)    <span class="c"># 0: the text is compared as it is</span></code></pre>
   <p>Names are quoted, so a name cannot turn into SQL either:</p>
@@ -1007,7 +1010,7 @@ pivoted.sort(<span class="s">"customer"</span>).rows(con)
     <dt>.drop(*names) / .rename(old="new")</dt><dd>Remove or rename columns. A name the plan does not have raises <code>ValueError</code>.</dd>
     <dt>.sort(*columns)</dt><dd>Order the rows.</dd>
     <dt>.limit(count, offset=0) / .head(count=5) / .offset(count)</dt><dd>Fewer rows.</dd>
-    <dt>.distinct(on=None)</dt><dd>Remove duplicate rows, or keep one row, not a fixed one, for each value of <code>on</code>.</dd>
+    <dt>.distinct(on=None)</dt><dd>Remove duplicate rows, or keep one row for each value of <code>on</code>: right after <code>.sort()</code> the first in that order, otherwise not a fixed one.</dd>
     <dt>.sample(n=None, *, percent=None, seed=None, method=None)</dt><dd>A random selection of rows: give <code>n</code> or <code>percent</code>.</dd>
     <dt>.group_by(*keys).agg(...) / .aggregate(..., group_by=None)</dt><dd>Group and aggregate. Group columns come first.</dd>
     <dt>.join(other, on=None, how="inner", suffix=None)</dt><dd>Join. <code>on</code> is a column name, a list of names, or a function of the two sides.</dd>
