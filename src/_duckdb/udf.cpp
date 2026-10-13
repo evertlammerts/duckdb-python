@@ -95,6 +95,10 @@ cxx::Value DefaultValue(cxx::Connection &connection, const ParameterSpec &parame
 	} catch (const cxx::Exception &) {
 		ThrowInvalidInput(ConversionFailure(subject + " is", any ? nullptr : &type.type));
 	} catch (nb::python_error &error) {
+		// Ctrl-C and SystemExit stop the program, as they do when a query parameter converts.
+		if (!error.matches(PyExc_Exception)) {
+			throw;
+		}
 		ThrowInvalidInput(subject + " cannot be converted: " + DescribePythonError(error));
 	} catch (const std::exception &error) {
 		ThrowInvalidInput(subject + " cannot be converted: " + error.what());

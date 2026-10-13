@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>User-Defined Functions &middot; DuckDB for Python</title>
+<title>Python Functions &middot; DuckDB for Python</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Newsreader:opsz,wght@6..72,400;6..72,600&family=Public+Sans:wght@400;500;600&display=swap">
@@ -13,35 +13,37 @@
 
 <nav class="sitenav">
   <a class="home" href="index.html">duckdb for python</a>
-  <a href="dbapi.html">DB-API 2.0</a>
   <a href="frame.html">Frames &amp; Plans</a>
-  <a class="here" href="udf.html">UDFs</a>
+  <a class="here" href="udf.html">Python Functions</a>
   <a href="extend.html">Macros &amp; Extensions</a>
+  <a href="dbapi.html">DB-API 2.0</a>
+  <a href="changes.html">Coming from 1.5.6</a>
 </nav>
 
 <div class="page">
 
 <header class="top">
   <div class="eyebrow">duckdb for python &middot; user manual</div>
-  <h1>User-defined functions</h1>
-  <p class="standfirst">A <strong>user-defined function</strong> is a Python callable registered as a scalar SQL function on the database. The engine calls it once per row, from its own threads, with the arguments as Python values, and casts what it returns to the type you declared.</p>
+  <h1>Python functions</h1>
+  <p class="standfirst">You can write a function in Python and call it from SQL, like any function DuckDB has. Register it once with <code>con.create_function</code>. DuckDB then calls it with one row's values at a time, as ordinary Python values. By default it skips the call when an argument is NULL, and it may reuse a result instead of calling again: see <a href="#null">NULL</a> and <a href="#stability">Stability</a>.</p>
 </header>
 
 <nav class="toc">
   <ol>
     <li><a href="#start">Start here</a></li>
-    <li><a href="#register">Registering</a></li>
-    <li><a href="#parameters">Parameters</a></li>
-    <li><a href="#annotations">Types from annotations</a></li>
-    <li><a href="#call">Calling it</a></li>
-    <li><a href="#types">What a function receives and returns</a></li>
+    <li><a href="#types">Giving the types</a></li>
+    <li><a href="#parameters">Names and defaults</a></li>
+    <li><a href="#any">Any type: ANY</a></li>
+    <li><a href="#call">Calling your function</a></li>
+    <li><a href="#values">Values in and out</a></li>
     <li><a href="#null">NULL</a></li>
+    <li><a href="#errors">Errors</a></li>
     <li><a href="#stability">Stability</a></li>
     <li><a href="#threads">Threads</a></li>
-    <li><a href="#errors">Errors</a></li>
-    <li><a href="#performance">Performance</a></li>
+    <li><a href="#again">Registering a name again</a></li>
+    <li><a href="#performance">Speed, and when a macro is better</a></li>
+    <li><a href="#more">More about parameters and type hints</a></li>
     <li><a href="#reference">Reference</a></li>
-    <li><a href="#changes">Changes from the old client</a></li>
   </ol>
 </nav>
 
@@ -54,202 +56,242 @@ con = frame.connect()
 con.create_function(<span class="s">"plus_one"</span>, <span class="k">lambda</span> x: x + <span class="s">1</span>, [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT"</span>)
 
 sql(<span class="s">"SELECT plus_one(i) FROM range(5) t(i)"</span>).rows(con)   <span class="c"># [(1,), (2,), (3,), (4,), (5,)]</span></code></pre>
-  <p><code>create_function</code> registers a Python callable as a scalar SQL function on the database. From then on <code>plus_one</code> is a function like any the engine has: it can be called from SQL, from a plan, inside a view, inside a macro.</p>
+  <p><code>range(5) t(i)</code> is a table named <code>t</code> with one column, <code>i</code>, holding the numbers 0 to 4. <code>rows(con)</code> runs the query and returns a list of tuples, one per row. A comment shows what the call returns, as you see it at the Python prompt or in a notebook; in a script, pass the result to <code>print()</code>. <code>create_function</code> is a method of a connection from <code>frame.connect()</code>; a DB-API connection, from <code>duckdb.dbapi</code>, does not have it.</p>
+  <p><code>create_function</code> takes four things here:</p>
+  <ul>
+    <li><code>"plus_one"</code> is the name you call it by in SQL.</li>
+    <li>The <code>lambda</code> is the Python function. Any function works: a <code>def</code>, a lambda, a method, a <code>functools.partial</code>, a closure that remembers values from where it was made. It must not run a query on <code>con</code> itself, see <a href="#errors">Errors</a>.</li>
+    <li><code>["BIGINT"]</code> lists the SQL type of each parameter. There is one parameter here, a whole number. Types are written as text, the way SQL writes them.</li>
+    <li><code>"BIGINT"</code> is the SQL type of the result.</li>
+  </ul>
+  <p>From then on, <code>plus_one</code> works like any DuckDB function: in a query, in a plan (a query you build in Python), in a view, or in a macro (a named piece of SQL). DuckDB turns each argument into a Python value before the call, and turns what you return into a value of the result type.</p>
+  <p>Your function returns one value per call. A list or dict it returns is still one value, not several rows. <code>create_function</code> cannot make a function that returns a table, or one that combines many rows into one value, as <code>sum</code> does.</p>
+  <div class="note">
+    <p><strong>The function belongs to the database, not to the connection.</strong> Every connection to the same database can call it, <code>con.duplicate()</code> included, while any of them is open: after <code>con.close()</code>, a duplicate can still call it. A new <code>frame.connect()</code> opens a different database, which does not have it. Python functions are not saved in a database file, so register them again when you open the file again.</p>
+  </div>
 </section>
 
-<section id="register">
-  <h2>Registering</h2>
-  <pre><code>con.create_function(name, function, parameters=<span class="k">None</span>, returns=<span class="k">None</span>, *, null_handling=<span class="s">"default"</span>, stability=<span class="s">"consistent"</span>)</code></pre>
-  <dl class="ref">
-    <dt>name</dt><dd>The SQL name, a bare string: the engine registers a Python function by its bare name, so it cannot be schema-qualified. Registering the name again with the same parameters, the same types in the same kinds, replaces the function; with other parameters it adds a second version beside the first, and the engine picks between them as for any function with several versions: the one the arguments fit with the cheapest casts, and a call two versions fit equally well is refused as ambiguous.</dd>
-    <dt>function</dt><dd>Any callable: a lambda, a <code>def</code>, a bound method, a <code>functools.partial</code>. Its parameters keep their names, kinds and defaults in SQL; see <a href="#parameters">Parameters</a>. A closure keeps its state.</dd>
-    <dt>parameters</dt><dd>Optional. The argument types, as SQL type text, overriding the annotations: a list for the parameters in order, <code>["VARCHAR", "BIGINT"]</code>, or a dict for some of them by name, <code>{"when": "TIMESTAMPTZ"}</code>. Not Python types. A parameter with neither a type here nor an annotation is <code>ANY</code>, which takes an argument of any type, uncast; see <a href="#annotations">Types from annotations</a> and <a href="#any">ANY</a>.</dd>
-    <dt>returns</dt><dd>Optional. The result type, as SQL type text; without it the return annotation gives it, and one of the two is required.</dd>
-    <dt>null_handling</dt><dd><code>"default"</code> or <code>"special"</code>. See <a href="#null">NULL</a>.</dd>
-    <dt>stability</dt><dd><code>"consistent"</code>, <code>"consistent_within_query"</code> or <code>"volatile"</code>. See <a href="#stability">Stability</a>.</dd>
-  </dl>
+<section id="types">
+  <h2>Giving the types</h2>
+  <p>DuckDB needs the type of each parameter and of the result before it first calls your function. You can give them in three ways: as a list, from the function's type hints, or as a dict for some parameters.</p>
+
+  <h3>A list, in order</h3>
   <pre><code><span class="k">def</span> weave(a, b, c):
     <span class="k">return</span> <span class="s">f"{a}-{b}-{c}"</span>
 
 con.create_function(<span class="s">"weave"</span>, weave, [<span class="s">"VARCHAR"</span>, <span class="s">"BIGINT"</span>, <span class="s">"BOOLEAN"</span>], <span class="s">"VARCHAR"</span>)
-sql(<span class="s">"SELECT weave('x', 7, true)"</span>).rows(con)   <span class="c"># [('x-7-True',)]</span>
+sql(<span class="s">"SELECT weave('x', 7, true)"</span>).rows(con)   <span class="c"># [('x-7-True',)]</span></code></pre>
+  <p>The list has one type per parameter, in order. Each type is SQL type text, such as <code>"DOUBLE"</code>, <code>"DATE"</code>, <code>"VARCHAR[]"</code> or <code>"DECIMAL(18, 2)"</code>, not a Python class. <code>DECIMAL(18, 2)</code> is an exact decimal number with up to 18 digits, 2 of them after the point. DuckDB's documentation lists <a href="https://duckdb.org/docs/stable/sql/data_types/overview">every type</a>.</p>
 
-<span class="k">def</span> shout(text: str, times: int) -&gt; str:
+  <h3>From type hints</h3>
+  <p>Type hints are the <code>: str</code> after a parameter and the <code>-&gt; str</code> after the parentheses. If your function has them, you can leave the types out:</p>
+  <pre><code><span class="k">def</span> shout(text: str, times: int) -&gt; str:
     <span class="k">return</span> text.upper() * times
 
-con.create_function(<span class="s">"shout"</span>, shout)   <span class="c"># VARCHAR, BIGINT -&gt; VARCHAR, from the annotations</span>
-
-prefix = <span class="s">"state"</span>
-con.create_function(<span class="s">"tag"</span>, <span class="k">lambda</span> x: <span class="s">f"{prefix}:{x}"</span>, [<span class="s">"BIGINT"</span>], <span class="s">"VARCHAR"</span>)
-sql(<span class="s">"SELECT tag(1)"</span>).rows(con)   <span class="c"># [('state:1',)]</span></code></pre>
-  <p>Everything is checked when you register, so a mistake is reported here and not at the first call: a type that does not exist raises <code>CatalogError</code> naming it, and an <code>ANY</code> return type, from <code>returns</code> or from <code>-&gt; typing.Any</code>, is refused with <code>InvalidInputError</code>: <code>an ANY return type is not supported yet</code>, since the result type must be known before the function is first called. <code>InvalidInputError</code> also refuses a list with more types than parameters, a shorter list past which a parameter has no default, a dict naming no parameter, an annotation no type is read from, a default its parameter cannot hold, and an option that is not one of the choices above. A <code>function</code> that is not callable, or a <code>parameters</code> that is neither a list nor a dict, raises <code>TypeError</code>. A closed connection raises <code>InterfaceError</code>. Inside a transaction you opened, a registration the engine refuses, for a type text it does not know or a default its parameter cannot hold, aborts the transaction, as a failed statement does: the next statement fails until you <code>ROLLBACK</code>.</p>
-  <div class="note">
-    <p><strong>The function belongs to the database, not to the connection.</strong> Every connection to that database sees it, <code>con.duplicate()</code> included, and the engine keeps it until the database closes. There is no way to remove one; register the same name again to replace it. A fresh <code>duckdb.frame.connect()</code> is a different database, and does not have it.</p>
-  </div>
-</section>
-
-<section id="parameters">
-  <h2>Parameters</h2>
-  <p>Each parameter keeps its kind, its name and its default, so a call from SQL reaches the function as the same call from Python would. DuckDB's parameter kinds are Python's:</p>
+con.create_function(<span class="s">"shout"</span>, shout)
+sql(<span class="s">"SELECT shout('hi', 3)"</span>).rows(con)   <span class="c"># [('HIHIHI',)]</span></code></pre>
+  <p>Here <code>str</code> means <code>VARCHAR</code> and <code>int</code> means <code>BIGINT</code>. Each hint gives the SQL type DuckDB uses for a Python value of that class:</p>
   <div class="tablewrap">
     <table>
-      <thead><tr><th>Python parameter</th><th>Passed from SQL</th></tr></thead>
-      <tbody>
-        <tr><td>before <code>/</code>, positional-only</td><td>by position only</td></tr>
-        <tr><td>plain, positional or keyword</td><td>by position, or by name: <code>f(x := 1)</code> or <code>f(x =&gt; 1)</code></td></tr>
-        <tr><td><code>*args</code></td><td>the positional arguments left over, as a tuple</td></tr>
-        <tr><td>after <code>*</code> or <code>*args</code>, keyword-only</td><td>by name only</td></tr>
-        <tr><td><code>**kwargs</code></td><td>the named arguments no other parameter takes, as a dict</td></tr>
-      </tbody>
-    </table>
-  </div>
-  <pre><code><span class="k">def</span> label(value, /, prefix=<span class="s">"id"</span>, *parts, sep=<span class="s">"-"</span>, **extra):
-    tags = <span class="s">""</span>.join(<span class="s">f"[{k}={v}]"</span> <span class="k">for</span> k, v <span class="k">in</span> extra.items())
-    <span class="k">return</span> sep.join([prefix, str(value), *map(str, parts)]) + tags
-
-con.create_function(<span class="s">"label"</span>, label, returns=<span class="s">"VARCHAR"</span>)
-sql(<span class="s">"SELECT label(7)"</span>).rows(con)                                      <span class="c"># [('id-7',)]</span>
-sql(<span class="s">"SELECT label(7, 'x', 1, 2, sep := '/', loud := true)"</span>).rows(con)   <span class="c"># [('x/7/1/2[loud=True]',)]</span></code></pre>
-  <p>A call that does not fit the signature, one missing a parameter without a default, naming one that does not exist, passing too many positional arguments, or a positional one after a named one, is refused when the query is planned with <code>ProgrammingError</code>. Where no version of the function fits, the message shows the signature as the engine sees it, in Python's notation; a positional argument after a named one, or a name given twice, gets a message of its own.</p>
-  <p>Names are matched ignoring case, as everywhere in DuckDB: <code>f(Value := 1)</code> reaches a parameter <code>value</code>, and two parameters whose names differ only in case cannot be registered. A name <code>**kwargs</code> receives keeps the spelling the caller wrote. A positional-only parameter's name is not visible to callers, so a named argument of the same name goes to <code>**kwargs</code>, as in Python.</p>
-  <p>The type of <code>*args</code> is the type of each extra positional argument, and that of <code>**kwargs</code> the type of each extra named one, as their annotations mean in Python: <code>*rest: int</code> casts every extra argument to <code>BIGINT</code>.</p>
-
-  <h3>Defaults</h3>
-  <p>A parameter with a default may be left out, and the function then receives its default. The default is converted when you register: to a declared type by the same rules as a returned value, so <code>x: float = 1</code> arrives as <code>1.0</code>; for an <code>ANY</code> parameter as a query parameter would be, keeping its own type. A default its parameter cannot hold, or one that is no SQL value at all, such as a <code>sentinel = object()</code>, is refused at registration naming the parameter. The function receives a fresh copy of the default on every call, so a list or dict default, nested ones included, is never shared between calls. The conversion happens once, with the settings of the connection registering the function, as Python evaluates a default once when the <code>def</code> runs: a text default for a <code>TIMESTAMPTZ</code> parameter is read in that connection's time zone, and every connection then receives that instant.</p>
-  <div class="note">
-    <p><strong>A default of <code>None</code> is a NULL argument.</strong> Under <code>null_handling="default"</code> a call that leaves the parameter out is NULL without calling the function, as is any NULL argument; register with <code>null_handling="special"</code> for the function to receive <code>None</code>. See <a href="#null">NULL</a>.</p>
-  </div>
-
-  <h3>Giving some types</h3>
-  <p>A list of types goes through the parameters in order, <code>*args</code> and <code>**kwargs</code> included. A dict gives the types of some parameters by name, and the others are read from their annotations.</p>
-  <p>A list may stop before the last parameter. SQL then sees only the parameters it covers, and Python fills in the rest from their defaults, as for any call that leaves them out; each of them needs a default, or must be <code>*args</code> or <code>**kwargs</code>, which receive nothing. This is how a default that only keeps a value for the function stays out of SQL:</p>
-  <pre><code><span class="k">for</span> offset <span class="k">in</span> range(<span class="s">3</span>):
-    con.create_function(<span class="s">f"plus_{offset}"</span>, <span class="k">lambda</span> x, offset=offset: x + offset, [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT"</span>)
-sql(<span class="s">"SELECT plus_2(1)"</span>).rows(con)   <span class="c"># [(3,)]; plus_2(1, 5) is refused, SQL has no offset</span></code></pre>
-  <p>Such a default is the function's own object, held on the function since it was defined: every call, on every engine thread, gets that same object, as it gets the objects a closure or a global names. A default SQL sees is different: it is converted to a SQL value at registration and arrives as a fresh Python value on each call. See <a href="#threads">Threads</a> for what sharing an object across threads asks of it.</p>
-  <p>A type in the list may carry the kind's mark, <code>"*BIGINT"</code> for <code>*args</code> and <code>"**BIGINT"</code> for <code>**kwargs</code>; one that does not match the parameter's kind is refused.</p>
-
-  <h3>Callables without a signature</h3>
-  <p>Some built-in functions, such as <code>max</code> and <code>dict</code>, have no signature Python can read. For them <code>parameters</code> must be a list, its plain types positional-only parameters, then at most one <code>"*T"</code> giving the type of extra positional arguments, then at most one <code>"**T"</code> giving the type of extra named ones; <code>returns</code> is then required.</p>
-  <pre><code>con.create_function(<span class="s">"biggest"</span>, max, [<span class="s">"*BIGINT"</span>], <span class="s">"BIGINT"</span>)
-con.create_function(<span class="s">"pack"</span>, dict, [<span class="s">"**BIGINT"</span>], <span class="s">"MAP(VARCHAR, BIGINT)"</span>)
-sql(<span class="s">"SELECT biggest(1, 5, 3), pack(a := 1, b := 2)"</span>).rows(con)   <span class="c"># [(5, {'a': 1, 'b': 2})]</span></code></pre>
-</section>
-
-<section id="annotations">
-  <h2>Types from annotations</h2>
-  <p>A parameter <code>parameters</code> gives no type for takes it from its annotation, and one without an annotation is <code>ANY</code>. The return type is read the same way when <code>returns</code> is left out. An annotation names the type a value of that class gets as a query parameter:</p>
-  <div class="tablewrap">
-    <table>
-      <thead><tr><th>Annotation</th><th>SQL type</th></tr></thead>
+      <thead><tr><th>Type hint</th><th>SQL type</th></tr></thead>
       <tbody>
         <tr><td><code>bool</code>, <code>int</code>, <code>float</code>, <code>str</code>, <code>bytes</code></td><td><code>BOOLEAN</code>, <code>BIGINT</code>, <code>DOUBLE</code>, <code>VARCHAR</code>, <code>BLOB</code></td></tr>
         <tr><td><code>datetime</code>, <code>date</code>, <code>time</code>, <code>timedelta</code>, <code>UUID</code></td><td><code>TIMESTAMP</code>, <code>DATE</code>, <code>TIME</code>, <code>INTERVAL</code>, <code>UUID</code></td></tr>
-        <tr><td><code>list[T]</code>, <code>tuple[T, ...]</code></td><td><code>T[]</code></td></tr>
-        <tr><td><code>dict[K, V]</code></td><td><code>MAP(K, V)</code></td></tr>
-        <tr><td><code>T | None</code>, <code>Optional[T]</code></td><td><code>T</code>; every SQL value can be NULL</td></tr>
-        <tr><td><code>typing.Any</code>, or none</td><td><code>ANY</code></td></tr>
+        <tr><td><code>list[T]</code>, <code>tuple[T, ...]</code></td><td>a list of <code>T</code>, written <code>T[]</code></td></tr>
+        <tr><td><code>dict[K, V]</code></td><td><code>MAP(K, V)</code>, DuckDB's type for keys and values</td></tr>
+        <tr><td><code>T | None</code>, <code>Optional[T]</code></td><td>the type for <code>T</code>, since any SQL value can be NULL</td></tr>
+        <tr><td><code>typing.Any</code>, or no hint</td><td><code>ANY</code>: a value of any type, see <a href="#any">ANY</a></td></tr>
       </tbody>
     </table>
   </div>
-  <p>The classes are matched exactly: a subclass, an <code>IntEnum</code> say, is a different annotation, since the function would be handed the base class's values and not its own. A <code>datetime</code> is <code>TIMESTAMP</code>, without a time zone, so a <code>TIMESTAMPTZ</code> argument does not fit it; give <code>"TIMESTAMPTZ"</code> in <code>parameters</code> for that. An annotation in quotes, or under <code>from __future__ import annotations</code>, is evaluated as Python evaluates it.</p>
-  <p>Anything else is refused at registration with <code>InvalidInputError</code> naming the parameter and the reason, unless <code>parameters</code> gives that parameter's type: a <code>Decimal</code>, whose width and scale its class does not say, a bare <code>list</code>, <code>tuple</code> or <code>dict</code>, a union of two types, <code>ANY</code> inside another type, and any other class.</p>
-  <p>Python evaluates a function's annotations together, so when one cannot be evaluated, a name that is only imported for type checking say, none of them is read: every parameter with an annotation, and the return, then needs its type in <code>parameters</code> and <code>returns</code>, and the refusal names the annotation and Python's error. On Python 3.14 an annotation whose code raises an error other than a missing name leaves Python no signature at all, and the registration is refused whatever <code>parameters</code> gives.</p>
-  <pre><code><span class="k">def</span> price(amount: Decimal, when: datetime) -&gt; str:
-    ...
+  <p><code>T</code>, <code>K</code> and <code>V</code> stand for a type from the table other than <code>Any</code>, which only a whole parameter can have: <code>list[int]</code> means <code>BIGINT[]</code>, and <code>dict[str, int]</code> means <code>MAP(VARCHAR, BIGINT)</code>. An optional hint such as <code>int | None</code> only picks the SQL type. It does not make DuckDB pass a NULL, SQL's missing value, to your function as <code>None</code>: <code>null_handling="special"</code> does that (see <a href="#null">NULL</a>).</p>
+  <p>The result type works the same way: give <code>returns</code>, or a return hint such as <code>-&gt; str</code>. You need one of the two. Without either, <code>create_function</code> raises <code>InvalidInputError</code>.</p>
 
-con.create_function(<span class="s">"price"</span>, price, {<span class="s">"amount"</span>: <span class="s">"DECIMAL(18, 2)"</span>, <span class="s">"when"</span>: <span class="s">"TIMESTAMPTZ"</span>})</code></pre>
+  <h3>A dict, for some parameters</h3>
+  <p>Some hints have no single SQL type. A <code>Decimal</code>, for example, does not say how many digits it has. For such a hint <code>create_function</code> raises <code>InvalidInputError</code> and names the parameter. Give that parameter's type in a dict, by name. The others still come from their hints:</p>
+  <pre><code><span class="k">from</span> datetime <span class="k">import</span> datetime
+<span class="k">from</span> decimal <span class="k">import</span> Decimal
+
+<span class="k">def</span> price(amount: Decimal, when: datetime) -&gt; str:
+    <span class="k">return</span> <span class="s">f"{amount} on {when:%Y-%m-%d}"</span>
+
+con.create_function(<span class="s">"price"</span>, price, {<span class="s">"amount"</span>: <span class="s">"DECIMAL(18, 2)"</span>, <span class="s">"when"</span>: <span class="s">"TIMESTAMPTZ"</span>})
+sql(<span class="s">"SELECT price(9.99, TIMESTAMPTZ '2026-03-01 10:00:00+00')"</span>).rows(con)   <span class="c"># [('9.99 on 2026-03-01',)]</span></code></pre>
+  <p>The dict also changes a hint that works but is not what you want. A <code>datetime</code> hint means <code>TIMESTAMP</code>, a timestamp without a time zone, and a <code>TIMESTAMPTZ</code> value does not fit it. The dict above makes <code>when</code> a <code>TIMESTAMPTZ</code> instead.</p>
+  <p>These hints are refused unless you give the type:</p>
+  <ul>
+    <li><code>Decimal</code>: give the digits you need, for example <code>"DECIMAL(18, 2)"</code>.</li>
+    <li>A bare <code>list</code>, <code>tuple</code> or <code>dict</code>, which does not say what it holds. Write <code>list[int]</code> instead, or give the type.</li>
+    <li>A choice of two types, such as <code>int | str</code>.</li>
+    <li>Any other class, your own classes included.</li>
+  </ul>
+
+  <h3>Details</h3>
+  <ul>
+    <li>The classes in the table must match exactly. A subclass, such as an <code>IntEnum</code>, is refused, because your function would receive plain values and not members of your class.</li>
+    <li>A tuple of fixed length, such as <code>tuple[int, str]</code>, is refused, and so is <code>typing.Any</code> inside another type, such as <code>list[Any]</code>.</li>
+    <li>The result cannot be <code>ANY</code>, whether from <code>returns="ANY"</code> or from <code>-&gt; typing.Any</code>. That raises <code>InvalidInputError: an ANY return type is not supported yet</code>, because DuckDB must know the result type before the first call.</li>
+  </ul>
 </section>
 
-<section id="call">
-  <h2>Calling it</h2>
-  <p>From SQL, on any plan or statement that runs on the connection:</p>
-  <pre><code>sql(<span class="s">"SELECT plus_one(i) FROM range(3) t(i)"</span>).rows(con)
-con.run(<span class="s">"CREATE TABLE next_ids AS SELECT plus_one(id) AS id FROM orders"</span>)</code></pre>
-  <p>From a plan, through <code>fn</code>, which calls any function by name; a registered function is one:</p>
-  <pre><code><span class="k">from</span> duckdb.frame <span class="k">import</span> col, fn, table
+<section id="parameters">
+  <h2>Names and defaults</h2>
+  <p>Your function's parameters keep their names and their defaults in SQL. A call from SQL reaches your function the way the same call from Python would.</p>
+  <pre><code><span class="k">def</span> area(width: float, height: float = <span class="s">1</span>) -&gt; float:
+    <span class="k">return</span> width * height
 
-table(<span class="s">"orders"</span>).with_columns(next_id=fn(<span class="s">"plus_one"</span>, col(<span class="s">"id"</span>))).rows(con)
-table(<span class="s">"orders"</span>).filter(fn(<span class="s">"plus_one"</span>, col(<span class="s">"id"</span>)) &gt; <span class="s">1</span>).rows(con)
-table(<span class="s">"orders"</span>).select(fn(<span class="s">"label"</span>, col(<span class="s">"id"</span>), sep=<span class="s">"/"</span>)).rows(con)   <span class="c"># label("id", "sep" := '/')</span>
+con.create_function(<span class="s">"area"</span>, area)
+sql(<span class="s">"SELECT area(3), area(3, 2), area(height := 4, width := 2)"</span>).rows(con)   <span class="c"># [(3.0, 6.0, 8.0)]</span></code></pre>
+  <p><code>area(3)</code> leaves <code>height</code> out, so your function gets its default. To pass an argument by name in SQL, write <code>name := value</code> or <code>name =&gt; value</code>: <code>area(height := 4, width := 2)</code> is <code>area(height=4, width=2)</code> in Python. <code>*args</code>, <code>**kwargs</code> and Python's other kinds of parameter work too: see <a href="#more">More about parameters and type hints</a>.</p>
 
-sql(<span class="s">"SELECT plus_one(3) AS v"</span>).types(con)   <span class="c"># ['BIGINT']: the engine knows it like any function</span></code></pre>
-  <p>The call renders as <code>plus_one("id")</code> in the SQL, and nothing about it differs from a call to an engine function. DuckDB matches the arguments to the declared parameters as it does for every function: a <code>TINYINT</code> or an <code>INTEGER</code> passed to a <code>BIGINT</code> parameter is cast on the way in; a <code>DECIMAL</code> passed to it is refused when the query is planned, with the usual <code>ProgrammingError</code> that no function matches the given name and argument types.</p>
+  <p>A call that does not fit is refused with <code>ProgrammingError</code> before the query runs. That happens for a missing argument, a name the function does not have, too many positional arguments, or a positional argument after a named one. The message lists the parameters:</p>
+  <pre><code>sql(<span class="s">"SELECT area(3, depth := 2)"</span>).rows(con)
+<span class="c"># ProgrammingError: Binder Error: No function matches the given name and argument types</span>
+<span class="c"># 'area(INTEGER_LITERAL, "depth" := INTEGER_LITERAL)'. You might need to add explicit type casts.</span>
+<span class="c">#     Candidate functions:</span>
+<span class="c">#     area(width DOUBLE, height DOUBLE := 1.0) -&gt; DOUBLE</span></code></pre>
+
+  <h3>Defaults</h3>
+  <p>A default is turned into a value of its parameter's SQL type once, when you register. A default the type cannot hold is reported then, with <code>InvalidInputError</code> naming the parameter, and not at the first call. Each call gets a fresh copy of the default, so a list or dict default, even one inside another, is never shared between calls, unlike in plain Python:</p>
+  <pre><code><span class="k">def</span> collect(item: int, bag: list[int] = []) -&gt; int:
+    bag.append(item)
+    <span class="k">return</span> len(bag)
+
+con.create_function(<span class="s">"collect"</span>, collect)
+sql(<span class="s">"SELECT collect(i) FROM range(3) t(i)"</span>).rows(con)   <span class="c"># [(1,), (1,), (1,)]</span></code></pre>
+  <div class="note">
+    <p><strong>A default of <code>None</code> counts as a NULL argument.</strong> By default, DuckDB does not call your function when an argument is NULL, and the result is NULL. So a call that leaves out a parameter whose default is <code>None</code> returns NULL without calling your function. Register with <code>null_handling="special"</code> to receive the <code>None</code>. See <a href="#null">NULL</a>.</p>
+  </div>
+
+  <h3>Details</h3>
+  <ul>
+    <li>Names are matched ignoring case, as everywhere in DuckDB: <code>area(WIDTH := 2)</code> reaches <code>width</code>. So two parameters whose names differ only in case, as in <code>def f(a, A)</code>, are refused with <code>InvalidInputError</code> when you register.</li>
+    <li>A positional argument after a named one, or the same name given twice, gets an error message of its own, which says just that.</li>
+    <li>A default for a typed parameter is converted the way a returned value is (see <a href="#values">Values in and out</a>), so <code>x: float = 1</code> arrives as <code>1.0</code>. A default for an <code>ANY</code> parameter keeps its own type, so a <code>date</code> default arrives as a <code>date</code>.</li>
+    <li>A default that is not a SQL value at all, such as <code>object()</code>, is refused when you register, with <code>InvalidInputError</code> naming the parameter.</li>
+    <li>A default is converted with the settings of the connection that registers the function. A text default for a <code>TIMESTAMPTZ</code> parameter is read in that connection's <code>TimeZone</code> setting, and every connection then gets that same moment in time.</li>
+  </ul>
 </section>
 
 <section id="any">
-  <h2>ANY</h2>
-  <p>A parameter declared <code>ANY</code> takes whatever the caller passes, without the cast a declared type brings: <code>f(1)</code> hands the function an <code>int</code>, <code>f('x')</code> a <code>str</code>, <code>f([1, 2])</code> a <code>list</code>, and <code>f(NULL)</code> follows the <a href="#null">NULL handling</a>. Each place a query calls the function converts by the type passed there, so one function can serve several types in one query, and the value arrives as the table below gives it for that type, as a query returning it would. A parameter declared beside it is still cast.</p>
+  <h2>Any type: ANY</h2>
+  <p>A parameter of type <code>ANY</code> takes a value of any SQL type. DuckDB does not cast it to another SQL type first, but it still turns it into a Python value, as for any parameter. A parameter with no type in <code>parameters</code> and no hint is <code>ANY</code>, and so is one hinted <code>typing.Any</code>.</p>
   <pre><code>con.create_function(<span class="s">"kind"</span>, <span class="k">lambda</span> x: type(x).__name__, [<span class="s">"ANY"</span>], <span class="s">"VARCHAR"</span>)
 sql(<span class="s">"SELECT kind(1), kind('x'), kind([1]), kind(DATE '2026-01-02')"</span>).rows(con)   <span class="c"># [('int', 'str', 'list', 'date')]</span></code></pre>
+  <p>Each value arrives as the Python value for its own SQL type, as in the table under <a href="#values">Values in and out</a>. So one function can take different types, even in the same query. A NULL follows the <a href="#null">NULL handling</a>. Other parameters of the same function still convert their values to their own types. Only parameters can be <code>ANY</code>: the result needs a real type.</p>
 </section>
 
-<section id="types">
-  <h2>What a function receives and returns</h2>
-  <p>Each argument arrives as the Python value its SQL type fetches as. The same conversion serves <code>rows()</code>, so a value looks the same inside the function as it does in a fetched row.</p>
+<section id="call">
+  <h2>Calling your function</h2>
+  <p>Call it in SQL, in any query or statement on a connection to the database. <code>con.run</code> runs a statement and returns the number of rows it changed; for a query's rows, use <code>sql(...).rows(con)</code>:</p>
+  <pre><code><span class="k">from</span> duckdb.frame <span class="k">import</span> col, fn, table
 
-  <p class="lead-in">in</p>
+con.run(<span class="s">"CREATE TABLE orders (id INTEGER, customer VARCHAR, total DECIMAL(6,2))"</span>)
+con.run(<span class="s">"INSERT INTO orders VALUES (1, 'acme', 1400), (2, 'bolt', 320)"</span>)
+
+sql(<span class="s">"SELECT id, plus_one(id) AS next_id FROM orders"</span>).rows(con)   <span class="c"># [(1, 2), (2, 3)]</span>
+con.run(<span class="s">"CREATE TABLE next_ids AS SELECT plus_one(id) AS id FROM orders"</span>)   <span class="c"># 2</span></code></pre>
+  <p>In a plan (a query you build in Python, see <a href="frame.html">Frames &amp; Plans</a>), call it with <code>fn</code>, which calls any DuckDB function by name. Keyword arguments to <code>fn</code> are passed by name:</p>
+  <pre><code>table(<span class="s">"orders"</span>).select(col(<span class="s">"id"</span>), fn(<span class="s">"plus_one"</span>, col(<span class="s">"id"</span>)).alias(<span class="s">"next_id"</span>)).rows(con)   <span class="c"># [(1, 2), (2, 3)]</span>
+table(<span class="s">"orders"</span>).filter(fn(<span class="s">"plus_one"</span>, col(<span class="s">"id"</span>)) &gt; <span class="s">2</span>).rows(con)   <span class="c"># [(2, 'bolt', Decimal('320.00'))]</span>
+table(<span class="s">"orders"</span>).select(fn(<span class="s">"area"</span>, col(<span class="s">"id"</span>), height=<span class="s">2</span>).alias(<span class="s">"a"</span>)).rows(con)   <span class="c"># [(2.0,), (4.0,)]</span>
+fn(<span class="s">"area"</span>, col(<span class="s">"id"</span>), height=<span class="s">2</span>)   <span class="c"># &lt;Expr area("id", "height" := 2)&gt;</span></code></pre>
+  <p><code>types(con)</code> gives a plan's column types from the declared result type, without running the query:</p>
+  <pre><code>sql(<span class="s">"SELECT plus_one(3) AS v"</span>).types(con)   <span class="c"># ['BIGINT']</span></code></pre>
+  <p>While it works the types out, DuckDB may still call your function when its arguments are fixed values: <code>sql("SELECT plus_one(3) + 1 AS v").types(con)</code> calls it once.</p>
+  <p>Arguments are converted to the parameter types, as for any DuckDB function. DuckDB makes some conversions by itself: an <code>INTEGER</code> passed to a <code>BIGINT</code> parameter is widened, and a whole number or a <code>DECIMAL</code> passed to a <code>DOUBLE</code> parameter becomes a <code>float</code>. Some of these lose precision. <code>9007199254740993::BIGINT</code> arrives in a <code>DOUBLE</code> parameter as <code>9007199254740992.0</code>, and a <code>DECIMAL</code> with three digits after the point is rounded to two for a <code>DECIMAL(18, 2)</code> parameter. Other conversions DuckDB does not make by itself, such as a <code>DECIMAL</code> or a <code>DOUBLE</code> to a <code>BIGINT</code>, or a number to <code>VARCHAR</code>. Such a call is refused with <code>ProgrammingError</code> before the query runs:</p>
+  <pre><code>table(<span class="s">"orders"</span>).select(fn(<span class="s">"plus_one"</span>, col(<span class="s">"total"</span>))).rows(con)
+<span class="c"># ProgrammingError: Binder Error: No function matches the given name and argument types 'plus_one(DECIMAL(6,2))'.</span>
+<span class="c"># You might need to add explicit type casts.</span>
+<span class="c">#     Candidate functions:</span>
+<span class="c">#     plus_one(x BIGINT) -&gt; BIGINT</span></code></pre>
+  <p>Convert it yourself when that is what you mean:</p>
+  <pre><code>table(<span class="s">"orders"</span>).select(fn(<span class="s">"plus_one"</span>, col(<span class="s">"total"</span>).cast(<span class="s">"BIGINT"</span>))).rows(con)   <span class="c"># [(1401,), (321,)]</span></code></pre>
+
+  <h3>On a pandas DataFrame</h3>
+  <p>To use your function on your own data, register the DataFrame as a table, call the function in a query, and get the result back as a DataFrame:</p>
+  <pre><code><span class="k">import</span> pandas <span class="k">as</span> pd
+
+people = pd.DataFrame({<span class="s">"name"</span>: [<span class="s">"ann"</span>, <span class="s">"bob"</span>]})
+con.register(<span class="s">"people"</span>, people)
+sql(<span class="s">"SELECT name, shout(name, 2) AS loud FROM people"</span>).to_pandas(con)
+<span class="c">#   name    loud</span>
+<span class="c"># 0  ann  ANNANN</span>
+<span class="c"># 1  bob  BOBBOB</span></code></pre>
+  <p>Watch out for whole numbers with a missing value. pandas stores such a column as <code>float64</code>, so DuckDB reads it as <code>DOUBLE</code>, and <code>plus_one</code> refuses it with <code>ProgrammingError</code>. pandas' nullable <code>"Int64"</code> dtype keeps the column whole numbers, and the missing value arrives as NULL:</p>
+  <pre><code>ages = pd.DataFrame({<span class="s">"age"</span>: pd.Series([<span class="s">20</span>, <span class="k">None</span>], dtype=<span class="s">"Int64"</span>)})
+con.register(<span class="s">"ages"</span>, ages)
+table(<span class="s">"ages"</span>).types(con)                        <span class="c"># ['BIGINT']</span>
+sql(<span class="s">"SELECT plus_one(age) FROM ages"</span>).rows(con)   <span class="c"># [(21,), (None,)]</span></code></pre>
+  <p><a href="frame.html#python">Querying Python data</a> tells you what else you can register, such as a polars DataFrame.</p>
+</section>
+
+<section id="values">
+  <h2>Values in and out</h2>
+  <p>Each argument arrives as the same Python value <code>rows()</code> would give you for it. So a value looks the same inside your function as in a row you fetch.</p>
   <div class="tablewrap">
     <table>
-      <thead><tr><th>Declared parameter</th><th>Arrives as</th></tr></thead>
+      <thead><tr><th>SQL type</th><th>Arrives in your function as</th></tr></thead>
       <tbody>
         <tr><td><code>BOOLEAN</code></td><td><code>bool</code></td></tr>
-        <tr><td><code>TINYINT</code> to <code>BIGINT</code>, the unsigned ones, <code>HUGEINT</code>, <code>UHUGEINT</code></td><td><code>int</code>, exact at every width</td></tr>
+        <tr><td><code>TINYINT</code> to <code>BIGINT</code>, the unsigned ones, <code>HUGEINT</code>, <code>UHUGEINT</code></td><td><code>int</code>, exact at every size</td></tr>
         <tr><td><code>FLOAT</code>, <code>DOUBLE</code></td><td><code>float</code></td></tr>
-        <tr><td><code>DECIMAL(p,s)</code></td><td><code>decimal.Decimal</code>, with its scale: <code>Decimal('1.250')</code> for a <code>DECIMAL(9,3)</code></td></tr>
-        <tr><td><code>VARCHAR</code>, an <code>ENUM</code></td><td><code>str</code></td></tr>
+        <tr><td><code>DECIMAL(p,s)</code></td><td><code>decimal.Decimal</code>, with its digits after the point: <code>Decimal('1.250')</code> for a <code>DECIMAL(9,3)</code></td></tr>
+        <tr><td><code>VARCHAR</code>, and an <code>ENUM</code> (text from a fixed list of allowed values)</td><td><code>str</code></td></tr>
         <tr><td><code>BLOB</code></td><td><code>bytes</code></td></tr>
         <tr><td><code>DATE</code></td><td><code>datetime.date</code></td></tr>
-        <tr><td><code>TIME</code>, <code>TIMETZ</code></td><td><code>datetime.time</code>; <code>TIMETZ</code> carries its offset as <code>tzinfo</code></td></tr>
-        <tr><td><code>TIMESTAMP</code>, <code>TIMESTAMP_S</code>, <code>TIMESTAMP_MS</code>, <code>TIMESTAMP_NS</code></td><td>naive <code>datetime.datetime</code>; nanoseconds are floored to the microsecond</td></tr>
-        <tr><td><code>TIMESTAMPTZ</code></td><td>aware <code>datetime.datetime</code>, in UTC</td></tr>
+        <tr><td><code>TIME</code>, <code>TIME_NS</code>, <code>TIMETZ</code></td><td><code>datetime.time</code>, nanoseconds rounded down; a <code>TIMETZ</code> carries its offset as <code>tzinfo</code></td></tr>
+        <tr><td><code>TIMESTAMP</code>, <code>TIMESTAMP_S</code>, <code>TIMESTAMP_MS</code>, <code>TIMESTAMP_NS</code></td><td><code>datetime.datetime</code> without a time zone; nanoseconds are rounded down to the microsecond</td></tr>
+        <tr><td><code>TIMESTAMPTZ</code>, <code>TIMESTAMPTZ_NS</code></td><td><code>datetime.datetime</code> with a time zone, in UTC</td></tr>
         <tr><td><code>INTERVAL</code></td><td><code>datetime.timedelta</code>; a month counts as 30 days</td></tr>
         <tr><td><code>UUID</code></td><td><code>uuid.UUID</code></td></tr>
-        <tr><td><code>T[]</code>, <code>T[n]</code></td><td><code>list</code></td></tr>
-        <tr><td><code>STRUCT(...)</code></td><td><code>dict</code>, keyed by field name</td></tr>
-        <tr><td><code>MAP(K, V)</code></td><td><code>dict</code>; when <code>K</code> is a list, struct or map type, a <code>list</code> of <code>(key, value)</code> pairs</td></tr>
-        <tr><td><code>UNION(...)</code></td><td>the value of the member that is set</td></tr>
-        <tr><td><code>BIT</code>, and anything not listed</td><td><code>str</code>, the value's SQL text</td></tr>
+        <tr><td>a list, <code>T[]</code>, or an array of fixed length, <code>T[n]</code></td><td><code>list</code></td></tr>
+        <tr><td><code>STRUCT(...)</code>, DuckDB's record type</td><td><code>dict</code>, keyed by field name</td></tr>
+        <tr><td><code>MAP(K, V)</code></td><td><code>dict</code>; when the keys are lists, structs or maps, a <code>list</code> of <code>(key, value)</code> pairs</td></tr>
+        <tr><td><code>UNION(...)</code>, a value that can be one of several types</td><td>the value it holds</td></tr>
+        <tr><td><code>BIT</code>, <code>BIGNUM</code>, <code>JSON</code>, <code>VARIANT</code>, <code>GEOMETRY</code></td><td><code>str</code>, the value as SQL writes it</td></tr>
       </tbody>
     </table>
   </div>
+  <p>What your function returns is converted to the result type you declared, the way SQL's <code>CAST</code> converts a value of the type in the second table below. A <code>float</code> is a <code>DOUBLE</code> there, so for an <code>INTEGER</code> it becomes the nearest whole number, and a value exactly halfway becomes the even one:</p>
+  <pre><code>con.create_function(<span class="s">"half"</span>, <span class="k">lambda</span> x: x / <span class="s">2</span>, [<span class="s">"BIGINT"</span>], <span class="s">"INTEGER"</span>)
+sql(<span class="s">"SELECT half(9), half(11)"</span>).rows(con)   <span class="c"># [(4, 6)]: 4.5 becomes 4, and 5.5 becomes 6</span>
 
-  <p class="lead-in">out</p>
-  <p>The value the function returns is read by its Python type first, then cast to <code>returns</code> by the engine's own cast, as <code>CAST</code> would, except for dates and times and for structs. A date or timestamp that <code>returns</code> cannot hold exactly is refused rather than rounded, and a date or time without a time zone returned for a type with one, or the reverse, is refused, since the cast would assume a time zone. So is a timestamp with a time zone returned for a time of day, which it has only in a time zone chosen for it; a timestamp without one returned for a <code>TIME</code> drops its date. These hold at any depth. A list meets an element type holding a date, a time or a struct one element at a time. A dict meets a <code>STRUCT</code> as the engine's cast pairs them: by field name, ignoring case, or by position when the first name is empty; a field no declared name takes is dropped unread. A value returned for a <code>UNION</code> is read whole, as its own type, and the engine's cast puts it in a member as an implicit <code>CAST</code> does: the one it converts to most cheaply, and refused when there is none or two tie. So a dict goes in a struct member only with the same fields, none dropped or added, and an <code>int</code>, read as a <code>BIGINT</code>, does not go in an <code>INTEGER</code> member. A date or time inside is then held to the rules above in the member the cast chose, and the value refused if it breaks them; another member is never tried. So a timestamp without a time zone is refused for <code>UNION(z TIMESTAMPTZ, s VARCHAR)</code>, where the cast would assume one. A string is a string, not a date or time: text returned for <code>TIMESTAMPTZ</code> is read in the session's time zone, exactly as SQL's <code>CAST</code> reads the same text.</p>
+con.create_function(<span class="s">"as_date"</span>, <span class="k">lambda</span> x: <span class="s">f"2020-01-0{x}"</span>, [<span class="s">"BIGINT"</span>], <span class="s">"DATE"</span>)
+sql(<span class="s">"SELECT as_date(5)"</span>).rows(con)   <span class="c"># [(datetime.date(2020, 1, 5),)]: the text becomes a DATE</span>
+
+con.create_function(<span class="s">"wide"</span>, <span class="k">lambda</span> x: <span class="s">2</span>**<span class="s">70</span>, [<span class="s">"BIGINT"</span>], <span class="s">"INTEGER"</span>)
+sql(<span class="s">"SELECT wide(1)"</span>).rows(con)
+<span class="c"># InvalidInputError: Invalid Input Error: the UDF 'wide' returned a value that cannot be converted to its declared type INTEGER:</span>
+<span class="c"># Failed to cast value: Type UINT128 with value 1180591620717411303424 can't be cast because the value is out of range for the destination type INT32</span></code></pre>
+  <p>A value that cannot be converted fails the query, and the message names your function and its result type. DuckDB calls your function a UDF there, short for user-defined function. Since every result is checked this way, declare the type you mean: a function that should return an <code>INTEGER</code> should say <code>"INTEGER"</code>.</p>
+  <p>Before that conversion, DuckDB reads your value by its Python type:</p>
   <div class="tablewrap">
     <table>
-      <thead><tr><th>Returned</th><th>Read as</th></tr></thead>
+      <thead><tr><th>You return</th><th>DuckDB reads it as</th></tr></thead>
       <tbody>
         <tr><td><code>None</code></td><td>NULL</td></tr>
         <tr><td><code>bool</code></td><td><code>BOOLEAN</code></td></tr>
-        <tr><td><code>int</code></td><td><code>BIGINT</code>; a wider value <code>HUGEINT</code> or <code>UHUGEINT</code></td></tr>
+        <tr><td><code>int</code></td><td><code>BIGINT</code>; a larger number as <code>HUGEINT</code> or <code>UHUGEINT</code></td></tr>
         <tr><td><code>float</code></td><td><code>DOUBLE</code></td></tr>
         <tr><td><code>str</code></td><td><code>VARCHAR</code></td></tr>
         <tr><td><code>bytes</code></td><td><code>BLOB</code></td></tr>
-        <tr><td><code>datetime.datetime</code></td><td><code>TIMESTAMP</code>, or <code>TIMESTAMPTZ</code> when aware</td></tr>
+        <tr><td><code>datetime.datetime</code></td><td><code>TIMESTAMP</code>, or <code>TIMESTAMPTZ</code> when it has a time zone</td></tr>
         <tr><td><code>datetime.date</code> / <code>datetime.time</code></td><td><code>DATE</code> / <code>TIME</code>, or <code>TIMETZ</code> when the time has an offset</td></tr>
         <tr><td><code>datetime.timedelta</code></td><td><code>INTERVAL</code></td></tr>
         <tr><td><code>pandas.Timestamp</code>, numpy <code>datetime64</code></td><td>a timestamp in its own unit, down to nanoseconds</td></tr>
-        <tr><td><code>pandas.Timedelta</code>, numpy <code>timedelta64</code></td><td><code>INTERVAL</code>, nanoseconds dropped toward zero</td></tr>
-        <tr><td><code>decimal.Decimal</code></td><td><code>DECIMAL</code>, width and scale taken from the value</td></tr>
+        <tr><td><code>pandas.Timedelta</code>, numpy <code>timedelta64</code></td><td><code>INTERVAL</code>, with any nanoseconds cut off</td></tr>
+        <tr><td><code>decimal.Decimal</code></td><td><code>DECIMAL</code>, with as many digits as the value has; today a nonzero value closer to zero than 0.000001 fails the query</td></tr>
         <tr><td><code>uuid.UUID</code></td><td><code>UUID</code></td></tr>
-        <tr><td><code>list</code>, <code>tuple</code></td><td>a list; the engine needs one element type, so <code>[1, "a"]</code> is refused</td></tr>
+        <tr><td><code>list</code>, <code>tuple</code></td><td>a list. Its values must share one type, so <code>[1, "a"]</code> is refused</td></tr>
         <tr><td><code>dict</code></td><td>a <code>STRUCT</code> when every key is a string, a <code>MAP</code> otherwise</td></tr>
-        <tr><td>anything else</td><td>refused: <code>InvalidInputError</code>, the UDF '<em>name</em>' returned a value of type <em>X</em>, which cannot be converted to a DuckDB value</td></tr>
+        <tr><td>anything else</td><td>refused with <code>InvalidInputError</code>: the UDF '<em>name</em>' returned a value of type <em>X</em>, which cannot be converted to a DuckDB value</td></tr>
       </tbody>
     </table>
   </div>
-  <pre><code>con.create_function(<span class="s">"half"</span>, <span class="k">lambda</span> x: x / <span class="s">2</span>, [<span class="s">"BIGINT"</span>], <span class="s">"INTEGER"</span>)
-sql(<span class="s">"SELECT half(9)"</span>).rows(con)        <span class="c"># [(4,)]: the DOUBLE 4.5 is cast to INTEGER</span>
+  <p>numpy numbers and booleans, such as <code>np.int64</code>, <code>np.float32</code> or <code>np.bool_</code>, count as anything else, and so does a numpy array. You get them from numpy and pandas, for example from <code>np.max(xs)</code>. Turn them into Python values before you return them, with <code>int()</code>, <code>float()</code>, <code>bool()</code> or <code>.item()</code>, and an array with <code>.tolist()</code>. <code>np.float64</code> works as it is, because it is a Python <code>float</code>.</p>
 
-con.create_function(<span class="s">"as_date"</span>, <span class="k">lambda</span> x: <span class="s">f"2020-01-0{x}"</span>, [<span class="s">"BIGINT"</span>], <span class="s">"DATE"</span>)
-sql(<span class="s">"SELECT as_date(5)"</span>).rows(con)     <span class="c"># [(datetime.date(2020, 1, 5),)]: the text is cast to DATE</span>
-
-con.create_function(<span class="s">"wide"</span>, <span class="k">lambda</span> x: <span class="s">2</span>**<span class="s">70</span>, [<span class="s">"BIGINT"</span>], <span class="s">"INTEGER"</span>)
-sql(<span class="s">"SELECT wide(1)"</span>).rows(con)        <span class="c"># InvalidInputError: the UDF 'wide' returned a value that cannot be converted to its declared type INTEGER: Failed to cast value ...</span></code></pre>
-  <p>A cast that fails fails the query, naming the function and its declared type before the engine's message for that cast. Every result is cast to the declared type, so a function that means to return an <code>INTEGER</code> should declare <code>INTEGER</code> and let the cast check it.</p>
-
-  <p class="lead-in">nested types</p>
+  <h3>Lists and structs</h3>
   <pre><code>con.create_function(<span class="s">"total"</span>, <span class="k">lambda</span> xs: sum(xs), [<span class="s">"BIGINT[]"</span>], <span class="s">"BIGINT"</span>)
 con.create_function(<span class="s">"field"</span>, <span class="k">lambda</span> s: s[<span class="s">"a"</span>], [<span class="s">"STRUCT(a INTEGER)"</span>], <span class="s">"INTEGER"</span>)
 sql(<span class="s">"SELECT total([1, 2, 3]), field({'a': 7})"</span>).rows(con)   <span class="c"># [(6, 7)]</span>
@@ -257,46 +299,142 @@ sql(<span class="s">"SELECT total([1, 2, 3]), field({'a': 7})"</span>).rows(con)
 con.create_function(<span class="s">"pair"</span>, <span class="k">lambda</span> x: [x, x + <span class="s">1</span>], [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT[]"</span>)
 con.create_function(<span class="s">"wrap"</span>, <span class="k">lambda</span> x: {<span class="s">"v"</span>: x}, [<span class="s">"BIGINT"</span>], <span class="s">"STRUCT(v BIGINT)"</span>)
 sql(<span class="s">"SELECT pair(3), wrap(9)"</span>).rows(con)   <span class="c"># [([3, 4], {'v': 9})]</span></code></pre>
-  <p>A list arrives as a list and goes back as one; a struct arrives as a dict and goes back as one. An empty list returned has no element type of its own and is cast to the declared one, so <code>[]</code> for a <code>BIGINT[]</code> is an empty <code>BIGINT[]</code>.</p>
+  <p>A list arrives as a list and goes back as one. A struct arrives as a dict and goes back as one. An empty list you return becomes an empty list of the declared type: <code>[]</code> for a <code>BIGINT[]</code> is an empty <code>BIGINT[]</code>.</p>
+
+  <h3>Details</h3>
+  <ul>
+    <li>Dates and times are converted more strictly than <code>CAST</code> would. A date or timestamp that the result type cannot hold exactly is refused, not rounded: a timestamp with microseconds returned for <code>TIMESTAMP_S</code>, for example.</li>
+    <li>A date or time without a time zone, returned for a type with one, is refused, and so is the reverse, because the conversion would have to guess a time zone. A timestamp with a time zone returned for <code>TIME</code> is refused for the same reason. A timestamp without one, returned for <code>TIME</code>, keeps only its time of day.</li>
+    <li>These date and time rules hold inside lists and structs too, at any depth.</li>
+    <li>Text returned for a <code>TIMESTAMPTZ</code> is read in the connection's <code>TimeZone</code> setting, as <code>CAST</code> reads the same text, and then arrives in Python in UTC like any <code>TIMESTAMPTZ</code>. After <code>SET TimeZone = 'America/New_York'</code>, the text <code>'2026-03-01 10:00:00'</code> comes back as 15:00 UTC. <code>SELECT current_setting('TimeZone')</code> shows the setting.</li>
+    <li>SQL reads <code>4.5</code> written in a query as a <code>DECIMAL</code>, which rounds halves away from zero: <code>CAST(4.5 AS INTEGER)</code> is 5, but <code>CAST(4.5::DOUBLE AS INTEGER)</code> is 4, as for your function's <code>float</code>.</li>
+    <li>A dict returned for a <code>STRUCT</code> is matched to the fields by name, ignoring case. A field the dict does not have is NULL, and a key that matches no field is dropped without its value being read. At least one key must match a field: for <code>STRUCT(a BIGINT, b BIGINT)</code>, <code>{"a": 1}</code> gives <code>{'a': 1, 'b': None}</code>, but <code>{}</code> and <code>{"other": 5}</code> fail the query.</li>
+    <li>A dict whose only key is the empty string fills the one field of a struct that has one field, and fails the query for a struct with more.</li>
+  </ul>
+
+  <h3>Details: a UNION result</h3>
+  <p>A <code>UNION</code> holds one value of one of several types, each with a name: its members. <code>union_tag</code> tells you which member a value is in:</p>
+  <pre><code>con.create_function(<span class="s">"num_or_text"</span>, <span class="k">lambda</span> x: x <span class="k">if</span> x &lt; <span class="s">10</span> <span class="k">else</span> <span class="s">f"{x} is big"</span>, [<span class="s">"BIGINT"</span>], <span class="s">"UNION(num BIGINT, txt VARCHAR)"</span>)
+sql(<span class="s">"SELECT num_or_text(5), num_or_text(50)"</span>).rows(con)                       <span class="c"># [(5, '50 is big')]</span>
+sql(<span class="s">"SELECT union_tag(num_or_text(5)), union_tag(num_or_text(50))"</span>).rows(con)   <span class="c"># [('num', 'txt')]</span></code></pre>
+  <ul>
+    <li>DuckDB reads your value by its Python type, as in the table above, and puts it in the member of that type: an <code>int</code> in a <code>BIGINT</code> member, a <code>str</code> in a <code>VARCHAR</code> member.</li>
+    <li>If no member has that type, the value goes into a member that DuckDB converts the type to by itself, as for arguments (see <a href="#call">Calling your function</a>): an <code>int</code> into a <code>DOUBLE</code> member, a <code>date</code> into a <code>TIMESTAMP</code> member. When several members could take it, DuckDB picks the one SQL's <code>CAST</code> to the same <code>UNION</code> picks.</li>
+    <li>The query fails if no member can take the value, or if two members of the same type can. So an <code>int</code> does not go into an <code>INTEGER</code> member, a <code>float</code> does not go into a <code>BIGINT</code> or <code>VARCHAR</code> member, and a dict goes into a struct member only when it has exactly that member's fields.</li>
+    <li>The date and time rules above then apply in the member chosen, and no other member is tried: a timestamp without a time zone is refused for <code>UNION(z TIMESTAMPTZ, s VARCHAR)</code>.</li>
+  </ul>
+  <p>To be sure where a value goes, declare a member of exactly the type DuckDB reads your value as.</p>
 </section>
 
 <section id="null">
   <h2>NULL</h2>
-  <p>With <code>null_handling="default"</code>, a NULL in any argument makes the result NULL for that row, and the function is not called for it:</p>
+  <p>By default, if any argument is NULL, DuckDB does not call your function for that row, and the result is NULL:</p>
   <pre><code>calls = []
 
 <span class="k">def</span> observe(x):
     calls.append(x)
     <span class="k">return</span> x
 
-con.create_function(<span class="s">"observe"</span>, observe, [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT"</span>)
+con.create_function(<span class="s">"observe"</span>, observe, [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT"</span>, stability=<span class="s">"volatile"</span>)
 sql(<span class="s">"SELECT observe(x) FROM (VALUES (1), (NULL), (3)) t(x)"</span>).rows(con)   <span class="c"># [(1,), (None,), (3,)]</span>
 calls                                                                    <span class="c"># [1, 3]</span></code></pre>
-  <p>With <code>null_handling="special"</code>, <code>None</code> arrives and the function decides:</p>
+  <p><code>observe</code> records its calls, so it is registered as <code>"volatile"</code>, which tells DuckDB not to reuse its results (see <a href="#stability">Stability</a>).</p>
+  <p>The rule looks at each argument as a whole. A list that holds a NULL is not NULL itself, so your function is called, and the NULL arrives as <code>None</code> inside the list. The same goes for a field of a struct. So <code>total([1, NULL, 3])</code>, with the <code>total</code> above, fails the query, because <code>sum</code> cannot add <code>None</code>. Skip such items yourself, as in <code>sum(x for x in xs if x is not None)</code>.</p>
+  <p>With <code>null_handling="special"</code>, your function is called with <code>None</code> and decides what to return:</p>
   <pre><code>con.create_function(<span class="s">"backfill"</span>, <span class="k">lambda</span> x: -<span class="s">1</span> <span class="k">if</span> x <span class="k">is</span> <span class="k">None</span> <span class="k">else</span> x, [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT"</span>, null_handling=<span class="s">"special"</span>)
 sql(<span class="s">"SELECT backfill(x) FROM (VALUES (1), (NULL)) t(x)"</span>).rows(con)   <span class="c"># [(1,), (-1,)]</span></code></pre>
-  <p>Every argument counts, however it was passed: a parameter left out whose default is <code>None</code>, an extra one in <code>*args</code>, and a NULL passed by name into <code>**kwargs</code> all make the result NULL without a call under <code>"default"</code>:</p>
+  <p>Every argument counts, however it was passed. A parameter left out whose default is <code>None</code>, an extra argument in <code>*args</code>, and a NULL passed by name into <code>**kwargs</code> all give NULL without a call under the default setting:</p>
   <pre><code>con.create_function(<span class="s">"tagged"</span>, <span class="k">lambda</span> x, tag=<span class="k">None</span>: <span class="s">f"{x}:{tag}"</span>, [<span class="s">"BIGINT"</span>, <span class="s">"VARCHAR"</span>], <span class="s">"VARCHAR"</span>)
 sql(<span class="s">"SELECT tagged(1), tagged(1, 'a')"</span>).rows(con)   <span class="c"># [(None, '1:a')]</span>
 
 con.create_function(<span class="s">"tagged"</span>, <span class="k">lambda</span> x, tag=<span class="k">None</span>: <span class="s">f"{x}:{tag}"</span>, [<span class="s">"BIGINT"</span>, <span class="s">"VARCHAR"</span>], <span class="s">"VARCHAR"</span>,
                     null_handling=<span class="s">"special"</span>)
 sql(<span class="s">"SELECT tagged(1), tagged(1, 'a')"</span>).rows(con)   <span class="c"># [('1:None', '1:a')]</span></code></pre>
-  <p>Returning <code>None</code> makes the result NULL under either setting:</p>
+  <p>Return <code>None</code> for a missing result: it gives NULL, whichever setting you chose. <code>pd.NaT</code> gives NULL too, but <code>float("nan")</code> stays NaN, and <code>pd.NA</code> is refused:</p>
   <pre><code>con.create_function(<span class="s">"odd_only"</span>, <span class="k">lambda</span> x: x <span class="k">if</span> x % <span class="s">2</span> <span class="k">else</span> <span class="k">None</span>, [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT"</span>)
 sql(<span class="s">"SELECT odd_only(i) FROM range(4) t(i)"</span>).rows(con)   <span class="c"># [(None,), (1,), (None,), (3,)]</span></code></pre>
-  <p>A <code>None</code> anywhere in a return is a NULL of the declared type at that place, and an empty list or dict an empty value of it, so <code>[ts, None]</code> returned for <code>TIMESTAMP[]</code> holds a NULL <code>TIMESTAMP</code>. Inside a value returned for a <code>UNION</code> the declared place is not fixed until the engine's cast picks the member, so a list or dict of only <code>None</code>s can steer that choice; name the member's type in the value, or return <code>None</code> whole.</p>
+
+  <h3>Details</h3>
+  <ul>
+    <li>A <code>None</code> inside a list or dict you return is a NULL of the declared type at that place: <code>[ts, None]</code> returned for <code>TIMESTAMP[]</code> holds a NULL <code>TIMESTAMP</code>. An empty list, or an empty dict for a <code>MAP</code>, is an empty value of the declared type. An empty dict for a <code>STRUCT</code> fails the query, see <a href="#values">Values in and out</a>.</li>
+    <li>For a <code>UNION</code> result, a list or dict that holds only <code>None</code> values has no type of its own, so it can change which member DuckDB picks. Return <code>None</code> for the whole value when you mean NULL.</li>
+  </ul>
+</section>
+
+<section id="errors">
+  <h2>Errors</h2>
+  <p>An exception raised inside your function fails the query that called it, with <code>InvalidInputError</code>. The message names your function, then the exception's class and text, then the traceback. To handle it in your program, catch the error class, which you import from <code>duckdb.exceptions</code>:</p>
+  <pre><code><span class="k">from</span> duckdb.exceptions <span class="k">import</span> InvalidInputError
+
+<span class="k">def</span> boom(x):
+    <span class="k">raise</span> ValueError(<span class="s">f"no thanks: {x}"</span>)
+
+con.create_function(<span class="s">"boom"</span>, boom, [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT"</span>)
+<span class="k">try</span>:
+    sql(<span class="s">"SELECT boom(7)"</span>).rows(con)
+<span class="k">except</span> InvalidInputError <span class="k">as</span> error:
+    print(error)
+<span class="c"># Invalid Input Error: Python exception occurred while executing the UDF 'boom': ValueError: no thanks: 7</span>
+<span class="c"># Traceback (most recent call last):</span>
+<span class="c">#   ...</span>
+<span class="c"># ValueError: no thanks: 7</span>
+
+print(sql(<span class="s">"SELECT 42"</span>).rows(con))   <span class="c"># [(42,)]: the connection still works</span></code></pre>
+  <p>The function still works afterwards, and outside a transaction so does the connection. Inside a transaction you started with <code>BEGIN</code>, the failed query aborts the transaction: every later statement fails with <code>TransactionError</code> until you end it with <code>ROLLBACK</code>, or with <code>COMMIT</code>, which then also discards its changes. A <code>with con.transaction():</code> block rolls back for you when the error leaves it. A <code>KeyboardInterrupt</code> raised inside your function, which is what pressing Ctrl&#8209;C during such a query does, is reported the same way, as <code>InvalidInputError</code>, so <code>except KeyboardInterrupt</code> does not catch it.</p>
+  <p>A returned value that DuckDB cannot read, or cannot convert to the result type, also fails the query with <code>InvalidInputError</code>:</p>
+  <pre><code>con.create_function(<span class="s">"odd"</span>, <span class="k">lambda</span> x: object(), [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT"</span>)
+sql(<span class="s">"SELECT odd(1)"</span>).rows(con)
+<span class="c"># InvalidInputError: Invalid Input Error: the UDF 'odd' returned a value of type object, which cannot be converted to a DuckDB value</span></code></pre>
+  <p>Your function must not run a query on the connection that is calling it, because a connection runs one query at a time. The inner query fails, and so does yours:</p>
+  <pre><code><span class="k">def</span> order_count(x):
+    <span class="k">return</span> sql(<span class="s">"SELECT count(*) FROM orders"</span>).rows(con)[<span class="s">0</span>][<span class="s">0</span>]
+
+con.create_function(<span class="s">"order_count"</span>, order_count, [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT"</span>)
+sql(<span class="s">"SELECT order_count(1)"</span>).rows(con)
+<span class="c"># InvalidInputError: Invalid Input Error: Python exception occurred while executing the UDF 'order_count':</span>
+<span class="c"># OperationalError: Resource In Use Error: connection has a live result; ...</span></code></pre>
+  <p>Some such calls never return at all, and Ctrl&#8209;C does not stop them: <code>types()</code>, <code>count()</code>, or a plan with a step such as <code>filter()</code>. A second connection from <code>con.duplicate()</code> fails the same way when DuckDB calls your function from several threads at once. Do the lookup in the query instead, with a join, or read what your function needs into a Python dict before the query.</p>
+
+  <h3>Handling an error</h3>
+  <p>If you want NULL instead of an error, catch the exception inside your function and return <code>None</code>:</p>
+  <pre><code><span class="k">def</span> parse_age(text):
+    <span class="k">try</span>:
+        <span class="k">return</span> int(text)
+    <span class="k">except</span> ValueError:
+        <span class="k">return</span> <span class="k">None</span>
+
+con.create_function(<span class="s">"parse_age"</span>, parse_age, [<span class="s">"VARCHAR"</span>], <span class="s">"BIGINT"</span>)
+sql(<span class="s">"SELECT parse_age('42'), parse_age('old')"</span>).rows(con)   <span class="c"># [(42, None)]</span></code></pre>
+
+  <h3>Which error, when</h3>
+  <p><code>create_function</code> checks everything it can when you register, so most mistakes show up there, not at the first call:</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Error</th><th>When</th></tr></thead>
+      <tbody>
+        <tr><td><code>CatalogError</code></td><td>A type name DuckDB does not know, such as the misspelled <code>"VARCHR"</code>. When you register.</td></tr>
+        <tr><td><code>TypeError</code></td><td>The function is not callable, <code>parameters</code> is neither a list nor a dict, a type in <code>parameters</code> is not text (such as <code>None</code>), <code>returns</code> is not text, or the name is not a string. When you register.</td></tr>
+        <tr><td><code>InvalidInputError</code></td><td>When you register: an <code>ANY</code> result type, no result type at all, a list of types that does not fit the parameters, a dict key that is no parameter, a hint no type can be read from, a default that does not fit its type, two parameter names that differ only in case, or a <code>null_handling</code> or <code>stability</code> that is not one of the choices. When the query runs: an exception in your function, or a returned value that cannot be read or converted.</td></tr>
+        <tr><td><code>InterfaceError</code></td><td>The connection is closed.</td></tr>
+        <tr><td><code>ProgrammingError</code></td><td>A call in a query does not fit any version of the function. Before the query runs.</td></tr>
+        <tr><td><code>ConversionError</code></td><td>An argument cannot be converted to its parameter's type, such as <code>'x'</code> for a <code>*rest: int</code>. When the query runs.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="note">
+    <p><strong>Inside a transaction, a refused registration can abort the transaction.</strong> This happens when DuckDB itself refuses it: for a type name it does not know, or for a default it cannot convert, such as <code>"five"</code> or <code>2**70</code> for a <code>BIGINT</code>. The transaction is then aborted, as after any failed statement, and every following statement fails with <code>TransactionError</code> until you run <code>ROLLBACK</code>. A mistake the package catches before asking DuckDB leaves the transaction usable: a default such as <code>object()</code>, a timestamp default without a time zone for a <code>TIMESTAMPTZ</code>, a hint no type can be read from, or a list with too many types.</p>
+  </div>
 </section>
 
 <section id="stability">
   <h2>Stability</h2>
-  <p><code>stability</code> is a promise about the function, and the engine plans by it. It is never checked; a wrong promise gives wrong rows, not an error.</p>
+  <p><code>stability</code> tells DuckDB whether it may reuse a result instead of calling your function again. DuckDB trusts what you say and never checks it, so a wrong setting gives wrong rows, not an error.</p>
   <dl class="ref">
-    <dt>"consistent"</dt><dd>The default. Same arguments, same result, always. The engine may compute a call whose arguments are constant once and reuse the value, and may treat repeated calls as one.</dd>
-    <dt>"consistent_within_query"</dt><dd>Same arguments, same result within one query, but a later query may see another. What the engine's own <code>now()</code> declares.</dd>
-    <dt>"volatile"</dt><dd>The result may differ per row. The engine calls the function once per row, every time.</dd>
+    <dt>"consistent"</dt><dd>The default. The same arguments always give the same result. DuckDB may call your function once for a call whose arguments are fixed values and reuse the result, and may compute <code>f(x)</code> once when a query uses it twice.</dd>
+    <dt>"consistent_within_query"</dt><dd>The same arguments give the same result within one query, but a later query may get another. DuckDB's own <code>now()</code> works this way.</dd>
+    <dt>"volatile"</dt><dd>The result may differ on every call, so DuckDB never reuses one. It promises no number of calls: each use in a query calls separately, and a filter with <code>LIMIT</code> can call it for more rows than come back.</dd>
   </dl>
-  <p>Anything random, stateful or side-effecting is volatile, and a function of no arguments is the clearest case: declared consistent, it is called once and its value repeated.</p>
+  <p>Use <code>"volatile"</code> for anything random, anything that keeps state, and anything with side effects. A function with no arguments shows the difference most clearly:</p>
   <div class="pair">
     <div class="bad">
       <div class="tag">consistent: one call, five copies</div>
@@ -313,150 +451,192 @@ sql(<span class="s">"SELECT tick() FROM range(5) t(i)"</span>).rows(con)
 <span class="c"># [(0,), (1,), (2,), (3,), (4,)]</span></code></pre>
     </div>
   </div>
-  <p>The same holds with arguments: <code>SELECT observe(1) FROM range(5) t(i)</code> calls a consistent <code>observe</code> once and a volatile one five times. Declare a pure function consistent: computing a call once and reusing the value is what makes it cheap in a <code>WHERE</code> or a join condition.</p>
+  <p>The same goes for a function with arguments: <code>SELECT observe(1) FROM range(5) t(i)</code> calls the volatile <code>observe</code> above five times, and would call it once if it were consistent. For a function whose result depends only on its arguments, keep the default. Computing a call once and reusing the result is what makes it cheap in a <code>WHERE</code> or a join condition.</p>
+  <p>Volatile does not make DuckDB call your function where the query does not need the result. <code>SELECT count(*) FROM (SELECT observe(i) FROM range(5) t(i))</code> never calls it, and a NULL argument still skips the call unless you register with <code>null_handling="special"</code>. So do not count on a query to run your function once per row for what it does on the side, such as sending a message: loop over the rows in Python instead.</p>
 </section>
 
 <section id="threads">
   <h2>Threads</h2>
-  <p>The engine runs a query on its worker threads, and it calls the function from whichever worker is executing that part of the query. For each batch of rows the worker takes the GIL once, converts the batch's arguments, calls the function once per row, and releases the GIL again. The thread that started the query drops the GIL while it waits on the engine, which is what lets the workers take it.</p>
-  <p>Two things are tested in <code>tests/test_udf.py</code>:</p>
-  <div class="chain">
-    <div class="step"><div class="n">1</div><div class="what">With <code>SET threads = 4</code> and a million-row aggregate over the function, the function was entered from more than one thread. The calling thread was among them; it was not the only one.</div></div>
-    <div class="step"><div class="n">2</div><div class="what">Three Python threads, each on its own <code>con.duplicate()</code>, ran a query over the same function at the same time, and each got the right answer.</div></div>
-  </div>
-  <pre><code>con.run(<span class="s">"SET threads = 4"</span>)
-seen = set()
+  <p>DuckDB splits a large query across several threads so it finishes sooner. Your function can be called from any of those threads, and from several of them during one query:</p>
+  <pre><code><span class="k">import</span> threading
 
-<span class="k">def</span> bump(x):
-    seen.add(threading.get_ident())
+con.run(<span class="s">"SET threads = 4"</span>)
+seen = set()
+lock = threading.Lock()
+
+<span class="k">def</span> note_thread(x):
+    <span class="k">with</span> lock:
+        seen.add(threading.get_ident())
     <span class="k">return</span> x + <span class="s">1</span>
 
-con.create_function(<span class="s">"bump"</span>, bump, [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT"</span>)
-con.run(<span class="s">"CREATE TABLE big AS SELECT i FROM range(1000000) t(i)"</span>)
-sql(<span class="s">"SELECT sum(bump(i)) FROM big"</span>).rows(con)   <span class="c"># [(500000500000,)]</span>
-len(seen)                                          <span class="c"># 4 on this machine; the test asserts at least 2</span></code></pre>
-  <p>What this means for the function: it may be entered from any thread, and from several over the course of one query. The GIL serialises bytecode, not calls, so two workers can be inside the function at once, interleaved. State it shares across calls, a list it appends to, a counter, a client, needs to be safe for that, or the function needs to take a lock.</p>
-  <p>The objects a function reaches through its globals, its closure and its defaults are the same objects on every thread. What belongs to a thread is not: a <code>threading.local</code> or a <code>contextvars.ContextVar</code> the calling thread set reads as unset on an engine worker, while the calling thread, which may run part of the query too, still sees its own value. Pass such a value in as an argument, or capture the object itself.</p>
+con.create_function(<span class="s">"note_thread"</span>, note_thread, [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT"</span>, stability=<span class="s">"volatile"</span>)
+con.run(<span class="s">"CREATE TABLE million AS SELECT i FROM range(1000000) t(i)"</span>)
+sql(<span class="s">"SELECT sum(note_thread(i)) FROM million"</span>).rows(con)   <span class="c"># [(500000500000,)]</span>
+len(seen)                                                <span class="c"># 4 on our machine; it can be fewer</span>
+con.run(<span class="s">"RESET threads"</span>)                                   <span class="c"># back to the default, one thread per core</span></code></pre>
+  <p>Python runs only one thread's Python code at a time, but it can switch threads in the middle of your function. So if your function changes something shared between calls, such as the set <code>seen</code>, a list, a counter or a network client, guard that change with a <code>threading.Lock</code>, as <code>note_thread</code> does. Only one thread at a time runs the code inside <code>with lock:</code>. A counter needs the lock too:</p>
+  <pre><code>count = <span class="s">0</span>
+
+<span class="k">def</span> counted(x):
+    <span class="k">global</span> count
+    <span class="k">with</span> lock:
+        count += <span class="s">1</span>
+    <span class="k">return</span> x
+
+con.create_function(<span class="s">"counted"</span>, counted, [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT"</span>, stability=<span class="s">"volatile"</span>)
+sql(<span class="s">"SELECT sum(counted(i)) FROM million"</span>).rows(con)   <span class="c"># [(499999500000,)]</span>
+count                                                 <span class="c"># 1000000</span></code></pre>
+  <p>A function that uses only its arguments and its own local variables needs no lock.</p>
+  <p>What is shared: the objects your function reaches through global variables or its closure are the same objects on every thread. So is the default of a parameter SQL cannot pass (see <a href="#more">More about parameters and type hints</a>). A default SQL can pass is different: each call gets a fresh copy of it, as in <a href="#parameters">Defaults</a>.</p>
+  <p>What is not shared: values that belong to one thread. A <code>threading.local</code> or a <code>contextvars.ContextVar</code> that you set in your own thread reads as unset when one of DuckDB's threads calls your function. Your own thread may run part of the query too, and there it still sees its own value. Pass such a value in as an argument, or read it in your own thread before the query, as in <code>value = var.get()</code> for a <code>ContextVar</code> called <code>var</code>, and let your function use <code>value</code>: capturing <code>var</code> itself does not help.</p>
+  <p>You can also run queries that call the same function from several Python threads at once, each with its own connection from <code>con.duplicate()</code>.</p>
+
+  <h3>Details</h3>
+  <ul>
+    <li>Each of DuckDB's threads takes Python's global lock (the GIL) for a batch of rows, calls your function once per row of that batch, and then lets the lock go. This is why more threads barely speed up a Python function: see <a href="#performance">Speed</a>.</li>
+    <li>While a query runs, the thread that started it does not hold the lock, so your other Python threads keep running.</li>
+  </ul>
   <div class="note caution">
-    <p><strong>Free-threaded Python is untested here.</strong> The free-threaded wheel builds and imports with the GIL off, and that is all that has been verified. Nothing yet exercises a function being called from several engine workers at once without a GIL to serialise them.</p>
+    <p><strong>Free-threaded Python is not tested here yet.</strong> On a Python built without the global lock, such as 3.14t, the package installs and imports. Nothing has yet tested your function being called from several DuckDB threads at the same moment with no lock between them.</p>
   </div>
 </section>
 
-<section id="errors">
-  <h2>Errors</h2>
-  <p>An exception raised inside the function fails the query that called it. The error is the query's <code>InvalidInputError</code>; its message names the function, then the exception's class and text, then the traceback:</p>
-  <pre><code><span class="k">def</span> boom(x):
-    <span class="k">raise</span> ValueError(<span class="s">f"no thanks: {x}"</span>)
+<section id="again">
+  <h2>Registering a name again</h2>
+  <p>Register a name again with the same parameter types to replace the function. Register it with other types, or with another number of parameters, and you add a second version beside the first:</p>
+  <pre><code>con.create_function(<span class="s">"spell"</span>, <span class="k">lambda</span> x: <span class="s">f"number {x}"</span>, [<span class="s">"BIGINT"</span>], <span class="s">"VARCHAR"</span>)
+con.create_function(<span class="s">"spell"</span>, <span class="k">lambda</span> x: <span class="s">f"text {x}"</span>, [<span class="s">"VARCHAR"</span>], <span class="s">"VARCHAR"</span>)
+sql(<span class="s">"SELECT spell(1), spell('a')"</span>).rows(con)   <span class="c"># [('number 1', 'text a')]</span>
 
-con.create_function(<span class="s">"boom"</span>, boom, [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT"</span>)
-sql(<span class="s">"SELECT boom(7)"</span>).rows(con)
-<span class="c"># InvalidInputError: Invalid Input Error: Python exception occurred while executing the UDF 'boom': ValueError: no thanks: 7</span>
-<span class="c"># Traceback (most recent call last):</span>
-<span class="c">#   ...</span>
-<span class="c"># ValueError: no thanks: 7</span>
+con.create_function(<span class="s">"spell"</span>, <span class="k">lambda</span> x: <span class="s">f"#{x}"</span>, [<span class="s">"BIGINT"</span>], <span class="s">"VARCHAR"</span>)
+sql(<span class="s">"SELECT spell(1), spell('a')"</span>).rows(con)   <span class="c"># [('#1', 'text a')]: the BIGINT version was replaced</span></code></pre>
+  <p>DuckDB picks the version that the arguments fit with the least converting, as it does for its own functions. If two versions fit equally well, the query is refused with <code>ProgrammingError</code>.</p>
+  <p>You cannot remove a function: <code>DROP FUNCTION</code> refuses with <code>CatalogError</code>. It stays until the database is closed, and registering the name again is how you change it.</p>
+  <p>Pick a name DuckDB does not already use. A built-in's name, such as <code>upper</code>, replaces DuckDB's own version with the same parameter types on every connection to the database, and nothing brings it back while the database is open; the name of an aggregate or a macro, such as <code>sum</code> or <code>nullif</code>, raises <code>InternalError</code>.</p>
 
-sql(<span class="s">"SELECT 42"</span>).rows(con)   <span class="c"># [(42,)]: the connection is fine</span></code></pre>
-  <p>The connection survives, and so does the function; the next query runs as usual. A <code>KeyboardInterrupt</code> raised inside the function is reported the same way, as the query's <code>InvalidInputError</code>: the engine owns the call and sees only that it failed.</p>
-  <p>The other failures at run time are a returned value that cannot be read and one that cannot be cast to <code>returns</code> (<code>InvalidInputError</code>, with the engine's cast message). Both fail the query the same way, and the message carries one <code>Invalid Input Error:</code> prefix. Failures at registration are listed under <a href="#register">Registering</a>.</p>
-  <pre><code>con.create_function(<span class="s">"odd"</span>, <span class="k">lambda</span> x: object(), [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT"</span>)
-sql(<span class="s">"SELECT odd(1)"</span>).rows(con)
-<span class="c"># InvalidInputError: Invalid Input Error: the UDF 'odd' returned a value of type object, which cannot be converted to a DuckDB value</span></code></pre>
+  <h3>Details</h3>
+  <ul>
+    <li>The name is a plain string. A function cannot go in a schema: a tuple such as <code>("util", "f")</code> raises <code>TypeError</code>. A dot is part of the name, so <code>"util.f"</code> registers a function called <code>util.f</code>, which SQL then has to quote: <code>"util.f"(1)</code>.</li>
+    <li>Whether a parameter is positional-only or plain makes no difference here: <code>def f(x)</code> and <code>def f(x, /)</code> with the same type replace each other. A keyword-only parameter does make a difference: <code>def f(x)</code> and <code>def f(*, x)</code> under one name are two versions, and a call by name that both fit, <code>f(x := 1)</code>, is refused with <code>ProgrammingError</code> as ambiguous.</li>
+    <li>A macro with the same name as your function takes precedence over it. See <a href="extend.html">Macros &amp; Extensions</a>.</li>
+  </ul>
 </section>
 
 <section id="performance">
-  <h2>Performance</h2>
-  <p>Every row costs a trip through Python: the arguments are turned into Python objects, the function is called, the result is turned back into a value and cast. Anything expressible as an expression runs orders of magnitude faster as a macro, because a macro is inlined into the query and never leaves the engine.</p>
-  <pre><code><span class="k">from</span> duckdb.frame <span class="k">import</span> col
+  <h2>Speed, and when a macro is better</h2>
+  <p>Every row costs a trip into Python and back. DuckDB turns the arguments into Python objects, calls your function, and turns the result back into a DuckDB value. For work you can write in SQL, a <strong>macro</strong> is much faster. A macro is a piece of SQL with a name: DuckDB copies it into the query and never calls Python.</p>
+  <pre><code>con.run(<span class="s">"CREATE TABLE big AS SELECT i FROM range(5000000) t(i)"</span>)
+con.create_macro(<span class="s">"add_one"</span>, [<span class="s">"x"</span>], col(<span class="s">"x"</span>) + <span class="s">1</span>)
 
-con.run(<span class="s">"CREATE TABLE big AS SELECT i FROM range(5000000) t(i)"</span>)
-con.create_function(<span class="s">"plus_one"</span>, <span class="k">lambda</span> x: x + <span class="s">1</span>, [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT"</span>)
-con.create_macro(<span class="s">"bump"</span>, [<span class="s">"x"</span>], col(<span class="s">"x"</span>) + <span class="s">1</span>)
+sql(<span class="s">"SELECT sum(plus_one(i)) FROM big"</span>).rows(con)   <span class="c"># [(12500002500000,)] in about 1.8 s on a 64-core Linux machine</span>
+sql(<span class="s">"SELECT sum(add_one(i)) FROM big"</span>).rows(con)    <span class="c"># [(12500002500000,)] in about 1.4 ms, the same as sum(i + 1)</span></code></pre>
+  <p>That is more than a thousand times faster. More threads hardly help the Python function, because only one thread can run Python code at a time.</p>
+  <p>Use a Python function for what SQL cannot do: calling a Python library, looking something up in your Python data, or reading a format DuckDB has no function for. For anything you can write as an expression, a computation over columns with SQL's operators and functions, however long, a macro is usually the better choice. <a href="extend.html">Macros &amp; Extensions</a> shows how to write one and how to choose. When you do need a Python function:</p>
+  <ul>
+    <li>Keep its own work small, and let DuckDB do the filtering and grouping around it.</li>
+    <li>Keep <code>stability="consistent"</code> when its result depends only on its arguments, so DuckDB can reuse results.</li>
+  </ul>
+</section>
 
-sql(<span class="s">"SELECT sum(plus_one(i)) FROM big"</span>).rows(con)   <span class="c"># 0.45 s on one laptop</span>
-sql(<span class="s">"SELECT sum(bump(i)) FROM big"</span>).rows(con)       <span class="c"># 0.002 s, the same as sum(i + 1)</span></code></pre>
-  <p>Use a function for what SQL cannot say: a call into a library, a lookup into Python state, a format the engine has no parser for. For anything that is an expression, however long, a macro is usually the better answer; <code>create_macro</code> and how far a macro goes are on <a href="extend.html">Macros &amp; Extensions</a>. Keep a function's own work small, declare it consistent when it is pure so the engine can compute a call once and reuse the value, and let the engine do the filtering and grouping around it.</p>
+<section id="more">
+  <h2>More about parameters and type hints</h2>
+  <p>You need this section only when your function uses <code>*args</code>, <code>**kwargs</code> or Python's other kinds of parameter, when SQL should not see a parameter, or when you register one of Python's built-in functions. Its Details also say how type hints are read.</p>
+
+  <h3>The five kinds of parameter</h3>
+  <p>Python has five ways to declare a parameter. Each one works from SQL as it does in Python:</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Python parameter</th><th>From SQL, you pass it</th></tr></thead>
+      <tbody>
+        <tr><td>positional-only, before a <code>/</code>: <code>def f(x, /)</code></td><td>by position only</td></tr>
+        <tr><td>a plain parameter: <code>def f(x)</code></td><td>by position, or by name: <code>f(x := 1)</code></td></tr>
+        <tr><td><code>*args</code></td><td>as the extra positional arguments, which arrive as a tuple</td></tr>
+        <tr><td>keyword-only, after <code>*</code> or <code>*args</code>: <code>def f(*, x)</code></td><td>by name only</td></tr>
+        <tr><td><code>**kwargs</code></td><td>as the extra named arguments, which arrive as a dict</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <pre><code><span class="k">def</span> label(value, /, prefix=<span class="s">"id"</span>, *parts, sep=<span class="s">"-"</span>, **extra):
+    tags = <span class="s">""</span>.join(<span class="s">f"[{k}={v}]"</span> <span class="k">for</span> k, v <span class="k">in</span> extra.items())
+    <span class="k">return</span> sep.join([prefix, str(value), *map(str, parts)]) + tags
+
+con.create_function(<span class="s">"label"</span>, label, returns=<span class="s">"VARCHAR"</span>)
+sql(<span class="s">"SELECT label(7)"</span>).rows(con)                                      <span class="c"># [('id-7',)]</span>
+sql(<span class="s">"SELECT label(7, 'x', 1, 2, sep := '/', loud := true)"</span>).rows(con)   <span class="c"># [('x/7/1/2[loud=True]',)]</span></code></pre>
+  <p><code>label(7)</code> uses every default. In the second call, <code>'x'</code> goes to <code>prefix</code>, <code>1</code> and <code>2</code> go to <code>parts</code>, <code>sep := '/'</code> goes to <code>sep</code>, and <code>loud := true</code>, which matches no parameter, goes to <code>extra</code>. These parameters have no type hints, so they take values of any type (see <a href="#any">ANY</a>).</p>
+
+  <h3>Keeping a parameter out of SQL</h3>
+  <p>A list of types can be shorter than the list of parameters. SQL then sees only the parameters the list covers, and Python fills in the rest from their defaults, as in any call that leaves them out. This is useful when a default only carries a value into the function, as in this loop:</p>
+  <pre><code><span class="k">for</span> offset <span class="k">in</span> range(<span class="s">3</span>):
+    con.create_function(<span class="s">f"plus_{offset}"</span>, <span class="k">lambda</span> x, offset=offset: x + offset, [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT"</span>)
+
+sql(<span class="s">"SELECT plus_0(1), plus_2(1)"</span>).rows(con)   <span class="c"># [(1, 3)]</span></code></pre>
+  <p>SQL cannot pass <code>offset</code>: <code>plus_2(1, 5)</code> is refused with <code>ProgrammingError</code>. Every parameter after the end of the list needs a default, or must be <code>*args</code> or <code>**kwargs</code>, which then receive nothing. Otherwise <code>create_function</code> raises <code>InvalidInputError</code>.</p>
+
+  <h3>Built-in functions such as <code>max</code></h3>
+  <p>Python cannot tell what parameters some of its built-in functions take, such as <code>max</code> and <code>dict</code>. For those, give <code>parameters</code> as a list:</p>
+  <ul>
+    <li>Each plain type is one parameter, passed by position.</li>
+    <li><code>"*T"</code> gives the type <code>T</code> of any extra positional arguments, as for <code>*args</code>.</li>
+    <li><code>"**T"</code> gives the type <code>T</code> of any extra named arguments, as for <code>**kwargs</code>.</li>
+  </ul>
+  <p>Put them in that order, with at most one <code>"*T"</code> and one <code>"**T"</code>. <code>returns</code> is required.</p>
+  <pre><code>con.create_function(<span class="s">"biggest"</span>, max, [<span class="s">"*BIGINT"</span>], <span class="s">"BIGINT"</span>)
+con.create_function(<span class="s">"pack"</span>, dict, [<span class="s">"**BIGINT"</span>], <span class="s">"MAP(VARCHAR, BIGINT)"</span>)
+sql(<span class="s">"SELECT biggest(1, 5, 3), pack(a := 1, b := 2)"</span>).rows(con)   <span class="c"># [(5, {'a': 1, 'b': 2})]</span></code></pre>
+
+  <h3>Details</h3>
+  <ul>
+    <li><code>**kwargs</code> receives each name spelled the way the caller wrote it.</li>
+    <li>SQL cannot see the name of a positional-only parameter. A named argument with that name goes to <code>**kwargs</code>, as in Python.</li>
+    <li>The type of <code>*args</code> applies to each extra positional argument, and the type of <code>**kwargs</code> to each extra named one, as their hints mean in Python. With <code>*rest: int</code>, every extra argument is converted to <code>BIGINT</code>. An argument that cannot be converted fails the query with <code>ConversionError</code>.</li>
+    <li>In a list of types, the type for <code>*args</code> or <code>**kwargs</code> may carry its mark: <code>"*BIGINT"</code>, <code>"**BIGINT"</code>. A mark that does not match the parameter is refused. In a dict, <code>*args</code> and <code>**kwargs</code> are named without the mark: <code>{"rest": "BIGINT"}</code>.</li>
+    <li>A list with more types than parameters is refused, and so is a dict key that is not a parameter's name. Both raise <code>InvalidInputError</code>.</li>
+    <li>A default after the end of a shorter list stays Python's own object: every call, on every thread, gets that same object, as with any object a closure or a global variable refers to. A default SQL sees is different: it is converted once and arrives as a fresh value on every call. See <a href="#threads">Threads</a>.</li>
+    <li>A hint written wholly as text, such as <code>"int"</code>, is evaluated, and so is every hint in a module that uses <code>from __future__ import annotations</code>. A quoted name inside another hint, such as <code>list["int"]</code> or <code>Optional["int"]</code>, is not evaluated, and is refused like any hint no type can be read from.</li>
+    <li>Python evaluates all of a function's hints together. If one of them fails, for example a name you import only for type checking, none of them can be read. Then every parameter with a hint, and the result, needs its type in <code>parameters</code> and <code>returns</code>. The error names the hint and Python's own error.</li>
+    <li>On Python 3.14, a hint whose code raises an error other than a missing name leaves Python with no description of the function at all. The registration is then refused, whatever <code>parameters</code> says.</li>
+  </ul>
 </section>
 
 <section id="reference">
   <h2>Reference</h2>
 
-  <h3>Registration</h3>
+  <h3>Registering</h3>
   <dl class="ref">
-    <dt>con.create_function(name, function, parameters=None, returns=None, *, null_handling, stability)</dt><dd>Register <code>function</code> as scalar SQL function <code>name</code> on the database, its parameters keeping their names, kinds and defaults. Returns nothing. A name already registered with the same parameters is replaced; with other parameters a second version is added.</dd>
-    <dt>parameters</dt><dd>SQL type texts overriding the annotations: a list for the parameters in order, the ones past its end left to Python's defaults, or a dict by parameter name. <code>ANY</code> takes an argument of any type, uncast. For a callable without a signature, a list of positional types, then <code>"*T"</code>, then <code>"**T"</code>.</dd>
-    <dt>returns</dt><dd>One SQL type text, else the return annotation. The returned value is cast to it.</dd>
-    <dt>null_handling="default"</dt><dd>A NULL argument gives NULL without a call, a <code>None</code> default included.</dd>
-    <dt>null_handling="special"</dt><dd><code>None</code> is passed in; the function decides.</dd>
-    <dt>stability="consistent"</dt><dd>Pure. The engine may compute a call once and reuse the value, and may treat repeated calls as one.</dd>
-    <dt>stability="consistent_within_query"</dt><dd>Stable within one query, free to change between queries.</dd>
-    <dt>stability="volatile"</dt><dd>Called once per row, every time. For anything random, stateful or side-effecting.</dd>
-    <dt>con.create_macro(name, parameters, body, replace, temporary)</dt><dd>The alternative for anything that is an expression.</dd>
+    <dt>con.create_function(name, function, parameters=None, returns=None, *, null_handling="default", stability="consistent")</dt><dd>Make <code>function</code> callable from SQL as <code>name</code>, on every connection to the database. Its parameters keep their names, kinds and defaults. Returns <code>None</code>. The same name with the same parameters replaces the function; with other parameters it adds a version.</dd>
+    <dt>name</dt><dd>A plain string. It cannot be put in a schema.</dd>
+    <dt>function</dt><dd>Any callable: a <code>def</code>, a lambda, a method, a <code>functools.partial</code>, a closure. It must not run a query on the connection that calls it.</dd>
+    <dt>parameters</dt><dd>SQL types as text. A list gives them in order; parameters after its end are left to their Python defaults. A dict gives some of them by name; the rest come from the type hints. A parameter with neither is <code>ANY</code>. For a built-in Python cannot describe, a list of plain types, then <code>"*T"</code>, then <code>"**T"</code>.</dd>
+    <dt>returns</dt><dd>The result type as SQL text. Without it, the return type hint. What your function returns is converted to it.</dd>
+    <dt>null_handling="default"</dt><dd>A NULL argument, or a left-out parameter whose default is <code>None</code>, gives NULL without a call.</dd>
+    <dt>null_handling="special"</dt><dd><code>None</code> is passed to your function, which decides.</dd>
+    <dt>stability="consistent"</dt><dd>The same arguments always give the same result. DuckDB may reuse results.</dd>
+    <dt>stability="consistent_within_query"</dt><dd>The same within one query, free to change between queries.</dd>
+    <dt>stability="volatile"</dt><dd>No result is reused, but the number of calls is not fixed. A NULL argument still skips the call under <code>null_handling="default"</code>. For anything random, stateful or with side effects.</dd>
+    <dt>con.create_macro(name, parameters, body)</dt><dd>The faster choice for anything you can write as an expression. See <a href="extend.html">Macros &amp; Extensions</a>.</dd>
   </dl>
 
   <h3>Calling</h3>
   <dl class="ref">
-    <dt>fn(name, /, *args, **named)</dt><dd>Any function by name, in an expression; keyword arguments pass by name. A registered function is one.</dd>
-    <dt>sql(text).rows(con) / con.run(text)</dt><dd>SQL that names the function, on a connection to the database it was registered on.</dd>
+    <dt>name(...) in SQL</dt><dd>In any query or statement, on a connection to the database the function was registered on. <code>name := value</code> or <code>name =&gt; value</code> passes an argument by name.</dd>
+    <dt>fn(name, /, *args, **named)</dt><dd>Calls any function by name in a plan. Keyword arguments are passed by name.</dd>
   </dl>
 
   <h3>Errors</h3>
   <dl class="ref">
-    <dt>CatalogError</dt><dd>A type text names a type that does not exist. At registration.</dd>
-    <dt>TypeError</dt><dd>A <code>function</code> that is not callable, or a <code>parameters</code> that is neither a list nor a dict. At registration.</dd>
-    <dt>InvalidInputError</dt><dd>At registration: an <code>ANY</code> return type, a list of types that does not fit the parameters, a dict naming no parameter, an annotation no type is read from, a default its parameter cannot hold, two parameter names equal ignoring case, or an option value that is not one of the choices. At run time: an exception inside the function, a returned value that cannot be read, or one that cannot be cast to <code>returns</code>.</dd>
+    <dt>CatalogError</dt><dd>An unknown type name. When you register.</dd>
+    <dt>TypeError</dt><dd>Not callable, <code>parameters</code> not a list or dict, a type or <code>returns</code> that is not text, a name that is not a string. When you register.</dd>
+    <dt>InvalidInputError</dt><dd>When you register: the types do not fit the function, or an option is not one of its choices. When the query runs: an exception in your function, or a result that cannot be converted.</dd>
     <dt>InterfaceError</dt><dd>The connection is closed.</dd>
-    <dt>ProgrammingError</dt><dd>The engine found no function taking the arguments given in the query.</dd>
+    <dt>ProgrammingError</dt><dd>A call does not fit the function's parameters. Before the query runs.</dd>
+    <dt>ConversionError</dt><dd>An argument cannot be converted to its parameter's type. When the query runs.</dd>
+    <dt>TransactionError</dt><dd>A statement after a failed query, or after a registration DuckDB refused, inside your transaction, until <code>ROLLBACK</code> or <code>COMMIT</code>.</dd>
   </dl>
 </section>
 
-<section id="changes">
-  <h2>Changes from the old client</h2>
-  <p>The old client's <code>create_function</code> had this signature:</p>
-  <pre><code>con.create_function(name, function, parameters=<span class="k">None</span>, return_type=<span class="k">None</span>, *,
-                    type=<span class="s">"native"</span>, null_handling=<span class="s">"default"</span>, exception_handling=<span class="s">"default"</span>, side_effects=<span class="k">False</span>)
-duckdb.create_function(...)     <span class="c"># the same, on the implicit default connection</span>
-con.remove_function(name)       <span class="c"># and duckdb.remove_function(name)</span></code></pre>
-  <div class="tablewrap">
-    <table>
-      <thead><tr><th>Old</th><th>Native</th></tr></thead>
-      <tbody>
-        <tr><td><code>return_type=</code>, optional</td><td><code>returns</code>, optional the same way</td></tr>
-        <tr><td><code>parameters=None</code>: types inferred from the function's annotations</td><td>the same, with a dict for some types by name; an annotation no type is read from is refused, where the old client made it <code>ANY</code>, and <code>bytearray</code> is no longer <code>BLOB</code>, since a <code>BLOB</code> arrives as <code>bytes</code></td></tr>
-        <tr><td>every parameter, keyword-only and <code>**kwargs</code> included, was one positional parameter; defaults were ignored and arguments could not be named</td><td>each parameter keeps its kind, name and default: <code>f(x := 1)</code>, <code>*args</code> and <code>**kwargs</code> work as in Python</td></tr>
-        <tr><td><code>type="native"</code> or <code>"arrow"</code></td><td>no <code>type</code>; every function is called per row with Python values</td></tr>
-        <tr><td><code>null_handling</code> took a string or one of the client's enum values</td><td>the strings <code>"default"</code> and <code>"special"</code></td></tr>
-        <tr><td>under <code>"default"</code>, returning <code>None</code> was refused: "The UDF is not expected to return NULL values"</td><td>returning <code>None</code> makes the result NULL under either setting</td></tr>
-        <tr><td><code>exception_handling="return_null"</code>: an exception inside the function became NULL</td><td>gone; an exception fails the query. Catch it in the function and return <code>None</code></td></tr>
-        <tr><td><code>side_effects=True</code> / <code>False</code></td><td><code>stability="volatile"</code> / <code>"consistent"</code>, plus <code>"consistent_within_query"</code></td></tr>
-        <tr><td>returned the connection, for chaining</td><td>returns <code>None</code></td></tr>
-        <tr><td>registering a name twice was refused, "already created"; <code>remove_function</code> first</td><td>registering again with the same parameters replaces, with other parameters adds a version; there is no <code>remove_function</code>, the engine keeps a function until the database closes</td></tr>
-        <tr><td><code>duckdb.create_function</code> on an implicit default connection</td><td>no module-level function; a connection is always explicit</td></tr>
-        <tr><td><code>InvalidInputException</code></td><td><code>InvalidInputError</code></td></tr>
-      </tbody>
-    </table>
-  </div>
-  <div class="pair">
-    <div class="bad">
-      <div class="tag">old</div>
-      <pre><code>con.create_function(<span class="s">"brittle"</span>, brittle,
-    exception_handling=<span class="s">"return_null"</span>)
-con.create_function(<span class="s">"tick"</span>, tick, [], <span class="s">"BIGINT"</span>,
-    side_effects=<span class="k">True</span>)</code></pre>
-    </div>
-    <div class="good">
-      <div class="tag">native</div>
-      <pre><code>con.create_function(<span class="s">"brittle"</span>, safe(brittle), [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT"</span>)
-    <span class="c"># where safe() catches and returns None</span>
-con.create_function(<span class="s">"tick"</span>, tick, [], <span class="s">"BIGINT"</span>,
-    stability=<span class="s">"volatile"</span>)</code></pre>
-    </div>
-  </div>
-  <p>One more difference is recorded in the behaviour notes: a <code>KeyboardInterrupt</code> raised inside the function is now the query's <code>InvalidInputError</code>, like any other exception in it, since the engine owns the call and sees only its failure.</p>
-  <p>One thing the old client had is not here in any form: Arrow functions, <code>type="arrow"</code>.</p>
-</section>
-
 <footer>
-  <p>A registered function is one of the engine's functions: it lives as long as the database does, and its errors come through the query that called it.</p>
+  <p>Moving from DuckDB 1.5.6? See <a href="changes.html">Coming from DuckDB 1.5.6</a>.</p>
 </footer>
 
 </div>

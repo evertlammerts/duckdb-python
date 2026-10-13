@@ -139,6 +139,7 @@ class TestValues:
             ("MAP(VARCHAR, BIGINT[])", "MAP {'k': []}"),
             ("STRUCT(a BIGINT[])", "{'a': []}"),
             ("MAP(BIGINT[], BIGINT)", "MAP {[]: 1}"),
+            ("STRUCT(a BIGINT[][])", "{'a': [[]]}"),
         ],
     )
     def test_a_constant_nested_argument_is_every_rows_own(
@@ -148,6 +149,8 @@ class TestValues:
         def grow(x: object) -> int:
             inner = x[0] if isinstance(x, list) else next(iter(x.values())) if isinstance(x, dict) else None
             if isinstance(inner, tuple):
+                inner = inner[0]
+            if isinstance(inner, list) and inner and isinstance(inner[0], list):
                 inner = inner[0]
             assert isinstance(inner, list)
             inner.append(1)

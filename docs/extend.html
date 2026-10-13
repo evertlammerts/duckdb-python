@@ -13,10 +13,11 @@
 
 <nav class="sitenav">
   <a class="home" href="index.html">duckdb for python</a>
-  <a href="dbapi.html">DB-API 2.0</a>
   <a href="frame.html">Frames &amp; Plans</a>
-  <a href="udf.html">UDFs</a>
+  <a href="udf.html">Python Functions</a>
   <a class="here" href="extend.html">Macros &amp; Extensions</a>
+  <a href="dbapi.html">DB-API 2.0</a>
+  <a href="changes.html">Coming from 1.5.6</a>
 </nav>
 
 <div class="page">
@@ -24,203 +25,218 @@
 <header class="top">
   <div class="eyebrow">duckdb for python &middot; user manual</div>
   <h1>Macros and extensions</h1>
-  <p class="standfirst">DuckDB can be extended at four levels. An <strong>expression</strong> is built in Python and runs in the engine. A <strong>macro</strong> is SQL the engine writes into every query that calls it. A <strong>Python function</strong> is called once per row. An <strong>extension</strong> is compiled code loaded into the engine, and it can add anything the engine itself has, from a function to a file system.</p>
+  <p class="standfirst">This page shows two ways to add to DuckDB. A <strong>macro</strong> is a piece of SQL you give a name and reuse in your queries. An <strong>extension</strong> is a package of compiled code that adds new features to DuckDB, such as functions, file formats or ways to read other databases. To decide between a macro, a Python function and an extension, see <a href="#choose">A macro, a Python function or an extension?</a></p>
 </header>
 
 <nav class="toc">
   <ol>
-    <li><a href="#ladder">Four ways to add something</a></li>
-    <li><a href="#macros">Macros</a></li>
-    <li><a href="#choose">A macro or a Python function</a></li>
+    <li><a href="#start">Start here</a></li>
+    <li><a href="#macros">Scalar and table macros</a></li>
+    <li><a href="#defaults">Defaults and named arguments</a></li>
+    <li><a href="#calling">Calling a macro from a plan</a></li>
+    <li><a href="#lifetime">Where a macro lives</a></li>
+    <li><a href="#limits">What a macro cannot do</a></li>
+    <li><a href="#choose">A macro, a Python function or an extension?</a></li>
     <li><a href="#extensions">Extensions</a></li>
-    <li><a href="#write">Writing an extension</a></li>
+    <li><a href="#write">Writing your own extension</a></li>
     <li><a href="#reference">Reference</a></li>
   </ol>
 </nav>
 
-<section id="ladder">
-  <h2>Four ways to add something</h2>
-  <p>Each level costs more than the one before it and can do more. Most work that ends up as a Python function could have been a macro, and most people never find out that the fourth level exists.</p>
-  <div class="tablewrap">
-    <table>
-      <thead><tr><th>Level</th><th>Written as</th><th>Cost per row</th><th>Can add</th><th>Where</th></tr></thead>
-      <tbody>
-        <tr><td>Expression</td><td><code>col()</code> and operators, in the plan that uses it</td><td>None. It is the query.</td><td>A computation over columns</td><td><a href="frame.html#exprs">Frames &amp; Plans</a></td></tr>
-        <tr><td>Macro</td><td>SQL, from an expression or a plan, with <code>con.create_macro</code></td><td>None. The engine writes it into the query.</td><td>A named computation, or a whole parameterised query</td><td><a href="#macros">below</a></td></tr>
-        <tr><td>Python function</td><td>A callable, with <code>con.create_function</code></td><td>A trip into Python and back, per row</td><td>Anything Python can compute</td><td><a href="udf.html">UDFs</a></td></tr>
-        <tr><td>Extension</td><td>C++ or Rust, loaded with <code>LOAD</code></td><td>None. It is engine code.</td><td>Functions, aggregates, table functions, types, file systems, storage, whole subsystems</td><td><a href="#extensions">below</a></td></tr>
-      </tbody>
-    </table>
-  </div>
-  <p>Read the table from the top. If a thing can be an expression, it is one. If it needs a name or parameters, it is a macro. Only what needs Python is a function, and only what needs to change the engine is an extension.</p>
+<section id="start">
+  <h2>Start here</h2>
+  <pre><code><span class="k">from</span> decimal <span class="k">import</span> Decimal
+<span class="k">from</span> duckdb <span class="k">import</span> frame
+<span class="k">from</span> duckdb.frame <span class="k">import</span> col, sql
+
+con = frame.connect()
+con.run(<span class="s">"CREATE TABLE orders (id INTEGER, customer VARCHAR, region VARCHAR, total DECIMAL(6,2))"</span>)
+con.run(<span class="s">"INSERT INTO orders VALUES (1, 'acme', 'emea', 1400), (2, 'bolt', 'amer', 320), (3, 'acme', 'emea', 2600)"</span>)
+
+con.create_macro(<span class="s">"with_vat"</span>, [<span class="s">"amount"</span>], col(<span class="s">"amount"</span>) * Decimal(<span class="s">"1.21"</span>))
+sql(<span class="s">"SELECT id, with_vat(total) AS gross FROM orders"</span>).rows(con)
+<span class="c"># [(1, Decimal('1694.0000')), (2, Decimal('387.2000')), (3, Decimal('3146.0000'))]</span></code></pre>
+  <p>A comment shows what the call returns, as you see it at the Python prompt or in a notebook; in a script, pass the result to <code>print()</code>. <code>con.run(...)</code> runs one statement and returns the number of rows it changed; <code>sql(...).rows(con)</code> gives you a query's rows.</p>
+  <p><code>create_macro</code> takes three things here:</p>
+  <ul>
+    <li><code>"with_vat"</code> is the name you call it by in SQL.</li>
+    <li><code>["amount"]</code> lists the names of its parameters.</li>
+    <li><code>col("amount") * Decimal("1.21")</code> is the <strong>body</strong>: what the macro stands for. It is an <strong>expression</strong>, a piece of a query built in Python (see <a href="frame.html">Frames &amp; Plans</a>). Inside the body, <code>col("amount")</code> means the parameter <code>amount</code>.</li>
+  </ul>
+  <p>When a query calls <code>with_vat(total)</code>, DuckDB puts the body in place of the call, with <code>total</code> in place of <code>amount</code>. It then runs the query as if you had written <code>total * 1.21</code> yourself. A macro adds no Python call of its own, so it is as fast as the SQL it stands for. If its body calls a Python function, DuckDB calls that function just as often as it would without the macro, with the same rules for <code>NULL</code> and for reusing results (see <a href="udf.html">Python Functions</a>).</p>
+  <p>The body uses <code>Decimal("1.21")</code> because a Python float is an approximate number. It would become DuckDB's <code>DOUBLE</code>, and <code>with_vat</code> would return floats such as <code>1694.0</code>. In SQL, <code>1.21</code> is an exact <code>DECIMAL</code>, and a Python <code>Decimal</code> becomes one too.</p>
+  <p>The column <code>total</code> is a <code>DECIMAL(6,2)</code>: a number with six digits in all, two of them after the decimal point. Multiplying two decimals adds up their decimal places, so the result has four. The macro does not round it; <code>round(with_vat(total), 2)</code> gives whole cents.</p>
+  <p>As an alternative to <code>create_macro</code>, you can write the same macro in SQL. <code>OR REPLACE</code> replaces the macro of that name, so running both is fine:</p>
+  <pre><code>con.run(<span class="s">"CREATE OR REPLACE MACRO with_vat(amount) AS amount * 1.21"</span>)</code></pre>
+  <p><code>create_macro</code> takes an expression or a plan, not SQL text: a string as the body raises <code>TypeError</code>. It is a method of a connection from <code>frame.connect()</code>. A connection from <code>duckdb.dbapi.connect()</code> does not have it and raises <code>AttributeError</code>; there, use <code>CREATE MACRO</code>. <code>TypeError</code> and <code>AttributeError</code> are Python's own errors; the other errors this page names, such as <code>CatalogError</code>, are classes in <code>duckdb.exceptions</code>.</p>
 </section>
 
 <section id="macros">
-  <h2>Macros</h2>
-  <pre><code><span class="k">from</span> duckdb.frame <span class="k">import</span> col, table, sql
+  <h2>Scalar and table macros</h2>
+  <p>There are two kinds of macro:</p>
+  <ul>
+    <li>A <strong>scalar macro</strong> computes one value, like a function. Its body is an expression, as in <code>with_vat</code> above.</li>
+    <li>A <strong>table macro</strong> returns rows, like a table. Its body is a <strong>plan</strong>, a query built in Python.</li>
+  </ul>
+  <pre><code><span class="k">from</span> duckdb.frame <span class="k">import</span> table
 
-con.create_macro(<span class="s">"add_up"</span>, [<span class="s">"a"</span>, (<span class="s">"b"</span>, <span class="s">1</span>)], col(<span class="s">"a"</span>) + col(<span class="s">"b"</span>))
 con.create_macro(<span class="s">"big_orders"</span>, [<span class="s">"floor"</span>], table(<span class="s">"orders"</span>).filter(col(<span class="s">"total"</span>) &gt; col(<span class="s">"floor"</span>)))
-
-sql(<span class="s">"SELECT add_up(2), add_up(2, 5)"</span>).rows(con)     <span class="c"># [(3, 7)]</span>
-sql(<span class="s">"SELECT id FROM big_orders(1000)"</span>).rows(con)    <span class="c"># [(1,), (3,)]</span></code></pre>
-  <p>A macro is a piece of SQL with a name and parameters, kept in the database. When a query calls it, the engine puts the body in place of the call, with the arguments in place of the parameters, and then plans the query as if you had written it out. No row ever reaches Python, and there is nothing to call at run time.</p>
-  <pre><code>con.create_macro(name, parameters, body, *, replace=<span class="k">False</span>, temporary=<span class="k">False</span>)</code></pre>
-  <dl class="ref">
-    <dt>name</dt><dd>The SQL name, quoted whole. A tuple puts the macro in a schema: <code>("util", "add_up")</code>.</dd>
-    <dt>parameters</dt><dd>A list of names, or <code>(name, default)</code> pairs. Every name after the first one with a default must have one too; the engine refuses the definition otherwise.</dd>
-    <dt>body</dt><dd>An expression, which makes a scalar macro, or a plan, which makes a table macro. Anything else raises <code>TypeError</code>.</dd>
-    <dt>replace</dt><dd>Redefine a macro of that name. Without it a second definition raises <code>CatalogError</code>.</dd>
-    <dt>temporary</dt><dd>The macro lives on this connection only, and is gone when it closes. Not visible from <code>con.duplicate()</code>.</dd>
-  </dl>
-
-  <p class="lead-in">parameters</p>
-  <p>Inside the body, <code>col(name)</code> refers to a parameter of that name. The engine tells a parameter from a column by name alone, and the parameter wins. A default is a plain value, written into the definition: a number, text, a date, <code>None</code>. An expression as a default is refused.</p>
-  <pre><code><span class="k">from</span> duckdb.frame <span class="k">import</span> lit
-
-con.create_macro(<span class="s">"vat"</span>, [<span class="s">"price"</span>, (<span class="s">"rate"</span>, <span class="s">0.21</span>)], col(<span class="s">"price"</span>) * (<span class="s">1</span> + col(<span class="s">"rate"</span>)))
-con.create_macro(<span class="s">"greet"</span>, [(<span class="s">"who"</span>, <span class="s">"world"</span>)], lit(<span class="s">"hello "</span>).concat(col(<span class="s">"who"</span>)))
-
-sql(<span class="s">"SELECT vat(100), vat(100, 0.09)"</span>).rows(con)     <span class="c"># [(Decimal('121.00'), Decimal('109.00'))]</span>
-sql(<span class="s">"SELECT greet(), greet('there')"</span>).rows(con)     <span class="c"># [('hello world', 'hello there')]</span>
-sql(<span class="s">"SELECT add_up(b := 5, a := 2)"</span>).rows(con)      <span class="c"># [(7,)]  arguments by name</span></code></pre>
+sql(<span class="s">"SELECT id, total FROM big_orders(1000)"</span>).rows(con)
+<span class="c"># [(1, Decimal('1400.00')), (3, Decimal('2600.00'))]</span></code></pre>
+  <p>You call a table macro wherever SQL expects a table, in <code>FROM</code>. It reads the table each time you call it, so it sees rows added after you defined it.</p>
   <div class="note caution">
-    <p><strong>A parameter shadows a column of the same name.</strong> <code>create_macro("above", ["total"], table("orders").filter(col("total") &gt; 1000))</code> compares the argument with 1000, not the column, and <code>above(5)</code> returns no rows. Name parameters so they cannot collide with the columns the body reads.</p>
+    <p><strong>A parameter hides a column with the same name.</strong> Inside the body, <code>col(name)</code> means the parameter whenever a parameter has that name. So <code>create_macro("above", ["total"], table("orders").filter(col("total") &gt; 1000))</code> compares the argument with 1000, not the column, and <code>above(5)</code> returns no rows. In the query of a scalar macro's <code>.scalar()</code>, the same clash raises <code>ProgrammingError</code> instead. Give parameters names that differ from the columns the body reads.</p>
   </div>
-  <p>A parameter is a value. It cannot be a table name, because a name in a <code>FROM</code> clause is not a value; the engine refuses the definition. To take a table by name, read it through <code>query_table</code>:</p>
-  <pre><code>con.run(<span class="s">"CREATE MACRO first_rows(t, n) AS TABLE SELECT * FROM query_table(t) LIMIT n"</span>)
-sql(<span class="s">"SELECT count(*) FROM first_rows('orders', 2)"</span>).rows(con)   <span class="c"># [(2,)]</span></code></pre>
 
-  <p class="lead-in">the body</p>
-  <p>A scalar macro's body is any expression, aggregates and windows included. A plan's <code>.scalar()</code> puts a whole query in it. A table macro's body is any plan.</p>
+  <h3>What a body can hold</h3>
+  <p>A scalar macro's body can be any expression, including aggregate functions, which combine many rows into one value, such as <code>mean()</code>. It can also be a window function, which keeps every row and gives each one a value computed from other rows: <code>running</code> below gives each order the running total, in order of <code>id</code>. To put a whole query in a scalar macro, end the plan with <code>.scalar()</code>, which turns a query that returns one value into an expression. A table macro's body can be any plan.</p>
   <pre><code><span class="k">from</span> duckdb.frame <span class="k">import</span> count_all, fn
 
 con.create_macro(<span class="s">"my_avg"</span>, [<span class="s">"x"</span>], col(<span class="s">"x"</span>).mean())
 con.create_macro(<span class="s">"running"</span>, [<span class="s">"x"</span>, <span class="s">"o"</span>], col(<span class="s">"x"</span>).sum().over(order_by=col(<span class="s">"o"</span>)))
 con.create_macro(<span class="s">"n_above"</span>, [<span class="s">"x"</span>], table(<span class="s">"orders"</span>).filter(col(<span class="s">"total"</span>) &gt; col(<span class="s">"x"</span>)).aggregate(count_all()).scalar())
 
-sql(<span class="s">"SELECT region, my_avg(total) FROM orders GROUP BY region ORDER BY region"</span>).rows(con)   <span class="c"># [('amer', 320.0), ('emea', 2000.0)]</span>
+sql(<span class="s">"SELECT region, my_avg(total) FROM orders GROUP BY region ORDER BY region"</span>).rows(con)
+<span class="c"># [('amer', 320.0), ('emea', 2000.0)]</span>
 sql(<span class="s">"SELECT id, running(total, id) FROM orders ORDER BY id"</span>).rows(con)
-sql(<span class="s">"SELECT n_above(1000)"</span>).rows(con)                                                       <span class="c"># [(2,)]</span></code></pre>
-  <p>Values in the body are written into the definition as literals, escaped, since a definition has no parameters to bind: <code>col("c") == "it's"</code> becomes <code>("c" = 'it''s')</code>. A <code>param()</code> is refused for the same reason: <code>create_macro</code> raises <code>TypeError</code>, <code>param() has no value inside a macro body; a macro parameter is col(name)</code>. A value that changes per call is a parameter of the macro, <code>col(name)</code> in the body.</p>
-  <p>A body can call anything the engine has, a Python function registered with <code>create_function</code> included, so the levels compose: the macro does the arithmetic around a call into Python.</p>
+<span class="c"># [(1, Decimal('1400.00')), (2, Decimal('1720.00')), (3, Decimal('4320.00'))]</span>
+sql(<span class="s">"SELECT n_above(1000)"</span>).rows(con)   <span class="c"># [(2,)]</span></code></pre>
+  <p>The query inside <code>.scalar()</code> must return one column, or <code>create_macro</code> raises <code>ProgrammingError</code>. When the query's result has no row, the value is <code>NULL</code>. That is not the case for <code>n_above(9999)</code>, which is 0: counting no orders still gives one row, holding 0. When the result has more than one row, the query that calls the macro raises <code>InvalidInputError</code>.</p>
+  <p>A body can call any function DuckDB has, a Python function you registered with <code>create_function</code> included. <code>fn(name, ...)</code> builds a call to the function with that name. So you can keep the Python part small and do the rest in the macro:</p>
   <pre><code>con.create_function(<span class="s">"plus_one"</span>, <span class="k">lambda</span> x: x + <span class="s">1</span>, [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT"</span>)
 con.create_macro(<span class="s">"plus_two"</span>, [<span class="s">"x"</span>], fn(<span class="s">"plus_one"</span>, col(<span class="s">"x"</span>)) + <span class="s">1</span>)
 sql(<span class="s">"SELECT plus_two(1)"</span>).rows(con)   <span class="c"># [(3,)]</span></code></pre>
-  <p>A macro and a function registered with <code>create_function</code> both live in schema <code>main</code>. The engine stores a registered function as internal, like a built-in, and a macro of the same name takes precedence over it, as it does over a built-in. That is the engine's rule, not this package's.</p>
-  <pre><code>con.create_macro(<span class="s">"abs"</span>, [<span class="s">"x"</span>], col(<span class="s">"x"</span>) + <span class="s">100</span>)
-sql(<span class="s">"SELECT abs(-1)"</span>).rows(con)   <span class="c"># [(99,)]</span></code></pre>
 
-  <p class="lead-in">writing the statement yourself</p>
-  <p><code>create_macro</code> renders the body and runs <code>CREATE MACRO</code>. The same statement can be written by hand, with a plan's <code>render()</code> as the body, when the macro needs something the method does not offer, such as several signatures under one name:</p>
-  <pre><code>body = sql(<span class="s">'SELECT unnest("i") AS uid'</span>).filter(col(<span class="s">"uid"</span>) &gt; <span class="s">2</span>)
-print(body.render())
-<span class="c"># WITH "_s0" AS (</span>
-<span class="c"># SELECT unnest("i") AS uid</span>
-<span class="c"># )</span>
-<span class="c"># SELECT * FROM "_s0" WHERE ("uid" &gt; 2)</span>
+  <h3>A table name as an argument</h3>
+  <p>A parameter holds a value, and a table name in <code>FROM</code> is not a value. To pass a table by name, read it with DuckDB's <code>query_table</code> function, in a macro you write in SQL:</p>
+  <pre><code>con.run(<span class="s">"CREATE MACRO first_rows(t, n) AS TABLE SELECT * FROM query_table(t) LIMIT n"</span>)
+sql(<span class="s">"SELECT count(*) FROM first_rows('orders', 2)"</span>).rows(con)   <span class="c"># [(2,)]</span></code></pre>
+</section>
 
-con.run(<span class="s">"CREATE MACRO big_ids(i) AS TABLE "</span> + body.render())
-sql(<span class="s">"SELECT * FROM big_ids([1, 3, 9])"</span>).rows(con)   <span class="c"># [(3,), (9,)]</span>
+<section id="defaults">
+  <h2>Defaults and named arguments</h2>
+  <p>A parameter can have a default: write it as a <code>(name, default)</code> pair. A call can then leave it out, or pass any argument by name with <code>name := value</code>:</p>
+  <pre><code><span class="k">from</span> duckdb.frame <span class="k">import</span> lit
 
-con.run(<span class="s">"CREATE MACRO m(a) AS a, (a, b) AS a + b"</span>)   <span class="c"># two signatures</span>
-sql(<span class="s">"SELECT m(1), m(1, 2)"</span>).rows(con)                  <span class="c"># [(1, 3)]</span></code></pre>
-  <p><code>render()</code> takes no connection, so a plan that names a parameter renders without anyone asking what <code>"i"</code> is. The engine finds out when the macro is defined.</p>
+con.create_macro(<span class="s">"add_up"</span>, [<span class="s">"a"</span>, (<span class="s">"b"</span>, <span class="s">1</span>)], col(<span class="s">"a"</span>) + col(<span class="s">"b"</span>))
+con.create_macro(<span class="s">"greet"</span>, [(<span class="s">"who"</span>, <span class="s">"world"</span>)], lit(<span class="s">"hello "</span>).concat(col(<span class="s">"who"</span>)))
 
-  <p class="lead-in">calling it</p>
-  <p>From SQL, as above. From a plan, a scalar macro is a function and a table macro is a table function; <code>fn</code> and <code>table_function</code> call either by name, and the engine knows the result like any function's.</p>
-  <pre><code><span class="k">from</span> duckdb.frame <span class="k">import</span> fn, table_function
+sql(<span class="s">"SELECT add_up(2), add_up(2, 5), add_up(b := 5, a := 2)"</span>).rows(con)   <span class="c"># [(3, 7, 7)]</span>
+sql(<span class="s">"SELECT greet(), greet('there')"</span>).rows(con)                        <span class="c"># [('hello world', 'hello there')]</span></code></pre>
+  <p><code>lit</code> turns a plain Python value into an expression, so that you can call expression methods such as <code>.concat()</code> on it; a plain string has no <code>.concat()</code>. A default is a plain value, such as a number, text, a date or <code>None</code>. An expression as a default raises <code>TypeError</code>. Every parameter after the first one with a default needs a default too; otherwise DuckDB refuses the macro with <code>ParserError</code>.</p>
+  <p>A macro has no rule of its own for <code>NULL</code>. A <code>NULL</code> argument, or a <code>None</code> default, goes into the body like any other value, and the SQL there decides the result: <code>add_up(2, NULL)</code> is <code>NULL</code>, because <code>2 + NULL</code> is.</p>
+  <p>A default keeps the type of its Python value. That matters for numbers with a decimal point:</p>
+  <pre><code><span class="k">from</span> decimal <span class="k">import</span> Decimal
 
-table(<span class="s">"orders"</span>).select(fn(<span class="s">"add_up"</span>, col(<span class="s">"total"</span>), <span class="s">10</span>).alias(<span class="s">"x"</span>)).rows(con)
-table_function(<span class="s">"big_orders"</span>, <span class="s">1000</span>).select(<span class="s">"id"</span>).rows(con)             <span class="c"># [(1,), (3,)]</span>
-table_function(<span class="s">"big_orders"</span>, floor=<span class="s">1000</span>).render()                   <span class="c"># SELECT * FROM big_orders("floor" := 1000)</span>
+con.create_macro(<span class="s">"vat"</span>, [<span class="s">"price"</span>, (<span class="s">"rate"</span>, <span class="s">0.21</span>)], col(<span class="s">"price"</span>) * (<span class="s">1</span> + col(<span class="s">"rate"</span>)))
+sql(<span class="s">"SELECT vat(100), vat(100, 0.09)"</span>).rows(con)   <span class="c"># [(121.0, Decimal('109.00'))]</span>
 
-sql(<span class="s">"SELECT add_up(2, 5) AS v"</span>).types(con)      <span class="c"># ['INTEGER']</span>
+con.create_macro(<span class="s">"vat"</span>, [<span class="s">"price"</span>, (<span class="s">"rate"</span>, Decimal(<span class="s">"0.21"</span>))], col(<span class="s">"price"</span>) * (<span class="s">1</span> + col(<span class="s">"rate"</span>)), replace=<span class="k">True</span>)
+sql(<span class="s">"SELECT vat(100), vat(100, 0.09)"</span>).rows(con)   <span class="c"># [(Decimal('121.00'), Decimal('109.00'))]</span></code></pre>
+  <p>The Python float <code>0.21</code> becomes a <code>DOUBLE</code>, so <code>vat(100)</code> gives a float. The <code>0.09</code> in the SQL text is read by DuckDB as an exact <code>DECIMAL</code>. A <code>Decimal</code> default keeps both calls exact.</p>
+</section>
+
+<section id="calling">
+  <h2>Calling a macro from a plan</h2>
+  <p>In a plan, call a scalar macro with <code>fn</code>, like any function, and a table macro with <code>table_function</code>, like any function that returns rows. Keyword arguments are passed by name, so you can choose which parameters with a default to give:</p>
+  <pre><code><span class="k">from</span> duckdb.frame <span class="k">import</span> table_function
+
+table(<span class="s">"orders"</span>).select(fn(<span class="s">"add_up"</span>, col(<span class="s">"id"</span>), b=<span class="s">10</span>).alias(<span class="s">"x"</span>)).rows(con)   <span class="c"># [(11,), (12,), (13,)]</span>
+table_function(<span class="s">"big_orders"</span>, <span class="s">1000</span>).select(<span class="s">"id"</span>).rows(con)                     <span class="c"># [(1,), (3,)]</span>
+print(table_function(<span class="s">"big_orders"</span>, floor=<span class="s">1000</span>).render())   <span class="c"># SELECT * FROM big_orders("floor" := 1000)</span></code></pre>
+  <p>Every parameter without a default still needs an argument. <code>fn</code> only builds an expression, so a missing argument, like a name DuckDB does not know, is reported when DuckDB checks or runs the plan: by <code>rows(con)</code>, <code>types(con)</code> or <code>columns(con)</code>, not by <code>fn</code>.</p>
+  <pre><code>table(<span class="s">"orders"</span>).select(fn(<span class="s">"add_up"</span>, b=<span class="s">10</span>)).rows(con)
+<span class="c"># ProgrammingError: Binder Error: Macro add_up() does not support the supplied arguments. You might need to add explicit type casts.</span></code></pre>
+  <p>A plan can tell you its result types and column names without fetching any rows:</p>
+  <pre><code>sql(<span class="s">"SELECT add_up(2, 5) AS v"</span>).types(con)        <span class="c"># ['INTEGER']</span>
 table_function(<span class="s">"big_orders"</span>, <span class="s">1000</span>).columns(con)   <span class="c"># ['id', 'customer', 'region', 'total']</span></code></pre>
+  <p>While it works these out, DuckDB may still call a Python function whose arguments are fixed values: <code>sql("SELECT plus_two(1)").types(con)</code> calls <code>plus_one</code> once.</p>
+</section>
 
-  <p class="lead-in">when the body is checked</p>
-  <p>The engine checks the body when the macro is defined. A table, function or column it cannot find is refused there, with the engine's message: <code>CatalogError</code> for a table or function, <code>ProgrammingError</code> for a name that is neither a parameter nor a column. A macro cannot call itself, and cannot call a macro defined after it, since the name does not exist yet.</p>
-  <pre><code>con.create_macro(<span class="s">"nope"</span>, [<span class="s">"x"</span>], table(<span class="s">"missing"</span>).filter(col(<span class="s">"v"</span>) &gt; col(<span class="s">"x"</span>)))
-<span class="c"># CatalogError: Table with name missing does not exist!</span>
-con.create_macro(<span class="s">"nope"</span>, [<span class="s">"x"</span>], col(<span class="s">"x"</span>) + col(<span class="s">"y"</span>))
-<span class="c"># ProgrammingError: Referenced column "y" was not found because the FROM clause is missing</span></code></pre>
-  <p>Parameters have no types, so anything that depends on the arguments' types is settled at each call. <code>create_macro("up", ["s"], col("s").str().upper())</code> is accepted; <code>up('abc')</code> gives <code>'ABC'</code> and <code>up(1)</code> is refused with the message <code>upper</code> gives an integer: no function matches the given name and argument types.</p>
-  <p>Tables are looked up again at every call. The body is text the engine substitutes, not a result it kept, so a macro over <code>orders</code> sees rows inserted after it was defined. One consequence: an unqualified table name in the body resolves from the caller's search path, not from the schema the macro lives in. A macro created as <code>("util", "rate_of")</code> that reads <code>rates</code> must say <code>table(("util", "rates"))</code>; with <code>table("rates")</code> the engine refuses the definition when <code>rates</code> is not on the definer's own path.</p>
-  <pre><code>con.create_macro((<span class="s">"util"</span>, <span class="s">"rate_of"</span>), [<span class="s">"p"</span>], table(<span class="s">"rates"</span>).select((col(<span class="s">"p"</span>) * col(<span class="s">"rate"</span>)).alias(<span class="s">"v"</span>)))
-<span class="c"># CatalogError: Table with name rates does not exist!</span>
-<span class="c"># Did you mean "util.rates"?</span></code></pre>
+<section id="lifetime">
+  <h2>Where a macro lives</h2>
+  <p>A macro is kept in the database, like a table. Every connection to the database can call it, and a macro made in a database file is still there when you open the file again. A Python function is not kept. If a macro calls one, register the function again with <code>create_function</code> after you open the file, or calling the macro raises <code>CatalogError</code>.</p>
+  <p>The examples on this page use an in-memory database, from <code>frame.connect()</code> with no file name. Its macros are gone when it closes, and another <code>frame.connect()</code> does not see them, but <code>con.duplicate()</code> shares the same database. To keep macros between runs, connect to a file, such as <code>frame.connect("shop.db")</code>.</p>
+  <ul>
+    <li><code>temporary=True</code> keeps the macro on this connection only. It is gone when the connection closes, and <code>con.duplicate()</code> cannot see it.</li>
+    <li>Defining a macro with the name of another macro of the same kind, in the same schema, raises <code>CatalogError</code>. <code>replace=True</code> replaces the old macro.</li>
+    <li>A macro may take the name of a built-in function or of a Python function you registered. It then hides that function; see the Details of <a href="#limits">What a macro cannot do</a>.</li>
+  </ul>
+  <p>A <strong>schema</strong> is a named group of tables, macros and other objects in a database. Unless you say otherwise, they go into the schema <code>main</code>. To put a macro in another schema, create the schema first, then give the name as a tuple:</p>
+  <pre><code>con.run(<span class="s">"CREATE SCHEMA util"</span>)
+con.create_macro((<span class="s">"util"</span>, <span class="s">"twice"</span>), [<span class="s">"x"</span>], col(<span class="s">"x"</span>) * <span class="s">2</span>)
 
-  <p class="lead-in">where it lives</p>
-  <p>In the database, like a table: a macro created on a file database is there when the file is opened again. <code>temporary=True</code> keeps it on this connection. <code>duckdb_functions()</code> lists macros with their parameter names and their definition, and <code>DROP MACRO</code> removes one:</p>
-  <pre><code>sql(<span class="s">"SELECT function_name, parameters, macro_definition FROM duckdb_functions() WHERE function_name = 'add_up'"</span>).rows(con)
-<span class="c"># [('add_up', ['a', 'b'], '(a + b)')]     the engine's own spelling; defaults are not shown</span>
+sql(<span class="s">"SELECT util.twice(21)"</span>).rows(con)                        <span class="c"># [(42,)]</span>
+table(<span class="s">"orders"</span>).select(fn((<span class="s">"util"</span>, <span class="s">"twice"</span>), col(<span class="s">"id"</span>))).rows(con)   <span class="c"># [(2,), (4,), (6,)]</span></code></pre>
+  <p>Without <code>CREATE SCHEMA</code>, <code>create_macro</code> raises <code>CatalogError</code>. A name given as one string is used as written, so a dot in it is part of the name: <code>table("orders").select(fn("util.twice", col("id"))).rows(con)</code> looks for a macro called <code>util.twice</code> and raises <code>CatalogError</code>.</p>
+  <p>To see your macros, ask <code>duckdb_functions()</code>. To remove one, use <code>DROP MACRO</code>, or <code>DROP MACRO TABLE</code> for a table macro:</p>
+  <pre><code>sql(<span class="s">"SELECT function_name, function_type, parameters, macro_definition FROM duckdb_functions() WHERE function_name = 'add_up'"</span>).rows(con)
+<span class="c"># [('add_up', 'macro', ['a', 'b'], '(a + b)')]</span>
 
 con.run(<span class="s">"DROP MACRO add_up"</span>)
 con.run(<span class="s">"DROP MACRO TABLE big_orders"</span>)</code></pre>
-  <p>Defaults are not introspectable: <code>parameters</code> lists the names without them, and <code>macro_definition</code> is the engine's normalised spelling of the body, not what was written.</p>
+  <p>The list does not show defaults, and <code>macro_definition</code> is DuckDB's own rewriting of the body, not the text you gave it.</p>
+</section>
 
-  <p class="lead-in">what a macro cannot do</p>
+<section id="limits">
+  <h2>What a macro cannot do</h2>
   <dl class="ref">
-    <dt>Run Python</dt><dd>The body is SQL. It can call a function registered from Python, and that is the only way Python enters.</dd>
-    <dt>Take a table</dt><dd>Parameters are values. <code>query_table(name)</code> reads a table whose name is a value.</dd>
-    <dt>Change anything</dt><dd>A body is an expression or a query. There is no macro for <code>INSERT</code> or <code>UPDATE</code>.</dd>
-    <dt>Recurse, or look ahead</dt><dd>Every name in the body must exist when the macro is defined.</dd>
-    <dt>Keep state</dt><dd>Each call is the body written out afresh. A volatile argument, <code>random()</code>, is written wherever the parameter appears and runs that many times.</dd>
+    <dt>Run Python</dt><dd>The body is SQL. It can call a Python function you registered, and that is the only way Python comes in.</dd>
+    <dt>Take a table</dt><dd>Parameters are values. Use <code>query_table(name)</code> to read a table whose name is a value.</dd>
+    <dt>Change data</dt><dd>A body is an expression or a query. There is no macro for <code>INSERT</code> or <code>UPDATE</code>.</dd>
+    <dt>Call itself, or a later macro</dt><dd>Every name in the body must exist when you define the macro.</dd>
+    <dt>Keep state</dt><dd>Each call is the body written out again, with nothing kept from the last one.</dd>
   </dl>
 
-  <p class="lead-in">why it is fast</p>
-  <p>After substitution the macro is gone. The plan shows the expression, and the engine treats it like any expression: a scalar macro in a <code>WHERE</code> is pushed into the scan, so rows that fail it are never read out.</p>
-  <pre><code>con.create_macro(<span class="s">"is_big"</span>, [<span class="s">"t"</span>], col(<span class="s">"t"</span>) &gt; <span class="s">1000</span>)
-con.create_function(<span class="s">"is_big_py"</span>, <span class="k">lambda</span> t: t &gt; <span class="s">1000</span>, [<span class="s">"DECIMAL(6,2)"</span>], <span class="s">"BOOLEAN"</span>)
+  <h3>Details</h3>
+  <ul>
+    <li>DuckDB checks the body when you define the macro. A table or function it cannot find raises <code>CatalogError</code>; a name that is neither a parameter nor a column of a table the body reads raises <code>ProgrammingError</code>.</li>
+    <li>Tables and functions are looked up again at every call. A macro sees rows added after you defined it, and a macro over a table that has since been dropped fails at its next call.</li>
+    <li>Parameters have no types, so anything that depends on an argument's type is checked at each call. With <code>create_macro("up", ["s"], col("s").str().upper())</code>, <code>up('abc')</code> gives <code>'ABC'</code>, and <code>up(1)</code> is refused with <code>ProgrammingError</code>, the error <code>upper</code> gives for a number.</li>
+    <li>An argument is copied to every place its parameter appears. A changing argument such as <code>random()</code> then runs once per place, so <code>x - x</code> in the body need not be 0.</li>
+    <li>A table name in the body without a schema is looked up from where the macro is called, not from the macro's own schema. A macro made as <code>("util", "rate_of")</code> that reads <code>util.rates</code> must say <code>table(("util", "rates"))</code>. With <code>table("rates")</code>, DuckDB refuses the macro when <code>rates</code> cannot be found from where you define it.</li>
+    <li>Values in the body are written into the macro as SQL text: <code>col("c") == "it's"</code> becomes <code>(c = 'it''s')</code>. So <code>param()</code>, a placeholder whose value you give when the query runs, has nothing to stand for there, and <code>create_macro</code> refuses it with <code>TypeError: param() has no value inside a macro body; a macro parameter is col(name)</code>.</li>
+    <li>A macro with the same name as a built-in function, or as a Python function you registered, takes precedence over it. That is DuckDB's own rule.</li>
+    <li>You can also write the <code>CREATE MACRO</code> statement yourself, for something <code>create_macro</code> does not offer, such as several versions under one name. A plan's <code>render()</code> gives its SQL text, to use as a table macro's body.</li>
+  </ul>
+  <pre><code>con.create_macro(<span class="s">"abs"</span>, [<span class="s">"x"</span>], col(<span class="s">"x"</span>) + <span class="s">100</span>)
+sql(<span class="s">"SELECT abs(-1)"</span>).rows(con)   <span class="c"># [(99,)]: the macro, not the built-in abs</span>
+con.run(<span class="s">"DROP MACRO abs"</span>)      <span class="c"># the built-in abs is back</span>
 
-print(table(<span class="s">"orders"</span>).filter(fn(<span class="s">"is_big"</span>, col(<span class="s">"total"</span>))).explain(con))
-<span class="c"># ╭─ Seq Scan ────────────────╮</span>
-<span class="c"># │ Table: memory.main.orders │</span>
-<span class="c"># │ Filters: total &gt; 1000.00  │        the macro became a scan filter</span>
-<span class="c"># ╰───────────────────────────╯</span>
+con.run(<span class="s">"CREATE MACRO m(a) AS a, (a, b) AS a + b"</span>)
+sql(<span class="s">"SELECT m(1), m(1, 2)"</span>).rows(con)   <span class="c"># [(1, 3)]: one name, two versions</span>
 
-print(table(<span class="s">"orders"</span>).filter(fn(<span class="s">"is_big_py"</span>, col(<span class="s">"total"</span>))).explain(con))
-<span class="c"># ╭─ Filter ─────────────────────╮</span>
-<span class="c"># │ Expression: is_big_py(total) │      every row is read, then handed to Python</span>
-<span class="c"># ╰───────────────┬──────────────╯</span>
-<span class="c"># ╭─ Seq Scan ────┴──────────────╮</span>
-<span class="c"># │ Table: memory.main.orders    │</span>
-<span class="c"># ╰──────────────────────────────╯</span></code></pre>
-  <p>The same arithmetic three ways, summed over five million rows:</p>
-  <pre><code>con.run(<span class="s">"CREATE TABLE big AS SELECT i FROM range(5000000) t(i)"</span>)
-con.create_function(<span class="s">"score_py"</span>, <span class="k">lambda</span> a: (a * <span class="s">3</span> + <span class="s">7</span>) % <span class="s">11</span>, [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT"</span>)
-con.create_macro(<span class="s">"score"</span>, [<span class="s">"a"</span>], (col(<span class="s">"a"</span>) * <span class="s">3</span> + <span class="s">7</span>) % <span class="s">11</span>)
-
-sql(<span class="s">"SELECT sum((i * 3 + 7) % 11) FROM big"</span>).rows(con)
-sql(<span class="s">"SELECT sum(score(i)) FROM big"</span>).rows(con)
-sql(<span class="s">"SELECT sum(score_py(i)) FROM big"</span>).rows(con)</code></pre>
-  <div class="tablewrap">
-    <table>
-      <thead><tr><th>Query</th><th>14 threads</th><th>1 thread</th></tr></thead>
-      <tbody>
-        <tr><td>the expression written out</td><td>2 ms</td><td></td></tr>
-        <tr><td><code>score(i)</code>, the macro</td><td>2 ms</td><td>13 ms</td></tr>
-        <tr><td><code>score_py(i)</code>, the Python function</td><td>510 ms</td><td>480 ms</td></tr>
-      </tbody>
-    </table>
-  </div>
-  <p>Medians over repeated runs on one laptop (Apple M3 Max, <code>threads</code> at its default of 14). The numbers move with the machine; the ratio does not move much. The macro costs the same as the expression because it is the expression. The Python function barely gains from threads, because one interpreter runs all of them.</p>
+body = table(<span class="s">"orders"</span>).filter(col(<span class="s">"total"</span>) &gt; <span class="s">1000</span>).select(<span class="s">"id"</span>)
+con.run(<span class="s">"CREATE MACRO big_ids() AS TABLE "</span> + body.render())
+sql(<span class="s">"SELECT * FROM big_ids()"</span>).rows(con)   <span class="c"># [(1,), (3,)]</span></code></pre>
 </section>
 
 <section id="choose">
-  <h2>A macro or a Python function</h2>
-  <p>The test is whether the body can be written with <code>col()</code>, operators and the engine's functions. If it can, it is a macro, and the per-row cost is zero. A Python function is for what SQL cannot say: a library call, a lookup into Python state, a format the engine has no parser for.</p>
+  <h2>A macro, a Python function or an extension?</h2>
+  <p>There are four ways to add a computation to your queries. They can do different things, as the last column shows: a macro can return one value or rows, a Python function returns one value per call, and an extension can also add table functions, types and more. Going down the table, each takes more work to write. Only a Python function adds a trip into Python and back for every row. The computation itself takes time whichever way you write it.</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Way</th><th>Written as</th><th>Trip into Python</th><th>Can add</th></tr></thead>
+      <tbody>
+        <tr><td>Expression</td><td><code>col()</code> and operators, in the plan that uses it (<a href="frame.html">Frames &amp; Plans</a>)</td><td>None: it is the query</td><td>A computation over columns</td></tr>
+        <tr><td>Macro</td><td>An expression or a plan, with <code>con.create_macro</code> (this page)</td><td>None: DuckDB copies it into the query</td><td>A named computation, or a whole query with parameters</td></tr>
+        <tr><td>Python function</td><td>A Python function, with <code>con.create_function</code> (<a href="udf.html">Python Functions</a>)</td><td>There and back, for every row</td><td>Anything Python can compute</td></tr>
+        <tr><td>Extension</td><td>C++ or Rust, loaded with <code>LOAD</code> (<a href="#extensions">below</a>)</td><td>None: it runs inside DuckDB</td><td>Functions, aggregate functions, table functions, types, file systems, storage</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Read the table from the top and stop at the first row that fits. If you can write it with <code>col()</code>, operators and DuckDB's functions, it is an expression, and if you want to reuse it under a name, a macro. Use a Python function only for what needs Python: a call into a Python library, a lookup in your Python data, a format DuckDB cannot read. An extension is for adding something DuckDB itself does not have, and most people install one rather than write one.</p>
   <div class="pair">
     <div class="bad">
-      <div class="tag">a trip into Python per row: 0.5 s</div>
+      <div class="tag">a trip into Python for every row</div>
       <pre><code>con.create_function(
-    <span class="s">"score"</span>,
+    <span class="s">"score_py"</span>,
     <span class="k">lambda</span> a: (a * <span class="s">3</span> + <span class="s">7</span>) % <span class="s">11</span>,
     [<span class="s">"BIGINT"</span>], <span class="s">"BIGINT"</span>,
 )</code></pre>
     </div>
     <div class="good">
-      <div class="tag">written into the query: 2 ms</div>
+      <div class="tag">copied into the query</div>
       <pre><code>con.create_macro(
     <span class="s">"score"</span>,
     [<span class="s">"a"</span>],
@@ -228,113 +244,163 @@ sql(<span class="s">"SELECT sum(score_py(i)) FROM big"</span>).rows(con)</code><
 )</code></pre>
     </div>
   </div>
-  <p>The macro also gives the engine the whole expression to plan with: filters move into scans, constant calls are computed once, and the engine's own types apply. A function is a closed box; the engine can only call it. When a function is needed, keep it to the part that needs Python and let a macro or the query do the rest, as in <code>plus_two</code> above. The function's own page, <a href="udf.html">UDFs</a>, covers what it receives and returns, NULL, stability and threads.</p>
+  <p>The two agree for the numbers in the example below, but not for every number:</p>
+  <ul>
+    <li>A Python integer has no size limit. SQL does the arithmetic in the argument's integer type, and a result too large for it raises <code>DataError</code>. <code>score_py(1000000000)</code> is 4, but <code>score(1000000000)</code> overflows, because DuckDB reads <code>1000000000</code> as an <code>INTEGER</code>.</li>
+    <li>For a negative number, Python's <code>%</code> and SQL's <code>%</code> differ: <code>score_py(-3)</code> is 9, and <code>score(-3)</code> is -2.</li>
+  </ul>
+  <p>Check such details when you move Python code into a macro.</p>
+  <p>Here is the same sum three ways, over five million rows:</p>
+  <pre><code>con.run(<span class="s">"CREATE TABLE big AS SELECT i FROM range(5000000) t(i)"</span>)
+
+sql(<span class="s">"SELECT sum((i * 3 + 7) % 11) FROM big"</span>).rows(con)   <span class="c"># [(25000007,)]</span>
+sql(<span class="s">"SELECT sum(score(i)) FROM big"</span>).rows(con)             <span class="c"># [(25000007,)]</span>
+sql(<span class="s">"SELECT sum(score_py(i)) FROM big"</span>).rows(con)          <span class="c"># [(25000007,)]</span></code></pre>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Query</th><th>64 threads</th><th>1 thread</th></tr></thead>
+      <tbody>
+        <tr><td>the expression written out</td><td>2 ms</td><td>40 ms</td></tr>
+        <tr><td><code>score(i)</code>, the macro</td><td>2 ms</td><td>40 ms</td></tr>
+        <tr><td><code>score_py(i)</code>, the Python function</td><td>2050 ms</td><td>1950 ms</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>These are middle values of seven runs on one 64-core Linux machine, with <code>threads</code> at its default of one per core, and then with <code>SET threads = 1</code>. Your numbers will differ, but the gap stays about the same. The macro costs the same as the expression because it is the expression. The Python function hardly gains from more threads, because only one thread at a time can run Python code.</p>
+
+  <h3>Why a macro is fast</h3>
+  <p>DuckDB sees the SQL inside a macro, so it can treat it like any other part of the query. A condition in a macro can be applied while DuckDB reads the table, so rows that fail it are skipped early. DuckDB cannot look inside a Python function, so it cannot use the function's condition while reading. Every row that reaches the function goes to Python, though other conditions in the query can still remove rows first. <code>explain(con)</code> shows the steps DuckDB will take:</p>
+  <pre><code>con.create_macro(<span class="s">"is_big"</span>, [<span class="s">"t"</span>], col(<span class="s">"t"</span>) &gt; <span class="s">1000</span>)
+con.create_function(<span class="s">"is_big_py"</span>, <span class="k">lambda</span> t: t &gt; <span class="s">1000</span>, [<span class="s">"DECIMAL(6,2)"</span>], <span class="s">"BOOLEAN"</span>)
+
+print(table(<span class="s">"orders"</span>).filter(fn(<span class="s">"is_big"</span>, col(<span class="s">"total"</span>))).explain(con))
+<span class="c"># ╭─ Seq Scan ────────────────╮</span>
+<span class="c"># │ Table: memory.main.orders │</span>
+<span class="c"># │ Type: Sequential Scan     │</span>
+<span class="c"># │ Projections: id,          │</span>
+<span class="c"># │              customer,    │</span>
+<span class="c"># │              region,      │</span>
+<span class="c"># │              total        │</span>
+<span class="c"># │ Filters: total &gt; 1000.00  │      the macro's condition, applied while reading</span>
+<span class="c"># │ ~1 row                    │</span>
+<span class="c"># ╰───────────────────────────╯</span>
+
+print(table(<span class="s">"orders"</span>).filter(fn(<span class="s">"is_big_py"</span>, col(<span class="s">"total"</span>))).explain(con))
+<span class="c"># ╭─ Filter ─────────────────────╮</span>
+<span class="c"># │ Expression: is_big_py(total) │   every row is read first, then handed to Python</span>
+<span class="c"># │ ~1 row                       │</span>
+<span class="c"># ╰───────────────┬──────────────╯</span>
+<span class="c"># ╭─ Seq Scan ────┴──────────────╮</span>
+<span class="c"># │ Table: memory.main.orders    │</span>
+<span class="c"># │ Type: Sequential Scan        │</span>
+<span class="c"># │ Projections: id, customer,   │</span>
+<span class="c"># │              region, total   │</span>
+<span class="c"># │ ~3 rows                      │</span>
+<span class="c"># ╰──────────────────────────────╯</span></code></pre>
+  <p>When you do need Python, keep the Python function to the part that needs it, and let a macro or the query do the rest, as <code>plus_two</code> does above. <a href="udf.html">Python Functions</a> covers what such a function receives and returns, NULL, and threads.</p>
 </section>
 
 <section id="extensions">
   <h2>Extensions</h2>
-  <p>An extension is a compiled library, loaded into the process, that registers things with the engine: functions, types, table functions, file systems, ways to read other databases. Several are built into the engine and are there in every connection. The rest are installed once, downloaded into a directory under your home, and loaded per process.</p>
-  <pre><code>sql(<span class="s">"SELECT extension_name, loaded, installed FROM duckdb_extensions() WHERE loaded"</span>).rows(con)
-<span class="c"># [('core_functions', True, True), ('icu', True, True), ('json', True, True), ('parquet', True, True), ('tpch', True, True)]</span>
+  <p>An extension is a package of compiled code that DuckDB loads into your program. It can add functions, data types, file formats, ways to read other databases, and access to files on the web or in cloud storage. A few extensions are built into DuckDB and always loaded. Others you download once with <code>INSTALL</code> and load with <code>LOAD</code>.</p>
+  <pre><code>sql(<span class="s">"SELECT extension_name FROM duckdb_extensions() WHERE loaded"</span>).rows(con)
+<span class="c"># [('autocomplete',), ('core_functions',), ('icu',), ('json',), ('parquet',)]</span>
 
-sql(<span class="s">"SELECT count(*) FROM duckdb_extensions()"</span>).rows(con)   <span class="c"># [(30,)]  the ones the engine knows by name</span></code></pre>
-  <p>What is built in depends on the build; the list above is this one's. The engine records which extension each function came from, so a name can be traced:</p>
-  <pre><code>sql(<span class="s">"""SELECT DISTINCT function_name, function_type, extension_name FROM duckdb_functions()
-       WHERE function_name IN ('json_extract', 'parquet_metadata', 'read_json') ORDER BY 1"""</span>).rows(con)
-<span class="c"># [('json_extract', 'scalar', 'json'), ('parquet_metadata', 'table', 'parquet'), ('read_json', 'table', 'json')]</span>
-
-sql(<span class="s">"""SELECT extension_name, function_type, count(DISTINCT function_name) AS n FROM duckdb_functions()
-       WHERE extension_name IS NOT NULL GROUP BY ALL ORDER BY 1, 2"""</span>).rows(con)
-<span class="c"># [('core_functions', 'aggregate', 68), ('core_functions', 'scalar', 260),</span>
-<span class="c">#  ('icu', 'scalar', 289), ('icu', 'table', 2),</span>
-<span class="c">#  ('json', 'macro', 6), ('json', 'pragma', 1), ('json', 'scalar', 40), ('json', 'table', 10),</span>
-<span class="c">#  ('parquet', 'pragma', 1), ('parquet', 'scalar', 2), ('parquet', 'table', 8),</span>
-<span class="c">#  ('tpch', 'pragma', 1), ('tpch', 'table', 3)]</span>
-
-sql(<span class="s">"SELECT type_name, extension_name FROM duckdb_types() WHERE extension_name IS NOT NULL"</span>).rows(con)
-<span class="c"># [('JSON', 'json')]</span></code></pre>
-  <p>So the five loaded here add aggregates, scalar functions, table functions, macros and a type between them. The engine's own description of the others it knows shows how far the list goes:</p>
+sql(<span class="s">"SELECT count(*) FROM duckdb_extensions()"</span>).rows(con)   <span class="c"># [(30,)]: the ones DuckDB knows by name</span></code></pre>
+  <p>Which extensions are built in depends on how your DuckDB was built; the list above is from the one this page was tested with. <code>duckdb_extensions()</code> also describes each extension it knows. Some of them, and what they add:</p>
   <div class="tablewrap">
     <table>
-      <thead><tr><th>Extension</th><th>Description, from <code>duckdb_extensions()</code></th><th>What kind of thing that is</th></tr></thead>
+      <thead><tr><th>Extension</th><th>Its description, from <code>duckdb_extensions()</code></th><th>What it adds</th></tr></thead>
       <tbody>
-        <tr><td><code>httpfs</code></td><td>Adds support for reading and writing files over a HTTP(S) connection</td><td>a file system</td></tr>
-        <tr><td><code>azure</code></td><td>Adds a filesystem abstraction for Azure blob storage to DuckDB</td><td>a file system</td></tr>
-        <tr><td><code>postgres_scanner</code></td><td>Adds support for connecting to a Postgres database</td><td>another database as storage</td></tr>
-        <tr><td><code>sqlite_scanner</code></td><td>Adds support for reading and writing SQLite database files</td><td>another database as storage</td></tr>
+        <tr><td><code>httpfs</code></td><td>Adds support for reading and writing files over a HTTP(S) connection</td><td>files on the web and in S3</td></tr>
+        <tr><td><code>azure</code></td><td>Adds a filesystem abstraction for Azure blob storage to DuckDB</td><td>files in Azure storage</td></tr>
+        <tr><td><code>postgres_scanner</code></td><td>Adds support for connecting to a Postgres database</td><td>reading another database</td></tr>
+        <tr><td><code>sqlite_scanner</code></td><td>Adds support for reading and writing SQLite database files</td><td>reading another database</td></tr>
         <tr><td><code>ducklake</code></td><td>Adds support for DuckLake, SQL as a Lakehouse Format</td><td>a storage format</td></tr>
-        <tr><td><code>inet</code></td><td>Adds support for IP-related data types and functions</td><td>types</td></tr>
+        <tr><td><code>excel</code></td><td>Adds support for Excel-like format strings</td><td>reading Excel files, writing them after <code>LOAD excel</code>, and Excel number formats</td></tr>
+        <tr><td><code>inet</code></td><td>Adds support for IP-related data types and functions</td><td>types and functions</td></tr>
         <tr><td><code>spatial</code></td><td>Geospatial extension that adds support for working with spatial data and functions</td><td>types, functions, file formats</td></tr>
-        <tr><td><code>fts</code></td><td>Adds support for Full-Text Search Indexes</td><td>an index</td></tr>
-        <tr><td><code>vss</code></td><td>Adds indexing support to accelerate Vector Similarity Search</td><td>an index</td></tr>
-        <tr><td><code>icu</code></td><td>Adds support for time zones and collations using the ICU library</td><td>collations, time zones</td></tr>
-        <tr><td><code>ui</code></td><td>Adds local UI for DuckDB</td><td>a whole application</td></tr>
+        <tr><td><code>fts</code></td><td>Adds support for Full-Text Search Indexes</td><td>search in text</td></tr>
+        <tr><td><code>vss</code></td><td>Adds indexing support to accelerate Vector Similarity Search</td><td>fast search for similar vectors</td></tr>
+        <tr><td><code>icu</code></td><td>Adds support for time zones and collations using the ICU library</td><td>time zones, and sorting text by language</td></tr>
+        <tr><td><code>ui</code></td><td>Adds local UI for DuckDB</td><td>a user interface in your browser</td></tr>
       </tbody>
     </table>
   </div>
 
-  <p class="lead-in">installing and loading</p>
-  <p>Both are statements, run on the connection. <code>INSTALL</code> downloads the extension once, for this engine version and platform, into <code>~/.duckdb/extensions/&lt;version&gt;/&lt;platform&gt;/</code>; <code>LOAD</code> loads it into the process.</p>
+  <h3>Installing and loading</h3>
+  <p>Both are SQL statements that you run on a connection. <code>INSTALL</code> downloads the extension from the internet, built for your DuckDB version and your computer, and keeps it on disk. So you run it once per computer and DuckDB version. <code>LOAD</code> makes the extension work in the database the connection belongs to:</p>
   <pre><code>con.run(<span class="s">"INSTALL httpfs"</span>)
 con.run(<span class="s">"LOAD httpfs"</span>)
+sql(<span class="s">"SELECT loaded, installed FROM duckdb_extensions() WHERE extension_name = 'httpfs'"</span>).rows(con)   <span class="c"># [(True, True)]</span>
 
-con.run(<span class="s">"INSTALL h3 FROM community"</span>)   <span class="c"># from the community repository</span>
-con.run(<span class="s">"FORCE INSTALL httpfs"</span>)        <span class="c"># download again</span>
-con.run(<span class="s">"UPDATE EXTENSIONS"</span>)           <span class="c"># every installed one, to the latest for this engine</span>
-con.run(<span class="s">"LOAD '/path/to/my.duckdb_extension'"</span>)   <span class="c"># a file, not a name</span></code></pre>
-  <div class="note">
-    <p><strong>Downloading needs an engine the repository knows.</strong> An extension is built for one engine version, and the engine looks it up under its own version name. The repository has every release, and every one of DuckDB's nightly builds under the name that build carried, such as <code>v2.0.0-alpha40145</code>, the engine this page was written against: on it, <code>INSTALL httpfs</code>, <code>FORCE INSTALL httpfs</code>, <code>INSTALL excel</code> and <code>INSTALL quack</code> all download and load. An engine built from the same commit without that name calls itself <code>v2.0.0-dev83455</code>, looks under its commit hash instead, and gets <code>IOError: HTTP Error: Failed to download extension "httpfs" at URL "http://extensions.duckdb.org/8a81c84987/osx_arm64/httpfs.duckdb_extension.gz" (HTTP 404)</code>. Community extensions are published for releases only, so <code>INSTALL h3 FROM community</code> fails the same way on any nightly.</p>
-  </div>
-  <p>The directory is the <code>extension_directory</code> setting, and can be given when connecting: <code>duckdb.frame.connect(extension_directory="/srv/duckdb/ext")</code>. Loading an extension that is not installed raises <code>IOError</code> naming the file the engine looked for.</p>
+con.run(<span class="s">"FORCE INSTALL httpfs"</span>)   <span class="c"># download it again</span>
+con.run(<span class="s">"UPDATE EXTENSIONS"</span>)      <span class="c"># bring every installed extension up to date</span></code></pre>
+  <p>Downloads go to <code>~/.duckdb/extensions</code>, in a folder for each DuckDB version and platform. Give another place when you connect: <code>frame.connect(extension_directory="/srv/duckdb/ext")</code>. Loading an extension that is not installed raises <code>IOError</code>, which names the file DuckDB looked for and tells you to run <code>INSTALL</code>. <code>LOAD '/path/to/name.duckdb_extension'</code>, with a path in quotes, loads a file instead.</p>
+  <p>A loaded extension lasts until its database is closed. Run <code>LOAD</code> again in every database you open, and in every new run of your program. A connection from <code>con.duplicate()</code> shares its database, and so the extension. Some extensions also load by themselves when a query needs them, as the next part shows.</p>
+  <p>Without a network, <code>INSTALL</code> raises <code>IOError: Failed to download extension</code>. To install on such a computer, copy the extension file from one with the same DuckDB version and platform, and give its path in quotes: <code>INSTALL '/path/to/httpfs.duckdb_extension'</code>. The <code>install_path</code> column of <code>duckdb_extensions()</code> shows where an installed file is.</p>
+  <p>This <code>IOError</code> is DuckDB's own class from <code>duckdb.exceptions</code>, not Python's built-in <code>IOError</code>, so <code>except IOError</code> does not catch it. Write <code>from duckdb import exceptions</code> and catch <code>exceptions.IOError</code>.</p>
 
-  <p class="lead-in">autoloading</p>
-  <p>The engine keeps a list of extensions it knows and the functions each one has. With <code>autoload_known_extensions</code> on, a query that names one of those functions loads its extension when the query is planned; with <code>autoinstall_known_extensions</code> on as well, it is downloaded first if it has to be. Both are on by default, so on a release <code>read_xlsx</code> on a fresh connection fetches <code>excel</code> and reads the file.</p>
-  <pre><code>sql(<span class="s">"SELECT * FROM read_xlsx('book.xlsx')"</span>).rows(con)   <span class="c"># on a release: installs and loads excel, then reads the file</span>
+  <h3>Loading by itself</h3>
+  <p>DuckDB knows which extension has which function. When a query uses a function from a known extension that is not loaded yet, DuckDB installs and loads it for you. Here <code>text</code>, which formats a number, comes from the <code>excel</code> extension:</p>
+  <pre><code>sql(<span class="s">"SELECT text(1234.5, '#,##0.00')"</span>).rows(con)   <span class="c"># [('1,234.50',)]: excel was installed and loaded first</span>
 
 sql(<span class="s">"SELECT current_setting('autoload_known_extensions'), current_setting('autoinstall_known_extensions')"</span>).rows(con)
-<span class="c"># [(True, True)]</span>
-
-con.run(<span class="s">"SET autoload_known_extensions = false"</span>)      <span class="c"># or duckdb.frame.connect(autoload_known_extensions="false")</span></code></pre>
-  <p>With autoloading off, the engine refuses the query and says which extension has the function:</p>
-  <pre><code><span class="c"># CatalogError: Table Function with name "read_xlsx" is not in the catalog, but it exists in the excel extension.</span>
+<span class="c"># [(True, True)]</span></code></pre>
+  <p>Two settings control this, and both are on by default: <code>autoload_known_extensions</code> loads the extension, and <code>autoinstall_known_extensions</code> downloads it first when it is not installed. With loading off, DuckDB refuses the query and tells you which extension has the function:</p>
+  <pre><code>strict = frame.connect(autoload_known_extensions=<span class="s">"false"</span>)
+sql(<span class="s">"SELECT * FROM read_xlsx('book.xlsx')"</span>).rows(strict)
+<span class="c"># CatalogError: Catalog Error: Table Function with name "read_xlsx" is not in the catalog, but it exists in the excel extension.</span>
+<span class="c">#</span>
 <span class="c"># Please try installing and loading the excel extension by running:</span>
 <span class="c"># INSTALL excel;</span>
-<span class="c"># LOAD excel;</span></code></pre>
-  <p>With loading on and installing off, a function whose extension is not installed raises <code>IOError</code> with the same advice. Not every extension is on the list: on this build <code>read_xlsx</code> tried to fetch <code>excel</code>, while <code>st_point</code> raised the <code>CatalogError</code> above naming <code>spatial</code> without trying, and needs an explicit <code>INSTALL</code> and <code>LOAD</code>.</p>
+<span class="c"># LOAD excel;</span>
+<span class="c"># ...</span></code></pre>
+  <p>With loading on and installing off, a function whose extension is not installed raises <code>IOError</code> with the same advice. Not every extension loads by itself: <code>st_point</code> from <code>spatial</code> raises the <code>CatalogError</code> above even with both settings on, and needs <code>INSTALL spatial</code> and <code>LOAD spatial</code>.</p>
 
-  <p class="lead-in">core and community</p>
-  <p>Core extensions are built and signed by the DuckDB team and come from <code>extensions.duckdb.org</code>, which is where a bare <code>INSTALL name</code> looks. Community extensions are built and signed by the community repository from other people's source, and come from <code>community-extensions.duckdb.org</code> with <code>INSTALL name FROM community</code>. The list of both, with a page per extension, is at <a href="https://duckdb.org/community_extensions/">duckdb.org/community_extensions</a>. The engine checks the signature when it loads; a library that is not signed, one you built yourself, loads only when the database was opened with <code>duckdb.frame.connect(allow_unsigned_extensions="true")</code>. That setting cannot be changed once the database is running.</p>
+  <h3>Core and community extensions</h3>
+  <p>Core extensions are built and signed by the DuckDB team, and a plain <code>INSTALL name</code> downloads them. Community extensions are written by other people and built and signed by DuckDB's community repository; install one with <code>INSTALL name FROM community</code>. The list of both, with a page for each, is at <a href="https://duckdb.org/community_extensions/">duckdb.org/community_extensions</a>.</p>
+  <p>DuckDB checks the signature when it loads an extension. An extension without one, such as one you built yourself, loads only when you connect with <code>frame.connect(allow_unsigned_extensions="true")</code>. You cannot turn that setting on later: <code>SET allow_unsigned_extensions = true</code> on an open database raises <code>InvalidInputError</code>.</p>
 
-  <p class="lead-in">from a plan</p>
-  <p>Once loaded, an extension's functions are the engine's. A scalar function is called with <code>fn</code>, or through the namespaces when one covers it; a table function is a plan through <code>table_function</code>, with named arguments spelled the way SQL spells them.</p>
-  <pre><code><span class="k">from</span> duckdb.frame <span class="k">import</span> fn, table_function
-
+  <h3>Using an extension from a plan</h3>
+  <p>Once an extension is loaded, its functions are DuckDB's. Call a function with <code>fn</code>, or with a method where the package has one, such as <code>col("payload").json().keys()</code> below. Call a function that returns rows with <code>table_function</code>. Keyword arguments are passed by name, as SQL's <code>name := value</code>:</p>
+  <pre><code>con.run(<span class="s">"COPY orders TO 'orders.parquet'"</span>)
 table_function(<span class="s">"parquet_metadata"</span>, <span class="s">"orders.parquet"</span>).select(<span class="s">"row_group_id"</span>, <span class="s">"path_in_schema"</span>, <span class="s">"num_values"</span>).rows(con)
 <span class="c"># [(0, 'id', 3), (0, 'customer', 3), (0, 'region', 3), (0, 'total', 3)]</span>
 
-table_function(<span class="s">"read_json"</span>, <span class="s">"events.json"</span>, format=<span class="s">"array"</span>).render()
+print(table_function(<span class="s">"read_json"</span>, <span class="s">"events.json"</span>, format=<span class="s">"array"</span>).render())
 <span class="c"># SELECT * FROM read_json('events.json', "format" := 'array')</span>
-
-table_function(<span class="s">"tpch_queries"</span>).select(<span class="s">"query_nr"</span>).head(<span class="s">2</span>).rows(con)   <span class="c"># [(1,), (2,)]</span>
 
 payload = sql(<span class="s">"""SELECT '{"id": 7, "tags": ["a"]}' AS payload"""</span>)
 payload.select(fn(<span class="s">"json_extract"</span>, col(<span class="s">"payload"</span>), <span class="s">"$.id"</span>).alias(<span class="s">"id"</span>), col(<span class="s">"payload"</span>).json().keys().alias(<span class="s">"keys"</span>)).rows(con)
 <span class="c"># [('7', ['id', 'tags'])]</span></code></pre>
-  <p><code>read_csv</code>, <code>read_parquet</code> and <code>read_json</code> are <code>table_function</code> with the name filled in. A type an extension adds is a type: <code>sql("SELECT '{\"a\": 1}'::JSON AS j").types(con)</code> is <code>['JSON']</code>.</p>
+  <p><code>read_csv</code>, <code>read_parquet</code> and <code>read_json</code> in <code>duckdb.frame</code> are <code>table_function</code> with the name filled in. A type an extension adds is a type like any other: <code>sql("SELECT '{\"a\": 1}'::JSON AS j").types(con)</code> is <code>['JSON']</code>.</p>
+
+  <h3>Details</h3>
+  <ul>
+    <li><code>INSTALL</code> downloads the build of the extension made for your exact DuckDB version. Releases and DuckDB's preview builds have them. A DuckDB you built from source yourself may not: without a release or preview version name, it looks for extensions under its commit, and finds none. <code>INSTALL</code> then fails with <code>IOError: HTTP Error: Failed to download extension ... (HTTP 404)</code>.</li>
+    <li>Community extensions are published for releases only. On a preview build, such as the one this page was tested with, <code>INSTALL h3 FROM community</code> fails with the same <code>IOError</code>.</li>
+    <li><code>FROM core_nightly</code> or <code>FROM 'https://...'</code> after <code>INSTALL name</code> picks another repository, and the <code>custom_extension_repository</code> setting changes where a plain <code>INSTALL name</code> looks.</li>
+    <li>DuckDB records which extension each function and type came from, so you can trace a name:</li>
+  </ul>
+  <pre><code>sql(<span class="s">"""SELECT DISTINCT function_name, function_type, extension_name FROM duckdb_functions()
+       WHERE function_name IN ('json_extract', 'parquet_metadata', 'text') ORDER BY 1"""</span>).rows(con)
+<span class="c"># [('json_extract', 'scalar', 'json'), ('parquet_metadata', 'table', 'parquet'), ('text', 'scalar', 'excel')]</span>
+
+sql(<span class="s">"SELECT type_name, extension_name FROM duckdb_types() WHERE extension_name IS NOT NULL"</span>).rows(con)
+<span class="c"># [('JSON', 'json')]</span></code></pre>
 </section>
 
 <section id="write">
-  <h2>Writing an extension</h2>
-  <p>In Polars, the way to add a fast expression the library does not have is an expression plugin: a Rust function, compiled to a library and registered as an expression. What it adds is an expression, because that is what the plugin API registers.</p>
-  <p>A DuckDB extension registers with the engine, and it can register anything the engine's own extensions do. The five loaded on this machine add scalar functions, aggregates, table functions, macros and a type between them. The ones the engine lists beside them add file systems, other databases as storage, lakehouse formats, indexes, collations and a user interface. All of that goes through the same mechanism, so an extension written for a domain can bring its types, its functions over them, its file format and its index together, and they plan and run inside the engine with the rest of the query.</p>
-  <p>Because it is loaded into the engine and not into a client, an extension works from every client that runs that engine: this one, the command line, R, Java, Node, and whatever else loads the same library.</p>
-  <p class="lead-in">where to start</p>
+  <h2>Writing your own extension</h2>
+  <p>If you use polars, you may know expression plugins: a function written in Rust and added to polars as a new expression. A DuckDB extension can add more than that. It can add anything DuckDB's own extensions add: functions, aggregate functions, table functions (functions that return rows), types, file systems, file formats, other databases to read, and indexes. An extension for one field of work can bring its types, its functions and its file format together, and they all run inside DuckDB with the rest of the query.</p>
+  <p>Because an extension is loaded into DuckDB and not into a Python package, it works from every program that uses DuckDB: this package, the command line, R, Java, Node and others.</p>
   <dl class="ref">
-    <dt>C++</dt><dd>The <a href="https://github.com/duckdb/extension-template">extension template</a> is the supported route. It comes with the build system, a SQL-based test runner and CI that builds for Linux, macOS, Windows and Wasm, and it is the route the community extension guide describes.</dd>
-    <dt>Rust</dt><dd>The <a href="https://github.com/duckdb/extension-template-rs">Rust template</a> builds on the engine's C extension API, with no C++ and no engine build. Its own README calls it experimental.</dd>
-    <dt>Docs</dt><dd>The <a href="https://duckdb.org/docs/stable/extensions/overview">extensions overview</a> on duckdb.org, and the <a href="https://duckdb.org/community_extensions/development">community extension development guide</a>, which is also how an extension gets into the community repository and becomes an <code>INSTALL name FROM community</code> for everyone.</dd>
+    <dt>C++</dt><dd>The <a href="https://github.com/duckdb/extension-template">extension template</a> is the main way. It comes with the build setup, a test runner that runs SQL files, and automatic builds for Linux, macOS, Windows and the web. It is the way the community extension guide describes.</dd>
+    <dt>Rust</dt><dd>The <a href="https://github.com/duckdb/extension-template-rs">Rust template</a> uses DuckDB's C interface for extensions, with no C++ and no build of DuckDB itself. Its own README calls it experimental.</dd>
+    <dt>Docs</dt><dd>The <a href="https://duckdb.org/docs/stable/extensions/overview">extensions overview</a> on duckdb.org, and the <a href="https://duckdb.org/community_extensions/development">community extension development guide</a>, which also explains how to publish an extension so that anyone can <code>INSTALL name FROM community</code>.</dd>
   </dl>
-  <p>Those pages document the extension API itself, and this manual does not repeat it. From here, an extension you built is <code>LOAD '/path/to/it.duckdb_extension'</code> on a connection opened with <code>allow_unsigned_extensions</code>, and once it is in the repository, <code>INSTALL</code> and <code>LOAD</code> like any other.</p>
+  <p>Those pages describe how to write an extension, and this manual does not repeat them. To try one you built, connect with <code>allow_unsigned_extensions="true"</code> and run <code>LOAD '/path/to/it.duckdb_extension'</code>. Once it is published, <code>INSTALL</code> and <code>LOAD</code> it like any other.</p>
 </section>
 
 <section id="reference">
@@ -342,37 +408,41 @@ payload.select(fn(<span class="s">"json_extract"</span>, col(<span class="s">"pa
 
   <h3>Macros</h3>
   <dl class="ref">
-    <dt>con.create_macro(name, parameters, body, replace=False, temporary=False)</dt><dd>Define a macro. An expression makes a scalar macro, a plan a table macro. <code>parameters</code> are names or <code>(name, default)</code> pairs; a default is a plain value. <code>col(name)</code> in the body is a parameter; a <code>param()</code> there is refused with <code>TypeError</code>.</dd>
-    <dt>con.run("CREATE MACRO name(p) AS ...")</dt><dd>The statement itself. <code>AS TABLE</code> and a plan's <code>render()</code> for a table macro. Several signatures: <code>AS a, (a, b) AS a + b</code>.</dd>
+    <dt>con.create_macro(name, parameters, body, *, replace=False, temporary=False)</dt><dd>Define a macro. Returns <code>None</code>. An expression as the body makes a scalar macro, a plan makes a table macro, and anything else raises <code>TypeError</code>. A tuple as the name puts the macro in a schema, which must already exist.</dd>
+    <dt>parameters</dt><dd>Names, or <code>(name, default)</code> pairs. A default is a plain value, kept with its Python type. After the first default, every parameter needs one.</dd>
+    <dt>body</dt><dd>In a scalar macro's expression, outside any plan, <code>col(name)</code> must name a parameter; any other name raises <code>ProgrammingError</code>, even one a table has as a column. Inside a plan, the body of a table macro or the query in <code>.scalar()</code>, <code>col(name)</code> is a parameter when <code>name</code> is in <code>parameters</code>, and otherwise a column of that plan's tables. In a table macro, a parameter hides a column of the same name; in <code>.scalar()</code>, the same clash raises <code>ProgrammingError</code>. Values are written in as SQL text; a <code>param()</code> raises <code>TypeError</code>.</dd>
+    <dt>replace=True</dt><dd>Replace a macro of that name. Without it, a second definition raises <code>CatalogError</code>.</dd>
+    <dt>temporary=True</dt><dd>Only this connection sees the macro, until it closes.</dd>
+    <dt>con.run("CREATE MACRO name(p) AS ...")</dt><dd>The SQL statement itself. <code>AS TABLE</code> and a plan's <code>render()</code> for a table macro. Several versions: <code>AS a, (a, b) AS a + b</code>.</dd>
     <dt>con.run("DROP MACRO name") / "DROP MACRO TABLE name"</dt><dd>Remove a scalar or a table macro. <code>IF EXISTS</code> works.</dd>
-    <dt>fn(name, /, *args, **named)</dt><dd>Call a scalar macro from a plan; keyword arguments pass by name, so a parameter with a default can be given alone.</dd>
-    <dt>table_function(name, *args, **named)</dt><dd>A table macro as a plan; named arguments render as <code>name := value</code>.</dd>
-    <dt>duckdb_functions()</dt><dd>Every function the engine has, macros included: <code>function_type</code> is <code>macro</code> or <code>table_macro</code>, <code>parameters</code> the names without their defaults, <code>macro_definition</code> the body in the engine's spelling, <code>extension_name</code> where it came from.</dd>
+    <dt>fn(name, /, *args, **named)</dt><dd>Call a scalar macro in a plan. Keyword arguments are passed by name. A tuple as the name, such as <code>("util", "twice")</code>, calls a macro in a schema.</dd>
+    <dt>table_function(name, *args, **named)</dt><dd>A table macro as a plan. Keyword arguments are passed by name.</dd>
+    <dt>duckdb_functions()</dt><dd>Every function DuckDB has, macros included: <code>function_type</code> is <code>macro</code> or <code>table_macro</code>, <code>parameters</code> the names without defaults, <code>macro_definition</code> the body as DuckDB writes it, <code>extension_name</code> where a function came from.</dd>
   </dl>
 
   <h3>Extensions</h3>
   <dl class="ref">
-    <dt>con.run("INSTALL name")</dt><dd>Download for this engine version and platform. <code>FROM community</code>, <code>FROM core_nightly</code> or <code>FROM 'https://...'</code> chooses the repository. <code>FORCE INSTALL</code> downloads again.</dd>
-    <dt>con.run("LOAD name")</dt><dd>Load an installed extension into the process. A quoted path loads a file.</dd>
+    <dt>con.run("INSTALL name")</dt><dd>Download for this DuckDB version and computer. <code>FROM community</code>, <code>FROM core_nightly</code> or <code>FROM 'https://...'</code> picks the repository. <code>FORCE INSTALL</code> downloads again.</dd>
+    <dt>con.run("LOAD name")</dt><dd>Load an installed extension. A path in quotes loads a file.</dd>
     <dt>con.run("UPDATE EXTENSIONS")</dt><dd>Bring every installed extension up to date.</dd>
-    <dt>duckdb_extensions()</dt><dd>Every extension the engine knows: <code>loaded</code>, <code>installed</code>, <code>install_path</code>, <code>description</code>, <code>extension_version</code>, <code>install_mode</code>, <code>installed_from</code>.</dd>
+    <dt>duckdb_extensions()</dt><dd>Every extension DuckDB knows: <code>loaded</code>, <code>installed</code>, <code>install_path</code>, <code>description</code>, <code>extension_version</code>, <code>install_mode</code>, <code>installed_from</code>.</dd>
     <dt>duckdb_types()</dt><dd>Every type, with <code>extension_name</code> for one an extension added.</dd>
-    <dt>duckdb_settings()</dt><dd>Every setting with its description; the extension ones match <code>name LIKE '%extension%'</code>.</dd>
+    <dt>duckdb_settings()</dt><dd>Every setting with its description; the ones for extensions match <code>name LIKE '%extension%'</code>.</dd>
   </dl>
 
   <h3>Settings</h3>
   <dl class="ref">
     <dt>autoload_known_extensions</dt><dd>Load a known extension when a query needs it. On by default.</dd>
-    <dt>autoinstall_known_extensions</dt><dd>Install it first if it is not. On by default.</dd>
-    <dt>allow_community_extensions</dt><dd>Whether <code>FROM community</code> may be loaded. On by default.</dd>
-    <dt>allow_unsigned_extensions</dt><dd>Load a library with no signature. Only at <code>connect()</code>.</dd>
+    <dt>autoinstall_known_extensions</dt><dd>Download it first if it is not installed. On by default.</dd>
+    <dt>allow_community_extensions</dt><dd>Whether community extensions may be installed and loaded. On by default.</dd>
+    <dt>allow_unsigned_extensions</dt><dd>Load an extension without a signature. Only when you connect.</dd>
     <dt>extension_directory</dt><dd>Where installed extensions are kept. Empty means <code>~/.duckdb/extensions</code>.</dd>
-    <dt>custom_extension_repository</dt><dd>Where a bare <code>INSTALL name</code> looks instead of the core repository.</dd>
+    <dt>custom_extension_repository</dt><dd>Where a plain <code>INSTALL name</code> looks instead of the core repository.</dd>
   </dl>
 </section>
 
 <footer>
-  <p>A macro and an extension belong to the engine, not to this client. Either works from every DuckDB client on the same engine, and an error in one comes from DuckDB, with the message it would give any of them.</p>
+  <p>A macro and an extension belong to DuckDB, not to this Python package. Both work from every program that uses the same DuckDB, and an error from either is DuckDB's own. A macro that calls a Python function also needs that function registered in the program that calls the macro. Moving from DuckDB 1.5.6? See <a href="changes.html">Coming from DuckDB 1.5.6</a>.</p>
 </footer>
 
 </div>

@@ -1,0 +1,455 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Coming from DuckDB 1.5.6 &middot; DuckDB for Python</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Newsreader:opsz,wght@6..72,400;6..72,600&family=Public+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="sitenav">
+  <a class="home" href="index.html">duckdb for python</a>
+  <a href="frame.html">Frames &amp; Plans</a>
+  <a href="udf.html">Python Functions</a>
+  <a href="extend.html">Macros &amp; Extensions</a>
+  <a href="dbapi.html">DB-API 2.0</a>
+  <a class="here" href="changes.html">Coming from 1.5.6</a>
+</nav>
+
+<div class="page">
+
+<header class="top">
+  <div class="eyebrow">duckdb for python &middot; user manual</div>
+  <h1>Coming from DuckDB 1.5.6</h1>
+  <p class="standfirst">This page lists what changes when you move Python code from the <code>duckdb</code> 1.5.6 package to this one, whose DuckDB engine is version 2.0. Each item shows what you wrote before and what to write now. It covers the Python side: connecting, running queries and getting results. Changes in DuckDB's SQL itself, and in its database file format, are in <a href="https://github.com/duckdb/duckdb/releases">DuckDB's release notes</a>.</p>
+</header>
+
+<nav class="toc">
+  <ol>
+    <li><a href="#short">The short version</a></li>
+    <li><a href="#setup">The examples on this page</a></li>
+    <li><a href="#connect">Importing and connecting</a></li>
+    <li><a href="#run">Running SQL and getting results</a></li>
+    <li><a href="#build">Building queries in Python</a></li>
+    <li><a href="#pydata">Querying Python data</a></li>
+    <li><a href="#values">Values you get back</a></li>
+    <li><a href="#params">Parameters</a></li>
+    <li><a href="#functions">Python functions</a></li>
+    <li><a href="#dbapi">The DB-API</a></li>
+    <li><a href="#errors">Errors</a></li>
+    <li><a href="#versions">Versions</a></li>
+    <li><a href="#missing">Not available yet</a></li>
+  </ol>
+</nav>
+
+<section id="short">
+  <h2>The short version</h2>
+  <ul>
+    <li>There is no default connection. You open one with <code>frame.connect()</code> and pass it to whatever runs a query. <code>duckdb.sql(...)</code>, <code>duckdb.connect()</code> and the other functions on the <code>duckdb</code> module are gone, apart from <code>duckdb_version()</code> (see Versions).</li>
+    <li><code>sql(text)</code> builds a query without running it. The query runs when you give it a connection: <code>sql(text).rows(con)</code>.</li>
+    <li>Getting results has new names: <code>fetchall()</code> is <code>rows(con)</code>, <code>df()</code> is <code>to_pandas(con)</code>. <code>arrow()</code> gave you a reader that hands out the result in batches; <code>to_arrow(con)</code> gives you the whole result as a pyarrow <code>Table</code>, and <code>to_reader(con)</code> gives you the reader.</li>
+    <li>A query no longer finds a pandas or polars variable by its name. Register it first: <code>con.register("df", df)</code>.</li>
+    <li>The classic <code>execute()</code>, cursor and <code>fetchall()</code> style is in its own module, <code>duckdb.dbapi</code>. Use it to keep SQL strings with <code>?</code> or <code>$name</code> placeholders, or for a tool that needs a DB-API driver. There, changes become final only when you call <code>commit()</code>, and all cursors of a connection share that one transaction.</li>
+    <li>Python functions match an argument written as <code>x := 1</code> to the parameter <code>x</code> (1.5.6 matched by position), and they use their Python defaults.</li>
+    <li>Error classes have new names that end in <code>Error</code>: <code>CatalogException</code> is now <code>CatalogError</code>, in <code>duckdb.exceptions</code>.</li>
+    <li>A <code>TIMESTAMP WITH TIME ZONE</code> fetched as Python rows comes back in UTC, with the standard library's <code>datetime.timezone</code>. You no longer need <code>pytz</code>.</li>
+  </ul>
+</section>
+
+<section id="setup">
+  <h2>The examples on this page</h2>
+  <p>Each pair of examples shows the 1.5.6 code on the left and the code to write now on the right. Each side builds on its own setup, shown here, and results appear in comments the way the Python prompt prints them:</p>
+  <div class="pair">
+    <div class="bad">
+      <div class="tag">DuckDB 1.5.6</div>
+      <pre><code><span class="k">import</span> duckdb
+
+con = duckdb.connect()
+con.execute(<span class="s">"CREATE TABLE orders (customer VARCHAR, region VARCHAR, total INTEGER)"</span>)
+con.execute(<span class="s">"INSERT INTO orders VALUES ('acme', 'emea', 1400), ('bolt', 'amer', 320), ('acme', 'emea', 2600)"</span>)
+rel = con.table(<span class="s">"orders"</span>)</code></pre>
+    </div>
+    <div class="good">
+      <div class="tag">now</div>
+      <pre><code><span class="k">from</span> duckdb <span class="k">import</span> frame
+<span class="k">from</span> duckdb.frame <span class="k">import</span> sql, table, col, param
+
+con = frame.connect()
+con.run(<span class="s">"CREATE TABLE orders (customer VARCHAR, region VARCHAR, total INTEGER)"</span>)
+con.run(<span class="s">"INSERT INTO orders VALUES ('acme', 'emea', 1400), ('bolt', 'amer', 320), ('acme', 'emea', 2600)"</span>)
+plan = table(<span class="s">"orders"</span>)</code></pre>
+    </div>
+  </div>
+</section>
+
+<section id="connect">
+  <h2>Importing and connecting</h2>
+  <p><code>import duckdb</code> gives you three modules: <code>duckdb.frame</code> to build and run queries, <code>duckdb.dbapi</code> for the classic database interface, and <code>duckdb.exceptions</code> for the error classes. The <code>duckdb</code> module itself has no <code>connect()</code>, <code>sql()</code>, <code>execute()</code>, <code>read_csv()</code> or <code>create_function()</code>.</p>
+  <div class="pair">
+    <div class="bad">
+      <div class="tag">DuckDB 1.5.6</div>
+      <pre><code><span class="k">import</span> duckdb
+
+duckdb.sql(<span class="s">"SELECT 42"</span>).fetchall()
+<span class="c"># [(42,)]</span></code></pre>
+    </div>
+    <div class="good">
+      <div class="tag">now</div>
+      <pre><code>sql(<span class="s">"SELECT 42"</span>).rows(con)
+<span class="c"># [(42,)]</span></code></pre>
+    </div>
+  </div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>DuckDB 1.5.6</th><th>Now</th></tr></thead>
+      <tbody>
+        <tr><td><code>duckdb.connect()</code>, <code>duckdb.connect("shop.db")</code></td><td><code>frame.connect()</code>, <code>frame.connect("shop.db")</code>, or <code>dbapi.connect(...)</code> for the classic interface</td></tr>
+        <tr><td><code>duckdb.connect("shop.db", read_only=True)</code></td><td><code>frame.connect("shop.db", access_mode="read_only")</code>. The file must exist: a missing one raises <code>IOError</code>. A statement that writes raises <code>InvalidInputError</code>.</td></tr>
+        <tr><td><code>duckdb.connect(config={"threads": 2})</code></td><td><code>frame.connect(threads=2)</code>: each setting is its own keyword argument. For a dict you already have, write <code>frame.connect(**config)</code>. <code>read_only=</code> and <code>config=</code> are refused with <code>InvalidInputError</code>, here and in <code>dbapi.connect</code>.</td></tr>
+        <tr><td><code>duckdb.sql(...)</code>, <code>duckdb.execute(...)</code> and the other functions on the module's default connection</td><td>Open a connection and pass it: <code>sql(...).rows(con)</code></td></tr>
+        <tr><td>Each <code>duckdb.connect()</code> in memory: a separate database</td><td>The same for each <code>frame.connect()</code>. For a second connection to the same database, for example one per thread, use <code>con.duplicate()</code>; it sees the same tables.</td></tr>
+        <tr><td>Opening the same file twice in one program gave you two handles on one database</td><td>Open the file once, even read-only. A second open that can write is refused with <code>OperationalError</code>, also between <code>frame.connect</code> and <code>dbapi.connect</code>. For another <code>frame</code> connection to it, use <code>con.duplicate()</code>; only <code>frame</code> connections have it. A <code>dbapi</code> connection gives you more cursors instead, and they share its one transaction and its one open result.</td></tr>
+        <tr><td><code>with duckdb.connect() as con:</code> closed the connection at the end</td><td>The same for <code>frame.connect()</code>. For a <code>dbapi</code> connection the <code>with</code> block is a transaction instead: see <a href="#dbapi">The DB-API</a>.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="run">
+  <h2>Running SQL and getting results</h2>
+  <p>In 1.5.6, <code>con.sql(text)</code> gave you a <strong>relation</strong>: a query object tied to that connection. A <code>SELECT</code> in it ran each time you fetched from it, and a statement such as <code>CREATE</code> ran at once. Now <code>sql(text)</code> gives you a <strong>plan</strong>: a query that has not run and belongs to no connection, until you give it one. Methods that return results, such as <code>rows(con)</code> and <code>to_pandas(con)</code>, run it each time you call them. <code>iter_rows(con)</code> starts it when you start looping, and <code>to_polars(con, lazy=True)</code> when you collect. <code>plan.on(con)</code> only attaches a connection. A plan does not belong to any connection, so you can run the same plan on several databases.</p>
+  <div class="pair">
+    <div class="bad">
+      <div class="tag">DuckDB 1.5.6</div>
+      <pre><code>pairs = con.sql(<span class="s">"SELECT 1 AS x, 'a' AS y"</span>)
+pairs.fetchall()
+pairs.df()
+con.sql(<span class="s">"CREATE TABLE t (x INTEGER)"</span>)</code></pre>
+    </div>
+    <div class="good">
+      <div class="tag">now</div>
+      <pre><code>pairs = sql(<span class="s">"SELECT 1 AS x, 'a' AS y"</span>)
+pairs.rows(con)
+pairs.to_pandas(con)
+con.run(<span class="s">"CREATE TABLE t (x INTEGER)"</span>)</code></pre>
+    </div>
+  </div>
+  <p>A statement that returns no rows, such as <code>CREATE</code>, <code>INSERT</code> or <code>SET</code>, goes to <code>con.run(text)</code>. It runs and takes effect at once, and returns the number of rows it changed. Do not use it to get rows: for a query it throws the rows away, so <code>con.run("SELECT 42")</code> returns <code>0</code>. <code>plan.on(con)</code> attaches a connection to a plan, so that <code>plan.on(con).rows()</code> needs no argument.</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>DuckDB 1.5.6</th><th>Now</th></tr></thead>
+      <tbody>
+        <tr><td><code>fetchall()</code></td><td><code>rows(con)</code></td></tr>
+        <tr><td><code>fetchone()</code></td><td><code>first(con)</code>. It runs the query and returns its first row as a tuple, or <code>None</code> if there are no rows. Each call runs the query again from the start: it does not move on to the next row, and if the data changed in between, it can return a different value. To go through rows one at a time, loop over <code>iter_rows(con)</code>.</td></tr>
+        <tr><td><code>fetchmany(n)</code> in a loop</td><td><code>for row in plan.iter_rows(con):</code>. While the loop still has rows to read, another query on the same connection can fail with <code>OperationalError</code>. Finish the loop first, call <code>close()</code> on an iterator you kept and stopped early, or run the other query on <code>con.duplicate()</code>.</td></tr>
+        <tr><td><code>df()</code>, <code>fetchdf()</code></td><td><code>to_pandas(con)</code></td></tr>
+        <tr><td><code>pl()</code></td><td><code>to_polars(con)</code>, or <code>to_polars(con, lazy=True)</code> for a polars LazyFrame</td></tr>
+        <tr><td><code>fetchnumpy()</code></td><td><code>to_numpy(con)</code></td></tr>
+        <tr><td><code>arrow()</code>, which gave a pyarrow <code>RecordBatchReader</code></td><td><code>to_arrow(con)</code> gives a pyarrow <code>Table</code> holding the whole result. <code>to_reader(con)</code> gives a <code>RecordBatchReader</code>, which hands out the result in batches; read it to the end or call its <code>close()</code> before running another query on the same connection.</td></tr>
+        <tr><td><code>torch()</code>, <code>tf()</code></td><td>No direct equivalent. Use <code>to_numpy(con)</code> and convert the arrays, choosing what a NULL becomes.</td></tr>
+        <tr><td><code>len(rel)</code></td><td><code>count(con)</code>. A plan cannot count itself without a connection.</td></tr>
+        <tr><td><code>sql_query()</code></td><td><code>render()</code>, the plan's SQL text, for reading. A <code>param()</code> comes out as <code>NULL</code> in it. To run the plan somewhere else, use <code>render_parameterized(parameters={...})</code>, which gives the SQL and its values.</td></tr>
+        <tr><td><code>write_csv(path, sep="|")</code>, <code>write_parquet(path)</code></td><td><code>to_csv(con, path, delim="|")</code>, <code>to_parquet(con, path)</code>. Both overwrite a file that exists, and return the number of rows written in a list, as <code>[(3,)]</code> for three rows. The options are those of DuckDB's <code>COPY</code> statement, such as <code>delim</code> and <code>header=False</code> for CSV: see <a href="https://duckdb.org/docs/stable/sql/statements/copy">COPY</a>.</td></tr>
+        <tr><td><code>con.execute(text).fetchall()</code></td><td><code>sql(text).rows(con)</code>. If the SQL has <code>?</code> or <code>$name</code> placeholders, use a <code>dbapi</code> cursor: <code>sql(text)</code> takes none (see <a href="#params">Parameters</a>).</td></tr>
+        <tr><td><code>con.execute(text, parameters).df()</code></td><td>Run it on a <code>dbapi</code> cursor with <code>cur.execute(text, parameters)</code>, then build the DataFrame from its rows: <code>pd.DataFrame.from_records(cur.fetchall(), columns=[c[0] for c in cur.description])</code>, as in <a href="dbapi.html#fetch">DB-API 2.0</a>. For a <code>$name</code> placeholder, the dict key leaves out the <code>$</code>: <code>{"region": "emea"}</code>. pandas then picks each column's type from the values, unlike <code>df()</code>: an integer column with a NULL becomes float and can lose digits above <code>2**53</code>, and a <code>DECIMAL</code> column holds <code>Decimal</code> objects. The recipe on that page shows how to keep such a column exact.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="build">
+  <h2>Building queries in Python</h2>
+  <p>The 1.5.6 relation methods (<code>project</code>, <code>filter</code>, <code>aggregate</code> and so on) are replaced by plan methods with similar names. The biggest difference is what a plain string means.</p>
+  <ul>
+    <li><strong>A string where a method expects a column names that column.</strong> This holds for <code>select</code>, <code>group_by</code>, <code>sort</code>, <code>drop</code> and the like: <code>select("total")</code> picks the column <code>total</code>. <code>select("total * 2")</code> looks for a column literally called <code>total * 2</code> and fails. Write <code>col("total") * 2</code>, or wrap SQL in <code>sql_expr("total * 2")</code>. <code>sql_expr</code> is one piece of SQL inside a plan, such as a condition or a computed column; <code>sql(text)</code> is a whole query.</li>
+    <li><strong>A string inside an expression is a value.</strong> <code>col("region") == "emea"</code> compares with the text <code>emea</code>. To mean a column, write <code>col(...)</code>.</li>
+    <li><strong><code>filter()</code> takes an expression.</strong> <code>filter("total &gt; 1000")</code> is refused with <code>TypeError</code>. Write <code>filter(col("total") &gt; 1000)</code>, or <code>filter(sql_expr("total &gt; 1000"))</code>.</li>
+    <li><strong>Combine conditions with <code>&amp;</code> for AND, <code>|</code> for OR and <code>~</code> for NOT</strong>, with parentheses around each comparison: <code>(col("total") &gt; 1000) &amp; (col("region") == "emea")</code>. Python's <code>and</code>, <code>or</code> and <code>not</code> raise <code>TypeError</code>.</li>
+    <li><strong>Find NULLs with <code>.is_null()</code>.</strong> NULL is SQL's missing value, and Python rows show it as <code>None</code>. <code>==</code> and <code>!=</code> never match it: <code>col("region") == None</code> matches no rows, and <code>col("region") != "emea"</code> leaves out the rows whose region is NULL. To keep those, write <code>(col("region") != "emea") | col("region").is_null()</code>.</li>
+  </ul>
+  <div class="pair">
+    <div class="bad">
+      <div class="tag">DuckDB 1.5.6</div>
+      <pre><code>rel.filter(<span class="s">"total &gt; 1000"</span>).project(<span class="s">"customer, total * 2"</span>)
+rel.aggregate(<span class="s">"sum(total)"</span>, <span class="s">"customer"</span>)</code></pre>
+    </div>
+    <div class="good">
+      <div class="tag">now</div>
+      <pre><code><span class="k">from</span> duckdb.frame <span class="k">import</span> sql_expr
+
+plan.filter(col(<span class="s">"total"</span>) &gt; <span class="s">1000</span>).select(<span class="s">"customer"</span>, col(<span class="s">"total"</span>) * <span class="s">2</span>).rows(con)
+<span class="c"># [('acme', 2800), ('acme', 5200)]</span>
+plan.filter(sql_expr(<span class="s">"total &gt; 1000"</span>)).select(<span class="s">"customer"</span>, sql_expr(<span class="s">"total * 2"</span>)).rows(con)
+<span class="c"># [('acme', 2800), ('acme', 5200)]</span>
+plan.aggregate(col(<span class="s">"total"</span>).sum(), group_by=<span class="s">"customer"</span>).rows(con)
+<span class="c"># [('bolt', 320), ('acme', 4000)], in no particular order</span></code></pre>
+    </div>
+  </div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>DuckDB 1.5.6</th><th>Now</th></tr></thead>
+      <tbody>
+        <tr><td><code>aggregate("sum(total)", "customer")</code> returned only the sum</td><td><code>aggregate(...)</code> returns the group columns first, then the aggregates</td></tr>
+        <tr><td>A method that produced two columns with the same name, or a join whose two sides share a column name besides the join key, kept both under that one name, such as <code>x</code> twice. Rows held both values, and pandas called the second one <code>x_1</code>. Naming <code>x</code> afterwards meant the first one after <code>project()</code>, and failed as ambiguous after a join.</td><td>Refused with <code>ValueError</code>, naming the column. For a join, pass <code>suffix=</code>: the other side's column is renamed, for example <code>name</code> becomes <code>name_right</code> with <code>suffix="_right"</code>. Plain SQL text keeps DuckDB's own behaviour, so <code>sql("SELECT 1 AS x, 2 AS x")</code> still runs.</td></tr>
+        <tr><td><code>intersect()</code> and <code>except_()</code> kept duplicates (<code>INTERSECT ALL</code>)</td><td>They remove duplicates (<code>INTERSECT</code>, <code>EXCEPT</code>). <code>union()</code> keeps duplicates as before; <code>union(other, all=False)</code> removes them.</td></tr>
+        <tr><td><code>rel.columns</code>, <code>rel.types</code> as attributes; types as <code>DuckDBPyType</code> objects</td><td><code>columns(con)</code>, <code>types(con)</code> and <code>schema(con)</code> are methods that take a connection; types are text such as <code>"DECIMAL(6,2)"</code>. <code>plan.schema(con)</code> pairs each column name with its type: <code>[('customer', 'VARCHAR'), ('region', 'VARCHAR'), ('total', 'INTEGER')]</code>. It is not a database schema, the named group of tables in <code>table(("main", "orders"))</code>.</td></tr>
+        <tr><td><code>describe()</code> gave one row per statistic</td><td><code>describe()</code> builds a plan of summary statistics with one row per column: run it with <code>plan.describe().show(con)</code></td></tr>
+        <tr><td><code>ColumnExpression</code>, <code>ConstantExpression</code>, <code>FunctionExpression</code>, <code>StarExpression</code>, <code>SQLExpression</code>, <code>CoalesceOperator</code></td><td><code>col</code>, <code>lit</code>, <code>fn</code>, <code>star</code>, <code>sql_expr</code>, <code>coalesce</code>, all imported from <code>duckdb.frame</code></td></tr>
+        <tr><td><code>CaseExpression(cond, value)</code></td><td><code>when(cond).then(value).end()</code>, or <code>.otherwise(...)</code> in place of <code>.end()</code> for an else</td></tr>
+        <tr><td><code>isnull()</code>, <code>isnotnull()</code>, <code>isnotin(...)</code></td><td><code>is_null()</code>, <code>is_not_null()</code>, <code>~col(...).isin(...)</code></td></tr>
+        <tr><td><code>ColumnExpression("orders.total")</code> meant column <code>total</code> of <code>orders</code></td><td><code>col("orders.total")</code> is one column whose name contains a dot. To say which side of a join a column comes from, use a small function as the join's condition, as in the example below the table. A table in a schema is a tuple: <code>table(("main", "orders"))</code>.</td></tr>
+        <tr><td><code>duckdb.read_csv(path)</code>, <code>con.read_parquet(path)</code></td><td><code>read_csv(path)</code>, <code>read_parquet(path)</code> and <code>read_json(path)</code> from <code>duckdb.frame</code>; they return plans</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>A join with <code>on=lambda left, right: ...</code> calls that small function with its two sides. The function returns the condition that says which rows match, and <code>left["customer"]</code> means the column <code>customer</code> of the left side:</p>
+  <pre><code>con.run(<span class="s">"CREATE TABLE customers (id VARCHAR, country VARCHAR)"</span>)
+con.run(<span class="s">"INSERT INTO customers VALUES ('acme', 'NL'), ('bolt', 'US')"</span>)
+both = plan.join(table(<span class="s">"customers"</span>), on=<span class="k">lambda</span> left, right: left[<span class="s">"customer"</span>] == right[<span class="s">"id"</span>])
+both.select(<span class="s">"customer"</span>, <span class="s">"total"</span>, <span class="s">"country"</span>).sort(<span class="s">"total"</span>).rows(con)
+<span class="c"># [('bolt', 320, 'US'), ('acme', 1400, 'NL'), ('acme', 2600, 'NL')]</span></code></pre>
+  <p>All of this is explained with examples in <a href="frame.html">Frames &amp; Plans</a>.</p>
+</section>
+
+<section id="pydata">
+  <h2>Querying Python data</h2>
+  <p>In 1.5.6 a query could name a pandas DataFrame, a polars DataFrame or an Arrow table that was a variable in your code, and DuckDB would find it. That no longer happens. Register the object under a name first:</p>
+  <div class="pair">
+    <div class="bad">
+      <div class="tag">DuckDB 1.5.6</div>
+      <pre><code><span class="k">import</span> pandas <span class="k">as</span> pd
+
+df = pd.DataFrame({<span class="s">"x"</span>: [<span class="s">1</span>, <span class="s">2</span>]})
+duckdb.sql(<span class="s">"SELECT sum(x) FROM df"</span>).fetchall()
+<span class="c"># [(3,)]</span></code></pre>
+    </div>
+    <div class="good">
+      <div class="tag">now</div>
+      <pre><code><span class="k">import</span> pandas <span class="k">as</span> pd
+
+df = pd.DataFrame({<span class="s">"x"</span>: [<span class="s">1</span>, <span class="s">2</span>]})
+con.register(<span class="s">"df"</span>, df)
+sql(<span class="s">"SELECT sum(x) FROM df"</span>).rows(con)
+<span class="c"># [(3,)]</span></code></pre>
+    </div>
+  </div>
+  <ul>
+    <li>Without <code>register</code>, the query fails with <code>CatalogError: Table with name df does not exist!</code>.</li>
+    <li>Registering does not copy the data into the database. Each query reads the DataFrame as it is at that moment, and the name is gone when the database closes. To keep a copy as a real table, create one: <code>table("df").create(con, "saved")</code>.</li>
+    <li>Registering keeps the object you passed, not the variable. If you assign a new DataFrame to <code>df</code>, as in <code>df = df.assign(...)</code>, queries still read the old one until you call <code>con.register("df", df)</code> again.</li>
+    <li>If a real table has the same name, the real table wins. Pick a name no table has.</li>
+    <li><code>register</code> also exists on a <code>dbapi</code> connection. Which objects it accepts is listed in <a href="frame.html">Frames &amp; Plans</a>.</li>
+  </ul>
+</section>
+
+<section id="values">
+  <h2>Values you get back</h2>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>DuckDB 1.5.6</th><th>Now</th></tr></thead>
+      <tbody>
+        <tr><td>A <code>TIMESTAMP WITH TIME ZONE</code> came back in the connection's time zone, its <code>TimeZone</code> setting, as a <code>pytz</code> zone, and needed <code>pytz</code> installed</td><td>As Python rows (<code>rows</code>, <code>first</code>, <code>fetchall</code>) it comes back in UTC with <code>datetime.timezone.utc</code>. <code>to_pandas</code>, <code>to_polars</code> and <code>to_arrow</code> keep using the <code>TimeZone</code> setting, as before. <code>pytz</code> is not needed.</td></tr>
+        <tr><td>A date or timestamp outside the years Python's <code>datetime</code> can hold (1 to 9999) came back as a string</td><td>As Python rows it raises <code>ConversionError</code>, naming the value. For the text, cast it in SQL, as in the example below. <code>to_arrow</code> keeps such values, also inside lists. <code>to_pandas</code> keeps them in a plain date or timestamp column up to about the year 290000, but raises <code>ConversionError</code> for one inside a list or a struct.</td></tr>
+        <tr><td>A <code>MAP</code> (DuckDB's key and value type) whose keys Python cannot put in a dict, such as lists, came back as <code>{"key": [...], "value": [...]}</code></td><td>It comes back as a list of <code>(key, value)</code> pairs</td></tr>
+        <tr><td>In <code>df()</code>, <code>LIST</code> and <code>ARRAY</code> values were numpy arrays, and <code>BLOB</code> values <code>bytearray</code></td><td>In <code>to_pandas()</code> they are Python lists and <code>bytes</code></td></tr>
+        <tr><td>An <code>ARRAY</code> (DuckDB's fixed-length list) came back in Python rows as a tuple</td><td>It comes back as a list</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>You change a connection's <code>TimeZone</code> setting with SQL, as in the <code>SET TimeZone</code> line below. The two <code>datetime</code> results are the same moment shown in two zones: 12:00 in UTC is 07:00 in New York.</p>
+  <pre><code><span class="k">from</span> datetime <span class="k">import</span> timezone
+<span class="k">from</span> zoneinfo <span class="k">import</span> ZoneInfo
+
+con.run(<span class="s">"SET TimeZone = 'America/New_York'"</span>)
+(t,) = sql(<span class="s">"SELECT TIMESTAMPTZ '2024-01-01 12:00:00+00' AS t"</span>).first(con)
+t
+<span class="c"># datetime.datetime(2024, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)</span>
+t.astimezone(ZoneInfo(<span class="s">"America/New_York"</span>))
+<span class="c"># datetime.datetime(2024, 1, 1, 7, 0, tzinfo=zoneinfo.ZoneInfo(key='America/New_York'))</span>
+
+sql(<span class="s">"SELECT MAP {[1, 2]: 'a'} AS m"</span>).rows(con)
+<span class="c"># [([([1, 2], 'a')],)]: one row, whose one value is a list of (key, value) pairs</span>
+
+sql(<span class="s">"SELECT CAST(DATE '10000-01-01' AS VARCHAR) AS d"</span>).rows(con)
+<span class="c"># [('10000-01-01',)]</span></code></pre>
+</section>
+
+<section id="params">
+  <h2>Parameters</h2>
+  <p>A parameter is a value you send with a query instead of writing it into the SQL text. If your code already has SQL strings with <code>?</code> or <code>$name</code> placeholders, keep them and run them through <code>duckdb.dbapi</code>, or with <code>con.run</code> for statements that return no rows:</p>
+  <div class="pair">
+    <div class="bad">
+      <div class="tag">DuckDB 1.5.6</div>
+      <pre><code>con.execute(<span class="s">"SELECT customer FROM orders WHERE region = ?"</span>, [<span class="s">"emea"</span>]).fetchall()
+con.execute(<span class="s">"INSERT INTO orders VALUES (?, ?, ?)"</span>, [<span class="s">"cato"</span>, <span class="s">"amer"</span>, <span class="s">90</span>])</code></pre>
+    </div>
+    <div class="good">
+      <div class="tag">now, with duckdb.dbapi</div>
+      <pre><code><span class="k">from</span> duckdb <span class="k">import</span> dbapi
+
+db = dbapi.connect()
+cur = db.cursor()
+cur.execute(<span class="s">"CREATE TABLE orders (customer VARCHAR, region VARCHAR, total INTEGER)"</span>)
+cur.execute(<span class="s">"INSERT INTO orders VALUES (?, ?, ?)"</span>, [<span class="s">"cato"</span>, <span class="s">"amer"</span>, <span class="s">90</span>])
+cur.execute(<span class="s">"SELECT customer FROM orders WHERE region = ?"</span>, [<span class="s">"amer"</span>]).fetchall()
+<span class="c"># [('cato',)]</span>
+db.commit()</code></pre>
+      <div class="tag">now, with con.run on the setup's connection</div>
+      <pre><code>con.run(<span class="s">"INSERT INTO orders VALUES (?, ?, ?)"</span>, [<span class="s">"dune"</span>, <span class="s">"emea"</span>, <span class="s">700</span>])
+<span class="c"># 1</span></code></pre>
+    </div>
+  </div>
+  <p>These are two alternatives with two separate databases. <code>dbapi.connect()</code> opens a new database in memory with its own <code>orders</code> table, so <code>cato</code> is only there, and <code>dune</code> is only in the setup's table.</p>
+  <p>A plan made with <code>sql(text)</code> takes no placeholders. In a plan, put <code>param("name")</code> where the value goes and pass the values when you run it:</p>
+  <pre><code>by_region = plan.filter(col(<span class="s">"region"</span>) == param(<span class="s">"region"</span>))
+by_region.rows(con, parameters={<span class="s">"region"</span>: <span class="s">"amer"</span>})
+<span class="c"># [('bolt', 'amer', 320)]</span></code></pre>
+  <ul>
+    <li>With <code>execute</code> and <code>con.run</code>, the names in a dict of parameters must be strings. 1.5.6 accepted <code>{1: 9}</code> for <code>$1</code>; now that is refused with <code>InvalidInputError</code>. Write <code>{"1": 9}</code>.</li>
+    <li>One statement per call. 1.5.6 ran <code>execute("SELECT 1; SELECT 2")</code> and kept the last result; now that is refused with <code>InvalidInputError</code>. Run each statement on its own.</li>
+  </ul>
+</section>
+
+<section id="functions">
+  <h2>Python functions</h2>
+  <p><code>con.create_function</code> still registers a Python function that SQL can call, but its options changed. This is how the two are declared (not code to run):</p>
+  <pre><code><span class="c"># 1.5.6</span>
+con.create_function(name, function, parameters=<span class="k">None</span>, return_type=<span class="k">None</span>, *,
+                    type=<span class="s">"native"</span>, null_handling=<span class="s">"default"</span>,
+                    exception_handling=<span class="s">"default"</span>, side_effects=<span class="k">False</span>)
+<span class="c"># now: everything after the * is passed by name</span>
+con.create_function(name, function, parameters=<span class="k">None</span>, returns=<span class="k">None</span>, *,
+                    null_handling=<span class="s">"default"</span>, stability=<span class="s">"consistent"</span>)</code></pre>
+  <p>And here is an actual call. <code>x: int</code> and <code>-&gt; int</code> are Python type annotations; the package reads the SQL types from them. Without annotations, give the types as text: <code>parameters=["BIGINT", "BIGINT"], returns="BIGINT"</code>.</p>
+  <pre><code><span class="k">def</span> bump(x: int, k: int = <span class="s">10</span>) -&gt; int:
+    <span class="k">return</span> x + k
+
+con.create_function(<span class="s">"bump"</span>, bump)
+sql(<span class="s">"SELECT bump(1) AS a, bump(1, k := 2) AS b"</span>).rows(con)
+<span class="c"># [(11, 3)]: 1.5.6 refused bump(1), since it ignored the default</span></code></pre>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>DuckDB 1.5.6</th><th>Now</th></tr></thead>
+      <tbody>
+        <tr><td>Every parameter became a positional SQL argument, even when written as <code>name := value</code>: for <code>def sub(x, k): return x - k</code>, <code>sub(k := 2, x := 10)</code> gave <code>-8</code>, and now gives <code>8</code>. Defaults were ignored, so <code>def f(x, k=10)</code> needed two arguments.</td><td>Parameters keep their names and defaults. <code>f(1)</code> uses the default, <code>f(1, k := 2)</code> passes <code>k</code> by name, and <code>*args</code> and <code>**kwargs</code> work as in Python. One exception: under the default NULL handling, a default of <code>None</code> counts as a NULL argument, so a call that leaves it out returns NULL without calling your function. Pass <code>null_handling="special"</code> to receive the <code>None</code>.</td></tr>
+        <tr><td><code>return_type=</code></td><td><code>returns=</code>. You need it unless the function has a return annotation.</td></tr>
+        <tr><td><code>parameters</code> took SQL type names as text, DuckDB type objects or Python types such as <code>int</code></td><td>Only SQL type names as text, such as <code>["BIGINT", "VARCHAR"]</code>; <code>[int]</code> is refused with <code>TypeError</code>. A dict gives the types of some parameters by name, and the rest come from annotations.</td></tr>
+        <tr><td>A parameter annotation DuckDB could not turn into a type was quietly treated as "any type". A return annotation like that was already refused, and needed <code>return_type=</code>.</td><td>A parameter annotation like that is refused too, and the message names the parameter. Give that parameter's type in <code>parameters</code>, for example <code>{"x": "DECIMAL(10, 2)"}</code>. A parameter with no annotation still takes any type.</td></tr>
+        <tr><td>Registering a name twice was refused (<code>already created</code>); <code>remove_function</code> first</td><td>Registering again with the same parameter types replaces the function. With other parameter types it adds a second version beside the first. There is no <code>remove_function</code>.</td></tr>
+        <tr><td>Returning <code>None</code> was refused under <code>null_handling="default"</code></td><td>Returning <code>None</code> gives NULL, whatever <code>null_handling</code> is</td></tr>
+        <tr><td><code>exception_handling="return_null"</code> turned an exception into NULL</td><td>An exception fails the query. Catch it inside your function and return <code>None</code> if you want NULL.</td></tr>
+        <tr><td><code>side_effects=True</code></td><td><code>stability="volatile"</code>: DuckDB does not reuse a result for the same arguments, so <code>SELECT f(1) FROM range(3)</code> calls it three times. How often it runs still follows the SQL, not the number of result rows. Under the default NULL handling a NULL argument gives NULL without a call. A result the query does not use may never be computed, as in <code>SELECT count(*) FROM (SELECT f(x) FROM t)</code>. A call in a subquery, as in <code>SELECT (SELECT f()) FROM range(3)</code>, runs once. The default <code>"consistent"</code> promises the same arguments always give the same result, so DuckDB may call it once and reuse the result; <code>"consistent_within_query"</code> promises that within one query.</td></tr>
+        <tr><td><code>type="arrow"</code> for functions that take Arrow arrays</td><td>Not available. Your function receives ordinary Python values for one row at a time.</td></tr>
+        <tr><td><code>create_function</code> returned the connection</td><td>It returns <code>None</code></td></tr>
+        <tr><td><code>duckdb.create_function(...)</code> on the default connection</td><td>Call it on a connection: <code>con.create_function(...)</code></td></tr>
+        <tr><td>An annotation of <code>bytearray</code> meant <code>BLOB</code></td><td>Use <code>bytes</code>; a <code>BLOB</code> arrives in your function as <code>bytes</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The details are in <a href="udf.html">Python Functions</a>.</p>
+</section>
+
+<section id="dbapi">
+  <h2>The DB-API</h2>
+  <p>In 1.5.6 the connection itself had <code>execute()</code>, <code>fetchall()</code>, <code>description</code> and <code>rowcount</code>. Now that style lives in <code>duckdb.dbapi</code>, which follows Python's standard database interface (PEP 249) closely. A <code>frame.connect()</code> connection has none of these methods.</p>
+  <div class="pair">
+    <div class="bad">
+      <div class="tag">DuckDB 1.5.6</div>
+      <pre><code>con = duckdb.connect(<span class="s">"notes.db"</span>)
+con.execute(<span class="s">"CREATE TABLE notes (text VARCHAR)"</span>)
+con.execute(<span class="s">"INSERT INTO notes VALUES ('hi')"</span>)
+con.close()   <span class="c"># the table and row are saved</span></code></pre>
+    </div>
+    <div class="good">
+      <div class="tag">now</div>
+      <pre><code>db = dbapi.connect(<span class="s">"notes.db"</span>)
+cur = db.cursor()
+cur.execute(<span class="s">"CREATE TABLE notes (text VARCHAR)"</span>)
+cur.execute(<span class="s">"INSERT INTO notes VALUES ('hi')"</span>)
+db.commit()   <span class="c"># without this, close() throws the changes away</span>
+db.close()</code></pre>
+    </div>
+  </div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>DuckDB 1.5.6</th><th>Now</th></tr></thead>
+      <tbody>
+        <tr><td>Each statement took effect by itself (autocommit)</td><td>The first statement opens a transaction. <code>commit()</code> makes its changes final; <code>rollback()</code>, or closing without a commit, throws them away. With <code>dbapi.connect(autocommit=True)</code> each statement takes effect by itself, as before.</td></tr>
+        <tr><td>Each cursor was independent, with its own transaction and its own result</td><td>All cursors of a connection share one transaction, so one cursor sees what another wrote before the commit. They also share one open result: running a statement on one cursor ends the result another cursor was still reading, whose next fetch raises <code>InterfaceError</code>. Read a result to the end, or keep it with <code>fetchall()</code>, before running the next statement.</td></tr>
+        <tr><td><code>rowcount</code> was always <code>-1</code></td><td>The real number for <code>INSERT</code>, <code>UPDATE</code>, <code>DELETE</code> and <code>CREATE TABLE AS</code>; <code>-1</code> for a query</td></tr>
+        <tr><td><code>with con:</code> closed the connection</td><td><code>with con:</code> is a transaction: it commits at the end, rolls back on an error, and leaves the connection open</td></tr>
+        <tr><td><code>execute("a; b")</code> ran both statements</td><td>One statement per call</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>On a <code>frame</code> connection, by contrast, each statement takes effect at once, unless you group statements with <code>with con.transaction():</code>. The details are in <a href="dbapi.html">DB-API 2.0</a>.</p>
+</section>
+
+<section id="errors">
+  <h2>Errors</h2>
+  <p>The error classes are in <code>duckdb.exceptions</code> and end in <code>Error</code>. They still fit Python's standard database hierarchy, so <code>except duckdb.exceptions.Error</code> catches them all, apart from errors that reach you through pyarrow or polars (see <a href="index.html#errors">Errors</a>).</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>DuckDB 1.5.6</th><th>Now</th></tr></thead>
+      <tbody>
+        <tr><td><code>duckdb.CatalogException</code></td><td><code>duckdb.exceptions.CatalogError</code></td></tr>
+        <tr><td><code>duckdb.ParserException</code></td><td><code>duckdb.exceptions.ParserError</code></td></tr>
+        <tr><td><code>duckdb.BinderException</code></td><td><code>duckdb.exceptions.ProgrammingError</code>; the message still starts with <code>Binder Error:</code></td></tr>
+        <tr><td><code>duckdb.InvalidInputException</code></td><td><code>duckdb.exceptions.InvalidInputError</code></td></tr>
+        <tr><td><code>duckdb.ConversionException</code></td><td><code>duckdb.exceptions.ConversionError</code></td></tr>
+        <tr><td><code>duckdb.ConstraintException</code></td><td><code>duckdb.exceptions.ConstraintError</code></td></tr>
+        <tr><td><code>duckdb.IOException</code></td><td><code>duckdb.exceptions.IOError</code></td></tr>
+        <tr><td><code>duckdb.ConnectionException</code> for a closed connection</td><td><code>duckdb.exceptions.InterfaceError</code></td></tr>
+        <tr><td>Ctrl&#8209;C during a query raised <code>RuntimeError</code></td><td>It raises <code>KeyboardInterrupt</code>, like the rest of Python, unless the query is calling a Python function of yours: then it fails with <code>InvalidInputError</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>A few mistakes are now caught in Python, before DuckDB sees the query, and raise <code>TypeError</code> or <code>ValueError</code>: a string passed to <code>filter()</code>, a value given for a <code>param()</code> name the plan does not use, a plan given a <code>dbapi</code> connection.</p>
+  <p>In a <code>dbapi</code> transaction, most failed statements leave the transaction aborted, for example a missing table, a missing column or a value that does not convert. Every later statement then raises <code>TransactionError</code> until you call <code>rollback()</code>; a syntax error (<code>ParserError</code>) does not do this. The rollback also undoes the earlier changes you had not committed:</p>
+  <pre><code><span class="k">from</span> duckdb <span class="k">import</span> dbapi, exceptions
+
+db = dbapi.connect()
+cur = db.cursor()
+cur.execute(<span class="s">"CREATE TABLE stock (item VARCHAR, n INTEGER)"</span>)
+db.commit()
+cur.execute(<span class="s">"INSERT INTO stock VALUES ('pen', 5)"</span>)
+<span class="k">try</span>:
+    cur.execute(<span class="s">"INSERT INTO stock VALUES ('ink', 'lots')"</span>)
+<span class="k">except</span> exceptions.ConversionError:
+    db.rollback()
+cur.execute(<span class="s">"SELECT count(*) FROM stock"</span>).fetchall()
+<span class="c"># [(0,)]: the rollback also undid the 'pen' row, which was not committed</span></code></pre>
+</section>
+
+<section id="versions">
+  <h2>Versions</h2>
+  <p><code>duckdb.__version__</code> is the version of this Python package. The version of the DuckDB engine inside it is <code>duckdb.duckdb_version()</code>. In 1.5.6 the two were the same number.</p>
+  <pre><code><span class="k">import</span> duckdb
+
+duckdb.__version__        <span class="c"># this package</span>
+duckdb.duckdb_version()   <span class="c"># the DuckDB engine, such as 'v2.0.0-alpha46057'</span></code></pre>
+</section>
+
+<section id="missing">
+  <h2>Not available yet</h2>
+  <ul>
+    <li>Finding Python variables by name in a query: register them, as above.</li>
+    <li>Removing a registered Python function. Registering the name again with the same parameter types replaces it; with other types it adds a version, and the first stays. A function lasts until its database closes.</li>
+    <li>Arrow-based Python functions (<code>type="arrow"</code>).</li>
+    <li><code>torch()</code> and <code>tf()</code>: go through <code>to_numpy(con)</code>.</li>
+    <li>Python file systems. fsspec, a Python library that reads files from many kinds of storage through one interface, cannot be used: <code>register_filesystem()</code> is gone. <code>read_csv</code> and the other readers take a path or a URL, not an open Python file such as <code>open(...)</code> or <code>io.BytesIO</code>; that raises <code>TypeError</code>. DuckDB still reads local paths, <code>http(s)://</code> URLs and <code>s3://</code> URLs by itself.</li>
+  </ul>
+</section>
+
+<footer>
+  <p>Something you relied on in 1.5.6 is not on this page? It may be under <a href="#missing">Not available yet</a>, or it may be a change in DuckDB's SQL itself, which <a href="https://github.com/duckdb/duckdb/releases">DuckDB's release notes</a> cover.</p>
+</footer>
+
+</div>
+
+</body>
+</html>

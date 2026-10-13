@@ -693,6 +693,17 @@ class TestDefaults:
         assert "the default of parameter 'v' is a value that cannot be converted" in printed
         assert "a list or dict that contains itself has no SQL value" in printed
 
+    def test_a_refusal_made_before_duckdb_is_asked_leaves_the_transaction_usable(
+        self, con: duckdb.frame.Connection
+    ) -> None:
+        con.run("BEGIN")
+        con.run("CREATE TABLE t AS SELECT 1 AS a")
+        missing = object()
+        with pytest.raises(exceptions.InvalidInputError, match="default of parameter 'x'"):
+            con.create_function("f", lambda x=missing: 0, ["BIGINT"], "BIGINT")
+        assert rows(con, "SELECT count(*) FROM t") == [(1,)]
+        con.run("ROLLBACK")
+
     def test_a_text_default_for_a_zoned_type_is_read_where_it_is_registered(self, con: duckdb.frame.Connection) -> None:
         con.run("SET TimeZone = 'America/New_York'")
         con.create_function("f", lambda x="2026-01-01 00:00:00": str(x), ["TIMESTAMPTZ"], "VARCHAR")
@@ -710,6 +721,11 @@ class TestDefaults:
             rows(con, "SELECT count(*) FROM t")
         con.run("ROLLBACK")
         assert rows(con, "SELECT 1") == [(1,)]
+
+    def test_ctrl_c_while_a_default_converts_is_not_turned_into_an_error(self, con: duckdb.frame.Connection) -> None:
+        when = datetime.datetime(2026, 1, 2, tzinfo=Failing(KeyboardInterrupt, "stop"))
+        with pytest.raises(KeyboardInterrupt):
+            con.create_function("f", lambda x=when: 0, ["TIMESTAMPTZ"], "BIGINT")
 
     def test_a_default_the_declared_type_cannot_hold_is_refused(self, con: duckdb.frame.Connection) -> None:
         def f(x: int = "five") -> int:  # type: ignore[assignment]

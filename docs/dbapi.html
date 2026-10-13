@@ -13,10 +13,11 @@
 
 <nav class="sitenav">
   <a class="home" href="index.html">duckdb for python</a>
-  <a class="here" href="dbapi.html">DB-API 2.0</a>
   <a href="frame.html">Frames &amp; Plans</a>
-  <a href="udf.html">UDFs</a>
+  <a href="udf.html">Python Functions</a>
   <a href="extend.html">Macros &amp; Extensions</a>
+  <a class="here" href="dbapi.html">DB-API 2.0</a>
+  <a href="changes.html">Coming from 1.5.6</a>
 </nav>
 
 <div class="page">
@@ -24,268 +25,481 @@
 <header class="top">
   <div class="eyebrow">duckdb for python &middot; user manual</div>
   <h1>The DB-API</h1>
-  <p class="standfirst"><code>duckdb.dbapi</code> is DuckDB behind <strong>PEP 249</strong>: <code>connect</code>, a <strong>cursor</strong>, <code>execute</code>, the fetch family, <code>commit</code> and <code>rollback</code>. It is here because other tools ask for exactly that. It follows the specification strictly and adds only <code>complete()</code> and <code>abort()</code>, for disposing of a pending result deliberately.</p>
+  <p class="standfirst"><code>duckdb.dbapi</code> lets you use DuckDB the way most Python database libraries work: you connect, get a cursor, run SQL with <code>execute()</code>, read rows with <code>fetchall()</code>, and save your changes with <code>commit()</code>. This page walks through those steps, then covers the details.</p>
 </header>
 
 <nav class="toc">
   <ol>
-    <li><a href="#what">What this module is</a></li>
+    <li><a href="#start">Start here</a></li>
     <li><a href="#connect">Connecting</a></li>
     <li><a href="#cursors">Cursors</a></li>
-    <li><a href="#execute">Executing</a></li>
-    <li><a href="#fetch">Fetching</a></li>
-    <li><a href="#meta">description and rowcount</a></li>
+    <li><a href="#execute">Running SQL</a></li>
+    <li><a href="#values">Sending Python values</a></li>
+    <li><a href="#fetch">Reading rows</a></li>
+    <li><a href="#one-result">One result at a time</a></li>
+    <li><a href="#meta">Column names and row counts</a></li>
     <li><a href="#transactions">Transactions</a></li>
-    <li><a href="#module">Module attributes and types</a></li>
+    <li><a href="#register">Querying Python data</a></li>
+    <li><a href="#stop">Stopping a query</a></li>
     <li><a href="#errors">Errors</a></li>
+    <li><a href="#module">Module attributes and types</a></li>
     <li><a href="#reference">Reference</a></li>
-    <li><a href="#changes">Changes from the old client</a></li>
   </ol>
 </nav>
 
-<section id="what">
-  <h2>What this module is</h2>
-  <p class="lede">PEP 249 is the interface Python tooling expects from a database driver: ORMs, notebook SQL cells, migration tools, connection pools. <code>duckdb.dbapi</code> is that interface over DuckDB, and nothing more.</p>
-  <p>The execute, fetch and cursor vocabulary exists because PEP 249 asks for it, not because it is the natural way to use DuckDB. So it lives in its own module, apart from the rest of the package. Use it when something else needs a DB-API driver. For code you write yourself, build plans; that is <a href="frame.html">Frames &amp; Plans</a>. A plan does not run on a dbapi connection, but its SQL does: <code>cur.execute(plan.render())</code>.</p>
+<section id="start">
+  <h2>Start here</h2>
+  <p class="lede">Python has a standard way for programs to talk to a database, called the DB-API and written down in <a href="https://peps.python.org/pep-0249/">PEP 249</a>. Many tools expect it, such as ORMs (libraries that map Python classes to tables), notebook SQL cells and database migration tools. <code>duckdb.dbapi</code> gives DuckDB that interface, so tools that accept a DB-API connection can use it.</p>
+  <p>For code you write yourself, the main module, <code>duckdb.frame</code>, is usually simpler: see <a href="frame.html">Frames &amp; Plans</a>. Use <code>duckdb.dbapi</code> when a tool needs a DB-API driver, or when you prefer this style.</p>
   <pre><code><span class="k">from</span> duckdb <span class="k">import</span> dbapi
 
-con = dbapi.connect(<span class="s">"shop.db"</span>)
+con = dbapi.connect()
 cur = con.cursor()
-cur.execute(<span class="s">"SELECT customer, total FROM orders WHERE total &gt; ?"</span>, [<span class="s">1000</span>])
-cur.fetchall()        <span class="c"># [('acme', Decimal('1400.00')), ('acme', Decimal('2600.00'))]</span>
+cur.execute(<span class="s">"CREATE TABLE orders (id INTEGER, customer VARCHAR, total DECIMAL(6,2), placed DATE)"</span>)
+cur.execute(<span class="s">"INSERT INTO orders VALUES (1, 'acme', 1400, '2026-01-12'), (2, 'bolt', 320, '2026-01-20'), (3, 'acme', 2600, '2026-02-03')"</span>)
 con.commit()
-con.close()</code></pre>
-  <p>Everything on this page follows that example. What DuckDB adds is in the details: real row counts, one transaction shared by every cursor, and errors typed by the engine's own error codes.</p>
+
+cur.execute(<span class="s">"SELECT customer, total FROM orders WHERE total &gt; ?"</span>, [<span class="s">1000</span>])
+print(cur.fetchall())        <span class="c"># [('acme', Decimal('1400.00')), ('acme', Decimal('2600.00'))]</span></code></pre>
+  <p>Line by line:</p>
+  <ul>
+    <li><code>dbapi.connect()</code> opens a new, empty database in memory. It disappears when the connection closes. To keep these tables in a file, write <code>dbapi.connect("shop.db")</code> here instead, before you create them: connecting to a file later does not move tables into it. See <a href="#connect">Connecting</a>.</li>
+    <li><code>con.cursor()</code> gives you a cursor: the object you run SQL with and read results from.</li>
+    <li><code>cur.execute(...)</code> runs one SQL statement. The table's columns are an <code>INTEGER</code>, a <code>VARCHAR</code> (text), a <code>DECIMAL(6,2)</code> (a number of six digits, two of them after the point) and a <code>DATE</code>.</li>
+    <li><code>con.commit()</code> saves your changes. Until you commit, <code>con.rollback()</code> or closing the connection undoes them.</li>
+    <li>The <code>?</code> in the query is a parameter: a placeholder for a value you pass separately, here <code>[1000]</code>. DuckDB never pastes the value into the SQL text, so any value is safe to pass, even text a user typed.</li>
+    <li><code>fetchall()</code> returns the rows as a list of tuples. A DECIMAL column comes back as Python's <code>Decimal</code>, an exact decimal number (see <a href="#fetch">Reading rows</a> for arithmetic with it).</li>
+  </ul>
+  <p>The sections below follow these steps in order. Their examples run one after the other and build on each other: they use the <code>con</code>, <code>cur</code> and <code>orders</code> table made here. A comment after a line shows what it prints or, for a line without <code>print()</code>, what an interactive prompt or a notebook shows.</p>
 </section>
 
 <section id="connect">
   <h2>Connecting</h2>
-  <pre><code>con = dbapi.connect()                                                <span class="c"># in memory</span>
-con = dbapi.connect(<span class="s">"shop.db"</span>)                                       <span class="c"># a file, created if it does not exist</span>
-con = dbapi.connect(<span class="s">"shop.db"</span>, access_mode=<span class="s">"READ_ONLY"</span>, threads=<span class="s">4</span>)
-con = dbapi.connect(<span class="s">"shop.db"</span>, autocommit=<span class="k">True</span>)</code></pre>
-  <p><code>database</code> is a path, as a string or a <code>pathlib.Path</code>, or <code>":memory:"</code>, the default. Every other keyword is a DuckDB setting under its own name, applied as the database opens. The value is sent as text, so <code>threads=4</code> and <code>threads="4"</code> are the same. Some settings, <code>access_mode</code> among them, can only be chosen here, before the database exists. A name the engine does not know is refused with <code>InvalidInputError</code>, and so is a value it cannot read.</p>
-  <p><code>autocommit</code> is the one keyword that is not a setting. Left <code>False</code>, the first statement opens a transaction that <code>commit()</code> ends and <code>close()</code> rolls back. Set <code>True</code>, no transaction is opened and every statement stands on its own. The details are under <a href="#transactions">Transactions</a>.</p>
+  <pre><code>db = dbapi.connect(<span class="s">"archive.db"</span>)                      <span class="c"># a database file, created if it does not exist</span>
+mem = dbapi.connect()                                 <span class="c"># a new, empty database in memory</span>
+fast = dbapi.connect(threads=<span class="s">8</span>, memory_limit=<span class="s">"4GB"</span>)    <span class="c"># with DuckDB settings</span>
+auto = dbapi.connect(autocommit=<span class="k">True</span>)                <span class="c"># every statement is saved as it runs</span></code></pre>
+  <ul>
+    <li>With a path, as a string or a <code>pathlib.Path</code>, you get a database file. It is created if it does not exist yet. What you commit is stored in the file, and is there the next time you connect to it.</li>
+    <li>With no path you get a new database in memory. Each such connection has its own database, which disappears when you close the connection.</li>
+    <li>Other keyword arguments are DuckDB settings, applied when the database opens. A few settings, such as <code>access_mode="READ_ONLY"</code>, can only be given here. Most others can also be changed later with <code>cur.execute("SET ...")</code>, and a few only that way: <code>max_streaming_buffer_size</code> given to <code>connect()</code> raises <code>InvalidInputError</code>. A setting DuckDB does not know raises <code>InvalidInputError</code>. A value it cannot use raises an error that depends on the setting, such as <code>InvalidInputError</code>, <code>ParserError</code> or <code>NotSupportedError</code>; <code>except dbapi.DatabaseError</code> catches them all.</li>
+    <li><code>dbapi</code> has the standard's error classes, such as <code>dbapi.ProgrammingError</code>. The more exact ones, such as <code>InvalidInputError</code>, are in <code>duckdb.exceptions</code>, and each is a kind of one of the standard's: <code>except dbapi.ProgrammingError</code> catches an <code>InvalidInputError</code>. See <a href="#errors">Errors</a>.</li>
+    <li><code>autocommit=True</code> is not a DuckDB setting: it makes every statement save itself as it runs, so you never call <code>commit()</code>. The default is <code>False</code>. See <a href="#transactions">Transactions</a>.</li>
+  </ul>
 
-  <p class="lead-in">one file, one open</p>
-  <p>A database file is open once at a time within a process. A second <code>connect()</code> to a file that is already open raises <code>OperationalError</code>, naming the file handle conflict. Open it once and take cursors from that connection; close it and it can be opened again.</p>
+  <p class="lead-in">open a file once</p>
+  <pre><code>dbapi.connect(<span class="s">"archive.db"</span>)     <span class="c"># raises OperationalError: db has archive.db open already</span></code></pre>
+  <p>A database file is opened by one connection at a time. A second <code>connect()</code> to the same file raises <code>OperationalError</code>, and so does a <code>frame.connect()</code> to it (for read-only connections, see Details). Open the file once and make as many cursors from that connection as you need. After you close the connection, you can open the file again.</p>
 
-  <p class="lead-in">the connection as a context manager</p>
+  <p class="lead-in">a with block is a transaction</p>
   <pre><code><span class="k">with</span> con:
     con.cursor().execute(<span class="s">"INSERT INTO orders VALUES (4, 'cato', 90, '2026-03-05')"</span>)
-<span class="c"># committed; con is still open</span></code></pre>
-  <p>The block is a transaction: COMMIT when it ends, ROLLBACK if it raises. The connection stays open afterwards. PEP 249 leaves this to the driver, and this is what <code>sqlite3</code> does and what a caller means by <code>with connection:</code>. Closing is <code>close()</code>.</p>
+<span class="c"># the insert is saved, and con is still open</span></code></pre>
+  <p>When the <code>with</code> block ends, the connection commits. If the block raises an exception, it rolls back (undoes) instead. Either way this covers the whole open transaction, which your first statement started, even a <code>SELECT</code>; entering the block does not start a new one. So changes made before the block are included, and an inner <code>with con:</code> block commits everything so far when it ends. An error you catch inside the block still fails the transaction, and the block's end then discards the earlier writes without raising: catch errors outside the block, or raise them again. The connection stays open after the block, as in Python's <code>sqlite3</code>.</p>
 
   <p class="lead-in">closing</p>
-  <p><code>close()</code> rolls back whatever was not committed, then releases the engine connection. Calling it again does nothing. After it, every other call raises <code>InterfaceError</code>: <code>cursor()</code>, <code>commit()</code>, <code>rollback()</code>, and <code>execute</code> on any cursor the connection made.</p>
+  <pre><code>db.close()
+db.close()        <span class="c"># does nothing: it is closed already</span>
+db.cursor()       <span class="c"># raises InterfaceError</span></code></pre>
+  <p><code>close()</code> rolls back any changes you have not committed, then closes the connection. Calling it again does nothing. After it, the connection and every cursor it made refuse any more work with <code>InterfaceError</code>.</p>
+
+  <h3>Details</h3>
+  <ul>
+    <li>Setting values are sent to DuckDB as text, so <code>threads=4</code> and <code>threads="4"</code> mean the same. DuckDB's settings are listed in its documentation at duckdb.org.</li>
+    <li>The path <code>":memory:"</code>, the default, also means a new database in memory.</li>
+    <li>While your connection can write to a file, another program that opens it gets an <code>IOError</code> saying the file is locked. Connections opened with <code>access_mode="READ_ONLY"</code> are not refused, but do not rely on them to share a file: when two in one program are open and one closes, another program can open the file and write to it while the other still reads the old data.</li>
+  </ul>
 </section>
 
 <section id="cursors">
   <h2>Cursors</h2>
-  <p><code>con.cursor()</code> gives a cursor: where statements run and rows come out. Make as many as you like. Every cursor shares the connection's engine connection, so every cursor shares its transaction. What one cursor writes, a sibling reads before any commit. PEP 249 requires this, and the old client could not do it.</p>
+  <p>A cursor is the object you run SQL with and read rows from. Get one with <code>con.cursor()</code>, and make as many as you like.</p>
+  <p>All cursors of a connection share one transaction. So what one cursor writes, another cursor of the same connection sees at once, even before you commit. A <code>commit()</code> saves the work of every cursor.</p>
   <pre><code>writer, reader = con.cursor(), con.cursor()
 writer.execute(<span class="s">"INSERT INTO orders VALUES (5, 'dune', 700, '2026-03-06')"</span>)
 reader.execute(<span class="s">"SELECT count(*) FROM orders"</span>)
-reader.fetchone()      <span class="c"># (5,): the same transaction, so the insert is visible</span></code></pre>
+reader.fetchone()      <span class="c"># (5,): the reader sees the insert</span>
+con.commit()           <span class="c"># saves it</span></code></pre>
+  <p>One thing to know before you read from two cursors at once: a connection has only one open result at a time. See <a href="#one-result">One result at a time</a>.</p>
 
-  <div class="note">
-    <p><strong>One result at a time.</strong> The engine keeps one live result per connection, and cursors share theirs. An <code>execute</code> on any cursor supersedes whatever result is open, including one a sibling cursor is still reading; that sibling's next fetch raises <code>InterfaceError</code>. A superseded <code>SELECT</code> stops where it stands; any other statement, a <code>RETURNING</code> among them, first runs out to its end, so a write is never cut short and the transaction stays valid. A <code>ROLLBACK</code> or <code>ABORT</code> cancels it instead, since the rollback discards its work anyway. PEP 249 permits this; it is what ODBC does without MARS. Read a result out before running the next statement on the connection, or dispose of it yourself: <code>complete()</code> runs it to its end without reading, <code>abort()</code> drops it where it stands. While one call is driving the engine, a fetch, a <code>complete()</code>, an <code>execute</code> mid-settle, every other call on that connection refuses with <code>ProgrammingError</code> instead of waiting; only <code>interrupt()</code> goes through, from any thread.</p>
-  </div>
-  <div class="pair">
-    <div class="bad">
-      <div class="tag">the second execute discards the first result</div>
-      <pre><code>a.execute(<span class="s">"SELECT id FROM orders"</span>)
-b.execute(<span class="s">"SELECT customer FROM orders"</span>)
-a.fetchall()      <span class="c"># InterfaceError: no result set</span></code></pre>
-    </div>
-    <div class="good">
-      <div class="tag">read it out first</div>
-      <pre><code>a.execute(<span class="s">"SELECT id FROM orders"</span>)
-ids = a.fetchall()
-b.execute(<span class="s">"SELECT customer FROM orders"</span>)</code></pre>
-    </div>
-  </div>
-
-  <p class="lead-in">lifecycle</p>
+  <p class="lead-in">closing a cursor</p>
   <pre><code><span class="k">with</span> con.cursor() <span class="k">as</span> cur:
     cur.execute(<span class="s">"SELECT 1"</span>)
     cur.fetchone()
-<span class="c"># cur is closed</span></code></pre>
-  <p><code>close()</code> releases the cursor's result and is idempotent. A closed cursor refuses every <code>execute</code> and every fetch with <code>InterfaceError</code>. <code>cur.connection</code> is the connection it came from. <code>cur.arraysize</code> is how many rows <code>fetchmany()</code> returns when not told; it starts at <code>1</code>.</p>
-  <p>Two methods beyond PEP 249 dispose of a pending result deliberately. <code>complete()</code> runs it to its end without reading its rows, so its side effects land in full. <code>abort()</code> drops it: rows never produced never arrive, what already ran keeps its effects, and a cancelled write fails the open transaction. Both are no-ops without a pending result.</p>
+<span class="c"># cur is closed here</span></code></pre>
+  <p><code>cur.close()</code> closes a cursor, and a <code>with</code> block closes it at the end. Closing it again does nothing. A closed cursor refuses <code>execute</code> and every fetch with <code>InterfaceError</code>. Closing a cursor commits nothing and undoes nothing: the transaction belongs to the connection.</p>
+  <p>Two attributes are useful now and then. <code>cur.connection</code> is the connection the cursor came from. <code>cur.arraysize</code> is how many rows <code>fetchmany()</code> returns when you do not say; it starts at <code>1</code>.</p>
 </section>
 
 <section id="execute">
-  <h2>Executing</h2>
-  <pre><code>cur.execute(<span class="s">"SELECT customer FROM orders WHERE placed &lt; ?"</span>, [dbapi.Date(<span class="s">2026</span>, <span class="s">2</span>, <span class="s">1</span>)])
-cur.execute(<span class="s">"INSERT INTO orders VALUES (?, ?, ?, ?)"</span>, (<span class="s">6</span>, <span class="s">"eve"</span>, <span class="s">10</span>, <span class="s">"2026-04-01"</span>))</code></pre>
-  <p><code>execute(operation, parameters=None)</code> runs one statement and returns the cursor, so <code>cur.execute(...).fetchall()</code> chains. <code>parameters</code> is a sequence for positional placeholders or a mapping for named ones.</p>
+  <h2>Running SQL</h2>
+  <pre><code>cur = con.cursor()
+cur.execute(<span class="s">"SELECT count(*) FROM orders"</span>).fetchone()       <span class="c"># (5,)</span></code></pre>
+  <p><code>cur.execute(sql, parameters)</code> runs one SQL statement. It returns the cursor, so you can call a fetch method on it straight away, as above.</p>
+  <p>Each call runs exactly one statement. Text with two statements, such as <code>"CREATE TABLE t (v INTEGER); INSERT INTO t VALUES (1)"</code>, is refused with <code>InvalidInputError</code>. Run each statement with its own <code>execute</code>.</p>
 
-  <p class="lead-in">parameter style</p>
-  <pre><code>cur.execute(<span class="s">"SELECT ? + ?"</span>, [<span class="s">2</span>, <span class="s">3</span>])                      <span class="c"># qmark: what paramstyle says</span>
-cur.execute(<span class="s">"SELECT $1 + $2"</span>, [<span class="s">2</span>, <span class="s">3</span>])                    <span class="c"># DuckDB's own positional form</span>
-cur.execute(<span class="s">"SELECT $a + $b"</span>, {<span class="s">"a"</span>: <span class="s">2</span>, <span class="s">"b"</span>: <span class="s">3</span>})          <span class="c"># DuckDB's named form</span></code></pre>
-  <p><code>paramstyle</code> is <code>"qmark"</code>. DuckDB itself also reads <code>$1</code> and <code>$name</code>, and a cursor passes those through, because they are the engine's syntax and the engine binds them. PEP 249 wants one answer, and <code>qmark</code> is the one every DB-API consumer can produce. <code>:name</code>, <code>%s</code> and <code>%(name)s</code> are not SQL to DuckDB and fail with <code>ParserError</code>. Too many or too few values is <code>InvalidInputError</code>, and the message names the parameters concerned.</p>
-  <p>A value never becomes part of the SQL text; it is sent to the engine separately. <code>None</code>, <code>bool</code>, <code>int</code> of any width, <code>float</code>, <code>str</code>, <code>bytes</code>, <code>Decimal</code> at its own scale, <code>date</code>, <code>time</code>, <code>datetime</code>, <code>timedelta</code> and <code>UUID</code> all bind, and an aware <code>datetime</code> or <code>time</code> keeps its offset. A numpy <code>datetime64</code> or <code>timedelta64</code> and a pandas <code>Timestamp</code> or <code>Timedelta</code> bind in their own unit, up to microseconds: a timestamp with nanoseconds is refused rather than rounded, a duration drops them toward zero, and <code>NaT</code> binds as NULL. A <code>time</code> whose zone's offset depends on a date is refused, and so is a list or map holding values both with and without a time zone in the same place. Places line up as the engine combines a list's elements, one after another: struct fields meet by name, ignoring case, or by position when either struct's first key is the empty string. A list binds as a list; a dict with string keys as a STRUCT, with any other keys as a MAP. A <code>None</code> or an empty list inside one has no type of its own and takes the one a sibling has in the same place, struct fields by their exact name, so <code>[[], ["a"]]</code> is a <code>VARCHAR[][]</code>. What no sibling types takes the type the statement expects for the parameter, as an <code>INSERT</code> or a comparison with a column fixes it; what the expectation cannot type cleanly goes to the engine as it is, cast like the same SQL literal. Where the statement expects nothing at all, as in <code>SELECT $1</code> with <code>[None]</code>, binding is refused with a message naming a cast such as <code>$1::VARCHAR[]</code>. A bare <code>None</code> is simply a NULL and binds wherever a NULL can go. In a mapping of parameters the names must be strings.</p>
+  <p class="lead-in">parameters</p>
+  <pre><code>cur.execute(<span class="s">"SELECT ? + ?"</span>, [<span class="s">2</span>, <span class="s">3</span>]).fetchone()                     <span class="c"># (5,)</span>
+cur.execute(<span class="s">"SELECT $1 + $2"</span>, [<span class="s">2</span>, <span class="s">3</span>]).fetchone()                   <span class="c"># (5,)</span>
+cur.execute(<span class="s">"SELECT $a + $b"</span>, {<span class="s">"a"</span>: <span class="s">2</span>, <span class="s">"b"</span>: <span class="s">3</span>}).fetchone()         <span class="c"># (5,)</span></code></pre>
+  <p>A parameter is a placeholder in the SQL for a value you pass next to it. There are three ways to write one:</p>
+  <ul>
+    <li><code>?</code>, filled in order from a list or tuple. This is the standard style, and what tools use.</li>
+    <li><code>$1</code>, <code>$2</code> and so on, filled by position from a list or tuple.</li>
+    <li><code>$name</code>, filled by name from a dict.</li>
+  </ul>
+  <p>Other styles you may know from other libraries, <code>:name</code>, <code>%s</code> and <code>%(name)s</code>, are not DuckDB SQL and fail with <code>ParserError</code> or <code>ProgrammingError</code>. Passing too many or too few values raises <code>InvalidInputError</code>, and the message names the parameters concerned. Which Python values you can pass is the next section.</p>
+  <p>Parameters carry values, never table or column names. <code>SELECT ? FROM orders</code> with <code>["customer"]</code> gives the text <code>'customer'</code> on every row, and <code>FROM ?</code> raises <code>ParserError</code>. To choose a column, write its name into the SQL text yourself, in double quotes (see <a href="#register">Querying Python data</a>), taken from a fixed list of names you allow.</p>
 
-  <p class="lead-in">what execute does</p>
-  <p>A query runs until its first batch of rows is ready, then waits; the rest is produced as you fetch. So an early error, one the engine hits on the way to that first batch, raises from <code>execute</code> itself, and a later one is raised by the fetch that reaches it. <code>description</code> is set when <code>execute</code> returns. How far "the way to the first batch" runs is the engine's streaming buffer (the <code>max_streaming_buffer_size</code> setting, 10&nbsp;MB unless changed): the first batch surfaces once the buffer is full or the query is done, so a small result runs entirely inside <code>execute</code>.</p>
-  <pre><code>cur.execute(<span class="s">"SELECT 'abc'::INTEGER AS n"</span>)   <span class="c"># ConversionError: hit before the first batch</span></code></pre>
-  <p>A statement with <code>RETURNING</code> applies its write entirely inside <code>execute</code>; the returned rows wait to be fetched. Any other statement runs to completion inside <code>execute</code>. Its effect has landed when the call returns, and <code>rowcount</code> says how many rows it changed.</p>
-  <p>One statement per call. <code>"CREATE TABLE t (v INTEGER); INSERT INTO t VALUES (1)"</code> is refused with <code>InvalidInputError</code>; run each on its own.</p>
+  <p class="lead-in">reading a file</p>
+  <pre><code>cur.execute(<span class="s">"COPY orders TO 'orders.csv'"</span>)
+cur.execute(<span class="s">"SELECT count(*) FROM read_csv(?)"</span>, [<span class="s">"orders.csv"</span>]).fetchone()     <span class="c"># (5,)</span></code></pre>
+  <p>SQL can read a file where it is, with <code>read_csv</code>, <code>read_parquet</code> or <code>read_json</code>, and you can send the file name as a parameter. <code>COPY ... TO</code> writes a table to a file, here to make one to read. It writes the file at once and replaces any file of that name, and <code>rollback()</code> does not undo that. A relative file name is taken from the program's current directory, <code>os.getcwd()</code>. Each reader's options are in DuckDB's documentation for <a href="https://duckdb.org/docs/stable/data/csv/overview">CSV</a>, <a href="https://duckdb.org/docs/stable/data/parquet/overview">Parquet</a> and <a href="https://duckdb.org/docs/stable/data/json/overview">JSON</a>.</p>
 
   <p class="lead-in">executemany</p>
   <pre><code>cur.executemany(<span class="s">"INSERT INTO orders VALUES (?, ?, ?, ?)"</span>, [
     (<span class="s">6</span>, <span class="s">"eve"</span>, <span class="s">10</span>, <span class="s">"2026-04-01"</span>),
     (<span class="s">7</span>, <span class="s">"fay"</span>, <span class="s">20</span>, <span class="s">"2026-04-02"</span>),
 ])
-cur.rowcount        <span class="c"># 2</span></code></pre>
-  <p>DuckDB has no batched bind, so the sets run one after another, in order. <code>rowcount</code> is the total across them, as <code>sqlite3</code> reports it. It is <code>-1</code> when the statement produced rows, or when the sequence was empty. A statement that produces rows leaves nothing behind: <code>description</code> is <code>None</code> and there is nothing to fetch.</p>
+cur.rowcount        <span class="c"># 2</span>
+con.commit()</code></pre>
+  <p><code>executemany</code> runs one statement once for each set of values, in order. Afterwards <code>rowcount</code> is the total number of rows changed. If one set fails, the sets before it have already run. Most errors also fail the open transaction (see <a href="#transactions">Transactions</a>), and <code>rollback()</code> then undoes them all. With <code>autocommit=True</code>, though, each statement is saved on its own, so the sets before the failed one stay saved. <code>executemany</code> keeps no rows, so after a <code>SELECT</code> there is nothing to fetch.</p>
+
+  <p class="lead-in">if you also use duckdb.frame</p>
+  <pre><code><span class="k">from</span> duckdb.frame <span class="k">import</span> table, col, param
+
+plan = table(<span class="s">"orders"</span>).filter(col(<span class="s">"total"</span>) &gt; param(<span class="s">"least"</span>)).select(<span class="s">"customer"</span>, <span class="s">"total"</span>)
+query, values = plan.render_parameterized(parameters={<span class="s">"least"</span>: <span class="s">1000</span>})
+cur.execute(query, values).fetchall()      <span class="c"># [('acme', Decimal('1400.00')), ('acme', Decimal('2600.00'))]</span></code></pre>
+  <p>This part is for readers who also build queries with <a href="frame.html"><code>duckdb.frame</code></a>. Such a query (a plan) does not run on a dbapi connection: <code>cur.execute(plan)</code> raises <code>TypeError</code>. <code>render_parameterized()</code> gives you its SQL, with <code>$1</code>, <code>$2</code> placeholders, and the values to send, and a cursor can run those. Do not use <code>plan.render()</code> for this: it writes each <code>param()</code> as <code>NULL</code>, so the query would run without its values.</p>
+
+  <h3>Details</h3>
+  <ul>
+    <li><strong>When an error appears.</strong> A query starts in <code>execute</code>, which returns as soon as the first rows are ready. DuckDB produces the rest while you fetch. So an error DuckDB meets early is raised by <code>execute</code>, and one it meets later by the fetch that gets to it. DuckDB works ahead until about 10&nbsp;MB of rows are waiting (the <code>max_streaming_buffer_size</code> setting), so a small result is usually complete when <code>execute</code> returns.</li>
+    <li>A statement without a result, such as <code>INSERT</code>, <code>UPDATE</code> or <code>CREATE</code>, runs to its end inside <code>execute</code>. Any error is raised there, and the change is made when the call returns.</li>
+    <li><code>RETURNING</code> makes an <code>INSERT</code>, <code>UPDATE</code> or <code>DELETE</code> give back rows about the rows it changed. It too makes its whole change inside <code>execute</code>, and you fetch the returned rows afterwards. Ending that result with <code>abort()</code> does not undo the change; <code>rollback()</code> does:
+      <pre><code>cur.execute(<span class="s">"INSERT INTO orders VALUES (8, 'gus', 30, '2026-04-03') RETURNING id"</span>)
+cur.fetchone()        <span class="c"># (8,)</span>
+cur.abort()
+cur.execute(<span class="s">"SELECT count(*) FROM orders WHERE id = 8"</span>).fetchone()     <span class="c"># (1,): the insert stays</span>
+con.rollback()        <span class="c"># undoes it</span></code></pre></li>
+    <li>Pass a single value in a list: <code>cur.execute("SELECT ?", ["ab"])</code>. A bare string counts as a sequence of characters, so <code>cur.execute("SELECT ?", "ab")</code> sends two values, <code>'a'</code> and <code>'b'</code>, and fails.</li>
+    <li>The keys of a dict of parameters must be strings: <code>{1: 9}</code> is refused with <code>InvalidInputError</code>, and <code>{"1": 9}</code> fills <code>$1</code>. Names match without regard to case, so <code>$Name</code> is filled by <code>{"name": ...}</code>.</li>
+    <li>A plan whose SQL depends on its tables' columns, such as a join with <code>suffix=</code>, cannot give its SQL this way: <code>render_parameterized()</code> raises <code>NeedsConnection</code>. Run such a plan on a <code>duckdb.frame</code> connection instead. When you have a frame connection to the same data, pass it, as in <code>render_parameterized(fcon, parameters=...)</code>: without one the SQL can differ from what the plan runs, for example a column replaced by <code>with_columns()</code> moves to the end.</li>
+  </ul>
+</section>
+
+<section id="values">
+  <h2>Sending Python values</h2>
+  <pre><code><span class="k">import</span> datetime
+<span class="k">from</span> decimal <span class="k">import</span> Decimal
+
+cur.execute(<span class="s">"SELECT ?, ?, ?"</span>, [Decimal(<span class="s">"9.99"</span>), datetime.date(<span class="s">2026</span>, <span class="s">5</span>, <span class="s">1</span>), <span class="k">None</span>]).fetchone()
+<span class="c"># (Decimal('9.99'), datetime.date(2026, 5, 1), None)</span></code></pre>
+  <p>A value you pass as a parameter is sent to DuckDB on its own and gets the DuckDB type that matches it:</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Python value</th><th>DuckDB type</th></tr></thead>
+      <tbody>
+        <tr><td><code>None</code></td><td>NULL</td></tr>
+        <tr><td><code>bool</code></td><td>BOOLEAN</td></tr>
+        <tr><td><code>int</code></td><td>BIGINT; HUGEINT or UHUGEINT for a larger number, up to 128 bits</td></tr>
+        <tr><td><code>float</code></td><td>DOUBLE</td></tr>
+        <tr><td><code>str</code></td><td>VARCHAR</td></tr>
+        <tr><td><code>bytes</code></td><td>BLOB</td></tr>
+        <tr><td><code>Decimal</code></td><td>DECIMAL with the value's own digits, 38 at most: <code>Decimal("12.340")</code> is a DECIMAL(5,3)</td></tr>
+        <tr><td><code>date</code></td><td>DATE</td></tr>
+        <tr><td><code>time</code></td><td>TIME; with a time zone, TIME WITH TIME ZONE, keeping its offset</td></tr>
+        <tr><td><code>datetime</code></td><td>TIMESTAMP; with a time zone, TIMESTAMP WITH TIME ZONE, for the same moment</td></tr>
+        <tr><td><code>timedelta</code></td><td>INTERVAL</td></tr>
+        <tr><td><code>uuid.UUID</code></td><td>UUID</td></tr>
+        <tr><td><code>list</code> or <code>tuple</code></td><td>LIST</td></tr>
+        <tr><td><code>dict</code> with string keys</td><td>STRUCT</td></tr>
+        <tr><td><code>dict</code> with other keys</td><td>MAP</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>To find rows where a column is NULL, write <code>WHERE customer IS NULL</code>. A comparison with NULL is never true, so <code>WHERE customer = ?</code> with <code>None</code> finds no rows at all. For a value that may be <code>None</code>, write <code>WHERE customer IS NOT DISTINCT FROM ?</code>, which also matches NULL to NULL.</p>
+
+  <p class="lead-in">lists and dicts</p>
+  <pre><code>cur.execute(<span class="s">"SELECT typeof(?), typeof(?)"</span>, [[<span class="s">1</span>, <span class="s">2</span>], {<span class="s">"customer"</span>: <span class="s">"acme"</span>, <span class="s">"vip"</span>: <span class="k">True</span>}]).fetchone()
+<span class="c"># ('BIGINT[]', 'STRUCT(customer VARCHAR, vip BOOLEAN)')</span></code></pre>
+  <p><code>typeof()</code> shows the DuckDB type of a value, and <code>[]</code> after a type means a list of it. A list or tuple becomes a LIST. A dict with string keys becomes a STRUCT: DuckDB's record type, a set of named fields, which Python sees as a dict. A dict with keys of any other type, such as <code>{1: "one"}</code>, becomes a MAP: its keys must all fit one type, and so must its values, while a STRUCT's fields can each have their own type. The values inside follow the same rules, so lists of dicts and dicts of lists work too.</p>
+  <p>To keep the rows whose value is in a Python list, send the list as one parameter and write <code>IN ?::VARCHAR[]</code>, without brackets around the <code>?</code>:</p>
+  <pre><code>query = <span class="s">"SELECT id FROM orders WHERE customer IN ?::VARCHAR[] ORDER BY id"</span>
+cur.execute(query, [[<span class="s">"bolt"</span>, <span class="s">"cato"</span>]]).fetchall()     <span class="c"># [(2,), (4,)]</span>
+cur.execute(query, [[]]).fetchall()                   <span class="c"># []</span></code></pre>
+  <p><code>::VARCHAR[]</code> is a cast: it says the parameter is a list of text. Without it, an empty list raises <code>InvalidInputError</code>, since it does not say what type it holds. <code>IN (?)</code> would compare each value with the whole list, and fails with <code>ConversionError</code>.</p>
+
+  <p class="lead-in">numpy and pandas values</p>
+  <p>Dates, times and durations from numpy and pandas work as parameters: a numpy <code>datetime64</code> or <code>timedelta64</code>, and a pandas <code>Timestamp</code> or <code>Timedelta</code>. A timestamp keeps its own unit, down to microseconds, and a pandas <code>Timestamp</code> with a time zone becomes a TIMESTAMP WITH TIME ZONE. A duration loses any nanoseconds, rounded toward zero. <code>NaT</code> is sent as NULL. A <code>timedelta64</code> counting months or years is refused, since a month has no fixed length. For calendar months, write an INTERVAL in the SQL, such as <code>placed + INTERVAL 1 MONTH</code>, or <code>placed + to_months(?)</code> with a number.</p>
+  <p>Other numpy values are not converted for you. <code>np.float64</code> and <code>np.str_</code> work, since they are a Python <code>float</code> and <code>str</code>, but <code>np.int64</code>, <code>np.float32</code>, <code>np.bool_</code> and numpy arrays are refused. Convert them first, with <code>value.item()</code> for a single value or <code>array.tolist()</code> for an array of numbers. For an array of <code>datetime64</code> or <code>timedelta64</code>, <code>tolist()</code> can give plain integers (it does for nanoseconds), so pass <code>list(array)</code> instead: its items stay numpy dates and durations, which work as above. pandas' <code>pd.NA</code> is refused too: pass <code>None</code>.</p>
+
+  <p class="lead-in">what is refused</p>
+  <p>These raise <code>InvalidInputError</code> from <code>execute</code>:</p>
+  <ul>
+    <li>A value of a type not listed above, such as a <code>set</code>. The message names the type.</li>
+    <li>A <code>bytearray</code> or <code>memoryview</code>: pass <code>bytes(value)</code>, or <code>dbapi.Binary(value)</code>.</li>
+    <li>An <code>int</code> wider than 128 bits, and a <code>Decimal</code> that is NaN or infinite.</li>
+    <li>A <code>Decimal</code> with more than 38 digits, counting those after the point, such as <code>Decimal("1e-40")</code>.</li>
+    <li>Today, also a nonzero <code>Decimal</code> whose absolute value is below 0.000001, such as <code>Decimal("0.0000001")</code> or <code>Decimal("-0.0000001")</code>. Send it as text with a cast instead: <code>cur.execute("SELECT ?::DECIMAL(10,9)", [format(value, "f")])</code>.</li>
+    <li>A numpy or pandas timestamp with a part smaller than a microsecond, such as <code>pd.Timestamp("2026-01-01 00:00:00.123456789")</code>. It is refused rather than rounded. A timestamp stored in nanoseconds that holds whole microseconds works.</li>
+    <li>A <code>time</code> whose time zone needs a date to know its offset, such as one from <code>zoneinfo</code>. Use a fixed offset, <code>datetime.timezone(...)</code>.</li>
+    <li>A list, or a dict with keys that are not strings, holding datetimes or times both with and without a time zone. Its values must share one type, and no one type holds both. The fields of a dict with string keys may differ: one field can hold a datetime with a time zone and another one without.</li>
+    <li>A list or dict that contains itself.</li>
+  </ul>
+
+  <h3>Details</h3>
+  <ul>
+    <li><strong>None and empty lists inside a list or dict.</strong> A <code>None</code>, or an empty list, has no type of its own, and DuckDB needs one. Inside a list it takes the type of the values beside it, so <code>[None, 1]</code> is a BIGINT[] and <code>[[], ["a"]]</code> a VARCHAR[][]. In a list of dicts, a field takes its type from the field with exactly the same name in the other dicts.</li>
+    <li>When nothing beside it says, the type comes from where the parameter is used: inserting into a VARCHAR[] column, or comparing with one, makes it a VARCHAR[]. When nothing says at all, <code>execute</code> raises <code>InvalidInputError</code> and suggests a cast. Add the cast to give the type, here <code>VARCHAR[]</code>, a list of text:
+      <pre><code>cur.execute(<span class="s">"SELECT $tags::VARCHAR[]"</span>, {<span class="s">"tags"</span>: []}).fetchone()      <span class="c"># ([],)</span></code></pre>
+      A plain <code>None</code> as a parameter always works: it is NULL, which fits any type.</li>
+    <li>The values in one list, and the keys and the values of a MAP, must fit one type. Integers and floats fit DOUBLE together, so <code>[1, 2.5]</code> is a DOUBLE[] and comes back as <code>[1.0, 2.5]</code>, a large integer can change (<code>[9007199254740993, 1.5]</code> comes back as <code>[9007199254740992.0, 1.5]</code>), and <code>{1: "one", 2.5: "two"}</code> is a MAP(DOUBLE, VARCHAR). <code>[1, "a"]</code> fails with <code>NotSupportedError</code>, and so do <code>{1: "one", "b": "two"}</code> and <code>{1: "one", 2: 2}</code>. A MAP key cannot be <code>None</code>.</li>
+    <li><code>float("nan")</code> is sent as the number NaN, not as NULL. To send a missing value, use <code>None</code>.</li>
+    <li>numpy <code>datetime64</code> units carry over: days, weeks, months and years become DATE; hours, minutes and seconds TIMESTAMP_S; milliseconds TIMESTAMP_MS; microseconds and nanoseconds TIMESTAMP.</li>
+  </ul>
 </section>
 
 <section id="fetch">
-  <h2>Fetching</h2>
+  <h2>Reading rows</h2>
   <pre><code>cur.execute(<span class="s">"SELECT id, customer FROM orders ORDER BY id"</span>)
 cur.fetchone()          <span class="c"># (1, 'acme')</span>
 cur.fetchmany(<span class="s">2</span>)        <span class="c"># [(2, 'bolt'), (3, 'acme')]</span>
-cur.fetchall()          <span class="c"># [(4, 'cato'), (6, 'eve'), (7, 'fay')]</span>
+cur.fetchall()          <span class="c"># [(4, 'cato'), (5, 'dune'), (6, 'eve'), (7, 'fay')]</span>
 cur.fetchone()          <span class="c"># None</span></code></pre>
-  <p>The three share one position. A row is a tuple. <code>fetchone</code> gives <code>None</code> at the end; the other two give an empty list. <code>fetchmany()</code> with no size uses <code>arraysize</code>; a negative size is <code>ProgrammingError</code>. The cursor is its own iterator:</p>
-  <pre><code>cur.execute(<span class="s">"SELECT id, customer FROM orders ORDER BY id"</span>)
+  <p>Each row is a tuple. <code>fetchone()</code> returns the next row, <code>fetchmany(n)</code> the next <code>n</code> rows as a list, and <code>fetchall()</code> all the rows that are left. All three move through the same result, so each starts where the last one stopped. When no rows are left, <code>fetchone()</code> returns <code>None</code>, and the other two an empty list.</p>
+  <p>You can also loop over the cursor:</p>
+  <pre><code>cur.execute(<span class="s">"SELECT id, customer FROM orders WHERE total &gt; 1000 ORDER BY id"</span>)
 <span class="k">for</span> order_id, customer <span class="k">in</span> cur:
-    ...</code></pre>
-  <p>The result streams from the engine in chunks; a <code>fetchmany(700)</code> loop over five thousand rows crosses chunk boundaries without noticing. Fetching before <code>execute</code>, or after a statement that produced no rows, raises <code>InterfaceError</code>.</p>
+    print(order_id, customer)
+<span class="c"># 1 acme</span>
+<span class="c"># 3 acme</span></code></pre>
+  <p><code>fetchall()</code> builds one Python list holding every row that is left, so a large result needs the memory for all of it at once. To work through a large result in parts, call <code>fetchmany()</code> until it returns an empty list. Here <code>range(2500)</code> is a DuckDB function that gives the numbers 0 to 2499:</p>
+  <pre><code>cur.execute(<span class="s">"SELECT * FROM range(2500)"</span>)
+<span class="k">while</span> <span class="k">True</span>:
+    rows = cur.fetchmany(<span class="s">1000</span>)
+    <span class="k">if</span> <span class="k">not</span> rows:
+        <span class="k">break</span>
+    print(len(rows))
+<span class="c"># 1000</span>
+<span class="c"># 1000</span>
+<span class="c"># 500</span></code></pre>
+
+  <p class="lead-in">into a pandas DataFrame</p>
+  <pre><code><span class="k">import</span> pandas <span class="k">as</span> pd
+
+cur.execute(<span class="s">"SELECT id, customer FROM orders ORDER BY id"</span>)
+rows = cur.fetchall()
+df = pd.DataFrame.from_records(rows, columns=[column[<span class="s">0</span>] <span class="k">for</span> column <span class="k">in</span> cur.description])
+df.shape        <span class="c"># (7, 2)</span></code></pre>
+  <p><code>cur.description</code> lists the result's columns, with the name first (see <a href="#meta">Column names and row counts</a>). Like <code>fetchall()</code>, this holds the whole result in memory. pandas picks each column's type from the values in the rows, so an integer column with a NULL in it becomes float, and an integer above <code>2**53</code> can then change in its last digits. To keep such a column exact, build it yourself: <code>df["id"] = pd.array([row[0] for row in rows], dtype="Int64")</code>. A plan from <code>duckdb.frame</code> gives a DataFrame directly, with <code>to_pandas(con)</code> on a frame connection: see <a href="frame.html#dataframes">Frames &amp; Plans</a>.</p>
 
   <p class="lead-in">what comes back</p>
   <div class="tablewrap">
     <table>
-      <thead><tr><th>Engine type</th><th>Python value</th></tr></thead>
+      <thead><tr><th>DuckDB type</th><th>Python value</th></tr></thead>
       <tbody>
         <tr><td>BOOLEAN</td><td><code>bool</code></td></tr>
         <tr><td>TINYINT through HUGEINT, signed and unsigned</td><td><code>int</code></td></tr>
         <tr><td>FLOAT, DOUBLE</td><td><code>float</code></td></tr>
-        <tr><td>DECIMAL</td><td><code>Decimal</code>, at the column's scale</td></tr>
-        <tr><td>VARCHAR, ENUM, BIT</td><td><code>str</code></td></tr>
+        <tr><td>DECIMAL</td><td><code>Decimal</code>, with the column's number of decimals</td></tr>
+        <tr><td>VARCHAR, ENUM (text from a fixed list of values)</td><td><code>str</code></td></tr>
         <tr><td>BLOB</td><td><code>bytes</code></td></tr>
-        <tr><td>DATE, TIME, TIMESTAMP</td><td><code>date</code>, <code>time</code>, <code>datetime</code>, naive</td></tr>
-        <tr><td>TIMESTAMP WITH TIME ZONE</td><td><code>datetime</code>, aware, in UTC</td></tr>
-        <tr><td>INTERVAL</td><td><code>timedelta</code></td></tr>
+        <tr><td>DATE</td><td><code>datetime.date</code></td></tr>
+        <tr><td>TIME</td><td><code>datetime.time</code></td></tr>
+        <tr><td>TIME WITH TIME ZONE</td><td><code>datetime.time</code> with its offset as the time zone</td></tr>
+        <tr><td>TIMESTAMP, in any precision</td><td><code>datetime.datetime</code> without a time zone</td></tr>
+        <tr><td>TIMESTAMP WITH TIME ZONE</td><td><code>datetime.datetime</code> in UTC</td></tr>
+        <tr><td>INTERVAL</td><td><code>datetime.timedelta</code></td></tr>
         <tr><td>UUID</td><td><code>uuid.UUID</code></td></tr>
-        <tr><td>LIST</td><td><code>list</code></td></tr>
+        <tr><td>LIST, ARRAY</td><td><code>list</code></td></tr>
         <tr><td>STRUCT</td><td><code>dict</code></td></tr>
-        <tr><td>MAP</td><td><code>dict</code>; a list of <code>(key, value)</code> pairs when the keys cannot be hashed</td></tr>
+        <tr><td>MAP</td><td><code>dict</code>; a list of <code>(key, value)</code> pairs when the keys cannot be dict keys, such as lists</td></tr>
+        <tr><td>UNION</td><td>the value it holds</td></tr>
         <tr><td>NULL</td><td><code>None</code></td></tr>
+        <tr><td>any other type, such as BIT</td><td><code>str</code>: the value as DuckDB writes it</td></tr>
       </tbody>
     </table>
   </div>
-  <p>Aware values carry the standard library's <code>datetime.timezone</code>, never pytz. A temporal value outside the range Python's <code>datetime</code> can hold raises <code>ConversionError</code> naming the value.</p>
+  <p>A <code>Decimal</code> holds a decimal number exactly, without the rounding a <code>float</code> has. It works with an <code>int</code> or another <code>Decimal</code>, but <code>total * 0.1</code> raises <code>TypeError</code>. Write the other number as a <code>Decimal</code>, or call <code>float(total)</code> if a float is good enough:</p>
+  <pre><code><span class="k">from</span> decimal <span class="k">import</span> Decimal
 
-  <p class="lead-in">stopping</p>
-  <p>Ctrl&#8209;C while <code>execute</code> or a fetch is inside the engine raises <code>KeyboardInterrupt</code>, as any Python program expects. From another thread, <code>con.interrupt()</code> cancels whatever the connection is running, and the statement fails with <code>InterruptError</code>. Either interrupt lands between batches of rows, so it is prompt on a long fetch.</p>
+total = cur.execute(<span class="s">"SELECT total FROM orders WHERE id = 1"</span>).fetchone()[<span class="s">0</span>]
+total * Decimal(<span class="s">"0.1"</span>)       <span class="c"># Decimal('140.000')</span></code></pre>
+
+  <h3>Details</h3>
+  <ul>
+    <li>A TIMESTAMP WITH TIME ZONE always comes back in UTC, whatever DuckDB's <code>TimeZone</code> setting is, with the standard library's <code>datetime.timezone.utc</code>. Call <code>value.astimezone(...)</code> for local time. You do not need pytz.</li>
+    <li>Python's <code>datetime</code> holds microseconds at most, so a TIMESTAMP_NS or TIME_NS loses its last three digits.</li>
+    <li><code>timedelta</code> has no months, so an INTERVAL counts a month as 30 days: <code>INTERVAL 1 MONTH</code> comes back as <code>timedelta(days=30)</code>.</li>
+    <li>A date or timestamp outside the years Python can hold, 1 to 9999, raises <code>ConversionError</code> naming the value. Cast it to VARCHAR in SQL if you want the text. DuckDB's <code>infinity</code> and <code>-infinity</code> come back as the largest and smallest values Python holds, such as <code>date.max</code>.</li>
+    <li><code>fetchmany(n)</code> returns exactly <code>n</code> rows each time, until fewer are left. Without a number it uses <code>cur.arraysize</code>. A negative number raises <code>ProgrammingError</code>.</li>
+    <li>Fetching before any <code>execute</code>, or after a statement without a result, such as <code>CREATE TABLE</code>, <code>INSERT</code> or <code>SET</code>, raises <code>InterfaceError</code>. A <code>SELECT</code> that matches no rows still has a result: <code>fetchall()</code> returns <code>[]</code> and <code>fetchone()</code> returns <code>None</code>. A row holding a NULL is <code>(None,)</code>.</li>
+  </ul>
+</section>
+
+<section id="one-result">
+  <h2>One result at a time</h2>
+  <p>A connection has one open result at a time. When you run a new statement, on any cursor of the connection, the result that was open ends. If another cursor was still reading it, that cursor's next fetch raises <code>InterfaceError</code>.</p>
+  <div class="pair">
+    <div class="bad">
+      <div class="tag">the second execute ends the first result</div>
+      <pre><code>a, b = con.cursor(), con.cursor()
+a.execute(<span class="s">"SELECT id FROM orders"</span>)
+b.execute(<span class="s">"SELECT customer FROM orders"</span>)
+a.fetchall()      <span class="c"># raises InterfaceError</span></code></pre>
+    </div>
+    <div class="good">
+      <div class="tag">read the rows first</div>
+      <pre><code>a.execute(<span class="s">"SELECT id FROM orders"</span>)
+ids = a.fetchall()
+b.execute(<span class="s">"SELECT customer FROM orders"</span>)</code></pre>
+    </div>
+  </div>
+  <p>So read the rows you need before you run the next statement. A second connection does not help: to the same file it is refused (see <a href="#connect">Connecting</a>), and without a path it is a new, empty database. If you do not need the rows, end the result yourself:</p>
+  <ul>
+    <li><code>cur.complete()</code> runs the statement to its end without reading the rows, so everything the statement does gets done.</li>
+    <li><code>cur.abort()</code> stops the statement where it is and drops the rows you have not read. DuckDB may have produced some of them already, since it works ahead of your fetches.</li>
+  </ul>
+  <p>Both do nothing when the cursor has no open result. <code>commit()</code> and <code>rollback()</code> also end the open result, see <a href="#transactions">Transactions</a>.</p>
+
+  <h3>Details</h3>
+  <ul>
+    <li><strong>What happens to the result that ends.</strong> A <code>SELECT</code> (or <code>EXPLAIN</code>) stops where it is, and the rows not read yet are dropped. Any other statement that returns rows first runs to its end, and if that fails, the error is raised by the call that ended it. For an <code>INSERT</code>, <code>UPDATE</code> or <code>DELETE</code> with <code>RETURNING</code>, the change is already complete when <code>execute</code> returns, so dropping its rows does not undo it.</li>
+    <li>DuckDB cannot always tell that a <code>SELECT</code> changes something. One that calls <code>nextval('name')</code>, which takes the next number from a sequence (a counter kept in the database), counts as a read: if it ends early, it stops part way, and the open transaction fails. Call <code>complete()</code> on it first. The numbers it took stay taken, even after <code>rollback()</code>.</li>
+    <li>What a stopped statement already did stays done. If <code>abort()</code> stops a statement part way through a change, the open transaction fails, and you need <code>rollback()</code>.</li>
+    <li>Closing a cursor ends its result the same way a new statement does. <code>commit()</code> does too. <code>rollback()</code>, <code>con.close()</code>, and a <code>ROLLBACK</code> or <code>ABORT</code> statement stop the open result at once, since the transaction's changes are undone anyway.</li>
+    <li>A connection does one thing at a time. While one call is running, for example a fetch in another thread, the connection refuses a second statement, fetch, commit, rollback or close with <code>ProgrammingError</code>. It does not wait. <code>con.interrupt()</code> always goes through.</li>
+  </ul>
 </section>
 
 <section id="meta">
-  <h2>description and rowcount</h2>
+  <h2>Column names and row counts</h2>
   <pre><code>cur.execute(<span class="s">"SELECT id, customer, total, placed FROM orders"</span>)
 cur.description
-<span class="c"># [('id',       'INTEGER',      None, None, None, None, None),
-#  ('customer', 'VARCHAR',      None, None, None, None, None),
-#  ('total',    'DECIMAL(6,2)', None, None, None, None, None),
-#  ('placed',   'DATE',         None, None, None, None, None)]</span></code></pre>
-  <p>One seven-tuple per column, laid out as PEP 249 says: <code>name</code>, <code>type_code</code>, <code>display_size</code>, <code>internal_size</code>, <code>precision</code>, <code>scale</code>, <code>null_ok</code>. The name and the type code are filled in. The type code is the engine's own text for the type, parameters included, and it is what the <a href="#module">type objects</a> compare against. The other five are <code>None</code>. <code>description</code> is <code>None</code> before the first <code>execute</code>, after a statement that produced no rows, and after one that failed.</p>
+<span class="c"># [('id', 'INTEGER', None, None, None, None, None),</span>
+<span class="c">#  ('customer', 'VARCHAR', None, None, None, None, None),</span>
+<span class="c">#  ('total', 'DECIMAL(6,2)', None, None, None, None, None),</span>
+<span class="c">#  ('placed', 'DATE', None, None, None, None, None)]</span></code></pre>
+  <p>After a query, <code>cur.description</code> has one tuple per column. The standard asks for seven items in each. DuckDB fills in the first two: the column name, and its type as DuckDB writes it, such as <code>'DECIMAL(6,2)'</code>. The other five are always <code>None</code>. A tool can compare the type with the <a href="#module">type objects</a> to learn what kind of column it is.</p>
+  <p><code>description</code> is <code>None</code> before the first <code>execute</code>, and after a statement without a result, such as an <code>INSERT</code>. A <code>SELECT</code> that matches no rows still has its <code>description</code>.</p>
 
   <p class="lead-in">rowcount</p>
+  <pre><code>cur.execute(<span class="s">"UPDATE orders SET total = total + 1 WHERE customer = 'acme'"</span>)
+cur.rowcount        <span class="c"># 2</span></code></pre>
   <div class="tablewrap">
     <table>
       <thead><tr><th>After</th><th>rowcount</th></tr></thead>
       <tbody>
-        <tr><td>INSERT, UPDATE, DELETE</td><td>the rows changed</td></tr>
-        <tr><td>CREATE TABLE AS</td><td>the rows written</td></tr>
-        <tr><td>CREATE, DROP, ALTER and the rest of DDL</td><td><code>0</code></td></tr>
-        <tr><td>SELECT, and anything else that returns rows, RETURNING included</td><td><code>-1</code></td></tr>
-        <tr><td><code>executemany</code></td><td>the total across the sets; <code>-1</code> if the statement returned rows or the sequence was empty</td></tr>
-        <tr><td>a statement that raised</td><td><code>-1</code></td></tr>
+        <tr><td>INSERT, UPDATE, DELETE</td><td>the number of rows changed</td></tr>
+        <tr><td>CREATE TABLE ... AS</td><td>the number of rows written</td></tr>
+        <tr><td>COPY</td><td>the number of rows written or read</td></tr>
+        <tr><td>other statements without a result, such as CREATE, DROP, ALTER or SET</td><td><code>0</code></td></tr>
+        <tr><td>a query, or anything else that returns rows, RETURNING included</td><td><code>-1</code></td></tr>
+        <tr><td><code>executemany</code></td><td>the total over all the sets; <code>-1</code> if the statement returns rows, or the list was empty</td></tr>
+        <tr><td>a statement that raised an error</td><td><code>-1</code></td></tr>
       </tbody>
     </table>
   </div>
-  <p>A query's count is <code>-1</code> because its result streams, and the number of rows is not known until they have been read. Every other count is real. The old client reported <code>-1</code> for everything.</p>
-  <p>A statement that raises leaves nothing behind: <code>description</code> is <code>None</code> and <code>rowcount</code> is <code>-1</code>, not the previous statement's values. Keeping those would describe a statement that never ran.</p>
+  <p>For a query, <code>rowcount</code> stays <code>-1</code>, even after you have fetched every row. Use <code>len(rows)</code> on the rows you fetched, or ask with <code>SELECT count(*)</code>.</p>
+  <p>An <code>execute</code> that fails clears both: <code>description</code> is <code>None</code> and <code>rowcount</code> is <code>-1</code>, so neither keeps describing the statement before it. An error while you fetch, such as a date Python cannot hold, leaves both as they were.</p>
 </section>
 
 <section id="transactions">
   <h2>Transactions</h2>
-  <p>PEP 249 says: "Note that if the database supports an auto-commit feature, this must be initially off." DuckDB has no session setting for autocommit, so the connection does it itself: before the first statement after <code>connect()</code>, <code>commit()</code> or <code>rollback()</code> it opens a transaction, and every statement from then on, reads included, runs inside it. Every cursor works inside it. <code>commit()</code> ends it; <code>rollback()</code> discards it; either does nothing when no transaction is open. The next statement opens a fresh one.</p>
+  <p>A transaction is a group of changes that is saved, or undone, as a whole. By default, the first statement you run opens one. Every statement after it runs inside it, reads included, on every cursor of the connection. <code>con.commit()</code> saves the changes and ends the transaction. <code>con.rollback()</code> undoes them. The next statement opens a new transaction.</p>
   <pre><code>cur = con.cursor()
 cur.execute(<span class="s">"INSERT INTO orders VALUES (9, 'hal', 1, '2026-04-04')"</span>)
 con.rollback()
-cur.execute(<span class="s">"SELECT count(*) FROM orders"</span>)     <span class="c"># the insert is gone</span></code></pre>
-  <p><code>close()</code> rolls back, as PEP 249 requires: work not committed before the connection closes is not in the file. The <a href="#connect">context manager</a> commits at the end of the block and rolls back if the block raises.</p>
-
-  <p class="lead-in">what a read sees</p>
-  <p>A transaction reads the database as it was when the transaction began. So a connection that only ever reads keeps seeing that snapshot, and what other connections commit in the meantime becomes visible only after its own <code>commit()</code> or <code>rollback()</code>:</p>
-  <pre><code>cur = con.cursor()
-cur.execute(<span class="s">"SELECT count(*) FROM orders"</span>)
-cur.fetchone()                                  <span class="c"># (3,)</span>
-<span class="c"># another connection inserts a row and commits</span>
-cur.execute(<span class="s">"SELECT count(*) FROM orders"</span>)
-cur.fetchone()                                  <span class="c"># (3,): the snapshot the transaction began with</span>
-con.rollback()                                  <span class="c"># or commit(); either ends the transaction</span>
-cur.execute(<span class="s">"SELECT count(*) FROM orders"</span>)
-cur.fetchone()                                  <span class="c"># (4,)</span></code></pre>
-  <p>The ways out are <code>connect(..., autocommit=True)</code>, below, where no transaction is opened and a read sees whatever has been committed when it runs, and the main API, where <code>con.transaction()</code> is the only way a transaction starts.</p>
+cur.execute(<span class="s">"SELECT count(*) FROM orders"</span>).fetchone()     <span class="c"># (7,): the insert is gone</span></code></pre>
+  <p><code>commit()</code> and <code>rollback()</code> do nothing when no transaction is open. <code>close()</code> rolls back, so changes you did not commit are not saved in the file. A <code>with con:</code> block commits at its end, or rolls back if it raises, and either way that includes changes made before the block.</p>
+  <div class="note caution">
+    <p><strong><code>commit()</code> and <code>rollback()</code> end the open result.</strong> A cursor part way through a result loses the rest, and its next fetch raises <code>InterfaceError</code>. Read the rows first.</p>
+  </div>
 
   <p class="lead-in">after an error</p>
-  <p>Most errors abort the open transaction. After one, every statement on the connection raises <code>TransactionError</code> until <code>rollback()</code> is called, and the message says so: <code>Current transaction is aborted (please ROLLBACK)</code>. A syntax error is the exception, since the parser refuses it before the transaction is touched.</p>
+  <p>Most errors fail the open transaction. After one, every statement on the connection raises <code>TransactionError</code>, with the message <code>Current transaction is aborted (please ROLLBACK)</code>, until you call <code>rollback()</code>. That undoes everything since your last commit, not only the statement that failed. If you catch the error and call <code>commit()</code> instead, it saves nothing and raises nothing.</p>
   <pre><code><span class="k">try</span>:
     cur.execute(<span class="s">"SELECT * FROM no_such_table"</span>)
-<span class="k">except</span> dbapi.ProgrammingError:
-    con.rollback()                              <span class="c"># nothing else runs until this</span></code></pre>
-  <p>Inside <code>with con:</code> the rollback is automatic, since the block rolls back on any exception.</p>
-  <div class="note caution">
-    <p><strong><code>commit()</code> and <code>rollback()</code> release the open result.</strong> A cursor part way through a result loses the rest, and its next fetch raises <code>InterfaceError</code>. Read the rows out first.</p>
-  </div>
+    rows = cur.fetchall()
+<span class="k">except</span> dbapi.Error <span class="k">as</span> error:
+    con.rollback()                  <span class="c"># needed before the connection runs anything else</span>
+    print(type(error).__name__)     <span class="c"># CatalogError</span></code></pre>
+  <p>Keep the fetch inside the <code>try</code> too, since an error can also come from a fetch (see <a href="#execute">Running SQL</a>). <code>dbapi.Error</code> catches every error DuckDB reports; here it is a <code>CatalogError</code>, since the table does not exist. In a program, end the <code>except</code> block with <code>raise</code> after the rollback, so the failure is not hidden. A few errors leave the transaction as it was. These are a syntax error (<code>ParserError</code>), some refusals that happen before the statement starts, such as a parameter value of a type that cannot be sent, and a fetched value Python cannot hold, such as a date after the year 9999. When an error leaves a <code>with con:</code> block, the block rolls back for you.</p>
 
   <p class="lead-in">autocommit</p>
-  <pre><code>auto = dbapi.connect(<span class="s">"shop.db"</span>, autocommit=<span class="k">True</span>)
-cur = auto.cursor()
-cur.execute(<span class="s">"INSERT INTO orders VALUES (10, 'ivy', 2, '2026-04-05')"</span>)
-auto.rollback()                                 <span class="c"># nothing to undo: the insert stands</span></code></pre>
-  <p>With <code>autocommit=True</code> no transaction is opened. Each statement commits itself and each read sees the latest commit, <code>commit()</code> and <code>rollback()</code> do nothing, and an error affects only the statement that raised it.</p>
+  <pre><code>auto = dbapi.connect(autocommit=<span class="k">True</span>)
+ac = auto.cursor()
+ac.execute(<span class="s">"CREATE TABLE notes (text VARCHAR)"</span>)
+ac.execute(<span class="s">"INSERT INTO notes VALUES ('kept')"</span>)
+auto.rollback()                                  <span class="c"># nothing to undo: each statement was saved as it ran</span>
+ac.execute(<span class="s">"SELECT * FROM notes"</span>).fetchall()     <span class="c"># [('kept',)]</span></code></pre>
+  <p>With <code>autocommit=True</code>, no transaction is opened for you. Each statement is saved as soon as it runs, and an error affects only the statement that raised it. <code>commit()</code> and <code>rollback()</code> save or undo nothing, but they still end the open result, as in the default mode. A <code>with</code> block on such a connection has nothing to commit or roll back.</p>
+
+  <h3>Details</h3>
+  <ul>
+    <li><strong>BEGIN, COMMIT and ROLLBACK as SQL.</strong> In the default mode, end transactions with <code>commit()</code> and <code>rollback()</code>, not with SQL. A <code>BEGIN</code> statement raises <code>TransactionError</code>, since a transaction is open already. A <code>COMMIT</code> or <code>ROLLBACK</code> statement ends the transaction without the connection knowing, and its later <code>commit()</code>, <code>rollback()</code> and <code>close()</code> then raise <code>TransactionError</code>. To recover, run <code>cur.execute("BEGIN")</code>, then <code>con.rollback()</code>; statements you ran before that were saved at once. With <code>autocommit=True</code> you can run <code>BEGIN</code>, <code>COMMIT</code> and <code>ROLLBACK</code> as SQL yourself; <code>commit()</code> and <code>rollback()</code> still save or undo nothing there.</li>
+    <li>Each transaction sees the database's tables as they were when it began, but not frozen copies of registered Python objects or files: a later query in the same transaction sees changes to those. While your connection can write to a DuckDB file, nothing else can write to it (see <a href="#connect">Connecting</a>). So this only matters for data that other programs can change at the same time, such as a database you attach through an extension. To see their latest changes, end your transaction with <code>commit()</code> or <code>rollback()</code>, or use <code>autocommit=True</code>.</li>
+  </ul>
 </section>
 
-<section id="module">
-  <h2>Module attributes and types</h2>
-  <pre><code>dbapi.apilevel        <span class="c"># "2.0"</span>
-dbapi.threadsafety    <span class="c"># 1: threads may share the module, not a connection</span>
-dbapi.paramstyle      <span class="c"># "qmark"</span></code></pre>
+<section id="register">
+  <h2>Querying Python data</h2>
+  <pre><code><span class="k">import</span> pandas <span class="k">as</span> pd
 
-  <p class="lead-in">type objects</p>
-  <pre><code>cur.execute(<span class="s">"SELECT id, customer, placed FROM orders"</span>)
-[column[<span class="s">1</span>] == dbapi.NUMBER <span class="k">for</span> column <span class="k">in</span> cur.description]     <span class="c"># [True, False, False]</span></code></pre>
-  <p>Each type object compares equal to the type code of every engine type it covers. A parameterised type is judged on its head, so <code>DECIMAL(18,3)</code> is a <code>NUMBER</code> and <code>ENUM('x', 'y')</code> a <code>STRING</code>.</p>
-  <div class="tablewrap">
-    <table>
-      <thead><tr><th>Object</th><th>Equal to</th></tr></thead>
-      <tbody>
-        <tr><td><code>STRING</code></td><td>VARCHAR, CHAR, TEXT, ENUM, UUID</td></tr>
-        <tr><td><code>BINARY</code></td><td>BLOB, BIT</td></tr>
-        <tr><td><code>NUMBER</code></td><td>BOOLEAN, TINYINT, SMALLINT, INTEGER, BIGINT, HUGEINT, their unsigned forms, FLOAT, DOUBLE, DECIMAL</td></tr>
-        <tr><td><code>DATETIME</code></td><td>DATE, TIME, TIME WITH TIME ZONE, TIMESTAMP, TIMESTAMP WITH TIME ZONE, TIMESTAMP_S, TIMESTAMP_MS, TIMESTAMP_NS, INTERVAL</td></tr>
-        <tr><td><code>ROWID</code></td><td>nothing: DuckDB has no row identifier type. The object exists because PEP 249 lists it.</td></tr>
-      </tbody>
-    </table>
-  </div>
-  <p>A nested type, <code>INTEGER[]</code>, <code>STRUCT(a INTEGER)</code> or <code>MAP(INTEGER, INTEGER)</code>, equals none of them.</p>
+discounts = pd.DataFrame({<span class="s">"customer"</span>: [<span class="s">"acme"</span>, <span class="s">"bolt"</span>], <span class="s">"discount"</span>: [<span class="s">0.1</span>, <span class="s">0.2</span>]})
+con.register(<span class="s">"discounts"</span>, discounts)
+cur.execute(<span class="s">"SELECT o.id, d.discount FROM orders o JOIN discounts d USING (customer) ORDER BY o.id"</span>).fetchall()
+<span class="c"># [(1, 0.1), (2, 0.2), (3, 0.1)]</span></code></pre>
+  <p><code>con.register(name, obj)</code> lets SQL read a Python object as if it were a table called <code>name</code>, from every cursor of the connection. Nothing is copied: DuckDB reads the object each time a query uses it, so a query sees the object as it is at that moment.</p>
+  <p>The name stays tied to the object you passed. A change made to that object, such as <code>discounts.loc[0, "discount"] = 0.15</code>, shows in the next query; do not make one while a result from it is still being fetched, since that result can then mix old and new values. But a method that returns a DataFrame, such as <code>assign()</code>, makes a new one, so register the new one again:</p>
+  <pre><code>discounts = discounts.assign(discount=[<span class="s">0.15</span>, <span class="s">0.25</span>])
+con.register(<span class="s">"discounts"</span>, discounts)
+cur.execute(<span class="s">"SELECT discount FROM discounts ORDER BY customer"</span>).fetchall()     <span class="c"># [(0.15,), (0.25,)]</span></code></pre>
+  <p>In SQL, double quotes mark a name and single quotes mark text. So a name with a space in it, such as a pandas column called <code>order total</code>, goes in double quotes; <code>'order total'</code> would be just that text:</p>
+  <pre><code>con.register(<span class="s">"sales data"</span>, pd.DataFrame({<span class="s">"order total"</span>: [<span class="s">5</span>, <span class="s">7</span>]}))
+cur.execute(<span class="s">'SELECT sum("order total") FROM "sales data"'</span>).fetchone()     <span class="c"># (12,)</span></code></pre>
+  <p>SQL can read a registered object but not change it: an <code>UPDATE</code> of <code>discounts</code> raises <code>ProgrammingError</code>. Nothing is stored in the database either, so <code>commit()</code> does not save it. To keep the data, copy it into a table, then commit. <code>con.unregister(name)</code> removes the name again:</p>
+  <pre><code>cur.execute(<span class="s">"CREATE TABLE kept AS SELECT * FROM discounts"</span>)
+con.commit()
+con.unregister(<span class="s">"discounts"</span>)
+cur.execute(<span class="s">"SELECT * FROM kept ORDER BY customer"</span>).fetchall()      <span class="c"># [('acme', 0.15), ('bolt', 0.25)]</span></code></pre>
+  <p>You can register:</p>
+  <ul>
+    <li>a pandas <code>DataFrame</code> (its index is left out) or <code>Series</code>;</li>
+    <li>a polars <code>DataFrame</code>, <code>Series</code> or <code>LazyFrame</code>;</li>
+    <li>a pyarrow <code>Table</code>, <code>RecordBatch</code>, <code>Array</code>, <code>Dataset</code> or <code>Scanner</code>;</li>
+    <li>a numpy array, or a dict, list or tuple of one-dimensional numpy arrays;</li>
+    <li>any other object that offers its data as Arrow, a standard layout for columns of data in memory that pandas, polars and pyarrow share.</li>
+  </ul>
+  <p>How each kind of object is read, column types included, is described in <a href="frame.html#python">Frames &amp; Plans</a>. Registering works the same way there.</p>
 
-  <p class="lead-in">constructors</p>
-  <pre><code>dbapi.Date(<span class="s">2026</span>, <span class="s">1</span>, <span class="s">1</span>)                  <span class="c"># datetime.date</span>
-dbapi.Time(<span class="s">12</span>, <span class="s">30</span>)                      <span class="c"># datetime.time</span>
-dbapi.Timestamp(<span class="s">2026</span>, <span class="s">1</span>, <span class="s">1</span>, <span class="s">12</span>, <span class="s">30</span>)     <span class="c"># datetime.datetime</span>
-dbapi.DateFromTicks(<span class="s">1767225600</span>)         <span class="c"># date(2026, 1, 1)</span>
-dbapi.TimeFromTicks(<span class="s">1767225600</span>)         <span class="c"># time(0, 0)</span>
-dbapi.TimestampFromTicks(<span class="s">1767225600</span>)    <span class="c"># datetime(2026, 1, 1, tzinfo=timezone.utc)</span>
-dbapi.Binary(bytearray(<span class="s">b"\x00\x01"</span>))    <span class="c"># b'\x00\x01'</span></code></pre>
-  <p><code>Date</code>, <code>Time</code> and <code>Timestamp</code> are the standard library classes themselves. The three <code>FromTicks</code> constructors read the tick count as UTC, so <code>DateFromTicks(0)</code> is 1970&#8209;01&#8209;01 wherever the program runs. <code>Binary</code> gives <code>bytes</code>, which binds as a BLOB.</p>
+  <h3>Details</h3>
+  <ul>
+    <li>A pyarrow <code>RecordBatchReader</code>, or an Arrow stream capsule (the raw object an <code>__arrow_c_stream__</code> method returns), is a stream: data that arrives in pieces and can be read only once. A second query over it fails with <code>InvalidInputError</code>. Registering the same reader again does not help: it stays used up, and reads as empty, without an error. Register a new reader made from the source data, or copy the data into a table first with <code>CREATE TABLE ... AS SELECT * FROM name</code>.</li>
+    <li>Registering a name again replaces the earlier object. A real table or view with the same name comes first.</li>
+    <li>A registration is not part of the transaction: <code>rollback()</code> does not remove it. It lasts until <code>unregister()</code> or until the connection closes. Registering does not end an open result.</li>
+    <li>A query reads only the columns it uses. A pyarrow <code>Dataset</code> and a polars <code>LazyFrame</code> also get the query's simple conditions, such as comparisons, <code>IN</code> and <code>IS NULL</code>, so they read less.</li>
+    <li>Reading a pandas <code>DataFrame</code> does not need pyarrow installed. A column of Python objects of different kinds, such as numbers mixed with text, is read as text (VARCHAR).</li>
+    <li>A pyarrow <code>Array</code> or a pandas <code>Series</code> is one column named <code>value</code>. A polars <code>Series</code> keeps its own name, or is named <code>value</code> if it has none. A struct <code>Array</code> or struct polars <code>Series</code> gives one column per field instead. A numpy array gives columns named <code>column0</code>, <code>column1</code> and so on; a dict of arrays uses its keys as the column names.</li>
+    <li>An object offers its data as Arrow through the <code>__arrow_c_stream__</code> or <code>__arrow_c_array__</code> method. A name that is not a string, or an object of a kind not listed, raises <code>TypeError</code>. <code>unregister()</code> of a name nothing is registered under raises <code>ProgrammingError</code>.</li>
+  </ul>
+</section>
+
+<section id="stop">
+  <h2>Stopping a query</h2>
+  <p>Press Ctrl&#8209;C while <code>execute</code> or a fetch is running, and the query stops with <code>KeyboardInterrupt</code>, as anywhere in Python, unless it is calling a Python function of yours: then it fails with <code>InvalidInputError</code>. From another thread, <code>con.interrupt()</code> stops whatever the connection is running. The call that was running then fails with <code>InterruptError</code>. <code>con.interrupt()</code> stops a long query or a long fetch promptly; Ctrl&#8209;C can take much longer to stop some queries, such as the cross join below.</p>
+  <pre><code><span class="k">import</span> threading
+<span class="k">from</span> duckdb <span class="k">import</span> exceptions
+
+threading.Timer(<span class="s">0.5</span>, con.interrupt).start()
+<span class="k">try</span>:
+    cur.execute(<span class="s">"SELECT sum(a.range * b.range) FROM range(1000000) a, range(1000000) b"</span>)
+<span class="k">except</span> exceptions.InterruptError:
+    print(<span class="s">"stopped"</span>)          <span class="c"># stopped</span>
+    con.rollback()</code></pre>
+  <p><code>InterruptError</code> fails the open transaction like most errors, so call <code>rollback()</code> next. <code>interrupt()</code> does nothing when the connection is not running anything.</p>
 </section>
 
 <section id="errors">
@@ -300,14 +514,67 @@ Error
     ├── InternalError        FatalError
     ├── ProgrammingError     ParserError, CatalogError, InvalidInputError, ConfigurationError
     └── NotSupportedError</code></pre>
-  <p>The left column is PEP 249's hierarchy, and <code>dbapi</code> exports those names. The right column is the leaves, which live in <code>duckdb.exceptions</code>. They are the same classes: <code>dbapi.Error is duckdb.exceptions.Error</code>, so <code>except dbapi.ProgrammingError</code> catches a <code>CatalogError</code>.</p>
-  <p><code>InterfaceError</code> is misuse of this package: a closed cursor or connection, a fetch with no result. Everything the engine reports is a <code>DatabaseError</code>, and the leaf is chosen by the engine's error code. A missing table is <code>CatalogError</code>, a value that will not convert <code>ConversionError</code>, a duplicate key <code>ConstraintError</code>, a mismatched parameter count <code>InvalidInputError</code>. A code this build has never seen, from a newer engine, comes through as a plain <code>DatabaseError</code> rather than being lost.</p>
-  <pre><code><span class="k">try</span>:
-    cur.execute(<span class="s">"INSERT INTO u VALUES (1)"</span>)
-<span class="k">except</span> dbapi.IntegrityError <span class="k">as</span> error:        <span class="c"># a ConstraintError</span>
+  <p>The tree on the left is the standard's list of error classes, and <code>dbapi</code> exports those names. The names on the right are more exact kinds of each, and live in <code>duckdb.exceptions</code>. They are the same classes everywhere: <code>dbapi.Error</code> is <code>duckdb.exceptions.Error</code>, and <code>except dbapi.ProgrammingError</code> also catches a <code>CatalogError</code>.</p>
+  <pre><code>cur.execute(<span class="s">"CREATE OR REPLACE TABLE users (id INTEGER PRIMARY KEY)"</span>)
+cur.execute(<span class="s">"INSERT INTO users VALUES (1)"</span>)
+con.commit()
+<span class="k">try</span>:
+    cur.execute(<span class="s">"INSERT INTO users VALUES (1)"</span>)
+<span class="k">except</span> dbapi.IntegrityError <span class="k">as</span> error:
+    print(type(error).__name__)       <span class="c"># ConstraintError</span>
     con.rollback()</code></pre>
-  <p>The message is the one DuckDB gives any client. <code>Warning</code> is exported because PEP 249 lists it; nothing in this package raises it. It is not an <code>Error</code>, so <code>except Error</code> does not swallow it.</p>
-  <p>Ctrl&#8209;C is not an <code>Error</code> either: it raises <code>KeyboardInterrupt</code>. A statement cancelled by <code>con.interrupt()</code> from another thread fails with <code>InterruptError</code>, an <code>OperationalError</code>.</p>
+  <p><code>InterfaceError</code> means the package was used in a way it does not allow, such as a closed cursor or connection, or a fetch with no result. Everything else DuckDB reports is a <code>DatabaseError</code>, of the kind DuckDB gives it, with DuckDB's own message:</p>
+  <ul>
+    <li>a table, view or function that does not exist: <code>CatalogError</code>;</li>
+    <li>a column that does not exist, or a function given the wrong types: <code>ProgrammingError</code>, with a message starting <code>Binder Error:</code>;</li>
+    <li>a value that does not convert, such as <code>'abc'::INTEGER</code>: <code>ConversionError</code>;</li>
+    <li>a duplicate key or a broken <code>NOT NULL</code> or <code>CHECK</code> rule: <code>ConstraintError</code>;</li>
+    <li>the wrong number of parameters: <code>InvalidInputError</code>.</li>
+  </ul>
+
+  <h3>Details</h3>
+  <ul>
+    <li><code>Warning</code> is exported because the standard lists it, but nothing raises it. It is not an <code>Error</code>, so <code>except Error</code> does not catch it.</li>
+    <li>An error kind this package does not know, from a newer DuckDB, comes through as a plain <code>DatabaseError</code>.</li>
+    <li>Ctrl&#8209;C raises <code>KeyboardInterrupt</code>, which is not an <code>Error</code> either, or <code>InvalidInputError</code> if the query was calling a Python function of yours. A query stopped by <code>con.interrupt()</code> raises <code>InterruptError</code>, a kind of <code>OperationalError</code>.</li>
+    <li>A few mistakes are caught in Python and raise <code>TypeError</code>: SQL that is not a string, a <code>register()</code> name or object it cannot use, and a plan from <code>duckdb.frame</code> run on a dbapi connection.</li>
+  </ul>
+</section>
+
+<section id="module">
+  <h2>Module attributes and types</h2>
+  <pre><code>dbapi.apilevel        <span class="c"># '2.0'</span>
+dbapi.threadsafety    <span class="c"># 1</span>
+dbapi.paramstyle      <span class="c"># 'qmark'</span></code></pre>
+  <p>Tools read these to learn what to expect. <code>apilevel</code> is the version of the standard. <code>threadsafety</code> <code>1</code> means threads may share the module, but not a connection; the one exception is <code>con.interrupt()</code>, which another thread may call. <code>paramstyle</code> <code>'qmark'</code> means <code>?</code> placeholders.</p>
+
+  <p class="lead-in">type objects</p>
+  <pre><code>cur.execute(<span class="s">"SELECT id, customer, placed FROM orders"</span>)
+[column[<span class="s">1</span>] == dbapi.NUMBER <span class="k">for</span> column <span class="k">in</span> cur.description]     <span class="c"># [True, False, False]</span></code></pre>
+  <p>A type object stands for a group of DuckDB types. It is equal to the type in <code>description</code> of every type in its group. Anything in brackets after the type name is ignored, so <code>DECIMAL(18,3)</code> is a <code>NUMBER</code> and <code>ENUM('x', 'y')</code> a <code>STRING</code>.</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Object</th><th>Equal to</th></tr></thead>
+      <tbody>
+        <tr><td><code>STRING</code></td><td>VARCHAR, CHAR, TEXT, ENUM, UUID</td></tr>
+        <tr><td><code>BINARY</code></td><td>BLOB, BIT</td></tr>
+        <tr><td><code>NUMBER</code></td><td>BOOLEAN, TINYINT, SMALLINT, INTEGER, BIGINT, HUGEINT, their unsigned forms, FLOAT, DOUBLE, DECIMAL</td></tr>
+        <tr><td><code>DATETIME</code></td><td>DATE, TIME, TIME_NS, TIME WITH TIME ZONE, TIMESTAMP, TIMESTAMP WITH TIME ZONE, TIMESTAMP_S, TIMESTAMP_MS, TIMESTAMP_NS, TIMESTAMPTZ_NS, INTERVAL</td></tr>
+        <tr><td><code>ROWID</code></td><td>nothing: DuckDB has no row identifier type. It exists because the standard lists it.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>A nested type, such as <code>INTEGER[]</code>, <code>STRUCT(a INTEGER)</code> or <code>MAP(INTEGER, INTEGER)</code>, is equal to none of them. Today a list of a type with brackets is the exception: <code>DECIMAL(10,2)[]</code> is equal to <code>NUMBER</code>, and <code>ENUM('x', 'y')[]</code> to <code>STRING</code>.</p>
+
+  <p class="lead-in">constructors</p>
+  <pre><code>dbapi.Date(<span class="s">2026</span>, <span class="s">1</span>, <span class="s">1</span>)                  <span class="c"># datetime.date(2026, 1, 1)</span>
+dbapi.Time(<span class="s">12</span>, <span class="s">30</span>)                      <span class="c"># datetime.time(12, 30)</span>
+dbapi.Timestamp(<span class="s">2026</span>, <span class="s">1</span>, <span class="s">1</span>, <span class="s">12</span>, <span class="s">30</span>)     <span class="c"># datetime.datetime(2026, 1, 1, 12, 30)</span>
+dbapi.DateFromTicks(<span class="s">1767225600</span>)         <span class="c"># datetime.date(2026, 1, 1)</span>
+dbapi.TimeFromTicks(<span class="s">1767225600</span>)         <span class="c"># datetime.time(0, 0)</span>
+dbapi.TimestampFromTicks(<span class="s">1767225600</span>)    <span class="c"># datetime.datetime(2026, 1, 1, 0, 0, tzinfo=datetime.timezone.utc)</span>
+dbapi.Binary(bytearray(<span class="s">b"\x00\x01"</span>))    <span class="c"># b'\x00\x01'</span></code></pre>
+  <p>The standard asks for these so that tools can build values without knowing the driver. <code>Date</code>, <code>Time</code> and <code>Timestamp</code> are Python's own <code>datetime</code> classes. The three <code>FromTicks</code> functions take a Unix timestamp, in seconds since 1970, and read it as UTC, so <code>DateFromTicks(0)</code> is 1970&#8209;01&#8209;01 wherever the program runs. <code>TimestampFromTicks</code> gives a datetime in UTC, so a TIMESTAMP column, which has no time zone, stores it in DuckDB's <code>TimeZone</code> setting, your local time by default: the example above is stored as 2025&#8209;12&#8209;31 19:00 in New York. <code>Binary</code> turns a <code>bytearray</code> or <code>memoryview</code> into <code>bytes</code>, which is what a BLOB parameter needs.</p>
 </section>
 
 <section id="reference">
@@ -315,84 +582,63 @@ Error
 
   <h3>Module</h3>
   <dl class="ref">
-    <dt>connect(database=":memory:", *, autocommit=False, **options)</dt><dd>Open a connection. A path, as a string or a <code>pathlib.Path</code>, or <code>":memory:"</code>; settings by name, applied as the database opens.</dd>
-    <dt>apilevel</dt><dd><code>"2.0"</code>.</dd>
-    <dt>threadsafety</dt><dd><code>1</code>: threads may share the module, not a connection.</dd>
-    <dt>paramstyle</dt><dd><code>"qmark"</code>. The engine also reads <code>$1</code> and <code>$name</code>.</dd>
+    <dt>connect(database=":memory:", *, autocommit=False, **settings)</dt><dd>Open a connection. <code>database</code> is a path, as a string or a <code>pathlib.Path</code>, or <code>":memory:"</code> for a new database in memory. Other keywords are DuckDB settings, applied as the database opens.</dd>
+    <dt>apilevel</dt><dd><code>'2.0'</code>.</dd>
+    <dt>threadsafety</dt><dd><code>1</code>: threads may share the module, not a connection, except to call <code>con.interrupt()</code>.</dd>
+    <dt>paramstyle</dt><dd><code>'qmark'</code>. <code>$1</code> and <code>$name</code> work too.</dd>
   </dl>
 
   <h3>Connection</h3>
   <dl class="ref">
-    <dt>con.cursor()</dt><dd>A new cursor sharing this connection's transaction.</dd>
-    <dt>con.commit()</dt><dd>Commit the open transaction, if any. Releases any open result.</dd>
-    <dt>con.rollback()</dt><dd>Discard the open transaction, if any. Releases any open result.</dd>
-    <dt>con.interrupt()</dt><dd>Cancel the statement the connection is running, from another thread; it fails with <code>InterruptError</code>.</dd>
-    <dt>con.register(name, obj) / con.unregister(name)</dt><dd>Read a Python object as the table <code>name</code> from every cursor and connection on the database: anything exporting an Arrow stream or array (a pyarrow <code>Table</code> or <code>Array</code>, a polars <code>DataFrame</code> or <code>Series</code>), a pyarrow <code>Dataset</code> or <code>Scanner</code>, a polars <code>LazyFrame</code>, or a pandas <code>DataFrame</code> without its index, all read as often as queried, and only the columns a query uses. A pandas <code>DataFrame</code> is read column by column, each by its own dtype: a numpy-backed column straight off its buffer, without pyarrow, and a pyarrow-backed one, such as a default string column, off its Arrow data, typed as the engine types any Arrow data; a column of mixed Python objects that does not settle on one type reads as text. A <code>Dataset</code> and a <code>LazyFrame</code> also apply the query's simple filters themselves, comparisons, <code>IN</code> and <code>IS NULL</code> over plain scalar columns, so they read less. A plain array is one column named <code>value</code>. A <code>RecordBatchReader</code> or a stream capsule is read once. A real table of that name comes first.</dd>
-    <dt>con.close()</dt><dd>Roll back, then close. Idempotent; every other call afterwards raises <code>InterfaceError</code>.</dd>
-    <dt>with con:</dt><dd>The block as a transaction: commit on success, roll back on any exception. Does not close.</dd>
+    <dt>con.cursor()</dt><dd>A new cursor. Every cursor of a connection shares its transaction.</dd>
+    <dt>con.commit()</dt><dd>Save the open transaction, if there is one. Ends any open result.</dd>
+    <dt>con.rollback()</dt><dd>Undo the open transaction, if there is one. Stops any open result.</dd>
+    <dt>con.close()</dt><dd>Roll back, then close. Closing again does nothing; any other call afterwards raises <code>InterfaceError</code>.</dd>
+    <dt>with con:</dt><dd>Commit the open transaction at the end of the block, or roll it back if the block raises; this includes changes from before the block. Does not close the connection.</dd>
+    <dt>con.register(name, obj)</dt><dd>Let SQL read a Python object as the table <code>name</code>. Registering a name again replaces the object.</dd>
+    <dt>con.unregister(name)</dt><dd>Remove a registered name. <code>ProgrammingError</code> if nothing is registered under it.</dd>
+    <dt>con.interrupt()</dt><dd>Stop what the connection is running, from another thread. The running call fails with <code>InterruptError</code>.</dd>
   </dl>
 
   <h3>Cursor</h3>
   <dl class="ref">
-    <dt>cur.execute(operation, parameters=None)</dt><dd>Run one statement. Returns the cursor.</dd>
-    <dt>cur.executemany(operation, seq_of_parameters)</dt><dd>Run it once per parameter set, in order. A statement that produces rows leaves no result.</dd>
-    <dt>cur.fetchone()</dt><dd>The next row, or <code>None</code>.</dd>
-    <dt>cur.fetchmany(size=arraysize)</dt><dd>Up to <code>size</code> rows.</dd>
-    <dt>cur.fetchall()</dt><dd>Every remaining row.</dd>
-    <dt>for row in cur</dt><dd>The cursor iterates its rows.</dd>
-    <dt>cur.description</dt><dd>Seven-tuples per column, or <code>None</code>. Name and type code are filled; the type code is the engine's type text.</dd>
-    <dt>cur.rowcount</dt><dd>Rows changed by the last statement, or <code>-1</code>.</dd>
-    <dt>cur.arraysize</dt><dd>Default for <code>fetchmany</code>. Starts at <code>1</code>.</dd>
-    <dt>cur.connection</dt><dd>The connection it came from.</dd>
-    <dt>cur.close()</dt><dd>Release the cursor and its result. Idempotent; also a context manager.</dd>
-    <dt>cur.setinputsizes(sizes) / cur.setoutputsize(size, column)</dt><dd>Accepted and ignored. DuckDB infers parameter types and needs no output buffers sized ahead.</dd>
+    <dt>cur.execute(sql, parameters=None)</dt><dd>Run one statement, with parameters from a list, a tuple or a dict. Returns the cursor.</dd>
+    <dt>cur.executemany(sql, seq_of_parameters)</dt><dd>Run the statement once per set of values, in order. Keeps no rows.</dd>
+    <dt>cur.fetchone()</dt><dd>The next row as a tuple, or <code>None</code>.</dd>
+    <dt>cur.fetchmany(size=cur.arraysize)</dt><dd>A list of up to <code>size</code> rows.</dd>
+    <dt>cur.fetchall()</dt><dd>A list of all the rows that are left.</dd>
+    <dt>for row in cur</dt><dd>Loop over the rows.</dd>
+    <dt>cur.complete()</dt><dd>Run the open result to its end without reading its rows. Does nothing without one.</dd>
+    <dt>cur.abort()</dt><dd>Stop the open result where it is and drop the rows not read. Does nothing without one.</dd>
+    <dt>cur.description</dt><dd>One seven-item tuple per column, with the name and the type filled in; or <code>None</code>.</dd>
+    <dt>cur.rowcount</dt><dd>The rows the last statement changed, or <code>-1</code>.</dd>
+    <dt>cur.arraysize</dt><dd>How many rows <code>fetchmany()</code> returns by default. Starts at <code>1</code>.</dd>
+    <dt>cur.connection</dt><dd>The connection the cursor came from.</dd>
+    <dt>cur.close()</dt><dd>Close the cursor. Closing again does nothing. A cursor also works as a <code>with</code> block, which closes it.</dd>
+    <dt>cur.setinputsizes(sizes) / cur.setoutputsize(size, column)</dt><dd>Accepted and ignored, as the standard allows. DuckDB works out the types itself.</dd>
   </dl>
 
   <h3>Type objects and constructors</h3>
   <dl class="ref">
-    <dt>STRING / BINARY / NUMBER / DATETIME / ROWID</dt><dd>Equal to the type codes they cover; <code>ROWID</code> to none.</dd>
+    <dt>STRING / BINARY / NUMBER / DATETIME / ROWID</dt><dd>Equal to the type names in their group; <code>ROWID</code> to none.</dd>
     <dt>Date / Time / Timestamp</dt><dd><code>datetime.date</code>, <code>datetime.time</code>, <code>datetime.datetime</code>.</dd>
     <dt>DateFromTicks / TimeFromTicks / TimestampFromTicks(ticks)</dt><dd>From a Unix timestamp, read as UTC.</dd>
-    <dt>Binary(value)</dt><dd><code>bytes</code> of a <code>bytes</code>, <code>bytearray</code> or <code>memoryview</code>.</dd>
+    <dt>Binary(value)</dt><dd><code>bytes</code> from <code>bytes</code>, a <code>bytearray</code> or a <code>memoryview</code>.</dd>
   </dl>
 
   <h3>Exceptions</h3>
   <dl class="ref">
-    <dt>Warning</dt><dd>Listed by PEP 249. Never raised.</dd>
-    <dt>Error</dt><dd>Base of every error, and the same class as <code>duckdb.exceptions.Error</code>.</dd>
-    <dt>InterfaceError</dt><dd>Misuse of the package: closed, or no result.</dd>
-    <dt>DatabaseError</dt><dd>Anything the engine reports; also what an unknown error code becomes.</dd>
-    <dt>DataError / OperationalError / IntegrityError / InternalError / ProgrammingError / NotSupportedError</dt><dd>The PEP 249 branches, each the parent of the engine-specific leaves in <code>duckdb.exceptions</code>.</dd>
+    <dt>Warning</dt><dd>Listed by the standard. Never raised.</dd>
+    <dt>Error</dt><dd>The base of every error. The same class as <code>duckdb.exceptions.Error</code>.</dd>
+    <dt>InterfaceError</dt><dd>The package was used in a way it does not allow: something closed, or no result to fetch.</dd>
+    <dt>DatabaseError</dt><dd>Anything DuckDB reports, and what an error kind this package does not know becomes.</dd>
+    <dt>DataError / OperationalError / IntegrityError / InternalError / ProgrammingError / NotSupportedError</dt><dd>The standard's kinds of <code>DatabaseError</code>, each the parent of the more exact classes in <code>duckdb.exceptions</code>.</dd>
   </dl>
 </section>
 
-<section id="changes">
-  <h2>Changes from the old client</h2>
-  <p>For someone arriving from the old <code>duckdb</code> package. Each row is a deliberate difference.</p>
-  <div class="tablewrap">
-    <table>
-      <thead><tr><th>Old client</th><th>Now</th></tr></thead>
-      <tbody>
-        <tr><td><code>duckdb.connect()</code> returned an object carrying <code>execute</code>, the fetch family, <code>description</code> and <code>rowcount</code>.</td><td><code>duckdb.frame.connect()</code> carries none of that. The DB-API vocabulary lives in <code>duckdb.dbapi</code>, strictly PEP 249.</td></tr>
-        <tr><td><code>cursor()</code> handed back an independent duplicate connection with its own transaction, closed along with its parent.</td><td>Cursors share their connection's transaction, as PEP 249 requires.</td></tr>
-        <tr><td><code>execute()</code> ran in autocommit: each statement committed itself, and <code>commit()</code> outside a transaction did nothing.</td><td>A transaction is open from the first statement after <code>connect()</code>, <code>commit()</code> or <code>rollback()</code>, reads included, as PEP 249 requires. <code>connect(autocommit=True)</code> gives the old behaviour.</td></tr>
-        <tr><td><code>rowcount</code> was always <code>-1</code>.</td><td>Real counts for INSERT, UPDATE, DELETE and CREATE TABLE AS; <code>-1</code> only for a row-producing statement.</td></tr>
-        <tr><td>Exception classes had their own names: <code>CatalogException</code>, <code>ConnectionException</code>, <code>BinderException</code> and so on.</td><td>Classes follow the engine's error codes, rooted in PEP 249, in <code>duckdb.exceptions</code>.</td></tr>
-        <tr><td>Ctrl&#8209;C during a query was converted to <code>RuntimeError</code>.</td><td>It raises <code>KeyboardInterrupt</code>.</td></tr>
-        <tr><td>A parameter mapping accepted any key and stringified it.</td><td>Keys must be strings; anything else is <code>InvalidInputError</code>.</td></tr>
-        <tr><td>Opening one file twice shared a single database instance per path.</td><td>A second open of a file already open is refused with <code>OperationalError</code>.</td></tr>
-        <tr><td><code>execute("a; b; c")</code> ran all three and returned the last result.</td><td>One statement per call; more is <code>InvalidInputError</code>. Multi-statement execute is pending.</td></tr>
-        <tr><td>A temporal value beyond Python's <code>datetime</code> range came back silently as text.</td><td>It raises <code>ConversionError</code> naming the value.</td></tr>
-        <tr><td>A MAP whose keys Python cannot hash came back as a <code>{'key': [...], 'value': [...]}</code> dict of lists.</td><td>It comes back as a list of <code>(key, value)</code> pairs.</td></tr>
-        <tr><td>Aware values carried pytz zones, and TIMESTAMPTZ was converted into the session time zone.</td><td>Aware values carry the standard library's <code>datetime.timezone</code>; TIMESTAMPTZ comes back in UTC.</td></tr>
-        <tr><td>A connection closed when its <code>with</code> block ended, as one from <code>duckdb.frame.connect()</code> still does.</td><td>A dbapi connection's <code>with</code> block is a transaction: commit or roll back, and stay open.</td></tr>
-      </tbody>
-    </table>
-  </div>
-</section>
-
 <footer>
-  <p>If a table does not exist or a value will not convert, the error comes from DuckDB, with the message it would give any client. The specification this module follows is <a href="https://peps.python.org/pep-0249/">PEP 249</a>.</p>
+  <p>The standard this module follows is <a href="https://peps.python.org/pep-0249/">PEP 249</a>. DuckDB's SQL, functions and settings are documented at duckdb.org.</p>
+  <p>Moving from DuckDB 1.5.6? See <a href="changes.html">Coming from DuckDB 1.5.6</a>.</p>
 </footer>
 
 </div>
