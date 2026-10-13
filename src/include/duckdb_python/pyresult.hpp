@@ -86,8 +86,6 @@ private:
 	//! Flat vectors, for the row fetch
 	unique_ptr<DataChunk> FetchNext();
 	unique_ptr<DataChunk> FetchNextRaw();
-	//! Rows a row fetch popped but has not returned yet. Once the stream's query has ended underneath them
-	//! they are dropped, so that the next fetch reports why.
 	unique_ptr<DataChunk> TakeBufferedRows();
 	std::unique_ptr<NumpyResultConversion> InitializeNumpyConversion(bool pandas = false);
 

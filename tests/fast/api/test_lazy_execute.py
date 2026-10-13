@@ -390,6 +390,7 @@ class TestIntegrations:
 class TestRelationArrow:
     def test_polars_runs_the_query_once(self, duckdb_cursor, produced):
         pytest.importorskip("polars")
+        pytest.importorskip("pyarrow")
         assert len(duckdb_cursor.sql(TALLY_QUERY).pl()) == ROWS
         assert produced[0] == ROWS
 

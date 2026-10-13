@@ -337,11 +337,6 @@ bool Result::Running() const {
 	return false;
 }
 
-bool Result::StreamEnded() const {
-	lock_guard<mutex> guard(handle_lock);
-	return stream && !stream->IsOpen();
-}
-
 void Result::Close() {
 	if (state == State::CLOSED) {
 		return;

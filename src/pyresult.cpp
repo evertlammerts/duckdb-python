@@ -84,7 +84,7 @@ unique_ptr<DataChunk> DuckDBPyResult::FetchNextRaw() {
 
 unique_ptr<DataChunk> DuckDBPyResult::TakeBufferedRows() {
 	unique_ptr<DataChunk> remainder;
-	if (current_chunk && chunk_offset < current_chunk->size() && !result->StreamEnded()) {
+	if (current_chunk && chunk_offset < current_chunk->size()) {
 		remainder = make_uniq<DataChunk>();
 		remainder->Initialize(Allocator::DefaultAllocator(), current_chunk->GetTypes());
 		current_chunk->Copy(*remainder, chunk_offset);
@@ -226,12 +226,7 @@ nb::dict DuckDBPyResult::FetchNumpyInternal(bool chunked, idx_t vectors_per_chun
 
 	idx_t count_vec = 0;
 	if (vectors_per_chunk > 0) {
-		unique_ptr<DataChunk> buffered;
-		{
-			D_ASSERT(duckdb::PyUtil::GilCheck());
-			nb::gil_scoped_release release;
-			buffered = TakeBufferedRows();
-		}
+		auto buffered = TakeBufferedRows();
 		if (buffered) {
 			conversion.Append(*buffered);
 			count_vec++;

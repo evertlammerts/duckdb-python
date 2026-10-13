@@ -83,8 +83,6 @@ public:
 	bool IsRetained() const {
 		return state == State::RETAINED;
 	}
-	//! Whether a stream's query has ended underneath it. Takes the client context lock.
-	bool StreamEnded() const;
 	//! Whether the query still runs on its connection with rows left to produce. Takes the client context lock.
 	bool Running() const;
 	//! The planner settles such a statement before its result is returned. Goes away with planner eagerness.

@@ -416,6 +416,7 @@ class TestOpenResultIsExclusive:
         assert con.execute("SELECT 42").fetchall() == [(42,)]
 
     @needs_polars
+    @needs_pyarrow
     def test_a_lazy_polars_frame_scanned_on_its_own_connection_errors(self):
         code, output = run_isolated(
             """
@@ -455,6 +456,7 @@ class TestOpenResultIsExclusive:
         assert INSIDE_A_QUERY in output
 
     @needs_polars
+    @needs_pyarrow
     def test_two_lazy_polars_frames_of_one_connection_cannot_be_joined(self, con):
         con.execute("CREATE TABLE a AS SELECT range::INT AS k FROM range(5)")
         con.execute("CREATE TABLE b AS SELECT range::INT AS k FROM range(3)")
@@ -701,6 +703,7 @@ class TestOpenResultIsExclusive:
             import _thread
             import signal
             import threading
+            import time
             import duckdb
             from duckdb.sqltypes import BIGINT
             # A background job starts with SIGINT ignored, which would turn the simulated Ctrl-C into nothing
@@ -710,10 +713,18 @@ class TestOpenResultIsExclusive:
             con.execute("CREATE TABLE t AS SELECT range AS i FROM range(2000000)")
             # A builtin runs no bytecode, so the Ctrl-C reaches the client's signal check while the scan's
             # tasks are still in the UDF, instead of raising inside a UDF call and failing the query
-            con.create_function("identity", abs, [BIGINT], BIGINT)
-            rel = con.sql("SELECT identity(i) FROM t")
+            calls = []
+            con.create_function("record", calls.append, [BIGINT], BIGINT, null_handling="special")
+            rel = con.sql("SELECT record(i) FROM t")
             print("started", flush=True)
-            threading.Timer(0.2, _thread.interrupt_main).start()
+
+            # Waiting for the UDF to run, not for a fixed time, keeps a fast machine from finishing the scan first
+            def interrupt_once_the_scan_runs():
+                while len(calls) < 10000:
+                    time.sleep(0.001)
+                _thread.interrupt_main()
+
+            threading.Thread(target=interrupt_once_the_scan_runs, daemon=True).start()
             try:
                 rel.materialize()
             except (RuntimeError, KeyboardInterrupt) as error:
@@ -743,6 +754,16 @@ class TestRowFetches:
             fetch_rows_into(con, rows, 2 * VECTOR)
         # A row fetch asks the engine only for the next chunk, so the rest of the first one comes back first
         assert rows == [(i,) for i in range(5, VECTOR)]
+        assert con.execute("SELECT 42").fetchall() == [(42,)]
+
+    @needs_pandas
+    def test_a_bulk_fetch_after_an_interrupt_takes_the_fetched_rows_then_raises(self, con):
+        con.execute(f"SELECT * FROM range({ROWS})")
+        assert con.fetchone() == (0,)
+        con.interrupt()
+        assert con.fetch_df_chunk(1)["range"].tolist() == list(range(1, VECTOR))
+        with pytest.raises(duckdb.InterruptException):
+            con.fetch_df_chunk(1)
         assert con.execute("SELECT 42").fetchall() == [(42,)]
 
     @pytest.mark.timeout(60)

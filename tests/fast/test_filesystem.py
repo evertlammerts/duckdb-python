@@ -290,6 +290,25 @@ class TestPythonFilesystem:
         res = c.sql(q).fetchall()
         assert res == [(1719568210134107692, 1)]
 
+    def test_a_globbed_windows_drive_path_becomes_a_standard_file_uri(self):
+        from fsspec.implementations.local import LocalFileSystem
+
+        class WindowsLocalFileSystem(LocalFileSystem):
+            # What fsspec's local filesystem returns for a drive-letter path on Windows
+            def glob(self, path, maxdepth=None, **kwargs):
+                return ["C:/data/table1.parquet", "D:/data/table2.parquet", "/data/table3.parquet"]
+
+            def unstrip_protocol(self, name):
+                return f"file://{name}"
+
+        con = duckdb.connect()
+        con.register_filesystem(WindowsLocalFileSystem())
+        assert sorted(con.sql("SELECT file FROM glob('file:///C:/data/table*.parquet')").fetchall()) == [
+            ("file:///C:/data/table1.parquet",),
+            ("file:///D:/data/table2.parquet",),
+            ("file:///data/table3.parquet",),
+        ]
+
 
 class TestNanobindFilesystemHardening:
     """Regressions for the pre-existing filesystem safety gaps the nanobind cutover surfaced."""
