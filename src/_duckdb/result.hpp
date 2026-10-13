@@ -31,13 +31,20 @@ std::vector<std::pair<std::string, std::string>> FieldTexts(const cxx::Schema &s
 /// The columns' types, which DuckDB's C++ API keeps on the schema rather than on the column data.
 std::vector<cxx::LogicalType> FieldTypes(const cxx::Schema &schema);
 
+/// A statement's engine result and its hold on the connection, declared first so it is given up only after the
+/// result is destroyed, unless the result ended before.
+struct OpenQuery {
+	ConnectionUse::Hold hold;
+	cxx::QueryResult query;
+};
+
 /// One statement's result, delivered a batch of rows at a time.
 ///
 /// Only one thread may fetch: the held batch, its offset and the flags are unguarded, and fetching drops the
 /// GIL, so two readers race even there. Closing from another thread is the one safe cross-thread call.
 class Result {
 public:
-	Result(nb::object database, std::shared_ptr<ModuleState> module, cxx::QueryResult result);
+	Result(nb::object database, std::shared_ptr<ModuleState> module, cxx::QueryResult result, ConnectionUse::Hold hold);
 
 	nb::handle Parent() const {
 		return result.Parent();
@@ -82,11 +89,11 @@ public:
 private:
 	enum class Pumped { Chunk, Finished, Cancelled, Quantum };
 
-	Pinned<cxx::QueryResult> Live();
+	Pinned<OpenQuery> Live();
 
 	/// Advance with the GIL released until `sink` keeps a batch, the result ends or is cancelled, or time is up.
 	template <class SINK>
-	static Pumped Pump(cxx::QueryResult &live, SINK &sink);
+	static Pumped Pump(OpenQuery &live, SINK &sink);
 
 	/// Run until `sink` keeps a batch (true) or the result ends (false); a cancelled query raises.
 	///
@@ -102,7 +109,7 @@ private:
 	/// The columns' types, cached because every batch dispatches on them and only the schema carries them.
 	const ColumnTypes &Types();
 
-	Owned<cxx::QueryResult> result;
+	Owned<OpenQuery> result;
 	std::optional<cxx::DataChunk> pending;
 	ColumnTypes types;
 	cxx::idx_t offset = 0;

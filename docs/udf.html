@@ -393,7 +393,8 @@ con.create_function(<span class="s">"order_count"</span>, order_count, [<span cl
 sql(<span class="s">"SELECT order_count(1)"</span>).rows(con)
 <span class="c"># InvalidInputError: Invalid Input Error: Python exception occurred while executing the UDF 'order_count':</span>
 <span class="c"># OperationalError: Resource In Use Error: connection has a live result; ...</span></code></pre>
-  <p>Some such calls never return at all, and Ctrl&#8209;C does not stop them: <code>types()</code>, <code>count()</code>, or a plan with a step such as <code>filter()</code>. A second connection from <code>con.duplicate()</code> fails the same way when DuckDB calls your function from several threads at once. Do the lookup in the query instead, with a join, or read what your function needs into a Python dict before the query.</p>
+  <p>Every use of the connection from inside your function, such as <code>types()</code>, <code>count()</code>, or a plan with a step such as <code>filter()</code>, fails at once with the same error. A second connection from <code>con.duplicate()</code> fails the same way when DuckDB calls your function from several threads at once. Do the lookup in the query instead, with a join, or read what your function needs into a Python dict before the query.</p>
+  <p>Closing the connection is not refused, but do not close it while a query that calls your function is running, either from inside your function or from another thread. With <code>rows()</code>, the program can then hang: ending the query waits for your function, which cannot finish. To stop such a query from another thread, call <code>con.interrupt()</code>.</p>
 
   <h3>Handling an error</h3>
   <p>If you want NULL instead of an error, catch the exception inside your function and return <code>None</code>:</p>
@@ -422,7 +423,7 @@ sql(<span class="s">"SELECT parse_age('42'), parse_age('old')"</span>).rows(con)
     </table>
   </div>
   <div class="note">
-    <p><strong>Inside a transaction, a refused registration can abort the transaction.</strong> This happens when DuckDB itself refuses it: for a type name it does not know, or for a default it cannot convert, such as <code>"five"</code> or <code>2**70</code> for a <code>BIGINT</code>. The transaction is then aborted, as after any failed statement, and every following statement fails with <code>TransactionError</code> until you run <code>ROLLBACK</code>. A mistake the package catches before asking DuckDB leaves the transaction usable: a default such as <code>object()</code>, a timestamp default without a time zone for a <code>TIMESTAMPTZ</code>, a hint no type can be read from, or a list with too many types.</p>
+    <p><strong>Inside a transaction, a refused registration can abort the transaction.</strong> This happens when DuckDB refuses a type you give it: a name it does not know, or a type it cannot build, such as <code>DECIMAL(5, 9)</code>. The transaction is then aborted, as after any failed statement, and every following statement fails with <code>TransactionError</code> until you run <code>ROLLBACK</code>. A default DuckDB cannot convert, such as <code>"five"</code> or <code>2**70</code> for a <code>BIGINT</code>, leaves the transaction usable, and so does a mistake the package catches before asking DuckDB: a default such as <code>object()</code>, a timestamp default without a time zone for a <code>TIMESTAMPTZ</code>, a hint no type can be read from, or a list with too many types.</p>
   </div>
 </section>
 

@@ -204,7 +204,7 @@ cxx::LogicalType ArrowColumnType(cxx::Context &context, ArrowSchema &schema, cxx
 cxx::LogicalType DescribedType(cxx::Context &context, const Registered &entry, nb::handle described,
                                cxx::idx_t batch_rows) {
 	if (nb::isinstance<nb::str>(described)) {
-		return context.ParseType(nb::cast<std::string>(described));
+		return context.GetFactory().ParseType(nb::cast<std::string>(described));
 	}
 	auto schema =
 	    TakeFromCapsule<ArrowSchema>(described, kSchemaCapsule, "the object registered as '" + entry.name + "'");
@@ -223,7 +223,7 @@ void NumpyScanBind(cxx::TableFunction::BindInput &input) {
 	std::vector<cxx::LogicalType> types;
 	cxx::idx_t rows = 0;
 	const auto batch_rows = input.GetUserData<NumpyScanUserData>().batch_rows;
-	auto context = input.GetContext();
+	auto &context = input.GetContext();
 	{
 		FencedGil gil;
 		try {
@@ -583,7 +583,7 @@ std::vector<NumpyColumn> OpenColumns(const Registered &entry, const NumpyScanBin
 		// The object is read afresh for every scan, so it may have changed since the query was bound.
 		auto type = encoding == NumpyEncoding::ARROW
 		                ? OpenArrow(entry.name, column_name, context, data_array, bound.rows, batch_rows, arrow)
-		                : context.ParseType(nb::cast<std::string>(type_text));
+		                : context.GetFactory().ParseType(nb::cast<std::string>(type_text));
 		if (type != bound.types.at(declared)) {
 			throw cxx::InvalidInputException("the object registered as '" + entry.name + "' answered columns() for '" +
 			                                 column_name + "' with the type " + type.ToText() +
@@ -653,7 +653,7 @@ void NumpyScanInitGlobal(cxx::TableFunction::InitGlobalInput &input) {
 		throw cxx::InvalidInputException("reading the columns of the object registered as '" + entry.name +
 		                                 "' failed: " + DescribePythonError(error));
 	}
-	auto context = input.GetContext();
+	auto &context = input.GetContext();
 	auto columns = OpenColumns(entry, bound, context, requested, answer, batch_rows);
 	ScalarMarkers markers;
 	// An array can hold pandas' singletons only once pandas is loaded, so an absent pandas leaves no marker to match
@@ -675,7 +675,7 @@ void NumpyScanInitGlobal(cxx::TableFunction::InitGlobalInput &input) {
 void NumpyScanInitLocal(cxx::TableFunction::InitLocalInput &input) {
 	auto &global = input.GetGlobalState<NumpyScanState>();
 	const auto batch_rows = input.GetUserData<NumpyScanUserData>().batch_rows;
-	auto context = input.GetContext();
+	auto &context = input.GetContext();
 	std::vector<std::optional<cxx::ArrowImporter>> importers(global.columns.size());
 	for (cxx::idx_t i = 0; i < global.columns.size(); i++) {
 		auto &column = global.columns[i];
@@ -900,7 +900,7 @@ void FillObjects(const NumpyScanState &global, cxx::Context &context, cxx::Vecto
 			                      nb::isinstance(cell, global.markers.numpy_timedelta64);
 			nb::object item = nb::isinstance(cell, global.markers.numpy_generic) && !temporal ? cell.attr("item")()
 			                                                                                  : nb::borrow(cell);
-			converted = PythonToValue(context, item, conversion);
+			converted = PythonToValue(context.GetFactory(), item, conversion);
 		} catch (const BeyondRangeException &) {
 			throw failed("at row " + row() + " beyond the range of its engine type");
 		} catch (const UnsupportedTypeException &) {
@@ -917,7 +917,8 @@ void FillObjects(const NumpyScanState &global, cxx::Context &context, cxx::Vecto
 			             ", and converting it to its sampled type " + column.type.ToText() +
 			             " would assume a time zone");
 		}
-		const auto cast = converted ? TryCastTemporalExactly(context, *converted, column.type) : std::nullopt;
+		const auto cast =
+		    converted ? TryCastTemporalExactly(context.GetFactory(), *converted, column.type) : std::nullopt;
 		if (!cast) {
 			throw failed("at row " + row() + " that its sampled type " + column.type.ToText() + " cannot hold exactly");
 		}
@@ -1086,7 +1087,7 @@ void NumpyScanExec(cxx::TableFunction::ExecInput &input) {
 	}
 	const auto batch_rows = input.GetUserData<NumpyScanUserData>().batch_rows;
 	const auto emit = std::min(batch_rows, local.end - local.start);
-	auto context = input.GetContext();
+	auto &context = input.GetContext();
 	auto &conversion = input.GetUserData<NumpyScanUserData>().module->conversion;
 
 	for (cxx::idx_t i = 0; i < out_columns; i++) {
@@ -1149,10 +1150,11 @@ void NumpyScanProgress(cxx::TableFunction::ProgressInput &input) {
 
 void RegisterNumpyScan(cxx::Connection &connection, std::shared_ptr<Registry> registry,
                        std::shared_ptr<ModuleState> module, cxx::idx_t batch_rows) {
-	auto function = cxx::TableFunction::Create(connection);
+	auto function = cxx::TableFunction::Create(connection.GetFactory());
 	function.SetName(kNumpyScanFunction);
-	function.WithSignature(
-	    [&](cxx::FunctionSignature &signature) { signature.AddParameter("name", connection.ParseType("VARCHAR")); });
+	function.WithSignature([&](cxx::FunctionSignature &signature) {
+		signature.AddParameter("name", connection.GetFactory().ParseType("VARCHAR"));
+	});
 	function.SetUserData<NumpyScanUserData>(NumpyScanUserData {std::move(registry), std::move(module), batch_rows});
 	function.SetBindCallback(&NumpyScanBind);
 	function.SetInitGlobalCallback(&NumpyScanInitGlobal);
@@ -1161,7 +1163,7 @@ void RegisterNumpyScan(cxx::Connection &connection, std::shared_ptr<Registry> re
 	function.SetProgressCallback(&NumpyScanProgress);
 	function.SetPartitionDataCallback(&NumpyScanPartitionData);
 	function.SetProjectionPushdown(true);
-	function.Register();
+	connection.Register(function);
 }
 
 } // namespace duckdb_python

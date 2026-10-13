@@ -20,19 +20,12 @@
 
 namespace duckdb_python {
 
-/// One Python object as a DuckDB value of the type the object itself implies; `scope` is a Connection, or the
-/// Context inside a function callback. When `contains_untyped` is given, it is set to whether the value still
-/// holds an untyped place (see untyped.hpp).
-template <class SCOPE>
-duckdb::cxx::Value PythonToValue(SCOPE &scope, nb::handle object, ConversionContext &ctx,
+/// One Python object as a DuckDB value of the type the object itself implies; `scope` is the factory of a
+/// Connection, or of the Context inside a function callback. When `contains_untyped` is given, it is set to whether
+/// the value still holds an untyped place (see untyped.hpp).
+duckdb::cxx::Value PythonToValue(duckdb::cxx::Factory &scope, nb::handle object, ConversionContext &ctx,
                                  TimestampPrecision precision = TimestampPrecision::OWN_UNIT,
                                  bool *contains_untyped = nullptr);
-
-extern template duckdb::cxx::Value PythonToValue<duckdb::cxx::Connection>(duckdb::cxx::Connection &, nb::handle,
-                                                                          ConversionContext &, TimestampPrecision,
-                                                                          bool *);
-extern template duckdb::cxx::Value PythonToValue<duckdb::cxx::Context>(duckdb::cxx::Context &, nb::handle,
-                                                                       ConversionContext &, TimestampPrecision, bool *);
 
 /// How a Python object is read: one value, a list's elements, a dict's named fields, or a dict's entries.
 enum class Form : uint8_t { SCALAR, LIST, STRUCT, MAP };

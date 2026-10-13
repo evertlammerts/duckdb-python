@@ -10,7 +10,10 @@
 
 #include <nanobind/nanobind.h>
 
+#include <mutex>
+#include <optional>
 #include <string>
+#include <vector>
 
 #include "duckdb_cpp.hpp"
 
@@ -45,6 +48,14 @@ struct ConversionContext {
 	nb::object epoch_naive;
 	nb::object epoch_aware;
 	nb::object one_microsecond;
+
+	/// DECIMAL(width, scale), built once per width and scale and copied after, since building it through a
+	/// connection's factory takes that connection's lock and transaction.
+	duckdb::cxx::LogicalType DecimalType(duckdb::cxx::Factory &scope, int width, int scale);
+
+private:
+	std::mutex decimal_lock;
+	std::vector<std::optional<duckdb::cxx::LogicalType>> decimal_types;
 };
 
 /// How finely `PythonToValue` keeps a timestamp: in its own unit, or in microseconds at most, as a query parameter

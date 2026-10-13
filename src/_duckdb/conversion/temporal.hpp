@@ -148,16 +148,8 @@ bool AssumesTimeZone(duckdb::cxx::LogicalTypeId from, duckdb::cxx::LogicalTypeId
 
 /// `value` cast to `target` when the cast loses nothing, and nullopt otherwise; the engine's own cast rounds rather
 /// than refuses.
-template <class SCOPE>
-std::optional<duckdb::cxx::Value> TryCastTemporalExactly(SCOPE &context, const duckdb::cxx::Value &value,
+std::optional<duckdb::cxx::Value> TryCastTemporalExactly(duckdb::cxx::Factory &context, const duckdb::cxx::Value &value,
                                                          const duckdb::cxx::LogicalType &target);
-
-extern template std::optional<duckdb::cxx::Value>
-TryCastTemporalExactly<duckdb::cxx::Connection>(duckdb::cxx::Connection &, const duckdb::cxx::Value &,
-                                                const duckdb::cxx::LogicalType &);
-extern template std::optional<duckdb::cxx::Value>
-TryCastTemporalExactly<duckdb::cxx::Context>(duckdb::cxx::Context &, const duckdb::cxx::Value &,
-                                             const duckdb::cxx::LogicalType &);
 
 /// Which kind of date or time a type is: an instant without or with a time zone, a time of day without or with
 /// one, or none of these.
@@ -185,14 +177,7 @@ std::string ScalarText(nanobind::handle scalar, int64_t raw, uint64_t scale, con
 bool IsNumpyScalar(nanobind::handle object, const char *name);
 
 /// A numpy datetime64 or timedelta64 scalar as an engine value in its own unit; `temporal.cpp` states the rules.
-template <class SCOPE>
-duckdb::cxx::Value NumpyTemporalToValue(SCOPE &scope, nanobind::handle scalar, bool is_datetime, bool zoned,
-                                        TimestampPrecision precision);
-
-extern template duckdb::cxx::Value NumpyTemporalToValue<duckdb::cxx::Connection>(duckdb::cxx::Connection &,
-                                                                                 nanobind::handle, bool, bool,
-                                                                                 TimestampPrecision);
-extern template duckdb::cxx::Value NumpyTemporalToValue<duckdb::cxx::Context>(duckdb::cxx::Context &, nanobind::handle,
-                                                                              bool, bool, TimestampPrecision);
+duckdb::cxx::Value NumpyTemporalToValue(duckdb::cxx::Factory &scope, nanobind::handle scalar, bool is_datetime,
+                                        bool zoned, TimestampPrecision precision);
 
 } // namespace duckdb_python

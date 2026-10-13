@@ -2354,7 +2354,6 @@ class TestPandasNumpyScanArrowColumns:
         assert rows(con, "SELECT s FROM t") == []
         assert rows(con, "DESCRIBE t")[0][:2] == ("s", "VARCHAR")
 
-    @pytest.mark.xfail(strict=True, reason="the engine's union import reads the members without the union's offset")
     def test_a_sparse_union_column_reads_every_batch(self, con: duckdb.frame.Connection) -> None:
         tags = pa.array([0, 1] * 3000, pa.int8())
         members = [

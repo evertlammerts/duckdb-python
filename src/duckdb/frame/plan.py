@@ -110,7 +110,7 @@ def _stub_shape(connection: Connection, sql: str) -> Shape:
         remembered = connection._stub_answers.get(sql)
     if remembered is not None:
         return cast("Shape", remembered)
-    output, _ = connection._engine().bind(sql)
+    output, _ = connection._ready().bind(sql)
     shape = tuple(Column(name, type_text) for name, type_text in output)
     with connection._stub_lock:
         _forget_if_moved(connection)
@@ -1094,7 +1094,7 @@ class Frame(PlanBase):
             body = self._step.render(tuple(names[id(p)] for p in self._inputs), tuple(given))
         if not stubs:
             # A source's answer belongs to one database, so it is asked every time rather than remembered.
-            output, _ = connection._engine().bind(body)
+            output, _ = connection._ready().bind(body)
             return tuple(Column(name, type_text) for name, type_text in output)
         return _stub_shape(connection, f"WITH {', '.join(stubs)}\n{body}")
 
@@ -1408,7 +1408,7 @@ class Frame(PlanBase):
         connection = self._on(connection)
         sql, values = self._sql_and_values(connection=connection, parameters=parameters)
         # Read before the statement runs: the setting decides what the TIMESTAMPTZ columns are shown in.
-        time_zone = connection._engine().get_option("TimeZone")
+        time_zone = connection._ready().get_option("TimeZone")
         with connection._execute(sql, values) as result:
             return fetch_pandas(result.result, time_zone=time_zone, date_as_object=date_as_object)
 

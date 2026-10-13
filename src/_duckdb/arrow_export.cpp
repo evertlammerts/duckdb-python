@@ -31,6 +31,10 @@ struct ArrowStream::State {
 	/// The thread holding `lock`, so Python code reached from under it, a signal handler or a finalizer, can
 	/// recognise reentrancy instead of deadlocking on its own lock.
 	std::atomic<std::thread::id> owner {};
+	/// The result's hold on its connection, declared before the result so it is given up only after it.
+	ConnectionUse::Hold hold;
+	/// Who that hold is, fixed at construction, so a closer without the lock can check it still holds the connection.
+	ConnectionUse::HoldTag hold_tag;
 	std::optional<cxx::ArrowResult> result;
 	/// For ending the read in flight instead of waiting for it; the first batch of a heavy pipeline may
 	/// otherwise be hours away.
@@ -143,6 +147,7 @@ struct ReadingGuard {
 /// What ending a stream still has to do once the lock falls: the engine teardown may wait for a Python scalar
 /// function, and dropping the pins runs arbitrary finalizers, so neither belongs under the mutex.
 struct Teardown {
+	ConnectionUse::Hold hold;
 	std::optional<cxx::ArrowResult> result;
 	std::vector<nb::object> pins;
 	std::weak_ptr<cxx::Connection> connection;
@@ -167,14 +172,15 @@ struct CallbackGuard {
 /// the same hazard for a stream the engine finished.
 Teardown Take(ArrowStream::State &state, bool cancel) {
 	Teardown teardown;
+	teardown.hold = std::move(state.hold);
 	teardown.result = std::move(state.result);
 	state.result.reset();
 	teardown.pins = std::move(state.kept);
 	state.kept.clear();
 	teardown.connection = state.connection;
-	// KNOWN RESIDUAL: the engine releases the connection's slot inside Step, before the exhausted mark or a
-	// thrown error reaches us, and a cancel decided in that gap can hit the connection's next statement; the
-	// interrupt is connection-wide, so only a result-scoped engine interrupt could close this.
+	// The engine frees the connection's slot inside Step, before the exhausted mark or a thrown error reaches us, so
+	// a cancel decided in that gap interrupts an idle connection; the hold, given up only after the interrupt, keeps
+	// the connection's next statement from starting before it.
 	teardown.interrupt = cancel && teardown.result.has_value() && !state.exhausted.load();
 	return teardown;
 }
@@ -194,12 +200,22 @@ void FinishTeardown(ArrowStream::State &state, Teardown teardown) {
 				}
 			}
 			teardown.result.reset();
+			teardown.hold.Release();
 		}
 		{
 			std::lock_guard<std::mutex> mark(state.done_lock);
 			state.torn_down = true;
 		}
 		state.done_cv.notify_all();
+	}
+}
+
+/// Cancels the stream's query from a thread without the state lock, under the connection's own lock and only while
+/// this stream still holds the connection, so the interrupt can never reach a statement started after it.
+void InterruptWhileHeld(ArrowStream::State &state) {
+	// Taken outside that lock: dropping the last reference to a connection disconnects it, which may wait.
+	if (auto connection = state.connection.lock()) {
+		state.hold_tag.WhileHeld([&] { connection->Interrupt(); });
 	}
 }
 
@@ -248,9 +264,7 @@ Shutdown ShutdownQuery(ArrowStream::State &state, bool wait) {
 				}
 			}
 		} else if (state.reading.load() && !state.exhausted.load()) {
-			if (auto connection = state.connection.lock()) {
-				connection->Interrupt();
-			}
+			InterruptWhileHeld(state);
 		}
 		return shutdown;
 	}
@@ -264,14 +278,11 @@ Shutdown ShutdownQuery(ArrowStream::State &state, bool wait) {
 			// and leave the teardown to it, rather than wait for a thread that may be waiting for us.
 			// Anything else holding the lock is brief, and interrupting on mere contention could cancel
 			// whatever the connection runs after this stream, so without the reading mark this polls. A read
-			// that finishes between the load and the interrupt leaves the interrupt on an idle connection,
-			// where the next statement's own setup clears it; only a statement already past that setup in the
-			// same instant could see it, a window the engine's API cannot close.
+			// that finishes between the load and the interrupt is caught there: the interrupt goes out only while
+			// this stream still holds the connection.
 			if (state.reading.load()) {
 				if (!state.exhausted.load()) {
-					if (auto connection = state.connection.lock()) {
-						connection->Interrupt();
-					}
+					InterruptWhileHeld(state);
 				}
 				break;
 			}
@@ -421,6 +432,7 @@ int RecordClosed(ArrowStream::State &state) {
 /// anything: a step that returns at once found nothing to claim, one that took real time did work and
 /// deserves an immediate successor, or a consumer driving the whole query alone would crawl.
 cxx::StepStatus TimedStep(ArrowStream::State &state, ArrowArray &out, bool &idle) {
+	const ConnectionUse::Reading reading(state.hold);
 	nb::gil_scoped_release no_gil;
 	const auto before = std::chrono::steady_clock::now();
 	const auto status = state.result->Step(out);
@@ -708,10 +720,12 @@ static std::string StatementTypeOf(const cxx::ArrowResult &result) {
 }
 
 ArrowStream::ArrowStream(nb::object database, std::shared_ptr<ModuleState> module,
-                         std::weak_ptr<cxx::Connection> connection, cxx::ArrowResult result,
+                         std::weak_ptr<cxx::Connection> connection, cxx::ArrowResult result, ConnectionUse::Hold hold,
                          std::vector<nb::object> kept)
     : statement_type(StatementTypeOf(result)), database(std::move(database)), module(std::move(module)),
       state(std::make_shared<State>()) {
+	state->hold_tag = hold.Tag();
+	state->hold = std::move(hold);
 	state->result.emplace(std::move(result));
 	state->connection = std::move(connection);
 	state->kept = std::move(kept);

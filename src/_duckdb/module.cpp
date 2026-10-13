@@ -65,7 +65,7 @@ public:
 	Database(std::shared_ptr<ModuleState> module, const std::string &path,
 	         const std::vector<std::pair<std::string, std::string>> &options)
 	    : module(std::move(module)), registry(std::make_shared<Registry>()),
-	      database(IsUntypedMarker(this->module->environment, path, options)) {
+	      database(Open(this->module->environment, path, options)) {
 		WithoutGil([&] { InstallRegistryScan(database, registry, this->module); });
 	}
 
@@ -119,13 +119,9 @@ public:
 	}
 
 private:
-	static cxx::Instance IsUntypedMarker(cxx::Environment &environment, const std::string &path,
-	                                     const std::vector<std::pair<std::string, std::string>> &options) {
-		auto instance = environment.CreateInstance();
-		// A startup-only setting such as access_mode is accepted only before the first attach.
-		for (const auto &[name, value] : options) {
-			instance.SetOption(name, value);
-		}
+	static cxx::Instance Open(cxx::Environment &environment, const std::string &path,
+	                          const std::vector<std::pair<std::string, std::string>> &options) {
+		auto instance = CreateInstance(environment, options);
 		instance.Attach(path, true);
 		return instance;
 	}
@@ -193,10 +189,10 @@ void FillUntypedFromStatement(cxx::Connection &live, const cxx::SqlStatement &st
 			continue;
 		}
 		if (param.value.IsNull()) {
-			param.value = cxx::Value::CreateNull(live, expected);
+			param.value = cxx::Value::CreateNull(live.GetFactory(), expected);
 			continue;
 		}
-		FillUntypedFromExpected(live, param.value, expected);
+		FillUntypedFromExpected(live.GetFactory(), param.value, expected);
 	}
 }
 
@@ -208,7 +204,7 @@ void ConvertParameters(cxx::Connection &live, nb::handle parameters, ConversionC
                        std::vector<cxx::NamedParam> &bound, std::vector<bool> &untyped) {
 	const auto convert = [&](nb::handle value) {
 		bool still = false;
-		auto converted = PythonToValue(live, value, ctx, TimestampPrecision::MICROSECONDS, &still);
+		auto converted = PythonToValue(live.GetFactory(), value, ctx, TimestampPrecision::MICROSECONDS, &still);
 		untyped.push_back(still);
 		return converted;
 	};
@@ -274,25 +270,27 @@ public:
 
 	/// Run one statement, with `parameters` either a sequence filling $1, $2, ... in order or a mapping by name.
 	std::unique_ptr<Result> Execute(const std::string &sql, nb::handle parameters) {
-		auto held = Live();
-		auto &live = *held.engine;
+		auto claimed = Claim(ConnectionUse::Needs::FREE);
+		auto &live = *claimed.held.engine;
+		std::optional<cxx::QueryResult> result;
 		if (parameters.is_none()) {
-			auto result = WithoutGil([&] { return live.Execute(sql); });
-			return std::make_unique<Result>(std::move(held.database), connection.Module(), std::move(result));
+			result.emplace(WithoutGil([&] { return live.Execute(sql); }));
+		} else {
+			std::vector<cxx::NamedParam> bound;
+			std::vector<bool> untyped;
+			ConvertParameters(live, parameters, connection.Module()->conversion, bound, untyped);
+			auto statement = WithoutGil([&] { return ParseExactlyOne(live, sql); });
+			FillUntypedFromStatement(live, statement, bound, untyped);
+			result.emplace(WithoutGil([&] { return live.Execute(statement, bound); }));
 		}
-		std::vector<cxx::NamedParam> bound;
-		std::vector<bool> untyped;
-		ConvertParameters(live, parameters, connection.Module()->conversion, bound, untyped);
-		auto statement = ParseExactlyOne(live, sql);
-		FillUntypedFromStatement(live, statement, bound, untyped);
-		auto result = WithoutGil([&] { return live.Execute(statement, bound); });
-		return std::make_unique<Result>(std::move(held.database), connection.Module(), std::move(result));
+		return std::make_unique<Result>(std::move(claimed.held.database), connection.Module(), std::move(*result),
+		                                ConnectionUse::Hold(use));
 	}
 
 	/// Run one statement like `Execute`, into an Arrow stream of at most `batch_size` rows per array.
 	std::unique_ptr<ArrowStream> ExecuteArrow(const std::string &sql, nb::handle parameters, cxx::idx_t batch_size) {
-		auto held = Live();
-		auto &live = *held.engine;
+		auto claimed = Claim(ConnectionUse::Needs::FREE);
+		auto &live = *claimed.held.engine;
 		const cxx::ArrowFormat format {batch_size};
 		std::optional<cxx::ArrowResult> result;
 		if (parameters.is_none()) {
@@ -301,7 +299,7 @@ public:
 			std::vector<cxx::NamedParam> bound;
 			std::vector<bool> untyped;
 			ConvertParameters(live, parameters, connection.Module()->conversion, bound, untyped);
-			auto statement = ParseExactlyOne(live, sql);
+			auto statement = WithoutGil([&] { return ParseExactlyOne(live, sql); });
 			FillUntypedFromStatement(live, statement, bound, untyped);
 			result.emplace(WithoutGil([&] { return live.Execute(statement, bound, format); }));
 		}
@@ -318,17 +316,19 @@ public:
 			throw cxx::InvalidInputException(
 			    "Invalid Input Error: the statement returns no rows, so there is no Arrow stream to read");
 		}
-		auto kept = Database::From(held.database).CallablesSnapshot();
-		return std::make_unique<ArrowStream>(std::move(held.database), connection.Module(),
-		                                     std::weak_ptr<cxx::Connection>(held.engine), std::move(*result),
-		                                     std::move(kept));
+		auto kept = Database::From(claimed.held.database).CallablesSnapshot();
+		return std::make_unique<ArrowStream>(std::move(claimed.held.database), connection.Module(),
+		                                     std::weak_ptr<cxx::Connection>(claimed.held.engine), std::move(*result),
+		                                     ConnectionUse::Hold(use), std::move(kept));
 	}
 
 	/// The columns a statement would produce and the parameters it expects, asked of DuckDB rather than guessed.
+	/// Answered while a result is open, as the engine binds beside one.
 	std::pair<std::vector<std::pair<std::string, std::string>>, std::vector<std::pair<std::string, std::string>>>
 	Bind(const std::string &sql) {
-		auto held = Live();
-		auto &live = *held.engine;
+		auto claimed = Claim(ConnectionUse::Needs::NOT_RUNNING);
+		auto &live = *claimed.held.engine;
+		nb::gil_scoped_release release;
 		auto statements = live.ParseSQL(sql);
 		auto statement = statements.Next();
 		if (!statement) {
@@ -337,17 +337,17 @@ public:
 		if (statements.Next()) {
 			throw cxx::InvalidInputException("Invalid Input Error: bind takes exactly one statement");
 		}
-		nb::gil_scoped_release release;
 		const auto signature = live.Bind(statement);
 		return {FieldTexts(signature.output), FieldTexts(signature.parameters)};
 	}
 
 	/// What DuckDB's parser makes of a statement, without binding or running it: its type as lowercase text and
 	/// its first keyword in upper case, both empty for input with no statement. A trailing statement past the
-	/// first is ignored, since callers ask about the one they are about to run.
+	/// first is ignored, since callers ask about the one they are about to run. Answered while a result is open,
+	/// since the DB-API decides from the next statement how to dispose of it.
 	std::pair<std::string, std::string> Classify(const std::string &sql) {
-		auto held = Live();
-		auto &live = *held.engine;
+		auto claimed = Claim(ConnectionUse::Needs::NOT_RUNNING);
+		auto &live = *claimed.held.engine;
 		nb::gil_scoped_release release;
 		auto statements = live.ParseSQL(sql);
 		auto statement = statements.Next();
@@ -380,13 +380,14 @@ public:
 		for (const auto &[parameter, kind, type, has_default, value] : parameters) {
 			specs.push_back(ParameterSpec {parameter, kind, type, has_default, value});
 		}
-		auto held = Live();
-		auto &owner = Database::From(held.database);
+		auto claimed = Claim(ConnectionUse::Needs::FREE);
+		auto &owner = Database::From(claimed.held.database);
 		// Kept BEFORE the engine can hand the name to anyone: a stream on another connection snapshots the
 		// kept callables when it starts, so a function must never be visible without its lifetime pin.
 		owner.KeepCallable(callable);
 		try {
-			RegisterScalarFunction(*held.engine, name, callable, specs, returns, nulls, level, connection.Module());
+			RegisterScalarFunction(*claimed.held.engine, name, callable, specs, returns, nulls, level,
+			                       connection.Module());
 		} catch (...) {
 			owner.AbandonCallable(callable);
 			throw;
@@ -396,13 +397,13 @@ public:
 	/// Register a Python object as the table `name`; a one-shot object is a stream, readable once, and `numpy_scan`
 	/// says the numpy scan reads it rather than the Arrow scan.
 	void RegisterObject(const std::string &name, nb::object object, bool one_shot, bool numpy_scan) {
-		auto held = Live();
-		Database::From(held.database).Objects().Add(name, std::move(object), one_shot, numpy_scan);
+		auto claimed = Claim(ConnectionUse::Needs::FREE);
+		Database::From(claimed.held.database).Objects().Add(name, std::move(object), one_shot, numpy_scan);
 	}
 
 	bool UnregisterObject(const std::string &name) {
-		auto held = Live();
-		return Database::From(held.database).Objects().Remove(name);
+		auto claimed = Claim(ConnectionUse::Needs::FREE);
+		return Database::From(claimed.held.database).Objects().Remove(name);
 	}
 
 	/// "stream" or "object" for a registered name, None otherwise.
@@ -415,16 +416,28 @@ public:
 		return std::string(entry->one_shot ? "stream" : "object");
 	}
 
+	/// Never refused: cancelling the running query is what it is for.
 	void Interrupt() {
 		Live().engine->Interrupt();
 	}
 
+	/// The setting's value as text; a setting without a value reads as its declared default, and as the empty string
+	/// when it declares none.
 	std::string GetOption(const std::string &name) {
-		return std::string(Live().engine->GetOption(name).GetValue());
+		auto claimed = Claim(ConnectionUse::Needs::FREE);
+		return WithoutGil([&] {
+			auto &config = claimed.held.engine->GetConfig();
+			auto value = config.GetOption(name).value;
+			if (value.IsNull()) {
+				value = config.DescribeOption(name).GetDefaultValue();
+			}
+			return value.IsNull() ? std::string() : value.ToText();
+		});
 	}
 
 	void SetOption(const std::string &name, const std::string &value) {
-		Live().engine->SetOption(name, value);
+		auto claimed = Claim(ConnectionUse::Needs::FREE);
+		WithoutGil([&] { claimed.held.engine->GetConfig().SetOption(name, value); });
 	}
 
 	/// Disconnect now rather than at collection; repeatable, and every other method refuses afterwards.
@@ -437,7 +450,24 @@ private:
 		return connection.Acquire("connection is closed");
 	}
 
+	/// A call's pin on the connection and its claim, taken in that order.
+	/// A constructor rather than aggregate initialization: GCC 11 leaks an aggregate's initialized members when a later
+	/// one throws, and a refused claim throws.
+	struct Claimed {
+		Claimed(Pinned<cxx::Connection> pinned, ConnectionUse &use, ConnectionUse::Needs needs)
+		    : held(std::move(pinned)), call(use, needs) {
+		}
+
+		Pinned<cxx::Connection> held;
+		ConnectionUse::Call call;
+	};
+
+	Claimed Claim(ConnectionUse::Needs needs) {
+		return Claimed(Live(), *use, needs);
+	}
+
 	Owned<cxx::Connection> connection;
+	std::shared_ptr<ConnectionUse> use = std::make_shared<ConnectionUse>();
 };
 
 std::unique_ptr<Connection> Database::Connect() {
@@ -639,7 +669,8 @@ NB_MODULE(_duckdb, m) {
 	    "temporal_literal",
 	    [state](nb::handle value) {
 		    ModuleState::LiteralLease connection(*state);
-		    const auto bound = PythonToValue(*connection, value, state->conversion, TimestampPrecision::MICROSECONDS);
+		    const auto bound =
+		        PythonToValue((*connection).GetFactory(), value, state->conversion, TimestampPrecision::MICROSECONDS);
 		    if (bound.IsNull()) {
 			    return std::string("NULL");
 		    }
@@ -666,7 +697,7 @@ NB_MODULE(_duckdb, m) {
 	    "literal_type",
 	    [state](nb::handle value) {
 		    ModuleState::LiteralLease connection(*state);
-		    return PythonToValue(*connection, value, state->conversion, TimestampPrecision::MICROSECONDS)
+		    return PythonToValue((*connection).GetFactory(), value, state->conversion, TimestampPrecision::MICROSECONDS)
 		        .GetLogicalType()
 		        .ToText();
 	    },

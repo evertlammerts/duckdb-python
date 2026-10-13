@@ -83,16 +83,17 @@ std::vector<cxx::LogicalType> FieldTypes(const cxx::Schema &schema) {
 	return out;
 }
 
-Result::Result(nb::object database, std::shared_ptr<ModuleState> module, cxx::QueryResult result)
-    : result(std::move(module), std::move(database), std::move(result)) {
+Result::Result(nb::object database, std::shared_ptr<ModuleState> module, cxx::QueryResult result,
+               ConnectionUse::Hold hold)
+    : result(std::move(module), std::move(database), OpenQuery {std::move(hold), std::move(result)}) {
 }
 
 std::vector<std::pair<std::string, std::string>> Result::Schema() {
-	return FieldTexts(Live().engine->GetSchema());
+	return FieldTexts(Live().engine->query.GetSchema());
 }
 
 std::string Result::ResultType() {
-	switch (Live().engine->GetResultType()) {
+	switch (Live().engine->query.GetResultType()) {
 	case cxx::QueryResult::ResultType::QUERY_RESULT:
 		return "rows";
 	case cxx::QueryResult::ResultType::CHANGED_ROWS:
@@ -103,7 +104,7 @@ std::string Result::ResultType() {
 }
 
 std::string Result::StatementTypeName() {
-	return StatementTypeText(Live().engine->GetStatementType());
+	return StatementTypeText(Live().engine->query.GetStatementType());
 }
 
 cxx::idx_t Result::Drain() {
@@ -202,26 +203,37 @@ std::vector<std::tuple<int, int, std::optional<std::vector<std::string>>>> Resul
 	return out;
 }
 
-Pinned<cxx::QueryResult> Result::Live() {
+Pinned<OpenQuery> Result::Live() {
 	return result.Acquire("result is closed");
 }
 
 template <class SINK>
-Result::Pumped Result::Pump(cxx::QueryResult &live, SINK &sink) {
+Result::Pumped Result::Pump(OpenQuery &live, SINK &sink) {
+	const ConnectionUse::Reading reading(live.hold);
 	// Step may run part of the query here, and a Python callback inside it would deadlock on a held GIL.
 	nb::gil_scoped_release release;
 	const auto deadline = std::chrono::steady_clock::now() + kStepQuantum;
 	while (std::chrono::steady_clock::now() < deadline) {
-		auto step = live.Step();
+		// The engine lets go of the connection once the query ends, whether it finished, failed or was cancelled.
+		auto step = [&] {
+			try {
+				return live.query.Step();
+			} catch (...) {
+				live.hold.Release();
+				throw;
+			}
+		}();
 		switch (step.status) {
 		case cxx::QueryResult::StepStatus::CHUNK:
-			if (sink(live, std::move(step.chunk))) {
+			if (sink(live.query, std::move(step.chunk))) {
 				return Pumped::Chunk;
 			}
 			break;
 		case cxx::QueryResult::StepStatus::FINISHED:
+			live.hold.Release();
 			return Pumped::Finished;
 		case cxx::QueryResult::StepStatus::CANCELLED:
+			live.hold.Release();
 			return Pumped::Cancelled;
 		default:
 			// WAITING: stepping is itself the progress, so go again.
@@ -263,7 +275,7 @@ bool Result::Advance() {
 
 const ColumnTypes &Result::Types() {
 	if (!types) {
-		types = std::make_shared<std::vector<cxx::LogicalType>>(FieldTypes(Live().engine->GetSchema()));
+		types = std::make_shared<std::vector<cxx::LogicalType>>(FieldTypes(Live().engine->query.GetSchema()));
 	}
 	return types;
 }

@@ -472,10 +472,11 @@ void ArrowScanPartitionData(cxx::TableFunction::PartitionDataInput &input) {
 
 void RegisterArrowScan(cxx::Connection &connection, std::shared_ptr<Registry> registry,
                        std::shared_ptr<ModuleState> module, cxx::idx_t batch_rows) {
-	auto function = cxx::TableFunction::Create(connection);
+	auto function = cxx::TableFunction::Create(connection.GetFactory());
 	function.SetName(kArrowScanFunction);
-	function.WithSignature(
-	    [&](cxx::FunctionSignature &signature) { signature.AddParameter("name", connection.ParseType("VARCHAR")); });
+	function.WithSignature([&](cxx::FunctionSignature &signature) {
+		signature.AddParameter("name", connection.GetFactory().ParseType("VARCHAR"));
+	});
 	function.SetUserData<ArrowScanUserData>(ArrowScanUserData {std::move(registry), std::move(module), batch_rows});
 	function.SetBindCallback(&ArrowScanBind);
 	function.SetInitGlobalCallback(&ArrowScanInitGlobal);
@@ -484,7 +485,7 @@ void RegisterArrowScan(cxx::Connection &connection, std::shared_ptr<Registry> re
 	function.SetFilterPushdownCallback(&ArrowScanFilterPushdown);
 	function.SetPartitionDataCallback(&ArrowScanPartitionData);
 	function.SetProjectionPushdown(true);
-	function.Register();
+	connection.Register(function);
 }
 
 } // namespace duckdb_python

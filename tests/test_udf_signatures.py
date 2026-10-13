@@ -714,11 +714,20 @@ class TestDefaults:
         with other._execute("SELECT f(), f('2026-01-01 00:00:00')") as result:
             assert result.fetch_all() == [("2026-01-01 05:00:00+00:00", "2026-01-01 00:00:00+00:00")]
 
-    def test_a_refused_registration_aborts_an_open_transaction(self, con: duckdb.frame.Connection) -> None:
+    def test_a_refused_default_leaves_an_open_transaction_usable(self, con: duckdb.frame.Connection) -> None:
         con.run("BEGIN")
         con.run("CREATE TABLE t AS SELECT 1 AS a")
         with pytest.raises(exceptions.InvalidInputError, match="default of parameter 'x'"):
             con.create_function("f", lambda x="five": 0, ["BIGINT"], "BIGINT")
+        assert rows(con, "SELECT count(*) FROM t") == [(1,)]
+        con.run("COMMIT")
+        assert rows(con, "SELECT count(*) FROM t") == [(1,)]
+
+    def test_an_unknown_type_name_aborts_an_open_transaction(self, con: duckdb.frame.Connection) -> None:
+        con.run("BEGIN")
+        con.run("CREATE TABLE t AS SELECT 1 AS a")
+        with pytest.raises(exceptions.CatalogError, match="NO_SUCH_TYPE"):
+            con.create_function("f", lambda x: 0, ["NO_SUCH_TYPE"], "BIGINT")
         with pytest.raises(exceptions.TransactionError, match="Current transaction is aborted"):
             rows(con, "SELECT count(*) FROM t")
         con.run("ROLLBACK")

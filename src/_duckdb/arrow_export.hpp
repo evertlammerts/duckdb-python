@@ -40,7 +40,7 @@ public:
 	/// `kept` is what the running query may call back into, the database's registered scalar functions,
 	/// pinned by the stream so they outlive their Database for as long as the consumer holds the capsule.
 	ArrowStream(nb::object database, std::shared_ptr<ModuleState> module, std::weak_ptr<cxx::Connection> connection,
-	            cxx::ArrowResult result, std::vector<nb::object> kept);
+	            cxx::ArrowResult result, ConnectionUse::Hold hold, std::vector<nb::object> kept);
 	~ArrowStream();
 	ArrowStream(const ArrowStream &) = delete;
 	ArrowStream &operator=(const ArrowStream &) = delete;

@@ -83,15 +83,15 @@ std::string ConversionFailure(const std::string &subject, const cxx::LogicalType
 
 /// A Python default as the engine keeps it, converted as a returned value is, or for ANY as a query parameter is, so
 /// a default its parameter cannot hold is refused once here rather than by every call that leaves it out.
-cxx::Value DefaultValue(cxx::Connection &connection, const ParameterSpec &parameter, const TypeTree &type,
+cxx::Value DefaultValue(cxx::Factory &factory, const ParameterSpec &parameter, const TypeTree &type,
                         ConversionContext &conversion) {
 	const auto subject = "the default of parameter '" + parameter.name + "'";
 	const bool any = type.id == cxx::LogicalTypeId::ANY;
 	try {
 		if (any) {
-			return PythonToValue(connection, parameter.default_value, conversion, TimestampPrecision::MICROSECONDS);
+			return PythonToValue(factory, parameter.default_value, conversion, TimestampPrecision::MICROSECONDS);
 		}
-		return PythonToDeclaredType(connection, parameter.default_value, type, conversion);
+		return PythonToDeclaredType(factory, parameter.default_value, type, conversion);
 	} catch (const cxx::Exception &) {
 		ThrowInvalidInput(ConversionFailure(subject + " is", any ? nullptr : &type.type));
 	} catch (nb::python_error &error) {
@@ -112,7 +112,7 @@ void PyScalarExec(cxx::ScalarFunction::ExecInput &input) {
 	const auto rows = input.GetRowCount();
 	const auto count = input.GetArgCount();
 	const auto positional = count - bound.keywords.size();
-	auto context = input.GetContext();
+	auto &context = input.GetContext();
 	auto result = input.GetResult();
 
 	// Fenced: the function may close an Arrow stream of this very query, which must not wait on this thread.
@@ -166,7 +166,8 @@ void PyScalarExec(cxx::ScalarFunction::ExecInput &input) {
 				continue;
 			}
 			try {
-				result.SetValue(r, PythonToDeclaredType(context, object, data.returns, data.module->conversion));
+				result.SetValue(
+				    r, PythonToDeclaredType(context.GetFactory(), object, data.returns, data.module->conversion));
 			} catch (const cxx::Exception &) {
 				throw cxx::InvalidInputException(
 				    ConversionFailure("the UDF '" + data.name + "' returned", &data.returns.type));
@@ -189,21 +190,23 @@ void RegisterScalarFunction(cxx::Connection &connection, const std::string &name
                             const std::vector<ParameterSpec> &parameters, const std::string &returns,
                             cxx::FunctionNullHandling nulls, cxx::FunctionStability level,
                             std::shared_ptr<ModuleState> module) {
+	auto &factory = connection.GetFactory();
 	std::vector<TypeTree> types;
 	std::vector<std::optional<cxx::Value>> defaults;
 	types.reserve(parameters.size());
 	defaults.reserve(parameters.size());
 	for (const auto &parameter : parameters) {
 		// The type parser refuses ANY, which only a signature may hold.
-		types.push_back(TypeTreeOf(parameter.type == "ANY" ? connection.CreateType(cxx::LogicalTypeId::ANY)
-		                                                   : connection.ParseType(parameter.type)));
+		types.push_back(TypeTreeOf(parameter.type == "ANY"
+		                               ? factory.CreateType(cxx::LogicalTypeId::ANY)
+		                               : WithoutGil([&] { return factory.ParseType(parameter.type); })));
 		defaults.push_back(parameter.has_default
-		                       ? std::optional(DefaultValue(connection, parameter, types.back(), module->conversion))
+		                       ? std::optional(DefaultValue(factory, parameter, types.back(), module->conversion))
 		                       : std::nullopt);
 	}
-	auto return_type = connection.ParseType(returns);
+	auto return_type = WithoutGil([&] { return factory.ParseType(returns); });
 
-	auto function = cxx::ScalarFunction::Create(connection);
+	auto function = cxx::ScalarFunction::Create(factory);
 	function.SetName(name);
 	function.WithSignature([&](cxx::FunctionSignature &signature) {
 		for (size_t i = 0; i < parameters.size(); i++) {
@@ -222,7 +225,7 @@ void RegisterScalarFunction(cxx::Connection &connection, const std::string &name
 	function.SetNullHandling(nulls);
 	function.SetStability(level);
 	nb::gil_scoped_release release;
-	function.Register();
+	connection.Register(function);
 }
 
 } // namespace duckdb_python

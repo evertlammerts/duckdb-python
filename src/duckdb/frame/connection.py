@@ -199,8 +199,7 @@ class Connection:
 
     def _execute(self, sql: str, parameters: Sequence[Any] | Mapping[str, Any] | None = None) -> LiveResult:
         """Run a statement and track its result; every execution comes through here."""
-        self._finish_pending_closes()
-        live = self._track(self._engine().execute(sql, parameters))
+        live = self._track(self._ready().execute(sql, parameters))
         # The engine's own classification of what it is running, not a reading of the text: anything but a plain
         # read may change what a later query resolves a name to. An EXPLAIN ANALYZE runs the statement it wraps,
         # and reports EXPLAIN, so it counts too.
@@ -223,8 +222,7 @@ class Connection:
         self, sql: str, parameters: Sequence[Any] | Mapping[str, Any] | None, batch_size: int
     ) -> LiveArrowStream:
         """Run a statement into an Arrow stream and track it, like `_execute` tracks a result."""
-        self._finish_pending_closes()
-        live = LiveArrowStream(self._engine().execute_arrow(sql, parameters, batch_size), self)
+        live = LiveArrowStream(self._ready().execute_arrow(sql, parameters, batch_size), self)
         if live.stream.statement_type != "select":
             self._catalog.changed()
 
@@ -245,6 +243,11 @@ class Connection:
             message = "connection is closed"
             raise InterfaceError(message)
         return raw
+
+    def _ready(self) -> _duckdb.Connection:
+        """The engine connection for a call that needs it free, once the closes engine threads deferred are done."""
+        self._finish_pending_closes()
+        return self._engine()
 
     def run(self, sql: SqlText, parameters: Parameters | None = None) -> int:
         """Run a statement and report how many rows it changed; use `sql()` for statements that produce rows."""
@@ -362,7 +365,7 @@ class Connection:
             message = "Invalid Input Error: stability must be 'consistent', 'volatile' or 'consistent_within_query'"
             raise InvalidInputError(message)
         declared, return_type = sql_signature(function, parameters, returns)
-        engine = self._engine()
+        engine = self._ready()
         engine.create_scalar_function(name, function, [p.for_engine() for p in declared], return_type, nulls, level)
         # A new function changes what a name in a later query can refer to.
         self._catalog.changed()
@@ -384,13 +387,13 @@ class Connection:
 
     def _register_source(self, name: str, source: Source) -> None:
         """Register a source as `name` as it is, without adapting it."""
-        self._engine().register_object(name, source, source.one_shot, isinstance(source, NumpyScanSource))
+        self._ready().register_object(name, source, source.one_shot, isinstance(source, NumpyScanSource))
         # A new name changes what a later query resolves it to.
         self._catalog.changed()
 
     def unregister(self, name: _ObjectName) -> None:
         """Forget the object registered as `name`; a query bound over it before this still runs."""
-        if not self._engine().unregister_object(name):
+        if not self._ready().unregister_object(name):
             message = f"Invalid Input Error: nothing is registered as {name!r}"
             raise InvalidInputError(message)
         self._catalog.changed()

@@ -14,6 +14,12 @@
 
 namespace duckdb_python {
 
+namespace {
+
+constexpr int kDecimalWidths = 39;
+
+} // namespace
+
 ConversionContext::ConversionContext() {
 	nb::object datetime = nb::module_::import_("datetime");
 	date_cls = datetime.attr("date");
@@ -33,6 +39,26 @@ ConversionContext::ConversionContext() {
 	epoch_naive = datetime_cls(1970, 1, 1);
 	epoch_aware = datetime_cls(1970, 1, 1, 0, 0, 0, 0, timezone_utc);
 	one_microsecond = timedelta_cls(0, 0, 1);
+	decimal_types.resize(static_cast<std::size_t>(kDecimalWidths * kDecimalWidths));
+}
+
+duckdb::cxx::LogicalType ConversionContext::DecimalType(duckdb::cxx::Factory &scope, int width, int scale) {
+	const auto slot = static_cast<std::size_t>(width * kDecimalWidths + scale);
+	{
+		std::lock_guard<std::mutex> guard(decimal_lock);
+		if (decimal_types[slot]) {
+			return decimal_types[slot]->Copy();
+		}
+	}
+	auto built = [&] {
+		nb::gil_scoped_release unlocked;
+		return scope.ParseType("DECIMAL(" + std::to_string(width) + "," + std::to_string(scale) + ")");
+	}();
+	std::lock_guard<std::mutex> guard(decimal_lock);
+	if (!decimal_types[slot]) {
+		decimal_types[slot].emplace(built.Copy());
+	}
+	return built;
 }
 
 std::string DescribePythonError(nb::python_error &error) {

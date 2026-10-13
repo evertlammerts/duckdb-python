@@ -214,9 +214,11 @@ class TestConcurrency:
     def test_unregistering_during_a_scan_does_not_stop_it(self, con: duckdb.frame.Connection) -> None:
         big = pa.Table.from_batches(pa.table({"i": list(range(50_000))}).to_batches(max_chunksize=1_000))
         con.register("big", big)
+        # Through a second connection, since the open result holds this one.
+        twin = con.duplicate()
         with con._execute("SELECT i FROM big") as result:
             first = result.fetch_rows(5)
-            con.unregister("big")
+            twin.unregister("big")
             rest = result.fetch_all()
         assert [r[0] for r in first + rest] == list(range(50_000))
         with pytest.raises(exceptions.CatalogError):
@@ -1456,7 +1458,6 @@ class TestEncodedLayouts:
         con.register("ree", pa.table({"r": pc.run_end_encode(pa.array([1, 1, 2, None, None]))}))
         assert rows(con, "SELECT * FROM ree") == [(1,), (1,), (2,), (None,), (None,)]
 
-    @pytest.mark.xfail(strict=True, reason="the engine's importer loses run ends for every chunk after the first")
     def test_run_end_encoding_across_the_batch_boundary(self, con: duckdb.frame.Connection) -> None:
         con.register("ree", pa.table({"r": pc.run_end_encode(pa.array([7] * 3000 + [8] * 3000))}))
         assert rows(con, "SELECT r, count(*) FROM ree GROUP BY r ORDER BY r") == [(7, 3000), (8, 3000)]

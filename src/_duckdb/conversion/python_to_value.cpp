@@ -27,11 +27,10 @@
 
 namespace duckdb_python {
 
+using duckdb::cxx::Factory;
 using duckdb::cxx::LogicalType;
 using duckdb::cxx::LogicalTypeId;
 using duckdb::cxx::Value;
-
-using duckdb::cxx::Connection;
 
 namespace {
 
@@ -51,8 +50,7 @@ int64_t MicrosSince(const nb::object &epoch, nb::handle moment, ConversionContex
 }
 
 // Through text, which is exact for integers of any width and for decimals, neither having a C++ type here.
-template <class SCOPE>
-Value FromText(SCOPE &scope, const std::string &text, const LogicalType &target) {
+Value FromText(Factory &scope, const std::string &text, const LogicalType &target) {
 	const duckdb::cxx::varchar_t borrowed(text);
 	return Value::Create(scope, borrowed).Cast(scope, target);
 }
@@ -61,8 +59,7 @@ Value FromText(SCOPE &scope, const std::string &text, const LogicalType &target)
 	throw UnsupportedTypeException(nb::cast<std::string>(nb::handle(Py_TYPE(object.ptr())).attr("__name__")));
 }
 
-template <class SCOPE>
-Value ScalarValue(SCOPE &scope, nb::handle object, ConversionContext &ctx, TimestampPrecision precision) {
+Value ScalarValue(Factory &scope, nb::handle object, ConversionContext &ctx, TimestampPrecision precision) {
 	using duckdb::cxx::LogicalTypeId;
 
 	// A NULL still needs a type; SQLNULL is rejected, and INTEGER works because a NULL casts to anything.
@@ -187,8 +184,7 @@ Value ScalarValue(SCOPE &scope, nb::handle object, ConversionContext &ctx, Times
 		if (scale > width) {
 			ThrowInvalidInput("Decimal has more fractional digits than DECIMAL can hold");
 		}
-		return FromText(scope, nb::cast<std::string>(nb::str(object)),
-		                scope.ParseType("DECIMAL(" + std::to_string(width) + "," + std::to_string(scale) + ")"));
+		return FromText(scope, nb::cast<std::string>(nb::str(object)), ctx.DecimalType(scope, width, scale));
 	}
 	if (nb::isinstance(object, ctx.uuid_cls)) {
 		return FromText(scope, nb::cast<std::string>(nb::str(object)), scope.CreateType(LogicalTypeId::UUID));
@@ -202,15 +198,13 @@ Value ScalarValue(SCOPE &scope, nb::handle object, ConversionContext &ctx, Times
 	ThrowUnsupported(object);
 }
 
-template <class SCOPE>
 struct Builder {
-	SCOPE &scope;
+	Factory &scope;
 	ConversionContext &ctx;
 	TimestampPrecision precision;
 };
 
-template <class SCOPE>
-Value TakeScalar(Builder<SCOPE> &builder, nb::handle object) {
+Value TakeScalar(Builder &builder, nb::handle object) {
 	return ScalarValue(builder.scope, object, builder.ctx, builder.precision);
 }
 
@@ -224,8 +218,7 @@ struct ConvertedValue {
 
 // Each untyped place in one of `values` takes the type the first sibling saying anything there gives it; a place a
 // sibling has already typed is never changed. Whether a place every sibling leaves untyped remains.
-template <class SCOPE>
-bool FillUntypedFromSiblings(SCOPE &scope, std::vector<Value> &values, const std::vector<bool> &untyped) {
+bool FillUntypedFromSiblings(Factory &scope, std::vector<Value> &values, const std::vector<bool> &untyped) {
 	if (std::find(untyped.begin(), untyped.end(), true) == untyped.end()) {
 		return false;
 	}
@@ -324,8 +317,7 @@ void RefuseCrossing(std::size_t count, const PART &part, const LogicalType &comb
 }
 
 // `node` as a query parameter binds it.
-template <class SCOPE>
-ConvertedValue Build(Builder<SCOPE> &builder, nb::handle node) {
+ConvertedValue Build(Builder &builder, nb::handle node) {
 	auto &scope = builder.scope;
 	switch (FormOf(node)) {
 	case Form::SCALAR: {
@@ -409,8 +401,7 @@ ConvertedValue Build(Builder<SCOPE> &builder, nb::handle node) {
 
 } // namespace
 
-template <class SCOPE>
-Value PythonToValue(SCOPE &scope, nb::handle object, ConversionContext &ctx, TimestampPrecision precision,
+Value PythonToValue(Factory &scope, nb::handle object, ConversionContext &ctx, TimestampPrecision precision,
                     bool *contains_untyped) {
 	const WalkScope walk;
 	if (!nb::isinstance<nb::list>(object) && !nb::isinstance<nb::tuple>(object) && !nb::isinstance<nb::dict>(object)) {
@@ -420,16 +411,12 @@ Value PythonToValue(SCOPE &scope, nb::handle object, ConversionContext &ctx, Tim
 		}
 		return value;
 	}
-	Builder<SCOPE> builder {scope, ctx, precision};
+	Builder builder {scope, ctx, precision};
 	auto built = Build(builder, object);
 	if (contains_untyped != nullptr) {
 		*contains_untyped = built.contains_untyped;
 	}
 	return std::move(built.value);
 }
-
-template Value PythonToValue<Connection>(Connection &, nb::handle, ConversionContext &, TimestampPrecision, bool *);
-template Value PythonToValue<duckdb::cxx::Context>(duckdb::cxx::Context &, nb::handle, ConversionContext &,
-                                                   TimestampPrecision, bool *);
 
 } // namespace duckdb_python

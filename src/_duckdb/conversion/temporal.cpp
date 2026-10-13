@@ -26,11 +26,10 @@
 
 namespace duckdb_python {
 
+using duckdb::cxx::Factory;
 using duckdb::cxx::LogicalType;
 using duckdb::cxx::LogicalTypeId;
 using duckdb::cxx::Value;
-
-using duckdb::cxx::Connection;
 
 // Scaling the infinity markers would overflow and destroy them, so they pass through in their own unit. A coarse
 // unit can hold an instant no microsecond count can, which is unrepresentable rather than a wrapped value; the
@@ -120,8 +119,7 @@ uint64_t NanosPerCount(LogicalTypeId id) {
 	}
 }
 
-template <class SCOPE>
-Value TimestampValue(SCOPE &scope, LogicalTypeId id, int64_t count) {
+Value TimestampValue(Factory &scope, LogicalTypeId id, int64_t count) {
 	switch (id) {
 	case LogicalTypeId::TIMESTAMP_SEC:
 		return Value::Create(scope, duckdb::cxx::timestamp_s_t {count});
@@ -243,8 +241,7 @@ bool AssumesTimeZone(LogicalTypeId from, LogicalTypeId to) {
 	       (kind_from == TemporalKind::ZONED_INSTANT && kind_to == TemporalKind::ZONED_TIME);
 }
 
-template <class SCOPE>
-std::optional<Value> TryCastTemporalExactly(SCOPE &context, const Value &value, const LogicalType &target) {
+std::optional<Value> TryCastTemporalExactly(Factory &context, const Value &value, const LogicalType &target) {
 	const auto from = value.GetLogicalType().GetTypeId();
 	const auto to = target.GetTypeId();
 	if (AssumesTimeZone(from, to)) {
@@ -277,10 +274,6 @@ std::optional<Value> TryCastTemporalExactly(SCOPE &context, const Value &value, 
 	}
 }
 
-template std::optional<Value> TryCastTemporalExactly<Connection>(Connection &, const Value &, const LogicalType &);
-template std::optional<Value> TryCastTemporalExactly<duckdb::cxx::Context>(duckdb::cxx::Context &, const Value &,
-                                                                           const LogicalType &);
-
 // Where numpy's scaling of a count before printing it overflows int64, numpy refuses on some platforms and wraps to a
 // wrong value on others, so such a count is never handed to it.
 std::string ScalarText(nb::handle scalar, int64_t raw, uint64_t scale, const std::string &dtype) {
@@ -312,8 +305,7 @@ constexpr int64_t CALENDAR_LIMIT = int64_t(1) << 40;
 
 } // namespace
 
-template <class SCOPE>
-Value NumpyTemporalToValue(SCOPE &scope, nb::handle scalar, bool is_datetime, bool zoned,
+Value NumpyTemporalToValue(Factory &scope, nb::handle scalar, bool is_datetime, bool zoned,
                            TimestampPrecision precision) {
 	using duckdb::cxx::LogicalTypeId;
 	const auto raw = nb::cast<int64_t>(nb::int_(scalar.attr("view")("i8")));
@@ -412,10 +404,6 @@ Value NumpyTemporalToValue(SCOPE &scope, nb::handle scalar, bool is_datetime, bo
 	}
 	return TimestampValue(scope, target, count);
 }
-
-template Value NumpyTemporalToValue<Connection>(Connection &, nb::handle, bool, bool, TimestampPrecision);
-template Value NumpyTemporalToValue<duckdb::cxx::Context>(duckdb::cxx::Context &, nb::handle, bool, bool,
-                                                          TimestampPrecision);
 
 bool ContainsTemporal(const LogicalType &type) {
 	return Contains(type, [](LogicalTypeId id) { return KindOf(id) != TemporalKind::NONE; });

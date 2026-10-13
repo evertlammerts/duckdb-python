@@ -23,7 +23,7 @@ from duckdb import exceptions
 from duckdb.frame import col, fn, param
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
 with contextlib.suppress(ModuleNotFoundError):
     import pyarrow as pa
@@ -207,6 +207,24 @@ class TestReaderStreaming:
             con.run("SELECT 1")
         reader.close()
         assert sql("SELECT 1").rows(con) == [(1,)]
+
+    @pytest.mark.parametrize(
+        ("ask", "answer"),
+        [
+            ("schema", [("x", "INTEGER")]),
+            ("types", ["INTEGER"]),
+            ("columns", ["x"]),
+            ("render", 'WITH "_s0" AS (\nSELECT 1 AS x\n)\nSELECT * FROM "_s0" WHERE ("x" > 0)'),
+        ],
+    )
+    def test_an_open_reader_still_lets_a_plan_ask_for_its_columns(
+        self, con: duckdb.frame.Connection, ask: str, answer: object
+    ) -> None:
+        # The engine binds beside an open result; only a statement must wait for it.
+        reader = sql("SELECT i FROM range(1000000) t(i)").to_reader(con, batch_size=1000)
+        assert reader.read_next_batch().num_rows == 1000
+        assert getattr(sql("SELECT 1 AS x").filter(col("x") > 0), ask)(con) == answer
+        assert reader.read_all().num_rows == 999_000
 
     def test_the_first_batch_arrives_before_the_query_finishes(self, con: duckdb.frame.Connection) -> None:
         # Minutes of work in full; the reader is streaming only if a batch lands long before that.
@@ -514,6 +532,37 @@ class TestReentrantClose:
             b.create_function("close_a", close_a, ["BIGINT"], "BIGINT")
             assert sql("SELECT min(close_a(i)) AS v FROM range(3) t(i)").rows(b) == [(0,)]
             assert sql("SELECT 2").rows(a) == [(2,)]
+            with pytest.raises(OSError, match="result is closed"):
+                reader.read_all()
+        finally:
+            a.close()
+            b.close()
+
+    @pytest.mark.parametrize("use", ["schema", "filter", "register", "unregister", "create_function"])
+    def test_every_use_of_the_connection_completes_a_deferred_close(self, use: str) -> None:
+        # Each of these is refused while the stream holds the connection, so each must finish its close first.
+        a = duckdb.frame.connect(threads="1")
+        b = duckdb.frame.connect(threads="1")
+        try:
+            a.register("u", pa.table({"x": [1]}))
+            reader = sql("SELECT i FROM range(10) t(i)").to_reader(a)
+            held = next(iter(a._live_streams))
+
+            def close_a(value: int) -> int:
+                held.close()
+                return value
+
+            b.create_function("close_a", close_a, ["BIGINT"], "BIGINT")
+            assert sql("SELECT min(close_a(i)) AS v FROM range(3) t(i)").rows(b) == [(0,)]
+            uses: dict[str, Callable[[], object]] = {
+                "schema": lambda: sql("SELECT 2 AS x").schema(a),
+                "filter": lambda: sql("SELECT 2 AS x").filter(col("x") > 1).rows(a),
+                "register": lambda: a.register("t", pa.table({"x": [1]})),
+                "unregister": lambda: a.unregister("u"),
+                "create_function": lambda: a.create_function("g", abs, ["BIGINT"], "BIGINT"),
+            }
+            uses[use]()
+            assert not a._live_streams
             with pytest.raises(OSError, match="result is closed"):
                 reader.read_all()
         finally:
@@ -953,12 +1002,15 @@ class TestDatabaseRelease:
         def keep(v: int, reader: object = reader) -> int:
             return v
 
-        con.create_function("keep", keep, ["BIGINT"], "BIGINT")
+        # Registered through a second connection, since the open reader holds this one.
+        twin = con.duplicate()
+        twin.create_function("keep", keep, ["BIGINT"], "BIGINT")
         reader.read_all()
         gone = weakref.ref(keep)
         del keep, reader
+        twin.close()
         con.close()
-        del con
+        del con, twin
         gc.collect()
         assert gone() is None, "the stream kept its database pinned after the read ended"
 

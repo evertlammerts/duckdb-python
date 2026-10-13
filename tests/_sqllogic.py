@@ -176,7 +176,7 @@ def as_text(value: object, type_text: str = "") -> str:
 
 
 #: Characters that make DuckDB quote a value inside a nested one.
-_QUOTED_ON = set("\"'(),:=[]{}")
+_QUOTED_ON = set("\"'(),:=[\\]{}")
 
 
 def _nested_text(value: object, type_text: str) -> str:

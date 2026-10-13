@@ -24,11 +24,10 @@
 
 namespace duckdb_python {
 
+using duckdb::cxx::Factory;
 using duckdb::cxx::LogicalType;
 using duckdb::cxx::LogicalTypeId;
 using duckdb::cxx::Value;
-
-using duckdb::cxx::Connection;
 
 bool IsUntypedMarker(const LogicalType &type) {
 	return type.GetTypeId() == LogicalTypeId::INTEGER;
@@ -44,8 +43,7 @@ bool Unnamed(const LogicalType &type) {
 	return type.GetTypeId() != LogicalTypeId::STRUCT || AllUnnamed(StructNames(type));
 }
 
-template <class SCOPE>
-LogicalType Copy(SCOPE &scope, const LogicalType &type) {
+LogicalType Copy(Factory &scope, const LogicalType &type) {
 	return Value::CreateNull(scope, type).GetLogicalType();
 }
 
@@ -53,8 +51,7 @@ LogicalType Copy(SCOPE &scope, const LogicalType &type) {
 
 } // namespace
 
-template <class SCOPE>
-std::optional<LogicalType> FilledFromSibling(SCOPE &scope, const LogicalType &type, const LogicalType &filler,
+std::optional<LogicalType> FilledFromSibling(Factory &scope, const LogicalType &type, const LogicalType &filler,
                                              bool widen) {
 	if (IsUntypedMarker(type)) {
 		return IsUntypedMarker(filler) ? std::nullopt : std::optional<LogicalType>(Copy(scope, filler));
@@ -115,8 +112,7 @@ std::optional<LogicalType> FilledFromSibling(SCOPE &scope, const LogicalType &ty
 
 // `value` as a value of `type`, which differs from its own type only at untyped places, where only NULLs and empty
 // lists stand, so nothing else changes and no cast runs.
-template <class SCOPE>
-Value RelabelUntyped(SCOPE &scope, Value value, const LogicalType &type) {
+Value RelabelUntyped(Factory &scope, Value value, const LogicalType &type) {
 	if (value.IsNull()) {
 		return Value::CreateNull(scope, type);
 	}
@@ -157,13 +153,6 @@ Value RelabelUntyped(SCOPE &scope, Value value, const LogicalType &type) {
 	return Value::CreateStruct(scope, fields);
 }
 
-template std::optional<LogicalType> FilledFromSibling<Connection>(Connection &, const LogicalType &,
-                                                                  const LogicalType &, bool);
-template std::optional<LogicalType> FilledFromSibling<duckdb::cxx::Context>(duckdb::cxx::Context &, const LogicalType &,
-                                                                            const LogicalType &, bool);
-template Value RelabelUntyped<Connection>(Connection &, Value, const LogicalType &);
-template Value RelabelUntyped<duckdb::cxx::Context>(duckdb::cxx::Context &, Value, const LogicalType &);
-
 bool ContainsUnknownOrAny(const LogicalType &type) {
 	return Contains(type, [](LogicalTypeId id) {
 		return id == LogicalTypeId::INVALID || id == LogicalTypeId::SQLNULL || id == LogicalTypeId::UNKNOWN ||
@@ -176,8 +165,7 @@ namespace {
 // The type a value binds as with each untyped place taking the type the binder expects there, or nullopt when an
 // untyped place gets nothing: the expectation is UNKNOWN, its form differs, or it does not name the field. A place
 // the value types itself always keeps its type.
-template <class SCOPE>
-std::optional<LogicalType> FilledFromExpected(SCOPE &scope, const LogicalType &type, const LogicalType &expected) {
+std::optional<LogicalType> FilledFromExpected(Factory &scope, const LogicalType &type, const LogicalType &expected) {
 	if (!ContainsUntyped(type)) {
 		return Copy(scope, type);
 	}
@@ -233,8 +221,7 @@ std::optional<LogicalType> FilledFromExpected(SCOPE &scope, const LogicalType &t
 
 } // namespace
 
-template <class SCOPE>
-bool FillUntypedFromExpected(SCOPE &scope, Value &value, const LogicalType &expected) {
+bool FillUntypedFromExpected(Factory &scope, Value &value, const LogicalType &expected) {
 	auto target = FilledFromExpected(scope, value.GetLogicalType(), expected);
 	if (!target) {
 		return false;
@@ -242,7 +229,5 @@ bool FillUntypedFromExpected(SCOPE &scope, Value &value, const LogicalType &expe
 	value = RelabelUntyped(scope, std::move(value), *target);
 	return true;
 }
-
-template bool FillUntypedFromExpected<Connection>(Connection &, Value &, const LogicalType &);
 
 } // namespace duckdb_python

@@ -22,8 +22,7 @@ namespace duckdb_python {
 // is refused with a cast hint.
 
 /// The marker type an untyped value takes.
-template <class SCOPE>
-duckdb::cxx::LogicalType UntypedMarkerType(SCOPE &scope) {
+inline duckdb::cxx::LogicalType UntypedMarkerType(duckdb::cxx::Factory &scope) {
 	return scope.CreateType(duckdb::cxx::LogicalTypeId::INTEGER);
 }
 
@@ -40,33 +39,19 @@ bool ContainsUnknownOrAny(const duckdb::cxx::LogicalType &type);
 /// `type` with each untyped place typed as `filler` has it, struct fields meeting by exact name, or nullopt when
 /// that changes nothing. With `widen`, the fields only `filler` has are added, so one type collects what every
 /// sibling says.
-template <class SCOPE>
-std::optional<duckdb::cxx::LogicalType> FilledFromSibling(SCOPE &scope, const duckdb::cxx::LogicalType &type,
+std::optional<duckdb::cxx::LogicalType> FilledFromSibling(duckdb::cxx::Factory &scope,
+                                                          const duckdb::cxx::LogicalType &type,
                                                           const duckdb::cxx::LogicalType &filler, bool widen);
 
 /// `value` carrying `type`, which may differ from its own type only at untyped places, so nothing else changes
 /// and no cast runs.
-template <class SCOPE>
-duckdb::cxx::Value RelabelUntyped(SCOPE &scope, duckdb::cxx::Value value, const duckdb::cxx::LogicalType &type);
+duckdb::cxx::Value RelabelUntyped(duckdb::cxx::Factory &scope, duckdb::cxx::Value value,
+                                  const duckdb::cxx::LogicalType &type);
 
 /// `value` with each untyped place typed as `expected`, the type the binder expects at the value's position;
 /// struct fields pair by exact name and a place the value types itself is never cast. False, with `value`
 /// unchanged, when an untyped place gets nothing: the expectation's form differs or it does not name the field.
-template <class SCOPE>
-bool FillUntypedFromExpected(SCOPE &scope, duckdb::cxx::Value &value, const duckdb::cxx::LogicalType &expected);
-
-extern template std::optional<duckdb::cxx::LogicalType>
-FilledFromSibling<duckdb::cxx::Connection>(duckdb::cxx::Connection &, const duckdb::cxx::LogicalType &,
-                                           const duckdb::cxx::LogicalType &, bool);
-extern template std::optional<duckdb::cxx::LogicalType>
-FilledFromSibling<duckdb::cxx::Context>(duckdb::cxx::Context &, const duckdb::cxx::LogicalType &,
-                                        const duckdb::cxx::LogicalType &, bool);
-extern template duckdb::cxx::Value RelabelUntyped<duckdb::cxx::Connection>(duckdb::cxx::Connection &,
-                                                                           duckdb::cxx::Value,
-                                                                           const duckdb::cxx::LogicalType &);
-extern template duckdb::cxx::Value RelabelUntyped<duckdb::cxx::Context>(duckdb::cxx::Context &, duckdb::cxx::Value,
-                                                                        const duckdb::cxx::LogicalType &);
-extern template bool FillUntypedFromExpected<duckdb::cxx::Connection>(duckdb::cxx::Connection &, duckdb::cxx::Value &,
-                                                                      const duckdb::cxx::LogicalType &);
+bool FillUntypedFromExpected(duckdb::cxx::Factory &scope, duckdb::cxx::Value &value,
+                             const duckdb::cxx::LogicalType &expected);
 
 } // namespace duckdb_python

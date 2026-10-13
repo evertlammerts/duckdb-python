@@ -44,8 +44,7 @@ void ReplaceRegisteredName(cxx::ReplacementScan::Input &input) {
 		return;
 	}
 	input.SetFunctionName(entry->numpy_scan ? kNumpyScanFunction : kArrowScanFunction);
-	auto context = input.GetContext();
-	input.AddArgument(context.CreateValue(cxx::varchar_t(name.GetPart(0))));
+	input.AddArgument(input.GetContext().GetFactory().CreateValue(cxx::varchar_t(name.GetPart(0))));
 }
 
 } // namespace
@@ -116,15 +115,15 @@ void Registry::Clear() {
 void InstallRegistryScan(cxx::Instance &instance, std::shared_ptr<Registry> registry,
                          std::shared_ptr<ModuleState> module) {
 	const auto batch_rows =
-	    static_cast<cxx::idx_t>(std::stoull(std::string(instance.GetOption("standard_vector_size").GetValue())));
+	    static_cast<cxx::idx_t>(std::stoull(instance.GetConfig().GetOption("standard_vector_size").value.ToText()));
 	auto connection = instance.Connect();
 	RegisterArrowScan(connection, registry, module, batch_rows);
 	RegisterNumpyScan(connection, registry, std::move(module), batch_rows);
 
-	auto scan = cxx::ReplacementScan::Create(instance);
+	auto scan = cxx::ReplacementScan::Create(instance.GetFactory());
 	scan.SetUserData<ReplacementUserData>(ReplacementUserData {std::move(registry)});
 	scan.SetCallback(&ReplaceRegisteredName);
-	scan.Register();
+	instance.Register(scan);
 }
 
 } // namespace duckdb_python

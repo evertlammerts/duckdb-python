@@ -2,8 +2,8 @@
 
 Ported from the old client's contract tests in cursor vocabulary. Not portable to this face and so
 absent here: scripts (execute parses exactly one statement), UDFs, relations, and polars sources.
-Divergence kept deliberately: register() is a registry write here, no statement runs, so it stays
-free while a result is open.
+Divergence kept deliberately: register() runs no statement here, so it never ends an open result; like every
+other use of the connection, it is refused while one is open.
 """
 
 from __future__ import annotations
@@ -24,6 +24,9 @@ VECTOR = 2048
 #: The engine surfaces a stream's first batch only once its streaming buffer is full, so settling runs
 #: one buffer, not one vector; the fixtures shrink the buffer to 64KB (8192 BIGINTs) to pin the bound.
 SETTLED = 4 * VECTOR
+
+#: The ways to write a rollback; the last puts comments of both kinds before the keyword.
+ROLLBACKS = ["ROLLBACK", "ABORT", "ROLLBACK TRANSACTION", "abort work", "/* why */ -- and\n ROLLBACK"]
 
 
 def _bounded(connection: dbapi.Connection) -> None:
@@ -225,31 +228,34 @@ class TestSupersede:
         sequenced.execute(f"SELECT nextval('s') FROM range({ROWS})")
         assert currval(con) == ROWS
 
-    @pytest.mark.parametrize(
-        "statement", ["ROLLBACK", "ABORT", "ROLLBACK TRANSACTION", "abort work", "/* why */ -- and\n ROLLBACK"]
-    )
+    @pytest.mark.parametrize("statement", ROLLBACKS)
     def test_a_rollback_cancels_an_open_result_instead_of_draining_it(
         self, con: dbapi.Connection, statement: str
     ) -> None:
         cursor = con.cursor()
         cursor.execute("BEGIN")
-        # EXECUTE may write, so any other statement would drain it into its failing last row.
+        # Only a SELECT streams on this engine, and any supersede cancels one, so this pins the rollback's own
+        # disposal path rather than its difference from a drain.
         late = f"CASE WHEN i = {ROWS - 1} THEN error('late') ELSE i END"
-        cursor.execute(f"PREPARE p AS SELECT {late} FROM range({ROWS}) t(i)")
-        cursor.execute("EXECUTE p")
+        cursor.execute(f"SELECT {late} FROM range({ROWS}) t(i)")
         cursor.execute(statement)
         cursor.execute("SELECT 42")
         assert cursor.fetchall() == [(42,)]
 
-    def test_a_rollback_only_inside_a_comment_is_no_rollback(self, con: dbapi.Connection) -> None:
-        cursor = con.cursor()
-        cursor.execute("BEGIN")
-        late = f"CASE WHEN i = {ROWS - 1} THEN error('late') ELSE i END"
-        cursor.execute(f"PREPARE p AS SELECT {late} FROM range({ROWS}) t(i)")
-        cursor.execute("EXECUTE p")
-        # DuckDB nests block comments, so this is a SELECT, which drains the EXECUTE into its late error.
-        with pytest.raises(exceptions.InvalidInputError, match="late"):
-            cursor.execute("/* kept: /* undo */ ROLLBACK */ SELECT 42")
+    @pytest.mark.parametrize(
+        ("statement", "rolls_back"),
+        [
+            *((statement, True) for statement in ROLLBACKS),
+            # DuckDB nests block comments, so this is a SELECT.
+            ("/* kept: /* undo */ ROLLBACK */ SELECT 42", False),
+            ("SELECT 'ROLLBACK'", False),
+            ("COMMIT", False),
+        ],
+    )
+    def test_a_rollback_is_read_from_the_statement_not_its_text(
+        self, con: dbapi.Connection, statement: str, rolls_back: bool
+    ) -> None:
+        assert con._rolls_back(statement) is rolls_back
 
     def test_many_comments_before_a_statement_cost_no_time(self, con: dbapi.Connection) -> None:
         cursor = con.cursor()
@@ -473,13 +479,16 @@ class TestBusyRefusal:
 
 
 class TestRegisterDivergence:
-    def test_register_is_free_while_a_result_is_open(self, con: dbapi.Connection) -> None:
+    def test_register_is_refused_while_a_result_is_open(self, con: dbapi.Connection) -> None:
         np = pytest.importorskip("numpy")
         cursor = con.cursor()
         cursor.execute(f"SELECT * FROM range({ROWS})")
-        con.register("v", {"a": np.arange(3)})
-        # The open result reads on, untouched by the registration.
+        with pytest.raises(dbapi.OperationalError, match="live result; finish reading it or close it"):
+            con.register("v", {"a": np.arange(3)})
+        # The open result reads on, untouched by the refusal.
         assert cursor.fetchone() == (0,)
+        cursor.abort()
+        con.register("v", {"a": np.arange(3)})
         other = con.cursor()
         other.execute("SELECT count(*) FROM v")
         assert other.fetchone() == (3,)
