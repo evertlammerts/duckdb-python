@@ -58,7 +58,7 @@ class ConnectionClaim;
 //! lock and may wait for running tasks, so callers must not hold a lock those tasks need.
 class Result {
 public:
-	//! written_type is the statement as written: a prepared execution reports the EXECUTE that runs it
+	//! written_type is the submitted statement's own type, since the handle of a prepared execution reports EXECUTE
 	Result(unique_ptr<QueryResult> submitted, StatementType written_type, Format format, shared_ptr<Relation> relation);
 	~Result();
 

@@ -259,8 +259,7 @@ shared_ptr<Result> Session::Submit(const shared_ptr<Relation> &relation, const F
 	if (!relation->IsReadOnly()) {
 		auto handle = context->Submit(relation, parameters);
 		NameRefusal(*state, *handle);
-		// A relation that writes is no SELECT, so it runs to its end like any other write
-		return make_shared_ptr<Result>(std::move(handle), StatementType::INVALID_STATEMENT, format, relation);
+		return make_shared_ptr<Result>(std::move(handle), StatementType::RELATION_STATEMENT, format, relation);
 	}
 	auto select = make_uniq<SelectStatement>();
 	select->node = relation->GetQueryNode();
