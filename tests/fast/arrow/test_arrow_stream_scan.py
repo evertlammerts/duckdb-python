@@ -225,33 +225,9 @@ class TestPyArrowTableUnifiedPath:
 class TestRecordBatchReaderSingleUse:
     """RecordBatchReaders are inherently single-use streams.
 
-    After the first scan consumes the reader, subsequent scans return empty results.
-    This is correct behavior — RecordBatchReaders represent forward-only streams
-    (e.g., reading from a socket or file).
+    RecordBatchReaders represent forward-only streams (e.g., reading from a socket or file). Scanning one more
+    than once is covered in test_arrow_single_use_stream.py; a single scan still gets pushdown.
     """
-
-    def test_second_scan_empty(self, duckdb_cursor):
-        """Second scan of a RecordBatchReader returns empty results."""
-        reader = pa.RecordBatchReader.from_batches(  # noqa: F841
-            pa.schema([("id", pa.int64())]),
-            [pa.record_batch([pa.array([1, 2, 3])], names=["id"])],
-        )
-        r1 = duckdb_cursor.sql("SELECT * FROM reader").fetchall()
-        assert r1 == [(1,), (2,), (3,)]
-        r2 = duckdb_cursor.sql("SELECT * FROM reader").fetchall()
-        assert r2 == []
-
-    def test_register_second_scan_empty(self, duckdb_cursor):
-        """Registered RecordBatchReader is also single-use."""
-        reader = pa.RecordBatchReader.from_batches(
-            pa.schema([("id", pa.int64())]),
-            [pa.record_batch([pa.array([1, 2, 3])], names=["id"])],
-        )
-        duckdb_cursor.register("my_reader", reader)
-        r1 = duckdb_cursor.sql("SELECT * FROM my_reader").fetchall()
-        assert r1 == [(1,), (2,), (3,)]
-        r2 = duckdb_cursor.sql("SELECT * FROM my_reader").fetchall()
-        assert r2 == []
 
     def test_has_pushdown(self, duckdb_cursor):
         """RecordBatchReader gets projection/filter pushdown (not materialized)."""

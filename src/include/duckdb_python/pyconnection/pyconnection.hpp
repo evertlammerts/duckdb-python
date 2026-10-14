@@ -262,6 +262,7 @@ public:
 	static std::shared_ptr<DuckDBPyConnection> DefaultConnection();
 	static void SetDefaultConnection(std::shared_ptr<DuckDBPyConnection> conn);
 	static PythonImportCache *ImportCache();
+	static nb::object ConsumedArrowReaders();
 	static bool IsInteractive();
 
 	std::unique_ptr<DuckDBPyRelation> ReadCSV(const nb::object &name, nb::kwargs &kwargs);

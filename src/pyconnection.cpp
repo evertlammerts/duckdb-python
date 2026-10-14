@@ -54,6 +54,8 @@ struct DuckDBPyModuleState {
 	DefaultConnectionHolder default_connection;
 	DBInstanceCache instance_cache;
 	std::shared_ptr<PythonImportCache> import_cache;
+	//! The single-use Arrow readers that have handed out their stream, by identity and held weakly
+	unique_ptr<PyObjectHolder> consumed_arrow_readers;
 	PythonEnvironmentType environment = PythonEnvironmentType::NORMAL;
 	std::string formatted_python_version;
 };
@@ -2434,6 +2436,18 @@ PythonImportCache *DuckDBPyConnection::ImportCache() {
 	return import_cache.get();
 }
 
+nb::object DuckDBPyConnection::ConsumedArrowReaders() {
+	auto &readers = GetModuleState().consumed_arrow_readers;
+	if (!readers) {
+		nb::dict record;
+		// Creating the record can run Python, so another thread may have published one in the meantime.
+		if (!readers) {
+			readers = make_uniq<PyObjectHolder>(std::move(record));
+		}
+	}
+	return readers->obj;
+}
+
 ModifiedMemoryFileSystem &DuckDBPyConnection::GetObjectFileSystem() {
 	if (!internal_object_filesystem) {
 		D_ASSERT(!FileSystemIsRegistered("DUCKDB_INTERNAL_OBJECTSTORE"));
@@ -2471,6 +2485,7 @@ void DuckDBPyConnection::Exit(DuckDBPyConnection &self, const nb::object &exc_ty
 void DuckDBPyConnection::Cleanup() {
 	GetModuleState().default_connection.Set(nullptr);
 	GetModuleState().import_cache.reset();
+	GetModuleState().consumed_arrow_readers.reset();
 }
 
 bool DuckDBPyConnection::IsPandasDataframe(const nb::object &object) {
