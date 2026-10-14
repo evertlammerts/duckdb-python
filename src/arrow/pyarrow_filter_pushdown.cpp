@@ -5,6 +5,7 @@
 #include "duckdb_python/python_objects.hpp"
 #include "duckdb_python/pyrelation.hpp"
 #include "duckdb/function/table/arrow.hpp"
+#include <cmath>
 
 namespace duckdb {
 
@@ -235,8 +236,8 @@ struct PyArrowBackend : public FilterBackend {
 			// Nothing is greater than NaN.
 			return dataset_scalar(false);
 		case ExpressionType::COMPARE_LESSTHANOREQUALTO:
-			// Everything is less than or equal to NaN.
-			return dataset_scalar(true);
+			// NaN sorts above every other value, so only NULL rows fail.
+			return IsNotNull(std::move(col));
 		default:
 			throw NotImplementedException("Unsupported comparison type (%s) for NaN values",
 			                              ExpressionTypeToString(op));
@@ -257,10 +258,52 @@ struct PyArrowBackend : public FilterBackend {
 
 	nb::object IsIn(nb::object col, const vector<Value> &values, const LogicalType &col_logical_type,
 	                const string &timezone_config) override {
-		// PyArrow accepts a plain Python list of Python-typed scalars; type
-		// coercion happens inside the scanner. We don't need the column type.
-		(void)col_logical_type;
 		(void)timezone_config;
+		const auto col_type_id = col_logical_type.id();
+		const bool is_float = col_type_id == LogicalTypeId::FLOAT || col_type_id == LogicalTypeId::DOUBLE;
+
+		// isin compares float bits (missing -0.0 and NaN payloads), and is_nan has no dictionary kernel.
+		if (is_float) {
+			bool has_zero = false;
+			nb::list non_zero_values;
+
+			for (auto &val : values) {
+				if (val.IsNull()) {
+					non_zero_values.append(PythonObject::FromValue(val, val.type(), client_properties));
+					continue;
+				}
+
+				double dbl = col_type_id == LogicalTypeId::FLOAT ? static_cast<double>(val.GetValue<float>())
+				                                                 : val.GetValue<double>();
+
+				if (std::isnan(dbl)) {
+					throw NotImplementedException(
+					    "Arrow filter pushdown: IN list with NaN over float/double is not pushed");
+				}
+
+				if (dbl == 0.0) {
+					has_zero = true;
+				} else {
+					non_zero_values.append(PythonObject::FromValue(val, val.type(), client_properties));
+				}
+			}
+
+			if (has_zero) {
+				auto zero_expr = Compare(ExpressionType::COMPARE_EQUAL, col, dataset_scalar(0.0));
+				if (nb::len(non_zero_values) > 0) {
+					auto isin_expr = col.attr("isin")(non_zero_values);
+					return Or(zero_expr, isin_expr);
+				}
+				return zero_expr;
+			}
+
+			if (nb::len(non_zero_values) > 0) {
+				return col.attr("isin")(non_zero_values);
+			}
+
+			return dataset_scalar(false);
+		}
+
 		nb::list py_values;
 		for (auto &val : values) {
 			py_values.append(PythonObject::FromValue(val, val.type(), client_properties));
