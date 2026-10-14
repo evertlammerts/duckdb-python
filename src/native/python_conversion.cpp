@@ -61,12 +61,12 @@ static Value EmptyMapValue() {
 	return Value::MAP(ListType::GetChildType(map_type), vector<Value>());
 }
 
-vector<Identifier> TransformStructKeys(nb::handle keys, idx_t size, const LogicalType &type = LogicalType::UNKNOWN) {
+static vector<Identifier> TransformStructKeys(nb::handle keys, idx_t size) {
 	vector<Identifier> res;
 	res.reserve(size);
 	for (idx_t i = 0; i < size; i++) {
-		// Stringify via str() so non-string keys (e.g. the integer keys of a hashable-key MAP, which DuckDB
-		// produces as a plain {1: 10} dict) are accepted -- nanobind's nb::cast<std::string> rejects non-str.
+		// str() accepts non-string keys, such as the integer keys of a MAP that DuckDB returns as a plain {1: 10}
+		// dict, which nanobind's nb::cast<std::string> rejects.
 		res.emplace_back(Identifier(nb::cast<std::string>(nb::str(keys.attr("__getitem__")(i)))));
 	}
 	return res;
@@ -122,26 +122,58 @@ bool DictionaryHasMapFormat(const PyDictionary &dict) {
 
 Value TransformDictionaryToStruct(optional_ptr<ClientContext> context, const PyDictionary &dict,
                                   const LogicalType &target_type = LogicalType::UNKNOWN) {
-	auto struct_keys = TransformStructKeys(dict.keys, dict.len, target_type);
-
-	bool struct_target = target_type.id() == LogicalTypeId::STRUCT || target_type.id() == LogicalTypeId::TUPLE;
+	auto conversion_error = [&]() {
+		return InvalidInputException("We could not convert the object %s to the desired target type (%s)",
+		                             dict.ToString(), target_type.ToString());
+	};
+	bool struct_target = StructType::IsStruct(target_type);
 	if (struct_target && dict.len != StructType::GetChildCount(target_type)) {
-		throw InvalidInputException("We could not convert the object %s to the desired target type (%s)",
-		                            dict.ToString(), target_type.ToString());
-	}
-
-	identifier_map_t<idx_t> key_mapping;
-	for (idx_t i = 0; i < struct_keys.size(); i++) {
-		key_mapping[struct_keys[i]] = i;
+		throw conversion_error();
 	}
 
 	child_list_t<Value> struct_values;
+	if (StructType::IsUnnamed(target_type)) {
+		// A TUPLE has no member names, so its members take the dict's values in dict order.
+		for (idx_t i = 0; i < dict.len; i++) {
+			auto val = TransformPythonValue(context, dict.values.attr("__getitem__")(i),
+			                                StructType::GetChildType(target_type, i));
+			struct_values.emplace_back(make_pair(StructType::GetChildName(target_type, i), std::move(val)));
+		}
+		return Value::STRUCT(std::move(struct_values));
+	}
+
+	auto struct_keys = TransformStructKeys(dict.keys, dict.len);
+	if (!struct_target) {
+		for (idx_t i = 0; i < dict.len; i++) {
+			auto val = TransformPythonValue(context, dict.values.attr("__getitem__")(i), LogicalType::UNKNOWN);
+			struct_values.emplace_back(make_pair(std::move(struct_keys[i]), std::move(val)));
+		}
+		return Value::STRUCT(std::move(struct_values));
+	}
+
+	// Keys that are distinct in Python but equal as identifiers would both claim one STRUCT field.
+	identifier_map_t<idx_t> key_mapping;
+	for (idx_t i = 0; i < struct_keys.size(); i++) {
+		if (!key_mapping.emplace(struct_keys[i], i).second) {
+			throw conversion_error();
+		}
+	}
+	// Every field finds its key before any value converts, so a key mismatch never surfaces as a value cast error.
+	vector<idx_t> value_indexes;
+	value_indexes.reserve(dict.len);
 	for (idx_t i = 0; i < dict.len; i++) {
-		auto &key = struct_target ? StructType::GetChildName(target_type, i) : struct_keys[i];
-		auto value_index = struct_target ? key_mapping[key] : i;
-		auto &child_type = struct_target ? StructType::GetChildType(target_type, i) : LogicalType::UNKNOWN;
-		auto val = TransformPythonValue(context, dict.values.attr("__getitem__")(value_index), child_type);
-		struct_values.emplace_back(make_pair(std::move(key), std::move(val)));
+		auto entry = key_mapping.find(StructType::GetChildName(target_type, i));
+		if (entry == key_mapping.end()) {
+			throw conversion_error();
+		}
+		value_indexes.push_back(entry->second);
+		// Fields equal ignoring case would otherwise all read one key.
+		key_mapping.erase(entry);
+	}
+	for (idx_t i = 0; i < dict.len; i++) {
+		auto val = TransformPythonValue(context, dict.values.attr("__getitem__")(value_indexes[i]),
+		                                StructType::GetChildType(target_type, i));
+		struct_values.emplace_back(make_pair(StructType::GetChildName(target_type, i), std::move(val)));
 	}
 	return Value::STRUCT(std::move(struct_values));
 }
