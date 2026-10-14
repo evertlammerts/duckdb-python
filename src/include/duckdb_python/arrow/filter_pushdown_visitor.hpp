@@ -27,10 +27,9 @@ namespace duckdb {
 // matter of implementing this interface; the walker itself is reused.
 //
 // Convention: a backend method that cannot push the given filter must throw
-// `NotImplementedException`. The walker swallows it at optional-filter
-// boundaries (an optional filter is not required for correctness) and the
-// top-level entry points catch it too, returning `nb::none()` for the affected
-// column. Throwing keeps the "I can't push this" path uniform across backends,
+// `NotImplementedException`. The optional-filter wrapper swallows it (an optional
+// filter is not required for correctness) and returns `nb::none()`, dropping the
+// filter. Throwing keeps the "I can't push this" path uniform across backends,
 // replacing the old polars walker's ad hoc `return nb::none()` style.
 struct FilterBackend {
 	virtual ~FilterBackend() = default;
@@ -52,7 +51,7 @@ struct FilterBackend {
 	virtual nb::object Compare(ExpressionType op, nb::object col, nb::object scalar) = 0;
 
 	// NaN-specific comparison. DuckDB treats NaN as the greatest value, so
-	// each operator decomposes into is_nan / ~is_nan / lit(true|false).
+	// each operator decomposes into is_nan / ~is_nan / is_valid / lit(true|false).
 	virtual nb::object NaNCompare(ExpressionType op, nb::object col) = 0;
 
 	// Column-side NaN predicate: `col.is_nan()`. Used to re-include NaN rows for `>` / `>=` against a
@@ -63,10 +62,10 @@ struct FilterBackend {
 	virtual nb::object IsNull(nb::object col) = 0;
 	virtual nb::object IsNotNull(nb::object col) = 0;
 
-	// IN list. `col_logical_type` is the column's DuckDB logical type — needed
-	// by polars to construct a typed Series with matching precision/scale for
-	// decimal columns. PyArrow ignores this parameter and uses MakeScalar
-	// per-element.
+	// IN list. `col_logical_type` is the column's DuckDB logical type: polars
+	// uses it to construct a typed Series with matching precision/scale for
+	// decimal columns; pyarrow uses it to detect float columns and decline NaN
+	// lists, and to match zero constants with == 0.0.
 	virtual nb::object IsIn(nb::object col, const vector<Value> &values, const LogicalType &col_logical_type,
 	                        const string &timezone_config) = 0;
 
