@@ -61,7 +61,8 @@ struct DuckDBPyModuleState {
 };
 
 static DuckDBPyModuleState &GetModuleState() {
-	static DuckDBPyModuleState state; // NOLINT: allow global - sole module-state seam (future: PyModule_GetState)
+	// Never destroyed: static destructors run after Py_Finalize, too late to release Python references
+	static auto &state = *new DuckDBPyModuleState(); // NOLINT: allow global - sole module-state seam
 	return state;
 }
 
