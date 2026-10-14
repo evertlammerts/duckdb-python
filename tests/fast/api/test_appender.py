@@ -11,10 +11,6 @@ import pytest
 import duckdb
 from duckdb.sqltypes import BIGINT, INTEGER, SQLNULL, VARCHAR
 
-ACTIONS_NOT_BUILT = pytest.mark.xfail(
-    strict=True, raises=TypeError, reason="the action and key arguments of appender() are not implemented yet"
-)
-
 WRONG_ARITY = duckdb.InvalidInputException
 CONCURRENT_USE = duckdb.ResourceInUseException
 CLOSED = duckdb.ConnectionException
@@ -357,7 +353,6 @@ class TestDefaultInsert:
             default.execute("DROP TABLE appender_default_target")
 
 
-@ACTIONS_NOT_BUILT
 class TestTableActions:
     def test_upsert_replaces_rows_on_the_unique_key(self, con):
         con.execute("INSERT INTO t VALUES (1, 'old'), (2, 'kept')")
@@ -385,6 +380,27 @@ class TestTableActions:
         app.append_rows([(1, "new"), (2, "added")])
         app.flush()
         assert table_rows(con, "d") == [(1, "new", "kept"), (2, "added", "default")]
+
+    def test_an_upsert_that_leaves_out_the_key_is_accepted_and_its_flush_fails(self, con):
+        app = con.appender("t", action="upsert", columns=["v"])
+        app.append_row("no key")
+        with pytest.raises(duckdb.ConstraintException):
+            app.flush()
+
+    def test_an_upsert_of_only_the_key_inserts_new_keys_and_leaves_existing_rows_alone(self, con):
+        con.execute("INSERT INTO t VALUES (1, 'old')")
+        app = con.appender("t", action="upsert", columns=["k"])
+        app.append_rows([(1,), (2,)])
+        app.flush()
+        assert table_rows(con) == [(1, "old"), (2, None)]
+
+    def test_an_upsert_matches_on_a_composite_primary_key(self, con):
+        con.execute("CREATE TABLE cp (a INTEGER, b INTEGER, v VARCHAR, PRIMARY KEY (a, b))")
+        con.execute("INSERT INTO cp VALUES (1, 1, 'x'), (1, 2, 'y')")
+        app = con.appender("cp", action="upsert")
+        app.append_rows([(1, 2, "Y"), (2, 1, "new")])
+        app.flush()
+        assert table_rows(con, "cp") == [(1, 1, "x"), (1, 2, "Y"), (2, 1, "new")]
 
     def test_update_sets_every_other_buffered_column_on_rows_matching_the_key(self, con):
         con.execute("CREATE TABLE u (k INTEGER PRIMARY KEY, v VARCHAR, w INTEGER)")
@@ -423,24 +439,184 @@ class TestTableActions:
         with pytest.raises(WRONG_ARITY):
             app.append_row(1, "a")
 
+    def test_delete_buffers_its_key_in_the_order_given(self, con):
+        con.execute("CREATE TABLE pairs (a INTEGER, b INTEGER, note VARCHAR)")
+        con.execute("INSERT INTO pairs VALUES (1, 1, 'x'), (1, 2, 'y'), (2, 1, 'z')")
+        app = con.appender("pairs", action="delete", key=["b", "a"])
+        app.append_row(2, 1)
+        app.flush()
+        assert table_rows(con, "pairs") == [(1, 1, "x"), (2, 1, "z")]
+
     @pytest.mark.parametrize(
-        "options",
+        ("options", "reason"),
         [
-            pytest.param({"key": ["k"]}, id="key_with_insert"),
-            pytest.param({"action": "insert", "key": ["k"]}, id="key_with_explicit_insert"),
-            pytest.param({"action": "upsert", "key": ["k"]}, id="key_with_upsert"),
-            pytest.param({"action": "update"}, id="update_without_key"),
-            pytest.param({"action": "delete"}, id="delete_without_key"),
-            pytest.param({"action": "update", "key": ["k"], "columns": ["v"]}, id="key_outside_the_buffer"),
-            pytest.param({"action": "update", "key": ["nope"]}, id="key_not_a_column"),
-            pytest.param({"action": "update", "key": ["k"], "columns": ["k"]}, id="update_of_nothing_but_the_key"),
-            pytest.param({"action": "delete", "key": ["k"], "columns": ["k"]}, id="delete_with_columns"),
-            pytest.param({"action": "merge"}, id="unknown_action"),
+            pytest.param({"key": ["k"]}, "key applies to the update and delete", id="key_with_insert"),
+            pytest.param(
+                {"action": "insert", "key": ["k"]},
+                "key applies to the update and delete",
+                id="key_with_explicit_insert",
+            ),
+            pytest.param(
+                {"action": "upsert", "key": ["k"]}, "key applies to the update and delete", id="key_with_upsert"
+            ),
+            pytest.param({"action": "update"}, "update action needs key", id="update_without_key"),
+            pytest.param({"action": "delete"}, "delete action needs key", id="delete_without_key"),
+            pytest.param(
+                {"action": "update", "key": ["k"], "columns": ["v"]},
+                "not one of the appender's columns",
+                id="key_outside_the_buffer",
+            ),
+            pytest.param({"action": "update", "key": ["nope"]}, "nope is not a column", id="key_not_a_column"),
+            pytest.param(
+                {"action": "update", "key": ["k"], "columns": ["k"]},
+                "columns other than the key",
+                id="update_of_nothing_but_the_key",
+            ),
+            pytest.param(
+                {"action": "delete", "key": ["k"], "columns": ["k"]}, "takes no columns", id="delete_with_columns"
+            ),
+            pytest.param({"action": "merge"}, '"insert", "upsert", "update" or "delete"', id="unknown_action"),
         ],
     )
-    def test_a_bad_action_is_refused_at_creation(self, con, options):
-        with pytest.raises(duckdb.InvalidInputException):
+    def test_a_bad_action_is_refused_at_creation(self, con, options, reason):
+        with pytest.raises(duckdb.InvalidInputException, match=re.escape(reason)):
             con.appender("t", **options)
+
+    @pytest.mark.parametrize("action", ["update", "delete"])
+    @pytest.mark.parametrize(
+        ("key", "reason"),
+        [
+            pytest.param([], "action needs key", id="empty"),
+            pytest.param(["k", "k"], "key names k twice", id="repeated"),
+            pytest.param(["k", "K"], "key names K twice", id="repeated_ignoring_case"),
+        ],
+    )
+    def test_an_empty_or_repeated_key_is_refused(self, con, action, key, reason):
+        with pytest.raises(duckdb.InvalidInputException, match=reason):
+            con.appender("t", action=action, key=key)
+
+    @pytest.mark.parametrize("action", ["update", "delete"])
+    def test_a_generated_key_column_is_refused(self, con, action):
+        con.execute("CREATE TABLE g (a INTEGER, b INTEGER GENERATED ALWAYS AS (a * 2), c VARCHAR)")
+        with pytest.raises(duckdb.InvalidInputException, match="b is a generated column"):
+            con.appender("g", action=action, key=["b"])
+
+    def test_the_key_must_be_a_list(self, con):
+        with pytest.raises(TypeError):
+            con.appender("t", action="delete", key="k")
+
+    def test_update_matches_on_every_key_column(self, con):
+        con.execute("CREATE TABLE pairs (a INTEGER, b INTEGER, note VARCHAR)")
+        con.execute("INSERT INTO pairs VALUES (1, 1, 'x'), (1, 2, 'y'), (2, 1, 'z')")
+        app = con.appender("pairs", action="update", key=["a", "b"])
+        app.append_rows([(1, 2, "Y"), (2, 2, "nothing matches")])
+        app.flush()
+        assert table_rows(con, "pairs") == [(1, 1, "x"), (1, 2, "Y"), (2, 1, "z")]
+
+    @pytest.mark.parametrize("name", ["appender_data", "appender_buffer", "appender_target", "excluded"])
+    @pytest.mark.parametrize(
+        ("action", "key", "rows", "expected"),
+        [
+            pytest.param(
+                "upsert", None, [(1, "new"), (3, "added")], [(1, "new"), (2, "old"), (3, "added")], id="upsert"
+            ),
+            pytest.param("update", ["k"], [(1, "new"), (3, "missing")], [(1, "new"), (2, "old")], id="update"),
+            pytest.param("delete", ["k"], [(1,)], [(2, "old")], id="delete"),
+        ],
+    )
+    def test_each_action_works_on_a_table_named_like_a_name_the_statement_uses(
+        self, con, name, action, key, rows, expected
+    ):
+        con.execute(f"CREATE TABLE {name} (k INTEGER PRIMARY KEY, v VARCHAR)")
+        con.execute(f"INSERT INTO {name} VALUES (1, 'old'), (2, 'old')")
+        app = con.appender(name, action=action, key=key)
+        app.append_rows(rows)
+        app.flush()
+        assert table_rows(con, name) == expected
+
+    @pytest.mark.parametrize(
+        ("action", "key", "rows", "expected"),
+        [
+            pytest.param("upsert", None, [(1, "A"), (3, "c")], [(1, "A"), (2, "b"), (3, "c")], id="upsert"),
+            pytest.param("update", ["select"], [(1, "A")], [(1, "A"), (2, "b")], id="update"),
+            pytest.param("delete", ["select"], [(1,)], [(2, "b")], id="delete"),
+        ],
+    )
+    def test_each_action_quotes_a_qualified_table_and_odd_column_names(self, con, action, key, rows, expected):
+        con.execute('CREATE SCHEMA "odd schema"')
+        con.execute('CREATE TABLE "odd schema"."my table" ("select" INTEGER PRIMARY KEY, "two words" VARCHAR)')
+        con.execute("""INSERT INTO "odd schema"."my table" VALUES (1, 'a'), (2, 'b')""")
+        app = con.appender('"odd schema"."my table"', action=action, key=key)
+        app.append_rows(rows)
+        app.flush()
+        assert table_rows(con, '"odd schema"."my table"') == expected
+
+    @pytest.mark.parametrize(
+        ("action", "rows", "expected"),
+        [
+            pytest.param("update", [(1, "z")], [(1, "z"), (1, "z"), (2, "c")], id="update"),
+            pytest.param("delete", [(1,)], [(2, "c")], id="delete"),
+        ],
+    )
+    def test_a_key_that_matches_several_rows_acts_on_all_of_them(self, con, action, rows, expected):
+        con.execute("CREATE TABLE groups (g INTEGER, v VARCHAR)")
+        con.execute("INSERT INTO groups VALUES (1, 'a'), (1, 'b'), (2, 'c')")
+        app = con.appender("groups", action=action, key=["g"])
+        app.append_rows(rows)
+        app.flush()
+        assert table_rows(con, "groups") == expected
+
+    @pytest.mark.parametrize(
+        ("action", "key"), [pytest.param("upsert", None, id="upsert"), pytest.param("update", ["k"], id="update")]
+    )
+    def test_a_generated_column_follows_the_columns_an_action_writes(self, con, action, key):
+        con.execute("CREATE TABLE gen (k INTEGER PRIMARY KEY, a INTEGER, d INTEGER GENERATED ALWAYS AS (a * 2))")
+        con.execute("INSERT INTO gen (k, a) VALUES (1, 10)")
+        app = con.appender("gen", action=action, key=key)
+        app.append_row(1, 11)
+        app.flush()
+        assert table_rows(con, "gen") == [(1, 11, 22)]
+
+    def test_the_module_level_function_takes_an_action_and_a_key(self, con):
+        con.execute("INSERT INTO t VALUES (1, 'a'), (2, 'b')")
+        app = duckdb.appender("t", action="delete", key=["k"], connection=con)
+        app.append_row(1)
+        app.flush()
+        assert table_rows(con) == [(2, "b")]
+
+    def test_an_upsert_refused_by_the_bind_leaves_the_open_transaction_usable(self, con):
+        con.execute("CREATE TABLE plain (k INTEGER, v VARCHAR)")
+        con.execute("BEGIN")
+        con.execute("INSERT INTO t VALUES (1, 'a')")
+        with pytest.raises(duckdb.BinderException):
+            con.appender("plain", action="upsert")
+        con.execute("INSERT INTO t VALUES (2, 'b')")
+        con.execute("COMMIT")
+        assert table_rows(con) == [(1, "a"), (2, "b")]
+
+    def test_the_key_list_is_read_once_at_creation(self):
+        code, output = run_isolated(
+            """
+            import duckdb
+            con = duckdb.connect()
+            con.execute("CREATE TABLE u (k INTEGER PRIMARY KEY, v VARCHAR)")
+            con.execute("INSERT INTO u VALUES (1, 'a')")
+            key = []
+            class Name:
+                # Converting this name clears the list, so a second read of the list would see no key
+                def __str__(self):
+                    key.clear()
+                    return "k"
+            key.append(Name())
+            print("started", flush=True)
+            app = con.appender("u", action="update", key=key)
+            app.append_row(1, "A")
+            app.flush()
+            print("rows:", con.execute("SELECT * FROM u").fetchall())
+            """
+        )
+        assert code == 0, output
+        assert "rows: [(1, 'A')]" in output
 
 
 class TestCustomColumns:
@@ -861,6 +1037,19 @@ class TestCheckedAtCreation:
             create(con)
         con.rollback()
         create(con)
+
+    @pytest.mark.parametrize(
+        "options", [{"action": "merge"}, {"action": "update"}], ids=["unknown_action", "update_without_key"]
+    )
+    def test_an_aborted_transaction_is_reported_before_a_bad_action(self, con, options):
+        con.begin()
+        with pytest.raises(duckdb.InvalidInputException):
+            con.execute("SELECT error('boom')")
+        with pytest.raises(duckdb.TransactionException):
+            con.appender("t", **options)
+        con.rollback()
+        with pytest.raises(duckdb.InvalidInputException):
+            con.appender("t", **options)
 
 
 class TestRows:
@@ -1620,10 +1809,15 @@ class TestClosedConnection:
         with pytest.raises(CLOSED):
             app.flush()
 
-    def test_creating_an_appender_on_a_closed_connection_raises(self, con):
+    @pytest.mark.parametrize(
+        "options",
+        [{}, {"action": "merge"}, {"action": "update"}],
+        ids=["insert", "unknown_action", "update_without_key"],
+    )
+    def test_creating_an_appender_on_a_closed_connection_raises(self, con, options):
         con.close()
         with pytest.raises(CLOSED):
-            con.appender("t")
+            con.appender("t", **options)
 
     def test_an_appender_on_a_cursor_raises_once_its_parent_is_closed(self, con):
         app = con.cursor().appender("t")

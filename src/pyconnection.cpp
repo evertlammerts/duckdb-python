@@ -325,9 +325,12 @@ static void InitializeConnectionMethods(nb::class_<DuckDBPyConnection> &m) {
 	      "Synchronizes data in the write-ahead log (WAL) to the database data file (no-op for in-memory connections)");
 	m.def("append", &DuckDBPyConnection::Append, "Append the passed DataFrame to the named table",
 	      nb::arg("table_name"), nb::arg("df"), nb::kw_only(), nb::arg("by_name") = false);
-	m.def("appender", &DuckDBPyConnection::CreateAppender,
-	      "Create an appender that buffers rows and inserts them into the named table at each flush", nb::arg("table"),
-	      nb::kw_only(), nb::arg("columns").none() = nb::none());
+	m.def(
+	    "appender", &DuckDBPyConnection::CreateAppender,
+	    "Create an appender that buffers rows and inserts, upserts, updates or deletes them in the named table at each "
+	    "flush",
+	    nb::arg("table"), nb::kw_only(), nb::arg("columns").none() = nb::none(), nb::arg("action") = "insert",
+	    nb::arg("key").none() = nb::none());
 	m.def("query_appender", &DuckDBPyConnection::CreateQueryAppender,
 	      "Create an appender that buffers rows of the declared columns and runs the DML over them at each flush",
 	      nb::arg("dml"), nb::arg("columns"), nb::kw_only(), nb::arg("source").none() = nb::none());
@@ -860,8 +863,10 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::Execute(const nb::object
 }
 
 std::unique_ptr<DuckDBPyAppender> DuckDBPyConnection::CreateAppender(const string &table,
-                                                                     const std::optional<nb::list> &columns) {
-	return DuckDBPyAppender::ForTable(shared_from_this(), table, columns);
+                                                                     const std::optional<nb::list> &columns,
+                                                                     const string &action,
+                                                                     const std::optional<nb::list> &key) {
+	return DuckDBPyAppender::ForTable(shared_from_this(), table, columns, action, key);
 }
 
 std::unique_ptr<DuckDBPyAppender> DuckDBPyConnection::CreateQueryAppender(const string &dml, const nb::dict &columns,

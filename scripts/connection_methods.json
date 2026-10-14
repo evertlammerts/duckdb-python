@@ -448,7 +448,7 @@
 	{
 		"name": "appender",
 		"function": "CreateAppender",
-		"docs": "Create an appender that buffers rows and inserts them into the named table at each flush",
+		"docs": "Create an appender that buffers rows and inserts, upserts, updates or deletes them in the named table at each flush",
 		"args": [
 			{
 				"name": "table",
@@ -458,6 +458,16 @@
 		"kwargs": [
 			{
 				"name": "columns",
+				"default": "None",
+				"type": "Optional[list[str]]"
+			},
+			{
+				"name": "action",
+				"default": "\"insert\"",
+				"type": "Literal[\"insert\", \"upsert\", \"update\", \"delete\"]"
+			},
+			{
+				"name": "key",
 				"default": "None",
 				"type": "Optional[list[str]]"
 			}

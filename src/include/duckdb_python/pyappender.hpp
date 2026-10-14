@@ -22,9 +22,11 @@ struct DuckDBPyConnection;
 //! appender_buffer and the source query over them as the CTE appender_data, ahead of the DML's own CTEs.
 class DuckDBPyAppender {
 public:
-	//! Inserts into a table, resolved once now, taking its non-generated columns or the listed ones
+	//! Inserts, upserts or updates rows of a table, resolved once now, over its non-generated columns or the listed
+	//! ones, or deletes its rows over just the key columns; an update or delete matches rows on the key
 	static std::unique_ptr<DuckDBPyAppender> ForTable(std::shared_ptr<DuckDBPyConnection> connection,
-	                                                  const string &table, const std::optional<nb::list> &columns);
+	                                                  const string &table, const std::optional<nb::list> &columns,
+	                                                  const string &action, const std::optional<nb::list> &key);
 	//! Runs the caller's DML over buffer columns declared as a dict of name to type
 	static std::unique_ptr<DuckDBPyAppender> ForQuery(std::shared_ptr<DuckDBPyConnection> connection, const string &dml,
 	                                                  const nb::dict &columns, const std::optional<string> &source);

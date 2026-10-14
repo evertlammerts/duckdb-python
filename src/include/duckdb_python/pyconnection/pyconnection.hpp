@@ -325,7 +325,8 @@ public:
 
 	std::shared_ptr<DuckDBPyConnection> Append(const string &name, const PandasDataFrame &value, bool by_name);
 
-	std::unique_ptr<DuckDBPyAppender> CreateAppender(const string &table, const std::optional<nb::list> &columns);
+	std::unique_ptr<DuckDBPyAppender> CreateAppender(const string &table, const std::optional<nb::list> &columns,
+	                                                 const string &action, const std::optional<nb::list> &key);
 	std::unique_ptr<DuckDBPyAppender> CreateQueryAppender(const string &dml, const nb::dict &columns,
 	                                                      const std::optional<string> &source);
 

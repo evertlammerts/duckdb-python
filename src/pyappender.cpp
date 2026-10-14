@@ -37,6 +37,9 @@ namespace duckdb {
 static constexpr const char *BUFFER_NAME = "appender_buffer";
 static constexpr const char *SOURCE_NAME = "appender_data";
 static constexpr const char *DEFAULT_SOURCE = "SELECT * FROM appender_buffer";
+// An upsert, update or delete names its target under this alias, so the target's columns stay apart from the source's
+// whatever the table is called
+static constexpr const char *TARGET_ALIAS = "appender_target";
 
 static constexpr const char *BUSY_ERROR =
     "appender is busy with another call; it refuses instead of waiting, so give each thread its own appender";
@@ -176,10 +179,65 @@ static ResolvedTable ResolveTable(ClientContext &context, const string &text) {
 	return result;
 }
 
+namespace {
+
+enum class TableAction : uint8_t { INSERT_ROWS, UPSERT_ROWS, UPDATE_ROWS, DELETE_ROWS };
+
+} // namespace
+
+static TableAction ParseAction(const string &action) {
+	if (action == "insert") {
+		return TableAction::INSERT_ROWS;
+	}
+	if (action == "upsert") {
+		return TableAction::UPSERT_ROWS;
+	}
+	if (action == "update") {
+		return TableAction::UPDATE_ROWS;
+	}
+	if (action == "delete") {
+		return TableAction::DELETE_ROWS;
+	}
+	throw InvalidInputException("action is \"insert\", \"upsert\", \"update\" or \"delete\", not \"%s\"", action);
+}
+
+static bool MatchesOnKey(TableAction action) {
+	return action == TableAction::UPDATE_ROWS || action == TableAction::DELETE_ROWS;
+}
+
+static optional_ptr<const ColumnDefinition> FindColumn(const ResolvedTable &table, const Identifier &name) {
+	auto column = std::find_if(table.columns.begin(), table.columns.end(),
+	                           [&](const ColumnDefinition &candidate) { return candidate.Name() == name; });
+	return column == table.columns.end() ? nullptr : &*column;
+}
+
+static vector<reference<const ColumnDefinition>> ResolveColumns(const ResolvedTable &table,
+                                                                const vector<string> &listed, const char *argument) {
+	auto table_name = table.name.ToString();
+	vector<reference<const ColumnDefinition>> result;
+	identifier_set_t seen;
+	for (auto &name : listed) {
+		Identifier identifier(name);
+		auto column = FindColumn(table, identifier);
+		if (!column) {
+			throw InvalidInputException("%s is not a column of %s", name, table_name);
+		}
+		if (column->Generated()) {
+			throw InvalidInputException("%s is a generated column of %s: its value is computed, so %s cannot name it",
+			                            name, table_name, argument);
+		}
+		if (!seen.insert(identifier).second) {
+			throw InvalidInputException("%s names %s twice", argument, name);
+		}
+		result.push_back(*column);
+	}
+	return result;
+}
+
 static vector<reference<const ColumnDefinition>> BufferColumns(const ResolvedTable &table,
                                                                const std::optional<vector<string>> &requested) {
-	vector<reference<const ColumnDefinition>> result;
 	if (!requested) {
+		vector<reference<const ColumnDefinition>> result;
 		for (auto &column : table.columns) {
 			if (!column.Generated()) {
 				result.push_back(column);
@@ -187,37 +245,63 @@ static vector<reference<const ColumnDefinition>> BufferColumns(const ResolvedTab
 		}
 		return result;
 	}
-	auto table_name = table.name.ToString();
 	if (requested->empty()) {
 		throw InvalidInputException("columns names none of the columns of %s; leave it out to append to all of them",
-		                            table_name);
+		                            table.name.ToString());
 	}
-	identifier_set_t seen;
-	for (auto &name : *requested) {
-		Identifier identifier(name);
-		auto column = std::find_if(table.columns.begin(), table.columns.end(),
-		                           [&](const ColumnDefinition &candidate) { return candidate.Name() == identifier; });
-		if (column == table.columns.end()) {
-			throw InvalidInputException("%s is not a column of %s", name, table_name);
-		}
-		if (column->Generated()) {
-			throw InvalidInputException("%s is a generated column of %s: its value is computed, not appended", name,
-			                            table_name);
-		}
-		if (!seen.insert(identifier).second) {
-			throw InvalidInputException("columns names %s twice", name);
-		}
-		result.push_back(*column);
-	}
-	return result;
+	return ResolveColumns(table, *requested, "columns");
 }
 
-static string InsertInto(const QualifiedName &table, const vector<Identifier> &names) {
-	string columns;
-	for (auto &name : names) {
-		columns += (columns.empty() ? "" : ", ") + SQLIdentifier::ToString(name);
+static vector<Identifier> ColumnsToSet(const vector<Identifier> &names, const vector<string> &key,
+                                       const vector<Identifier> &key_names) {
+	for (idx_t i = 0; i < key_names.size(); i++) {
+		if (std::find(names.begin(), names.end(), key_names[i]) == names.end()) {
+			throw InvalidInputException(
+			    "key column %s is not one of the appender's columns, so no row has a value to match it on", key[i]);
+		}
 	}
-	return StringUtil::Format("INSERT INTO %s (%s) FROM %s", table.ToString(), columns, SOURCE_NAME);
+	vector<Identifier> assigned;
+	for (auto &name : names) {
+		if (std::find(key_names.begin(), key_names.end(), name) == key_names.end()) {
+			assigned.push_back(name);
+		}
+	}
+	if (assigned.empty()) {
+		throw InvalidInputException("an update sets the appender's columns other than the key, and there are none");
+	}
+	return assigned;
+}
+
+static string TableDML(TableAction action, const QualifiedName &table, const vector<Identifier> &names,
+                       const vector<Identifier> &key, const vector<Identifier> &assigned) {
+	auto quoted = [](const Identifier &name) {
+		return SQLIdentifier::ToString(name);
+	};
+	auto match = [&](const Identifier &name) {
+		return StringUtil::Format("%s.%s = %s.%s", TARGET_ALIAS, quoted(name), SOURCE_NAME, quoted(name));
+	};
+	switch (action) {
+	case TableAction::INSERT_ROWS:
+		return StringUtil::Format("INSERT INTO %s (%s) FROM %s", table.ToString(),
+		                          StringUtil::Join(names, ", ", quoted), SOURCE_NAME);
+	case TableAction::UPSERT_ROWS:
+		// The engine rewrites this into a merge that names the target by its bare name beside its own alias excluded,
+		// which collides for a table called excluded unless the target has an alias
+		return StringUtil::Format("INSERT OR REPLACE INTO %s AS %s (%s) FROM %s", table.ToString(), TARGET_ALIAS,
+		                          StringUtil::Join(names, ", ", quoted), SOURCE_NAME);
+	case TableAction::UPDATE_ROWS: {
+		auto assignment = [&](const Identifier &name) {
+			return StringUtil::Format("%s = %s.%s", quoted(name), SOURCE_NAME, quoted(name));
+		};
+		return StringUtil::Format("UPDATE %s AS %s SET %s FROM %s WHERE %s", table.ToString(), TARGET_ALIAS,
+		                          StringUtil::Join(assigned, ", ", assignment), SOURCE_NAME,
+		                          StringUtil::Join(key, " AND ", match));
+	}
+	case TableAction::DELETE_ROWS:
+		return StringUtil::Format("DELETE FROM %s AS %s USING %s WHERE %s", table.ToString(), TARGET_ALIAS, SOURCE_NAME,
+		                          StringUtil::Join(key, " AND ", match));
+	}
+	throw InternalException("unknown table action");
 }
 
 DuckDBPyAppender::DuckDBPyAppender(std::shared_ptr<DuckDBPyConnection> connection_p, ClientContext &context,
@@ -263,24 +347,43 @@ std::unique_ptr<DuckDBPyAppender> DuckDBPyAppender::Create(std::shared_ptr<DuckD
 	return appender;
 }
 
+static std::optional<vector<string>> ListedNames(const std::optional<nb::list> &list) {
+	if (!list) {
+		return std::nullopt;
+	}
+	// Converting a name can run Python code that changes the list, so the names come from one copy of it
+	vector<nb::object> listed;
+	for (auto name : *list) {
+		listed.push_back(nb::borrow<nb::object>(name));
+	}
+	vector<string> names;
+	for (auto &name : listed) {
+		names.push_back(duckdb::PyUtil::CastToString(name));
+	}
+	return names;
+}
+
 std::unique_ptr<DuckDBPyAppender> DuckDBPyAppender::ForTable(std::shared_ptr<DuckDBPyConnection> connection,
                                                              const string &table,
-                                                             const std::optional<nb::list> &columns) {
+                                                             const std::optional<nb::list> &columns,
+                                                             const string &action_name,
+                                                             const std::optional<nb::list> &key) {
 	Held held {connection->con.ShareDatabase(), connection->con.GetConnection().context};
 	RefuseInsideAnAbortedTransaction(*held.context);
-	std::optional<vector<string>> requested;
-	if (columns) {
-		// Converting a name can run Python code that changes the list, so the names come from one copy of it
-		vector<nb::object> listed;
-		for (auto name : *columns) {
-			listed.push_back(nb::borrow<nb::object>(name));
-		}
-		requested.emplace();
-		for (auto &name : listed) {
-			requested->push_back(duckdb::PyUtil::CastToString(name));
-		}
-	}
+	auto requested = ListedNames(columns);
+	auto keyed = ListedNames(key);
 	RefuseClosed(*connection);
+	auto action = ParseAction(action_name);
+	if (keyed && !MatchesOnKey(action)) {
+		throw InvalidInputException("key applies to the update and delete actions, not to %s", action_name);
+	}
+	if (MatchesOnKey(action) && (!keyed || keyed->empty())) {
+		throw InvalidInputException("the %s action needs key, the columns that pick the rows to %s", action_name,
+		                            action_name);
+	}
+	if (requested && action == TableAction::DELETE_ROWS) {
+		throw InvalidInputException("the delete action buffers exactly its key columns, so it takes no columns");
+	}
 	ResolvedTable resolved;
 	{
 		D_ASSERT(duckdb::PyUtil::GilCheck());
@@ -288,13 +391,25 @@ std::unique_ptr<DuckDBPyAppender> DuckDBPyAppender::ForTable(std::shared_ptr<Duc
 		engine::ConnectionClaim claim(*held.context);
 		resolved = ResolveTable(*held.context, table);
 	}
+	vector<reference<const ColumnDefinition>> key_columns;
+	if (keyed) {
+		key_columns = ResolveColumns(resolved, *keyed, "key");
+	}
+	vector<Identifier> key_names;
+	for (auto &column : key_columns) {
+		key_names.push_back(column.get().Name());
+	}
 	vector<Identifier> names;
 	vector<LogicalType> types;
-	for (auto &column : BufferColumns(resolved, requested)) {
+	for (auto &column : action == TableAction::DELETE_ROWS ? key_columns : BufferColumns(resolved, requested)) {
 		names.push_back(column.get().Name());
 		types.push_back(column.get().Type());
 	}
-	auto dml = InsertInto(resolved.name, names);
+	vector<Identifier> assigned;
+	if (action == TableAction::UPDATE_ROWS) {
+		assigned = ColumnsToSet(names, *keyed, key_names);
+	}
+	auto dml = TableDML(action, resolved.name, names, key_names, assigned);
 	return Create(std::move(connection), held.context, std::move(names), std::move(types), DEFAULT_SOURCE, dml);
 }
 
