@@ -21,4 +21,16 @@ public:
 	unique_ptr<RegisteredObject> object;
 };
 
+class Relation;
+
+struct RelationDependencyItem : DependencyItem {
+	explicit RelationDependencyItem(shared_ptr<Relation> rel_p) : rel(std::move(rel_p)) {
+	}
+	static shared_ptr<DependencyItem> Create(shared_ptr<Relation> rel) {
+		return make_shared_ptr<RelationDependencyItem>(std::move(rel));
+	}
+
+	shared_ptr<Relation> rel;
+};
+
 } // namespace duckdb
