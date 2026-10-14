@@ -333,6 +333,9 @@ unique_ptr<TableRef> PythonReplacementScan::Replace(ClientContext &context, Repl
 	if (auto resolved = state->RecallResolved(table_name)) {
 		return resolved;
 	}
+	if (state->PinnedExclusively()) {
+		return nullptr;
+	}
 	auto result = ReplaceInternal(context, table_name);
 	if (result) {
 		state->RecordResolved(table_name, *result);

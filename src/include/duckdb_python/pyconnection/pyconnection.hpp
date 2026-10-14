@@ -13,6 +13,7 @@
 #include "duckdb_python/import_cache/python_import_cache.hpp"
 #include "duckdb_python/numpy/numpy_type.hpp"
 #include "duckdb_python/pyrelation.hpp"
+#include "duckdb_python/pyappender.hpp"
 #include "duckdb_python/engine/connection.hpp"
 #include "duckdb_python/pytype.hpp"
 #include "duckdb_python/path_like.hpp"
@@ -108,6 +109,12 @@ public:
 			ThrowConnectionException();
 		}
 		return *database;
+	}
+	shared_ptr<DuckDB> ShareDatabase() const {
+		if (!database) {
+			ThrowConnectionException();
+		}
+		return database;
 	}
 	//! Refuses while engine work runs on the connection, so a call from inside that work errors instead of waiting
 	Connection &GetConnection() {
@@ -317,6 +324,10 @@ public:
 	std::shared_ptr<DuckDBPyConnection> ExecuteFromString(const string &query);
 
 	std::shared_ptr<DuckDBPyConnection> Append(const string &name, const PandasDataFrame &value, bool by_name);
+
+	std::unique_ptr<DuckDBPyAppender> CreateAppender(const string &table, const std::optional<nb::list> &columns);
+	std::unique_ptr<DuckDBPyAppender> CreateQueryAppender(const string &dml, const nb::dict &columns,
+	                                                      const std::optional<string> &source);
 
 	std::shared_ptr<DuckDBPyConnection> RegisterPythonObject(const string &name, const nb::object &python_object);
 

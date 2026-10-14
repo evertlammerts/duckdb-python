@@ -446,6 +446,48 @@
 		"return": "DuckDBPyConnection"
 	},
 	{
+		"name": "appender",
+		"function": "CreateAppender",
+		"docs": "Create an appender that buffers rows and inserts them into the named table at each flush",
+		"args": [
+			{
+				"name": "table",
+				"type": "str"
+			}
+		],
+		"kwargs": [
+			{
+				"name": "columns",
+				"default": "None",
+				"type": "Optional[list[str]]"
+			}
+		],
+		"return": "Appender"
+	},
+	{
+		"name": "query_appender",
+		"function": "CreateQueryAppender",
+		"docs": "Create an appender that buffers rows of the declared columns and runs the DML over them at each flush",
+		"args": [
+			{
+				"name": "dml",
+				"type": "str"
+			},
+			{
+				"name": "columns",
+				"type": "dict[str, IntoPyType]"
+			}
+		],
+		"kwargs": [
+			{
+				"name": "source",
+				"default": "None",
+				"type": "Optional[str]"
+			}
+		],
+		"return": "Appender"
+	},
+	{
 		"name": "register",
 		"function": "RegisterPythonObject",
 		"docs": "Register the passed Python Object value for querying with a view",

@@ -3,7 +3,11 @@
 #include "duckdb_python/nb/casters.hpp"
 #include "duckdb/common/types.hpp"
 
+#include <memory>
+
 namespace duckdb {
+
+struct DuckDBPyConnection;
 
 class PyGenericAlias : public nb::object {
 public:
@@ -38,6 +42,9 @@ public:
 	//! registered implicit conversions. Returns false (clearing any pending Python error) when the object can't be
 	//! converted, so a caller can raise a context-specific message.
 	static bool TryConvert(const nb::object &object, std::unique_ptr<DuckDBPyType> &result);
+	//! Converts any form TryConvert accepts, resolving type names against the connection, or the default connection
+	//! when it is null. Raises the conversion's own error instead of returning false.
+	static LogicalType Resolve(const nb::object &object, const std::shared_ptr<DuckDBPyConnection> &connection);
 
 public:
 	bool Equals(const DuckDBPyType &other) const;
