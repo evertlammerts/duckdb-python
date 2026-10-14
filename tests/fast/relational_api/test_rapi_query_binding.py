@@ -281,6 +281,7 @@ class TestQuerySources:
         assert rel.fetchall() == [(1, 7)]
 
     def test_file_like_source_outlives_its_relation(self):
+        pytest.importorskip("fsspec")
         con = duckdb.connect()
         rel = con.read_csv(io.BytesIO(b"a\n1\n2\n")).query("v", "select sum(a) from v")
         gc.collect()
