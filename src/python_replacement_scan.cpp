@@ -14,6 +14,7 @@
 #include "duckdb_python/pandas/pandas_scan.hpp"
 #include "duckdb/parser/tableref/subqueryref.hpp"
 #include "duckdb_python/pyrelation.hpp"
+#include "duckdb_python/python_dependency.hpp"
 #include <duckdb/main/settings.hpp>
 
 namespace duckdb {
@@ -100,20 +101,6 @@ unique_ptr<TableRef> PythonReplacementScan::ReplacementObject(const nb::object &
 	}
 	return replacement;
 }
-
-namespace {
-
-struct RelationDependencyItem : DependencyItem {
-	explicit RelationDependencyItem(shared_ptr<Relation> rel_p) : rel(std::move(rel_p)) {
-	}
-	static shared_ptr<DependencyItem> Create(shared_ptr<Relation> rel) {
-		return make_shared_ptr<RelationDependencyItem>(std::move(rel));
-	}
-
-	shared_ptr<Relation> rel;
-};
-
-} // namespace
 
 unique_ptr<TableRef> PythonReplacementScan::TryReplacementObject(const nb::object &entry, const string &name,
                                                                  ClientContext &context, bool relation) {
