@@ -577,7 +577,7 @@ class TestResolveObjectColumns:
                 (12.0,                13,                       324234234.00000005),
                 (-123.0,              -12.0000000005,           -128),
                 (-234234.0,           7453324234.0,             345345),
-                (NULL,                NULL,                     1.00000),
+                (NULL,                NULL,                     100000),
                 (1.234,               -324234234,               1324234359)
             ) tbl(a, b, c);
         """
@@ -611,8 +611,8 @@ class TestResolveObjectColumns:
         assert math.isnan(conversion[2][0])
         assert math.isinf(conversion[3][0])
         assert math.isinf(conversion[4][0])
-        assert math.isinf(conversion[5][0])
-        assert str(conversion) == "[(nan,), (nan,), (nan,), (inf,), (inf,), (inf,)]"
+        assert conversion[5][0] == float("-inf")
+        assert str(conversion) == "[(nan,), (nan,), (nan,), (inf,), (inf,), (-inf,)]"
 
     # Test that the column 'offset' is actually used when converting,
     # and that the same 2048 (STANDARD_VECTOR_SIZE) values are not being scanned over and over again
