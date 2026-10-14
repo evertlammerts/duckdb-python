@@ -639,6 +639,7 @@ class TestStandInsTakeTheStatementsType:
 # room for that depth of recursion.
 DEEP = """
 import threading
+import time
 from duckdb import _duckdb
 
 def bind():
@@ -651,16 +652,21 @@ def bind():
 
 # The default stack: an enlarged one would hide growth in the stack a nesting level costs.
 worker = threading.Thread(target=bind)
+start = time.perf_counter()
 worker.start()
 worker.join()
+print(time.perf_counter() - start)
 """
 
 
 def test_a_list_nested_a_thousand_deep_binds_within_seconds() -> None:
-    # Far longer than a thousand depths need, and far shorter than work cubic in the depth takes.
-    result = subprocess.run([sys.executable, "-c", DEEP], capture_output=True, text=True, timeout=10, check=False)
+    # The binding is timed in the child, since LeakSanitizer's report at its exit can alone outlast the bound.
+    result = subprocess.run([sys.executable, "-c", DEEP], capture_output=True, text=True, timeout=60, check=False)
     assert result.returncode == 0, result.stderr
-    assert result.stdout.split() == ["True", "True"]
+    *matches, seconds = result.stdout.split()
+    assert matches == ["True", "True"], result.stderr
+    # Far longer than a thousand depths need, and far shorter than work cubic in the depth takes.
+    assert float(seconds) < 10
 
 
 def test_a_conversion_started_inside_another_walks_on_its_own() -> None:

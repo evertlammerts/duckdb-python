@@ -1,5 +1,5 @@
-# Resolves which DuckDB engine this run builds against: the newest published build on the 2.0 line.
-# Resolved once per run, so every job fetches the same engine even if a new one is published mid-run.
+# Gives the DuckDB engine this run builds against: the one pinned in third_party/duckdb_cpp/REF.
+# The shipped C++ API comes from that same commit, and it may not compile against any other engine's C headers.
 name: Engine
 
 on:
@@ -16,9 +16,8 @@ jobs:
       engine: ${{ steps.resolve.outputs.engine }}
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
       - id: resolve
         run: |
-          spec=$(uv run scripts/engine.py resolve)
+          spec=$(cat third_party/duckdb_cpp/REF)
           echo "engine=$spec" >> "$GITHUB_OUTPUT"
           echo "DuckDB engine: \`$spec\`" >> "$GITHUB_STEP_SUMMARY"

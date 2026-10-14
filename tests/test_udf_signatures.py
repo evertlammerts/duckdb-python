@@ -575,6 +575,42 @@ class TestAnnotations:
         with pytest.raises(exceptions.InvalidInputError, match="annotation 'T' of parameter 'y'"):
             con.create_function("f", f)
 
+    @pytest.mark.skipif(sys.version_info < (3, 12), reason="type parameters arrive with Python 3.12")
+    def test_an_annotation_naming_a_methods_type_parameter_is_refused(self, con: duckdb.frame.Connection) -> None:
+        namespace: dict[str, object] = {}
+        source = "T = int\nclass C:\n    def f[T](self, y: 'T') -> int:\n        return 0\n"
+        exec(compile(source, "<generic>", "exec", dont_inherit=True), namespace)
+        method = typing.cast("type", namespace["C"])().f
+        with pytest.raises(
+            exceptions.InvalidInputError, match="annotation 'T' of parameter 'y': the client knows no SQL type for it"
+        ):
+            con.create_function("f", method)
+
+    @pytest.mark.skipif(sys.version_info < (3, 12), reason="type parameters arrive with Python 3.12")
+    def test_a_generic_function_wrapping_another_reads_the_annotations_of_the_one_it_wraps(
+        self, con: duckdb.frame.Connection
+    ) -> None:
+        # The wrapping function's own T is not in scope where the wrapped one was defined, so 'T' is the module's int.
+        namespace: dict[str, object] = {}
+        source = (
+            "T = int\ndef inner(y: 'T') -> int:\n    return 0\n"
+            "def f[T](y: T) -> int:\n    return 0\nf.__wrapped__ = inner\n"
+        )
+        exec(compile(source, "<generic>", "exec", dont_inherit=True), namespace)
+        f = typing.cast("Callable[..., int]", namespace["f"])
+        con.create_function("f", f)
+        assert registered(con, "f")[1:] == (["BIGINT"], None, "BIGINT")
+
+    @pytest.mark.skipif(sys.version_info < (3, 12), reason="type parameters arrive with Python 3.12")
+    def test_a_generic_functions_other_annotations_are_read(self, con: duckdb.frame.Connection) -> None:
+        # Deferred, so Python evaluates the text T, which names nothing outside the function's own scope.
+        namespace: dict[str, object] = {}
+        source = "from __future__ import annotations\ndef f[T](x: T, n: int) -> int:\n    return n\n"
+        exec(compile(source, "<generic>", "exec", dont_inherit=True), namespace)
+        f = typing.cast("Callable[..., int]", namespace["f"])
+        con.create_function("f", f, {"x": "VARCHAR"})
+        assert registered(con, "f")[1:] == (["VARCHAR", "BIGINT"], None, "BIGINT")
+
     @pytest.mark.skipif(sys.version_info < (3, 14), reason="annotations are evaluated lazily from Python 3.14")
     def test_a_lazy_annotation_sees_what_it_closes_over(self, con: duckdb.frame.Connection) -> None:
         namespace: dict[str, object] = {}

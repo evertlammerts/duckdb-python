@@ -72,6 +72,9 @@ if sys.version_info >= (3, 14):
 
     _LENIENT = {"annotation_format": annotationlib.Format.FORWARDREF}
 
+# Python 3.12.0 to 3.12.4 evaluate a text annotation without the function's own type parameters in scope.
+_UNSCOPED_TYPE_PARAMETERS = (3, 12) <= sys.version_info < (3, 12, 5)
+
 
 @dataclasses.dataclass(frozen=True)
 class Parameter:
@@ -135,7 +138,16 @@ def _python_signature(function: Callable[..., object]) -> inspect.Signature | No
         )
         raise InvalidInputError(message) from None
     try:
-        return inspect.signature(function, eval_str=True)
+        scope = None
+        # On Python 3.12.0 to 3.12.4, a type parameter named in an annotation of a function reached through
+        # functools.partial, a wrapper or a callable object resolves as a module name, as it does in Python there.
+        if (
+            _UNSCOPED_TYPE_PARAMETERS
+            and isinstance(function, (types.FunctionType, types.MethodType))
+            and not hasattr(function, "__wrapped__")
+        ):
+            scope = {parameter.__name__: parameter for parameter in getattr(function, "__type_params__", ())}
+        return inspect.signature(function, eval_str=True, locals=scope)
     except Exception as failure:
         return _unread(lenient, failure)
 

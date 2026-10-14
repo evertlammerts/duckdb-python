@@ -597,6 +597,7 @@ sql(<span class="s">"SELECT biggest(1, 5, 3), pack(a := 1, b := 2)"</span>).rows
     <li>A hint written wholly as text, such as <code>"int"</code>, is evaluated, and so is every hint in a module that uses <code>from __future__ import annotations</code>. A quoted name inside another hint, such as <code>list["int"]</code> or <code>Optional["int"]</code>, is not evaluated, and is refused like any hint no type can be read from.</li>
     <li>Python evaluates all of a function's hints together. If one of them fails, for example a name you import only for type checking, none of them can be read. Then every parameter with a hint, and the result, needs its type in <code>parameters</code> and <code>returns</code>. The error names the hint and Python's own error.</li>
     <li>On Python 3.14, a hint whose code raises an error other than a missing name leaves Python with no description of the function at all. The registration is then refused, whatever <code>parameters</code> says.</li>
+    <li>A hint naming one of the function's own type parameters, such as <code>T</code> in <code>def f[T](x: T)</code>, is refused like any hint no type can be read from. On Python 3.12.0 to 3.12.4, a type parameter named in a hint of a function reached through <code>functools.partial</code>, a wrapper or a callable object resolves as a module name, as it does in Python itself there.</li>
   </ul>
 </section>
 

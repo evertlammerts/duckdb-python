@@ -23,9 +23,10 @@ Nightly, two jobs each hold one side fixed (`.github/workflows/codspeed.yml`):
   diffs the counts against the committed `benchmarks/baseline.json`. Every
   delta is the client's, so a gate regression fails the job. Skipped while no
   baseline is committed.
-- **Engine delta**: when the newest published engine differs from the
-  baseline's, the same code runs on both engines in one job; the difference
-  is the engine's, reported whole and never gated. The new-engine run is
+- **Engine delta**: when the engine pinned in `third_party/duckdb_cpp/REF`
+  differs from the baseline's, the same code runs on both engines in one
+  job; the difference is the engine's, reported whole and never gated. The
+  new-engine run is
   uploaded as the `baseline` artifact: the candidate baseline. To adopt it,
   download it and commit it as `benchmarks/baseline.json`, together with
   `requirements-bench.txt` (regenerate the pins per the header in that file).

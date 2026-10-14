@@ -35,7 +35,7 @@ class Failing(datetime.tzinfo):
     test alive past interpreter exit.
     """
 
-    def __init__(self, error: type[Exception], message: str) -> None:
+    def __init__(self, error: type[BaseException], message: str) -> None:
         self.error = error
         self.message = message
 
