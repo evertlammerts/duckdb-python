@@ -67,9 +67,11 @@ public:
 	void BeginResolving();
 	ResolvedTables EndResolving();
 	void RecordResolved(const string &name, TableRef &table);
-	//! While pinned, the replacement scan answers a recorded name with the recorded table
-	void Pin(optional_ptr<const ResolvedTables> tables);
+	//! While pinned, the replacement scan answers a recorded name with the recorded table; an exclusive pin answers
+	//! no other name
+	void Pin(optional_ptr<const ResolvedTables> tables, bool exclusive = false);
 	unique_ptr<TableRef> RecallResolved(const string &name);
+	bool PinnedExclusively();
 
 private:
 	friend class ConnectionClaim;
@@ -81,6 +83,7 @@ private:
 	unique_ptr<ResolvedTables> resolving;
 	std::thread::id resolving_thread;
 	optional_ptr<const ResolvedTables> pinned;
+	bool pinned_exclusively = false;
 	std::thread::id pinned_thread;
 };
 
@@ -141,8 +144,12 @@ public:
 	shared_ptr<Result> Submit(Prepared &prepared, identifier_map_t<BoundParameterData> &values, const Format &format);
 	//! A relation that writes is submitted as itself; one that reads as a statement over its query
 	shared_ptr<Result> Submit(const shared_ptr<Relation> &relation, const Format &format);
+	//! Binds a statement without running it, keeping the tables its replacement scans resolved in tables
+	StatementSignature Bind(unique_ptr<SQLStatement> statement, ResolvedTables &tables);
 	//! Runs a statement to its end and drops its rows
 	void Run(unique_ptr<SQLStatement> statement, const InterruptCheck &check);
+	//! Runs a statement to its end and drops its rows, its replacement scans answered from tables and nothing else
+	void Run(unique_ptr<SQLStatement> statement, const ResolvedTables &tables, const InterruptCheck &check);
 
 private:
 	shared_ptr<ClientContext> context;

@@ -73,22 +73,18 @@ struct PyDecimal {
 
 	struct PyDecimalPowerConverter {
 		template <typename T, typename = std::enable_if<std::numeric_limits<T>::is_integer, T>>
-		static Value Operation(bool signed_value, vector<uint8_t> &digits, uint8_t width, uint8_t scale) {
+		static Value Operation(bool signed_value, vector<uint8_t> &digits, uint8_t width, uint8_t exponent) {
 			T value = 0;
 			for (auto &digit : digits) {
 				value = value * 10 + digit;
 			}
-			D_ASSERT(scale >= 0);
-			int64_t multiplier =
-			    NumericHelper::POWERS_OF_TEN[MinValue<uint8_t>(scale, NumericHelper::CACHED_POWERS_OF_TEN - 1)];
-			for (auto power = scale; power > NumericHelper::CACHED_POWERS_OF_TEN; power--) {
-				multiplier *= 10;
+			for (idx_t i = 0; i < exponent; i++) {
+				value *= 10;
 			}
-			value *= multiplier;
 			if (signed_value) {
 				value = -value;
 			}
-			return Value::DECIMAL(value, width, scale);
+			return Value::DECIMAL(value, width, 0);
 		}
 	};
 
@@ -98,7 +94,7 @@ public:
 	bool signed_value = false;
 
 	PyDecimalExponentType exponent_type;
-	int32_t exponent_value;
+	int64_t exponent_value;
 
 public:
 	bool TryGetType(LogicalType &type);

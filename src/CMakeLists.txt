@@ -19,6 +19,7 @@ add_library(
   importer.cpp
   map.cpp
   path_like.cpp
+  pyappender.cpp
   pyconnection.cpp
   pyexpression.cpp
   pyfilesystem.cpp

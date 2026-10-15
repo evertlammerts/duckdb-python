@@ -89,10 +89,16 @@ void ConnectionState::RecordResolved(const string &name, TableRef &table) {
 	}
 }
 
-void ConnectionState::Pin(optional_ptr<const ResolvedTables> tables) {
+void ConnectionState::Pin(optional_ptr<const ResolvedTables> tables, bool exclusive) {
 	lock_guard<mutex> guard(lock);
 	pinned = tables;
+	pinned_exclusively = exclusive;
 	pinned_thread = std::this_thread::get_id();
+}
+
+bool ConnectionState::PinnedExclusively() {
+	lock_guard<mutex> guard(lock);
+	return pinned && pinned_exclusively && pinned_thread == std::this_thread::get_id();
 }
 
 unique_ptr<TableRef> ConnectionState::RecallResolved(const string &name) {
@@ -131,8 +137,8 @@ private:
 
 class PinGuard {
 public:
-	PinGuard(ConnectionState &state, const ResolvedTables &tables) : state(state) {
-		state.Pin(&tables);
+	PinGuard(ConnectionState &state, const ResolvedTables &tables, bool exclusive = false) : state(state) {
+		state.Pin(&tables, exclusive);
 	}
 	~PinGuard() {
 		state.Pin(nullptr);
@@ -269,9 +275,28 @@ shared_ptr<Result> Session::Submit(const shared_ptr<Relation> &relation, const F
 	return make_shared_ptr<Result>(std::move(handle), StatementType::SELECT_STATEMENT, format, relation);
 }
 
+StatementSignature Session::Bind(unique_ptr<SQLStatement> statement, ResolvedTables &tables) {
+	ConnectionClaim claim(*state, *context);
+	ResolvingGuard guard(*state);
+	auto signature = context->BindStatement(std::move(statement));
+	tables = guard.End();
+	return signature;
+}
+
 void Session::Run(unique_ptr<SQLStatement> statement, const InterruptCheck &check) {
 	ConnectionClaim claim(*state, *context);
 	auto handle = context->Submit(std::move(statement), QueryParameters());
+	NameRefusal(*state, *handle);
+	Complete(*handle, check);
+}
+
+void Session::Run(unique_ptr<SQLStatement> statement, const ResolvedTables &tables, const InterruptCheck &check) {
+	ConnectionClaim claim(*state, *context);
+	unique_ptr<QueryResult> handle;
+	{
+		PinGuard guard(*state, tables, true);
+		handle = context->Submit(std::move(statement), QueryParameters());
+	}
 	NameRefusal(*state, *handle);
 	Complete(*handle, check);
 }

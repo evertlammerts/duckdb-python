@@ -6,7 +6,16 @@
 namespace duckdb {
 
 bool PyUtil::GilCheck() {
-	return (bool)PyGILState_Check();
+	// Not PyGILState_Check, which answers true on every thread once any subinterpreter has been created.
+#if PY_VERSION_HEX >= 0x030D0000
+	return PyThreadState_GetUnchecked() != nullptr;
+#elif PY_VERSION_HEX >= 0x030C0000
+	return _PyThreadState_UncheckedGet() != nullptr;
+#else
+	// Before 3.12 the current thread state is process wide, so it must also be this thread's own.
+	auto current = _PyThreadState_UncheckedGet();
+	return current && current == PyGILState_GetThisThreadState();
+#endif
 }
 
 void PyUtil::GilAssert() {

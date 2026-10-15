@@ -63,8 +63,8 @@ struct PolarsBackend : public FilterBackend {
 			// Nothing is greater than NaN.
 			return import_cache.polars.lit()(false);
 		case ExpressionType::COMPARE_LESSTHANOREQUALTO:
-			// Everything is less than or equal to NaN.
-			return import_cache.polars.lit()(true);
+			// NaN sorts above every other value, so only NULL rows fail.
+			return IsNotNull(std::move(col));
 		default:
 			throw NotImplementedException("Unsupported comparison type (%s) for NaN values",
 			                              ExpressionTypeToString(op));

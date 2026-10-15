@@ -3,13 +3,15 @@
 #include "duckdb_python/pyconnection/pyconnection.hpp"
 #include "duckdb_python/pytype.hpp"
 #include "duckdb_python/pyresult.hpp"
+#include "duckdb_python/python_dependency.hpp"
 #include "duckdb/parser/qualified_name.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/relation/query_relation.hpp"
 #include "duckdb/main/relation/join_relation.hpp"
 #include "duckdb/parser/parser.hpp"
-#include "duckdb/function/pragma/pragma_functions.hpp"
 #include "duckdb/parser/statement/pragma_statement.hpp"
+#include "duckdb/parser/common_table_expression_info.hpp"
+#include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/common/box_renderer.hpp"
 #include "duckdb/main/query_result.hpp"
 #include "duckdb/parser/statement/explain_statement.hpp"
@@ -1342,15 +1344,47 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::CreateView(const string &vie
 	return DeriveRelation(rel);
 }
 
-static bool IsDescribeStatement(SQLStatement &statement) {
+//! DESCRIBE binds like a SELECT and so sees the source CTE, while PRAGMA show reads the catalog.
+static unique_ptr<SQLStatement> TryRewriteShowPragma(ClientContext &context, SQLStatement &statement, string &text) {
 	if (statement.type != StatementType::PRAGMA_STATEMENT) {
-		return false;
+		return nullptr;
 	}
-	auto &pragma_statement = statement.Cast<PragmaStatement>();
-	if (pragma_statement.info->name != "show") {
-		return false;
+	auto &info = *statement.Cast<PragmaStatement>().info;
+	if (info.name != "show" || info.parameters.size() != 1 || !info.named_parameters.empty() ||
+	    info.parameters[0]->GetExpressionClass() != ExpressionClass::CONSTANT) {
+		return nullptr;
 	}
-	return true;
+	auto &literal = info.parameters[0]->Cast<ConstantExpression>().GetLiteral();
+	if (literal.kind != LiteralKind::STRING) {
+		return nullptr;
+	}
+	QualifiedName table_name;
+	string error;
+	if (!QualifiedName::TryParse(literal.text, table_name, error)) {
+		throw ParserException(error);
+	}
+	text = "DESCRIBE " + table_name.ToString();
+	Parser parser(context);
+	parser.ParseQuery(text);
+	return std::move(parser.statements[0]);
+}
+
+static void BindNameToRelation(QueryNode &node, const Identifier &name, Relation &relation) {
+	auto &user_ctes = node.cte_map.map;
+	// Below a user CTE of the same name, earlier user CTEs would capture the source's own table names.
+	if (user_ctes.contains(name)) {
+		return;
+	}
+	auto source = make_uniq<CommonTableExpressionInfo>();
+	source->query_node = relation.GetQueryNode();
+	// Inlined like the view it stands in for, so binding the name is the only change.
+	source->materialized = CTEMaterialize::CTE_MATERIALIZE_NEVER;
+	CommonTableExpressionMap ctes;
+	ctes.map.insert(name, std::move(source));
+	for (auto &user_cte : user_ctes) {
+		ctes.map.insert(user_cte.first, std::move(user_cte.second));
+	}
+	node.cte_map = std::move(ctes);
 }
 
 std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Query(const string &view_name, const string &sql_query) {
@@ -1360,31 +1394,36 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Query(const string &view_nam
 		engine::NameRefusal(*rel->context->GetContext(), error);
 		throw;
 	}
-	auto all_dependencies = rel->GetAllDependencies();
-
-	Parser parser(*rel->context->GetContext());
+	auto &context = *rel->context->GetContext();
+	Parser parser(context);
 	parser.ParseQuery(sql_query);
 	if (parser.statements.size() != 1) {
 		throw InvalidInputException("'DuckDBPyRelation.query' only accepts a single statement");
 	}
-	auto &statement = *parser.statements[0];
-	if (statement.type == StatementType::SELECT_STATEMENT) {
-		auto select_statement = unique_ptr_cast<SQLStatement, SelectStatement>(std::move(parser.statements[0]));
+	auto statement = std::move(parser.statements[0]);
+	auto query_text = sql_query;
+	auto describe = TryRewriteShowPragma(context, *statement, query_text);
+	if (describe) {
+		statement = std::move(describe);
+	}
+	if (statement->type == StatementType::SELECT_STATEMENT) {
+		auto select_statement = unique_ptr_cast<SQLStatement, SelectStatement>(std::move(statement));
+		BindNameToRelation(*select_statement->node, Identifier(view_name), *rel);
 		auto query_relation =
 		    make_shared_ptr<QueryRelation>(rel->context->GetContext(), std::move(select_statement),
-		                                   "query_relation_" + StringUtil::GenerateRandomName(16), sql_query);
+		                                   "query_relation_" + StringUtil::GenerateRandomName(16), query_text);
+		// File-like objects named in the source's node stay registered only while the source lives.
+		auto source_dependency = make_shared_ptr<ExternalDependency>();
+		source_dependency->AddDependency("source", RelationDependencyItem::Create(rel));
+		query_relation->AddExternalDependency(std::move(source_dependency));
 		return DeriveRelation(std::move(query_relation));
-	} else if (IsDescribeStatement(statement)) {
-		auto query = PragmaShow(view_name);
-		return Query(view_name, query);
 	}
 	{
 		D_ASSERT(duckdb::PyUtil::GilCheck());
 		nb::gil_scoped_release release;
 		// Execute it anyways, for creation/altering statements
 		// We only care that it succeeds, we can't store the result
-		engine::Session(rel->context->GetContext())
-		    .Run(std::move(parser.statements[0]), DuckDBPyConnection::CheckSignals);
+		engine::Session(rel->context->GetContext()).Run(std::move(statement), DuckDBPyConnection::CheckSignals);
 	}
 	return nullptr;
 }

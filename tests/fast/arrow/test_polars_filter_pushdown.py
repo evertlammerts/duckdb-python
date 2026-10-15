@@ -42,6 +42,8 @@ import pytest
 from _pushdown_helpers import (
     COMPARABLE_TYPES,
     COMPARISON_CASES,
+    to_polars_dataframe,
+    to_polars_lazyframe,
 )
 from _pushdown_helpers import (
     arrow_scan_block as _arrow_scan_block,
@@ -60,19 +62,6 @@ import duckdb
 
 pl = pytest.importorskip("polars")
 pa = pytest.importorskip("pyarrow")
-
-
-# ===========================================================================
-# Conversion factories — polars side
-# ===========================================================================
-
-
-def to_polars_lazyframe(rel):
-    return rel.pl().lazy()
-
-
-def to_polars_dataframe(rel):
-    return rel.pl()
 
 
 POLARS_FACTORIES = [

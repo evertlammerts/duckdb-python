@@ -54,12 +54,15 @@ struct DuckDBPyModuleState {
 	DefaultConnectionHolder default_connection;
 	DBInstanceCache instance_cache;
 	std::shared_ptr<PythonImportCache> import_cache;
+	//! The single-use Arrow readers that have handed out their stream, by identity and held weakly
+	unique_ptr<PyObjectHolder> consumed_arrow_readers;
 	PythonEnvironmentType environment = PythonEnvironmentType::NORMAL;
 	std::string formatted_python_version;
 };
 
 static DuckDBPyModuleState &GetModuleState() {
-	static DuckDBPyModuleState state; // NOLINT: allow global - sole module-state seam (future: PyModule_GetState)
+	// Never destroyed: static destructors run after Py_Finalize, too late to release Python references
+	static auto &state = *new DuckDBPyModuleState(); // NOLINT: allow global - sole module-state seam
 	return state;
 }
 
@@ -325,6 +328,15 @@ static void InitializeConnectionMethods(nb::class_<DuckDBPyConnection> &m) {
 	      "Synchronizes data in the write-ahead log (WAL) to the database data file (no-op for in-memory connections)");
 	m.def("append", &DuckDBPyConnection::Append, "Append the passed DataFrame to the named table",
 	      nb::arg("table_name"), nb::arg("df"), nb::kw_only(), nb::arg("by_name") = false);
+	m.def(
+	    "appender", &DuckDBPyConnection::CreateAppender,
+	    "Create an appender that buffers rows and inserts, upserts, updates or deletes them in the named table at each "
+	    "flush",
+	    nb::arg("table"), nb::kw_only(), nb::arg("columns").none() = nb::none(), nb::arg("action") = "insert",
+	    nb::arg("key").none() = nb::none());
+	m.def("query_appender", &DuckDBPyConnection::CreateQueryAppender,
+	      "Create an appender that buffers rows of the declared columns and runs the DML over them at each flush",
+	      nb::arg("dml"), nb::arg("columns"), nb::kw_only(), nb::arg("source").none() = nb::none());
 	m.def("register", &DuckDBPyConnection::RegisterPythonObject,
 	      "Register the passed Python Object value for querying with a view", nb::arg("view_name"),
 	      nb::arg("python_object"));
@@ -851,6 +863,18 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::Execute(const nb::object
 	auto py_result = std::make_shared<DuckDBPyResult>(std::move(res));
 	con.SetResult(std::make_unique<DbapiResult>(std::move(py_result)));
 	return shared_from_this();
+}
+
+std::unique_ptr<DuckDBPyAppender> DuckDBPyConnection::CreateAppender(const string &table,
+                                                                     const std::optional<nb::list> &columns,
+                                                                     const string &action,
+                                                                     const std::optional<nb::list> &key) {
+	return DuckDBPyAppender::ForTable(shared_from_this(), table, columns, action, key);
+}
+
+std::unique_ptr<DuckDBPyAppender> DuckDBPyConnection::CreateQueryAppender(const string &dml, const nb::dict &columns,
+                                                                          const std::optional<string> &source) {
+	return DuckDBPyAppender::ForQuery(shared_from_this(), dml, columns, source);
 }
 
 std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::Append(const string &name, const PandasDataFrame &value,
@@ -2434,6 +2458,18 @@ PythonImportCache *DuckDBPyConnection::ImportCache() {
 	return import_cache.get();
 }
 
+nb::object DuckDBPyConnection::ConsumedArrowReaders() {
+	auto &readers = GetModuleState().consumed_arrow_readers;
+	if (!readers) {
+		nb::dict record;
+		// Creating the record can run Python, so another thread may have published one in the meantime.
+		if (!readers) {
+			readers = make_uniq<PyObjectHolder>(std::move(record));
+		}
+	}
+	return readers->obj;
+}
+
 ModifiedMemoryFileSystem &DuckDBPyConnection::GetObjectFileSystem() {
 	if (!internal_object_filesystem) {
 		D_ASSERT(!FileSystemIsRegistered("DUCKDB_INTERNAL_OBJECTSTORE"));
@@ -2471,6 +2507,7 @@ void DuckDBPyConnection::Exit(DuckDBPyConnection &self, const nb::object &exc_ty
 void DuckDBPyConnection::Cleanup() {
 	GetModuleState().default_connection.Set(nullptr);
 	GetModuleState().import_cache.reset();
+	GetModuleState().consumed_arrow_readers.reset();
 }
 
 bool DuckDBPyConnection::IsPandasDataframe(const nb::object &object) {

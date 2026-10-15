@@ -9,6 +9,8 @@ pyarrow.parquet = pytest.importorskip("pyarrow.parquet")
 pyarrow.dataset = pytest.importorskip("pyarrow.dataset")
 np = pytest.importorskip("numpy")
 
+CONSUMED = "has already been consumed and cannot be scanned again"
+
 
 class TestArrowRecordBatchReader:
     def test_parallel_reader(self, duckdb_cursor):
@@ -32,8 +34,8 @@ class TestArrowRecordBatchReader:
         rel = duckdb_conn.from_arrow(reader)
 
         assert rel.filter("first_name='Jose' and salary > 134708.82").aggregate("count(*)").fetchall()[0][0] == 12
-        # The reader is already consumed so this should be 0
-        assert rel.filter("first_name='Jose' and salary > 134708.82").aggregate("count(*)").fetchall()[0][0] == 0
+        with pytest.raises(duckdb.InvalidInputException, match=CONSUMED):
+            rel.filter("first_name='Jose' and salary > 134708.82").aggregate("count(*)").fetchall()
 
     def test_parallel_reader_replacement_scans(self, duckdb_cursor):
         duckdb_conn = duckdb.connect()
@@ -59,12 +61,10 @@ class TestArrowRecordBatchReader:
             ).fetchone()[0]
             == 12
         )
-        assert (
+        with pytest.raises(duckdb.InvalidInputException, match=CONSUMED):
             duckdb_conn.execute(
                 "select count(*) r2 from reader where first_name='Jose' and salary > 134708.82"
-            ).fetchone()[0]
-            == 0
-        )
+            ).fetchone()
 
     def test_parallel_reader_register(self, duckdb_cursor):
         duckdb_conn = duckdb.connect()
@@ -90,10 +90,8 @@ class TestArrowRecordBatchReader:
             duckdb_conn.execute("select count(*) from bla where first_name='Jose' and salary > 134708.82").fetchone()[0]
             == 12
         )
-        assert (
-            duckdb_conn.execute("select count(*) from bla where first_name='Jose' and salary > 134708.82").fetchone()[0]
-            == 0
-        )
+        with pytest.raises(duckdb.InvalidInputException, match=CONSUMED):
+            duckdb_conn.execute("select count(*) from bla where first_name='Jose' and salary > 134708.82").fetchone()
 
     def test_parallel_reader_default_conn(self, duckdb_cursor):
         parquet_filename = str(Path(__file__).parent / "data" / "userdata1.parquet")
@@ -113,5 +111,5 @@ class TestArrowRecordBatchReader:
         rel = duckdb.from_arrow(reader)
 
         assert rel.filter("first_name='Jose' and salary > 134708.82").aggregate("count(*)").fetchall()[0][0] == 12
-        # The reader is already consumed so this should be 0
-        assert rel.filter("first_name='Jose' and salary > 134708.82").aggregate("count(*)").fetchall()[0][0] == 0
+        with pytest.raises(duckdb.InvalidInputException, match=CONSUMED):
+            rel.filter("first_name='Jose' and salary > 134708.82").aggregate("count(*)").fetchall()

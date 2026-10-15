@@ -12,7 +12,78 @@
 #include "duckdb/common/limits.hpp"
 #include "duckdb/main/client_config.hpp"
 
+#include <cstring>
+
 namespace duckdb {
+
+static constexpr const char *CONSUMED_READER_ERROR =
+    "This RecordBatchReader has already been consumed and cannot be scanned again. A RecordBatchReader can be read "
+    "only once; to scan its data more than once, read it into a table first, for example with read_all().";
+
+bool PythonTableArrowArrayStreamFactory::IsSingleUse(nb::handle arrow_object, PyArrowObjectType type) {
+	if (type != PyArrowObjectType::PyCapsuleInterface) {
+		return false;
+	}
+	auto mro = Py_TYPE(arrow_object.ptr())->tp_mro;
+	for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(mro); i++) {
+		auto cls = reinterpret_cast<PyTypeObject *>(PyTuple_GET_ITEM(mro, i));
+		// tp_name works without pyarrow in sys.modules; a Python class has a dotted one only by choice.
+		if (strcmp(cls->tp_name, "pyarrow.lib.RecordBatchReader") == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+namespace {
+
+//! Records a single-use reader as consumed, by identity, and takes the record back unless Keep() is called
+class ConsumedReaderMark {
+public:
+	ConsumedReaderMark(nb::handle reader, bool single_use) {
+		if (!single_use) {
+			return;
+		}
+		auto readers = DuckDBPyConnection::ConsumedArrowReaders();
+		key = nb::steal(PyLong_FromVoidPtr(reader.ptr()));
+		if (!key) {
+			throw nb::python_error();
+		}
+		auto forget = nb::module_::import_("functools").attr("partial")(readers.attr("pop"), key);
+		auto entry = nb::steal(PyWeakref_NewRef(reader.ptr(), forget.ptr()));
+		if (!entry) {
+			throw nb::python_error();
+		}
+		// One setdefault tests and records at once; the entry leaves with the reader, before its id can be reused.
+		auto recorded = PyDict_SetDefault(readers.ptr(), key.ptr(), entry.ptr());
+		if (!recorded) {
+			throw nb::python_error();
+		}
+		if (recorded != entry.ptr()) {
+			throw InvalidInputException(CONSUMED_READER_ERROR);
+		}
+		record = std::move(readers);
+	}
+	~ConsumedReaderMark() {
+		if (record && !kept && PyDict_DelItem(record.ptr(), key.ptr()) < 0) {
+			PyErr_Clear();
+		}
+	}
+	ConsumedReaderMark(const ConsumedReaderMark &) = delete;
+	ConsumedReaderMark &operator=(const ConsumedReaderMark &) = delete;
+
+	void Keep() {
+		kept = true;
+	}
+
+private:
+	//! Set only once the reader is marked
+	nb::object record;
+	nb::object key;
+	bool kept = false;
+};
+
+} // namespace
 
 void TransformDuckToArrowChunk(nb::object pyarrow_schema, ArrowArray &data, nb::list &batches) {
 	duckdb::PyUtil::GilAssert();
@@ -118,7 +189,9 @@ PythonTableArrowArrayStreamFactory::ProduceStream(ArrowStreamParameters &paramet
 	}
 
 	if (arrow_object_type == PyArrowObjectType::PyCapsuleInterface || arrow_object_type == PyArrowObjectType::Table) {
+		ConsumedReaderMark mark(arrow_obj_handle, single_use);
 		nb::object capsule_obj = arrow_obj_handle.attr("__arrow_c_stream__")();
+		mark.Keep();
 		auto capsule = nb::borrow<nb::capsule>(capsule_obj);
 		auto stream = reinterpret_cast<ArrowArrayStream *>(capsule.data());
 		if (!stream->release) {

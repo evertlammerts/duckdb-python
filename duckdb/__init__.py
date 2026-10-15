@@ -10,6 +10,7 @@ Note:
 """
 
 from _duckdb import (
+    Appender,
     BinderException,
     CaseExpression,
     CatalogException,
@@ -73,6 +74,7 @@ from _duckdb import (
     alias,
     apilevel,
     append,
+    appender,
     array_type,
     arrow,
     begin,
@@ -123,6 +125,7 @@ from _duckdb import (
     paramstyle,
     project,
     query,
+    query_appender,
     query_df,
     query_progress,
     read_csv,
@@ -206,6 +209,7 @@ from duckdb.value.constant import (
 )
 
 __all__: list[str] = [
+    "Appender",
     "BinaryValue",
     "BinderException",
     "BitValue",
@@ -303,6 +307,7 @@ __all__: list[str] = [
     "alias",
     "apilevel",
     "append",
+    "appender",
     "array_type",
     "arrow",
     "begin",
@@ -354,6 +359,7 @@ __all__: list[str] = [
     "paramstyle",
     "project",
     "query",
+    "query_appender",
     "query_df",
     "query_progress",
     "read_csv",
