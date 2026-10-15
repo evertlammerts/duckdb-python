@@ -132,7 +132,7 @@ private:
 } // namespace
 
 void TransformDuckToArrowChunk(nb::object pyarrow_schema, ArrowArray &data, nb::list &batches) {
-	duckdb::PyUtil::GilAssert();
+	DUCKDB_PY_ASSERT_GIL_HELD();
 	auto pyarrow_lib_module = nb::module_::import_("pyarrow").attr("lib");
 	auto batch_import_func = pyarrow_lib_module.attr("RecordBatch").attr("_import_from_c");
 	batches.append(batch_import_func(reinterpret_cast<uint64_t>(&data), pyarrow_schema));

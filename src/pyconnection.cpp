@@ -763,7 +763,7 @@ engine::Prepared DuckDBPyConnection::PrepareQuery(unique_ptr<SQLStatement> state
 	auto session = EngineSession();
 	engine::Prepared prep;
 	{
-		D_ASSERT(duckdb::PyUtil::GilCheck());
+		DUCKDB_PY_ASSERT_GIL_HELD();
 		nb::gil_scoped_release release;
 		unique_lock<std::recursive_mutex> lock(py_connection_lock);
 		prep = session.Prepare(std::move(statement));
@@ -781,7 +781,7 @@ shared_ptr<engine::Result> DuckDBPyConnection::ExecuteInternal(engine::Prepared 
 	auto named_values = TransformPreparedParameters(session.Context(), params, *prep.statement);
 	shared_ptr<engine::Result> res;
 	{
-		D_ASSERT(duckdb::PyUtil::GilCheck());
+		DUCKDB_PY_ASSERT_GIL_HELD();
 		nb::gil_scoped_release release;
 		unique_lock<std::recursive_mutex> lock(py_connection_lock);
 
@@ -802,7 +802,7 @@ shared_ptr<engine::Result> DuckDBPyConnection::PrepareAndSubmitInternal(unique_p
 
 	shared_ptr<engine::Result> res;
 	{
-		D_ASSERT(duckdb::PyUtil::GilCheck());
+		DUCKDB_PY_ASSERT_GIL_HELD();
 		nb::gil_scoped_release release;
 		unique_lock<std::recursive_mutex> lock(py_connection_lock);
 		res = session.Submit(std::move(statement), named_values, engine::Format::Chunks());
@@ -848,7 +848,7 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::Execute(const nb::object
 
 	auto res = PrepareAndSubmitInternal(std::move(last_statement), std::move(params));
 	{
-		D_ASSERT(duckdb::PyUtil::GilCheck());
+		DUCKDB_PY_ASSERT_GIL_HELD();
 		nb::gil_scoped_release release;
 		unique_lock<std::recursive_mutex> lock(py_connection_lock);
 		try {
@@ -1134,7 +1134,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadJSON(
 		auto_detect = true;
 	}
 
-	D_ASSERT(duckdb::PyUtil::GilCheck());
+	DUCKDB_PY_ASSERT_GIL_HELD();
 	nb::gil_scoped_release gil;
 	auto read_json_relation =
 	    make_shared_ptr<ReadJSONRelation>(connection.context, name, std::move(options), auto_detect);
@@ -1718,7 +1718,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadCSV(const nb::object &
 
 	// Create the ReadCSV Relation using the 'options'
 
-	D_ASSERT(duckdb::PyUtil::GilCheck());
+	DUCKDB_PY_ASSERT_GIL_HELD();
 	nb::gil_scoped_release gil;
 	auto read_csv_p = connection.ReadCSV(name, std::move(bind_parameters));
 	auto &read_csv = read_csv_p->Cast<ReadCSVRelation>();
@@ -1731,7 +1731,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadCSV(const nb::object &
 
 void DuckDBPyConnection::ExecuteImmediately(vector<unique_ptr<SQLStatement>> statements) {
 	auto session = EngineSession();
-	D_ASSERT(duckdb::PyUtil::GilCheck());
+	DUCKDB_PY_ASSERT_GIL_HELD();
 	nb::gil_scoped_release release;
 	if (statements.empty()) {
 		return;
@@ -1770,7 +1770,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::RunQuery(const nb::object 
 	if (!has_params) {
 		// No params (or empty params) — use lazy QueryRelation path
 		{
-			D_ASSERT(duckdb::PyUtil::GilCheck());
+			DUCKDB_PY_ASSERT_GIL_HELD();
 			nb::gil_scoped_release gil;
 			auto statement_type = last_statement->type;
 			switch (statement_type) {
@@ -1791,7 +1791,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::RunQuery(const nb::object 
 		auto res = PrepareAndSubmitInternal(std::move(last_statement), std::move(params));
 		unique_ptr<ColumnDataCollection> collection;
 		{
-			D_ASSERT(duckdb::PyUtil::GilCheck());
+			DUCKDB_PY_ASSERT_GIL_HELD();
 			nb::gil_scoped_release release;
 			try {
 				res->Retain(CheckSignals);
@@ -1878,7 +1878,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::Values(const nb::args &arg
 		throw InvalidInputException("Could not create a ValueRelation without any inputs");
 	}
 
-	D_ASSERT(duckdb::PyUtil::GilCheck());
+	DUCKDB_PY_ASSERT_GIL_HELD();
 	nb::handle first_arg = args[0];
 	if (arg_count == 1 && nb::isinstance<nb::list>(first_arg)) {
 		vector<vector<Value>> values {DuckDBPyConnection::TransformPythonParamList(context, first_arg)};
@@ -1954,7 +1954,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::FromParquet(const nb::obje
 		}
 		named_parameters["compression"] = Value(nb::cast<std::string>(compression));
 	}
-	D_ASSERT(duckdb::PyUtil::GilCheck());
+	DUCKDB_PY_ASSERT_GIL_HELD();
 	nb::gil_scoped_release gil;
 	auto parquet_relation = connection.TableFunction("parquet_scan", params, named_parameters);
 	if (file_like_object_wrapper) {
@@ -1990,7 +1990,7 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::UnregisterPythonObject(c
 	// Held from the check to the change, so no result can open in between and be ended by it
 	engine::ConnectionClaim claim(*connection.context);
 	engine::VerifyNoOpenResult(*connection.context);
-	D_ASSERT(duckdb::PyUtil::GilCheck());
+	DUCKDB_PY_ASSERT_GIL_HELD();
 	nb::gil_scoped_release release;
 	// FIXME: DROP TEMPORARY VIEW? doesn't exist?
 	const auto quoted_name = SQLQuotedIdentifier::ToString(name);
@@ -2057,7 +2057,7 @@ void DuckDBPyConnection::Abort() {
 void DuckDBPyConnection::Close() {
 	ConnectionLockGuard conn_lock(*this);
 	con.SetResult(nullptr);
-	D_ASSERT(duckdb::PyUtil::GilCheck());
+	DUCKDB_PY_ASSERT_GIL_HELD();
 	// Release the GIL only for the native Connection / DuckDB teardown, which
 	// is pure C++ work and can take noticeable time. Hold the GIL back for
 	// `registered_functions.clear()` because the
@@ -2353,7 +2353,7 @@ static std::shared_ptr<DuckDBPyConnection> FetchOrCreateInstance(const string &d
 	bool cache_instance = database_path != ":memory:" && !database_path.empty();
 	config.replacement_scans.emplace_back(PythonReplacementScan::Replace);
 	{
-		D_ASSERT(duckdb::PyUtil::GilCheck());
+		DUCKDB_PY_ASSERT_GIL_HELD();
 		nb::gil_scoped_release release;
 		unique_lock<std::recursive_mutex> lock(res->py_connection_lock);
 		auto database = GetModuleState().instance_cache.GetOrCreateInstance(database_path, config, cache_instance,
@@ -2568,7 +2568,7 @@ NumpyObjectType DuckDBPyConnection::IsAcceptedNumpyObject(const nb::object &obje
 }
 
 PyArrowObjectType DuckDBPyConnection::GetArrowType(const nb::handle &obj) {
-	D_ASSERT(duckdb::PyUtil::GilCheck());
+	DUCKDB_PY_ASSERT_GIL_HELD();
 
 	if (nb::isinstance<nb::capsule>(obj)) {
 		auto capsule = nb::borrow<nb::capsule>(obj);

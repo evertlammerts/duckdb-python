@@ -40,9 +40,43 @@ struct PyUtil {
 		return nb::cast<std::string>(nb::str(obj));
 	}
 
-	// GIL state checks.
+#ifndef Py_LIMITED_API
+	// Whether this thread holds the GIL. The stable ABI has no way to ask, so the asserts below exist only in
+	// full-API builds, where debugging happens.
 	static bool GilCheck();
-	static void GilAssert();
+#endif
+
+	// Releases the GIL for the scope when this thread holds it, and leaves a thread without it alone. Stream
+	// callbacks arrive either way, and ending a query waits for tasks that may need the GIL.
+	class GilReleaseIfHeld {
+	public:
+		GilReleaseIfHeld() {
+#if PY_VERSION_HEX >= 0x030C0000
+			// From 3.12 this detaches the thread's state and releases the GIL, or returns null for a thread without
+			// one; before 3.12 it only swapped a process-wide pointer
+			saved = PyThreadState_Swap(nullptr);
+#elif defined(Py_LIMITED_API)
+#error "the stable ABI build starts at CPython 3.12, where PyThreadState_Swap releases the GIL"
+#else
+			saved = GilCheck() ? PyEval_SaveThread() : nullptr;
+#endif
+		}
+		~GilReleaseIfHeld() {
+			if (!saved) {
+				return;
+			}
+#if PY_VERSION_HEX >= 0x030C0000
+			PyThreadState_Swap(saved);
+#else
+			PyEval_RestoreThread(saved);
+#endif
+		}
+		GilReleaseIfHeld(const GilReleaseIfHeld &) = delete;
+		GilReleaseIfHeld &operator=(const GilReleaseIfHeld &) = delete;
+
+	private:
+		PyThreadState *saved;
+	};
 
 	// Collection predicates consulting the connection's ImportCache (collections.abc Iterable/Mapping).
 	static bool IsListLike(nb::handle obj);
@@ -80,3 +114,11 @@ struct PyUtil {
 };
 
 } // namespace duckdb
+
+#ifdef Py_LIMITED_API
+#define DUCKDB_PY_ASSERT_GIL_HELD()     ((void)0)
+#define DUCKDB_PY_ASSERT_GIL_RELEASED() ((void)0)
+#else
+#define DUCKDB_PY_ASSERT_GIL_HELD()     D_ASSERT(duckdb::PyUtil::GilCheck())
+#define DUCKDB_PY_ASSERT_GIL_RELEASED() D_ASSERT(!duckdb::PyUtil::GilCheck())
+#endif

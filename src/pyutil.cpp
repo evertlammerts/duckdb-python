@@ -5,6 +5,7 @@
 
 namespace duckdb {
 
+#ifndef Py_LIMITED_API
 bool PyUtil::GilCheck() {
 	// Not PyGILState_Check, which answers true on every thread once any subinterpreter has been created.
 #if PY_VERSION_HEX >= 0x030D0000
@@ -17,12 +18,7 @@ bool PyUtil::GilCheck() {
 	return current && current == PyGILState_GetThisThreadState();
 #endif
 }
-
-void PyUtil::GilAssert() {
-	if (!GilCheck()) {
-		throw InternalException("The GIL should be held for this operation, but it's not!");
-	}
-}
+#endif
 
 bool PyUtil::IsListLike(nb::handle obj) {
 	if (nb::isinstance<nb::str>(obj) || nb::isinstance<nb::bytes>(obj)) {

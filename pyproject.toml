@@ -88,6 +88,9 @@ build-dir = "build/{cache_tag}"
 
 [tool.scikit-build.wheel]
 cmake = true
+# One stable ABI wheel for CPython 3.12 and up, where nanobind can link the stable ABI; an older interpreter gets
+# a wheel of its own from the same setting.
+py-api = "cp312"
 packages.duckdb = "duckdb"
 packages.adbc_driver_duckdb = "adbc_driver_duckdb"
 packages._duckdb-stubs = "_duckdb-stubs"
@@ -128,6 +131,11 @@ inherit.cmake.define = "append"
 cmake.define.CMAKE_CXX_FLAGS = "--coverage -O0"
 cmake.define.CMAKE_C_FLAGS = "--coverage -O0"
 cmake.define.CMAKE_SHARED_LINKER_FLAGS = "--coverage"
+
+# Override: an editable build keeps the full API, for the debug asserts on the GIL that the stable ABI cannot express.
+[[tool.scikit-build.overrides]]
+if.state = "editable"
+wheel.py-api = ""
 
 # Override: if we're in editable mode then make sure a build dir is set. Note that COVERAGE runs have their own
 #   build-dir, and we don't want to interfere with that. We're also disabling unity builds to help with debugging.

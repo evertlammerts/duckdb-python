@@ -172,14 +172,14 @@ string PythonFilesystem::PathSeparator(const string &path) {
 	return "/";
 }
 int64_t PythonFilesystem::GetFileSize(FileHandle &handle) {
-	D_ASSERT(!duckdb::PyUtil::GilCheck());
+	DUCKDB_PY_ASSERT_GIL_RELEASED();
 	// TODO: this value should be cached on the PythonFileHandle
 	nb::gil_scoped_acquire gil;
 
 	return nb::cast<int64_t>(filesystem.attr("size")(handle.path));
 }
 void PythonFilesystem::Seek(duckdb::FileHandle &handle, uint64_t location) {
-	D_ASSERT(!duckdb::PyUtil::GilCheck());
+	DUCKDB_PY_ASSERT_GIL_RELEASED();
 	nb::gil_scoped_acquire gil;
 
 	auto seek = PythonFileHandle::GetHandle(handle).attr("seek");
@@ -198,21 +198,21 @@ bool PythonFilesystem::CanHandleFile(const string &fpath) {
 	return false;
 }
 void PythonFilesystem::MoveFile(const string &source, const string &dest, optional_ptr<FileOpener> opener) {
-	D_ASSERT(!duckdb::PyUtil::GilCheck());
+	DUCKDB_PY_ASSERT_GIL_RELEASED();
 	nb::gil_scoped_acquire gil;
 
 	auto move = filesystem.attr("mv");
 	move(nb::str(source.c_str(), source.size()), nb::str(dest.c_str(), dest.size()));
 }
 void PythonFilesystem::RemoveFile(const string &filename, optional_ptr<FileOpener> opener) {
-	D_ASSERT(!duckdb::PyUtil::GilCheck());
+	DUCKDB_PY_ASSERT_GIL_RELEASED();
 	nb::gil_scoped_acquire gil;
 
 	auto remove = filesystem.attr("rm");
 	remove(nb::str(filename.c_str(), filename.size()));
 }
 timestamp_t PythonFilesystem::GetLastModifiedTime(FileHandle &handle) {
-	D_ASSERT(!duckdb::PyUtil::GilCheck());
+	DUCKDB_PY_ASSERT_GIL_RELEASED();
 	// TODO: this value should be cached on the PythonFileHandle
 	nb::gil_scoped_acquire gil;
 
@@ -222,7 +222,7 @@ timestamp_t PythonFilesystem::GetLastModifiedTime(FileHandle &handle) {
 	return Timestamp::FromEpochSeconds((int64_t)nb::cast<double>(last_mod.attr("timestamp")()));
 }
 void PythonFilesystem::FileSync(FileHandle &handle) {
-	D_ASSERT(!duckdb::PyUtil::GilCheck());
+	DUCKDB_PY_ASSERT_GIL_RELEASED();
 	nb::gil_scoped_acquire gil;
 
 	PythonFileHandle::GetHandle(handle).attr("flush")();
@@ -231,20 +231,20 @@ bool PythonFilesystem::DirectoryExists(const string &directory, optional_ptr<Fil
 	return Exists(directory, "isdir");
 }
 void PythonFilesystem::RemoveDirectory(const string &directory, optional_ptr<FileOpener> opener) {
-	D_ASSERT(!duckdb::PyUtil::GilCheck());
+	DUCKDB_PY_ASSERT_GIL_RELEASED();
 	nb::gil_scoped_acquire gil;
 
 	filesystem.attr("rm")(directory, nb::arg("recursive") = true);
 }
 void PythonFilesystem::CreateDirectory(const string &directory, optional_ptr<FileOpener> opener) {
-	D_ASSERT(!duckdb::PyUtil::GilCheck());
+	DUCKDB_PY_ASSERT_GIL_RELEASED();
 	nb::gil_scoped_acquire gil;
 
 	filesystem.attr("mkdir")(nb::str(directory.c_str(), directory.size()));
 }
 bool PythonFilesystem::ListFiles(const string &directory, const std::function<void(const string &, bool)> &callback,
                                  FileOpener *opener) {
-	D_ASSERT(!duckdb::PyUtil::GilCheck());
+	DUCKDB_PY_ASSERT_GIL_RELEASED();
 	nb::gil_scoped_acquire gil;
 	bool nonempty = false;
 
@@ -265,7 +265,7 @@ bool PythonFilesystem::ListFiles(const string &directory, const std::function<vo
 	return nonempty;
 }
 void PythonFilesystem::Truncate(FileHandle &handle, int64_t new_size) {
-	D_ASSERT(!duckdb::PyUtil::GilCheck());
+	DUCKDB_PY_ASSERT_GIL_RELEASED();
 	nb::gil_scoped_acquire gil;
 
 	filesystem.attr("touch")(handle.path, nb::arg("truncate") = true);
@@ -274,7 +274,7 @@ bool PythonFilesystem::IsPipe(const string &filename, optional_ptr<FileOpener> o
 	return false;
 }
 idx_t PythonFilesystem::SeekPosition(FileHandle &handle) {
-	D_ASSERT(!duckdb::PyUtil::GilCheck());
+	DUCKDB_PY_ASSERT_GIL_RELEASED();
 	nb::gil_scoped_acquire gil;
 
 	return nb::cast<idx_t>(PythonFileHandle::GetHandle(handle).attr("tell")());

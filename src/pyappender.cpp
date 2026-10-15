@@ -315,7 +315,7 @@ DuckDBPyAppender::DuckDBPyAppender(std::shared_ptr<DuckDBPyConnection> connectio
 // Checked before any lookup, so the refusal does not depend on whether a type name needed the transaction, and
 // again before the bind, because converting a name or a type can run Python code that aborts the transaction
 static void RefuseInsideAnAbortedTransaction(ClientContext &context) {
-	D_ASSERT(duckdb::PyUtil::GilCheck());
+	DUCKDB_PY_ASSERT_GIL_HELD();
 	nb::gil_scoped_release release;
 	engine::ConnectionClaim claim(context);
 	context.RunFunctionInTransaction([]() {}, true);
@@ -337,7 +337,7 @@ std::unique_ptr<DuckDBPyAppender> DuckDBPyAppender::Create(std::shared_ptr<DuckD
 	std::unique_ptr<DuckDBPyAppender> appender(
 	    new DuckDBPyAppender(std::move(connection), *context, std::move(names), std::move(types)));
 	engine::Session session(context);
-	D_ASSERT(duckdb::PyUtil::GilCheck());
+	DUCKDB_PY_ASSERT_GIL_HELD();
 	nb::gil_scoped_release release;
 	appender->statement = FlushStatement(*context, *appender->buffer, appender->names, source, dml);
 	auto signature = session.Bind(appender->statement->Copy(), appender->tables);
@@ -386,7 +386,7 @@ std::unique_ptr<DuckDBPyAppender> DuckDBPyAppender::ForTable(std::shared_ptr<Duc
 	}
 	ResolvedTable resolved;
 	{
-		D_ASSERT(duckdb::PyUtil::GilCheck());
+		DUCKDB_PY_ASSERT_GIL_HELD();
 		nb::gil_scoped_release release;
 		engine::ConnectionClaim claim(*held.context);
 		resolved = ResolveTable(*held.context, table);
@@ -508,7 +508,7 @@ void DuckDBPyAppender::Stage(const vector<Value> &row) {
 
 void DuckDBPyAppender::MoveStagedIntoBuffer() {
 	{
-		D_ASSERT(duckdb::PyUtil::GilCheck());
+		DUCKDB_PY_ASSERT_GIL_HELD();
 		nb::gil_scoped_release release;
 		try {
 			buffer->Append(staged);
@@ -587,7 +587,7 @@ void DuckDBPyAppender::Flush() {
 			throw;
 		}
 	};
-	D_ASSERT(duckdb::PyUtil::GilCheck());
+	DUCKDB_PY_ASSERT_GIL_HELD();
 	nb::gil_scoped_release release;
 	try {
 		session.Run(statement->Copy(), tables, check);
