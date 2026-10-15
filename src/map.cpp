@@ -39,7 +39,8 @@ static nb::object FunctionCall(NumpyResultConversion &conversion, const vector<I
 	D_ASSERT(in_df.ptr());
 
 	D_ASSERT(function);
-	auto *df_obj = PyObject_CallOneArg(function, in_df.ptr());
+	// Not PyObject_CallOneArg: nanobind links macOS extensions against a fixed list of CPython symbols that lacks it.
+	auto *df_obj = PyObject_CallFunctionObjArgs(function, in_df.ptr(), nullptr);
 	if (!df_obj) {
 		PyErr_PrintEx(1);
 		throw InvalidInputException("Python error. See above for a stack trace.");
