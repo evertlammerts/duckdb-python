@@ -715,9 +715,11 @@ def test_a_python_error_from_the_binding_code_keeps_its_type_and_message(shape, 
     outcome = _run_child(_BINDING_CODE_RAISES, shape, stage, "input")
     assert outcome["raised_at"] == ("map" if stage == "bind" else "fetchall")
     assert outcome["error_type"] == "_duckdb.Error"
+    # The layout between the header, the raising frame and the final line is nanobind's: the full API prints bare
+    # frame lines, the limited API uses traceback.format_exception, with blank lines, source lines and markers.
     traceback = (
-        r'Traceback \(most recent call last\):\n(  File "[^"\n]+", line \d+, in \S+\n)*'
-        rf'  File "<string>", line \d+, in {raising_function}\nValueError: {text}'
+        r"Traceback \(most recent call last\):\n(.*\n)*?"
+        rf'  File "<string>", line \d+, in {raising_function}\n(.*\n)*?ValueError: {text}\n?'
     )
     assert re.fullmatch(traceback, outcome["message"]), outcome["message"]
 
