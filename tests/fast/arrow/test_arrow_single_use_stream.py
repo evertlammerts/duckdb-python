@@ -88,6 +88,51 @@ except duckdb.InvalidInputException as error:
     print("second raised", {CONSUMED!r} in str(error))
 """
 
+# The three sources that are not pyarrow's reader, classified while pyarrow is out of sys.modules: a class that
+# claims the reader's name and module, one whose metaclass makes __mro__ a list, and one with a deep diamond
+# hierarchy that a naive walk of the bases visits exponentially often.
+NEGATIVES_WITHOUT_PYARROW = """
+import sys
+from unittest import mock
+import duckdb
+
+with mock.patch.dict(sys.modules):
+    import pyarrow as pa
+    table = pa.table({"id": [1, 2, 3]})
+print("pyarrow listed", "pyarrow" in sys.modules)
+
+
+def stream(self, requested_schema=None):
+    return table.__arrow_c_stream__(requested_schema)
+
+
+class RecordBatchReader:
+    __module__ = "pyarrow.lib"
+    __qualname__ = "RecordBatchReader"
+    __arrow_c_stream__ = stream
+
+
+class ListMroMeta(type):
+    @property
+    def __mro__(cls):
+        return type.mro(cls)
+
+
+class ListMroSource(metaclass=ListMroMeta):
+    __arrow_c_stream__ = stream
+
+
+left, right = type("A0", (), {}), type("B0", (), {})
+for level in range(25):
+    left, right = type(f"A{level + 1}", (left, right), {}), type(f"B{level + 1}", (left, right), {})
+Diamond = type("Diamond", (left, right), {"__arrow_c_stream__": stream})
+
+con = duckdb.connect()
+for source in (RecordBatchReader(), ListMroSource(), Diamond()):
+    rel = con.from_arrow(source)
+    print(type(source).__name__, len(rel.fetchall()), len(rel.fetchall()))
+"""
+
 CONCURRENT_FIRST_SCANS = f"""
 import json, threading
 import duckdb, pyarrow as pa
@@ -532,6 +577,14 @@ class TestConsumedReaderRecord:
         assert "pyarrow listed False" in completed.stdout
         assert "first 3" in completed.stdout
         assert "second raised True" in completed.stdout
+
+    def test_sources_that_are_not_the_reader_while_pyarrow_is_out_of_sys_modules(self):
+        completed = _run_python(NEGATIVES_WITHOUT_PYARROW)
+        assert completed.returncode == 0, completed.stderr[-2000:]
+        assert "pyarrow listed False" in completed.stdout
+        assert "RecordBatchReader 3 3" in completed.stdout
+        assert "ListMroSource 3 3" in completed.stdout
+        assert "Diamond 3 3" in completed.stdout
 
     def test_concurrent_first_scans_in_a_fresh_process(self):
         completed = _run_python(CONCURRENT_FIRST_SCANS)

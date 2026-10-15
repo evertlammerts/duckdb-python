@@ -10,9 +10,9 @@
 #include "duckdb/common/assert.hpp"
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/limits.hpp"
+#include "duckdb/common/unordered_set.hpp"
+#include "duckdb/common/vector.hpp"
 #include "duckdb/main/client_config.hpp"
-
-#include <cstring>
 
 namespace duckdb {
 
@@ -20,19 +20,68 @@ static constexpr const char *CONSUMED_READER_ERROR =
     "This RecordBatchReader has already been consumed and cannot be scanned again. A RecordBatchReader can be read "
     "only once; to scan its data more than once, read it into a table first, for example with read_all().";
 
+namespace {
+
+string TypeText(nb::object value) {
+	if (!value.is_valid() || !nb::str::check_(value)) {
+		PyErr_Clear();
+		return string();
+	}
+	return nb::cast<string>(value);
+}
+
+//! The fallback for a reader whose pyarrow left sys.modules: an extension type's module and name come from tp_name,
+//! while a Python class can forge both through __module__ and __qualname__, so it is never the reader.
+bool IsPyarrowReaderType(PyTypeObject *type) {
+	if (PyType_GetFlags(type) & Py_TPFLAGS_HEAPTYPE) {
+		return false;
+	}
+	auto name = TypeText(nb::steal(PyType_GetName(type)));
+	auto module = TypeText(nb::steal(PyObject_GetAttrString(reinterpret_cast<PyObject *>(type), "__module__")));
+	return name == "RecordBatchReader" && module == "pyarrow.lib";
+}
+
+//! Walks the bases the type was created with, not __mro__, which a metaclass can replace; each ancestor once, since
+//! a diamond hierarchy repeats them
+bool DerivesFromPyarrowReader(PyTypeObject *type) {
+	vector<PyTypeObject *> pending {type};
+	unordered_set<PyTypeObject *> seen;
+	while (!pending.empty()) {
+		auto current = pending.back();
+		pending.pop_back();
+		if (!seen.insert(current).second) {
+			continue;
+		}
+		if (IsPyarrowReaderType(current)) {
+			return true;
+		}
+		auto bases = static_cast<PyObject *>(PyType_GetSlot(current, Py_tp_bases));
+		if (!bases || !PyTuple_Check(bases)) {
+			PyErr_Clear();
+			continue;
+		}
+		auto count = PyTuple_Size(bases);
+		for (Py_ssize_t i = 0; i < count; i++) {
+			pending.push_back(reinterpret_cast<PyTypeObject *>(PyTuple_GetItem(bases, i)));
+		}
+	}
+	return false;
+}
+
+} // namespace
+
 bool PythonTableArrowArrayStreamFactory::IsSingleUse(nb::handle arrow_object, PyArrowObjectType type) {
 	if (type != PyArrowObjectType::PyCapsuleInterface) {
 		return false;
 	}
-	auto mro = Py_TYPE(arrow_object.ptr())->tp_mro;
-	for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(mro); i++) {
-		auto cls = reinterpret_cast<PyTypeObject *>(PyTuple_GET_ITEM(mro, i));
-		// tp_name works without pyarrow in sys.modules; a Python class has a dotted one only by choice.
-		if (strcmp(cls->tp_name, "pyarrow.lib.RecordBatchReader") == 0) {
-			return true;
+	if (ModuleIsLoaded<PyarrowCacheItem>()) {
+		auto reader_type = DuckDBPyConnection::ImportCache()->pyarrow.RecordBatchReader();
+		if (reader_type.ptr() && PyType_Check(reader_type.ptr())) {
+			return PyType_IsSubtype(Py_TYPE(arrow_object.ptr()), reinterpret_cast<PyTypeObject *>(reader_type.ptr())) !=
+			       0;
 		}
 	}
-	return false;
+	return DerivesFromPyarrowReader(Py_TYPE(arrow_object.ptr()));
 }
 
 namespace {
@@ -55,11 +104,8 @@ public:
 			throw nb::python_error();
 		}
 		// One setdefault tests and records at once; the entry leaves with the reader, before its id can be reused.
-		auto recorded = PyDict_SetDefault(readers.ptr(), key.ptr(), entry.ptr());
-		if (!recorded) {
-			throw nb::python_error();
-		}
-		if (recorded != entry.ptr()) {
+		auto recorded = readers.attr("setdefault")(key, entry);
+		if (!recorded.is(entry)) {
 			throw InvalidInputException(CONSUMED_READER_ERROR);
 		}
 		record = std::move(readers);

@@ -15,8 +15,6 @@
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/types/hugeint.hpp"
 
-#include "datetime.h" // from Python
-
 namespace duckdb {
 
 enum class PythonObjectType {

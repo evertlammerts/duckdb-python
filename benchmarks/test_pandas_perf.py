@@ -5,6 +5,7 @@ Column backing selects the path: numpy-backed -> NumpyArray scan; arrow-backed (
 
 from __future__ import annotations
 
+import datetime
 from typing import TYPE_CHECKING
 
 import pyarrow as pa
@@ -36,7 +37,7 @@ def df_numpy_numeric() -> pd.DataFrame:
 @pytest.fixture(scope="module")
 def df_numpy_string() -> pd.DataFrame:
     # explicit object dtype -> the reworked numpy-backed object-string / analyzer path
-    return pd.DataFrame({"s": pd.array(_STRINGS, dtype=object)})
+    return pd.DataFrame({"s": pd.Series(_STRINGS, dtype=object)})
 
 
 @pytest.fixture(scope="module")
@@ -52,6 +53,14 @@ def df_arrow_numeric() -> pd.DataFrame:
 @pytest.fixture(scope="module")
 def df_arrow_string() -> pd.DataFrame:
     return pd.DataFrame({"s": pd.array(_STRINGS, dtype=pd.ArrowDtype(pa.string()))})
+
+
+@pytest.fixture(scope="module", params=["naive", "aware"])
+def df_object_datetime(request: pytest.FixtureRequest) -> pd.DataFrame:
+    # explicit object dtype keeps datetime objects, so the scan converts each one instead of a datetime64 column
+    zone = datetime.timezone(datetime.timedelta(hours=2)) if request.param == "aware" else None
+    start = datetime.datetime(2020, 1, 1, 12, 30, 15, 250_000, tzinfo=zone)
+    return pd.DataFrame({"t": pd.Series([start + datetime.timedelta(seconds=i) for i in range(N)], dtype=object)})
 
 
 # READ: pandas -> duckdb. sum/length force a full scan.
@@ -73,6 +82,15 @@ def test_read_pandas_numpy_string(
     con.register("t", df_numpy_string)
     con.execute("SELECT count(s), sum(length(s)) FROM t").fetchall()  # warm
     benchmark(lambda: con.execute("SELECT count(s), sum(length(s)) FROM t").fetchall())
+
+
+@pytest.mark.informational
+def test_read_pandas_object_datetime(
+    benchmark: BenchmarkFixture, con: duckdb.DuckDBPyConnection, df_object_datetime: pd.DataFrame
+) -> None:
+    con.register("t", df_object_datetime)
+    con.execute("SELECT count(t), max(t) FROM t").fetchall()  # warm
+    benchmark(lambda: con.execute("SELECT count(t), max(t) FROM t").fetchall())
 
 
 @pytest.mark.informational

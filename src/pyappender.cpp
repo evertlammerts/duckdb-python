@@ -556,7 +556,7 @@ void DuckDBPyAppender::AppendRows(const nb::handle &rows) {
 		if (nb::isinstance<nb::str>(row) || nb::isinstance<nb::bytes>(row) || nb::isinstance<nb::dict>(row) ||
 		    !PySequence_Check(row.ptr())) {
 			throw InvalidInputException("append_rows takes rows as sequences of values, not a %s",
-			                            Py_TYPE(row.ptr())->tp_name);
+			                            nb::type_name(row.type()).c_str());
 		}
 		auto count = PySequence_Size(row.ptr());
 		if (count < 0) {
