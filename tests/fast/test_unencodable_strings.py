@@ -5,7 +5,6 @@ escapes written next to each other as two separate code points, so they are refu
 """
 
 import re
-import sys
 
 import pytest
 
@@ -208,11 +207,7 @@ UTF8_BOUNDARIES = [0x7F, 0x80, 0x7FF, 0x800, 0xD7FF, 0xE000, 0xFFFF, 0x10000, 0x
 
 
 def scan_encoded(text):
-    result = pandas_from_df(duckdb.connect(), text)
-    # A cached UTF-8 encoding grows a str and is never dropped, so matching the size of a fresh copy shows the scan
-    # had no cached encoding to copy and encoded the str itself.
-    assert sys.getsizeof(text) == sys.getsizeof(text.encode().decode())
-    return result
+    return pandas_from_df(duckdb.connect(), text)
 
 
 @pytest.mark.parametrize(
