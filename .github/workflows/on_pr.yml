@@ -1,15 +1,13 @@
 name: Tests and builds on PR
+# No paths filter: Summary is a required status check, and a check that never
+# reports blocks the merge. Docs-only changes pay the full run.
 on:
   pull_request:
     branches:
       - main
       - v*.*-*
     types: [opened, reopened, ready_for_review, converted_to_draft, synchronize]
-    paths-ignore:
-      - '**.md'
-      - 'LICENSE'
-      - '.editorconfig'
-      - 'scripts/**'
+  merge_group:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -38,3 +36,24 @@ jobs:
     uses: ./.github/workflows/coverage.yml
     with:
       testsuite: all
+
+  summary:
+    name: Summary
+    # The one required status check: red when any job failed or was cancelled,
+    # green when every job passed or was skipped by its own condition.
+    if: ${{ always() }}
+    needs:
+      - code_quality
+      - packaging_test
+      - coverage_test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check job results
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS"
+          if echo "$RESULTS" | grep -Eq '"result": "(failure|cancelled)"'; then
+            echo "::error::A job failed or was cancelled."
+            exit 1
+          fi
