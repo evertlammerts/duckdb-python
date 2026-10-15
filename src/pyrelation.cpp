@@ -13,6 +13,7 @@
 #include "duckdb/parser/common_table_expression_info.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/common/box_renderer.hpp"
+#include "duckdb/common/file_system.hpp"
 #include "duckdb/main/query_result.hpp"
 #include "duckdb/parser/statement/explain_statement.hpp"
 #include "duckdb/catalog/default/default_types.hpp"
@@ -1071,6 +1072,25 @@ static Value NestedDictToStruct(const nb::object &dictionary) {
 	return Value::STRUCT(std::move(children));
 }
 
+// The engine refuses an existing file itself for directory output and rejects append next to an overwrite option,
+// but a single file COPY replaces an existing file whatever its overwrite options say.
+static void RefuseExistingSingleFile(ClientContext &context, const string &filename,
+                                     const identifier_map_t<vector<Value>> &options) {
+	auto per_thread_output = options.find("per_thread_output");
+	if (options.count("partition_by") || options.count("file_size_bytes") || options.count("append") ||
+	    (per_thread_output != options.end() && BooleanValue::Get(per_thread_output->second[0]))) {
+		return;
+	}
+	bool exists;
+	{
+		nb::gil_scoped_release release;
+		exists = FileSystem::GetFileSystem(context).FileExists(filename);
+	}
+	if (exists) {
+		throw IOException("Cannot write to \"%s\" - it exists! Pass overwrite=True to overwrite the file", filename);
+	}
+}
+
 void DuckDBPyRelation::ToParquet(const string &filename, const nb::object &compression, const nb::object &field_ids,
                                  const nb::object &row_group_size_bytes, const nb::object &row_group_size,
                                  const nb::object &overwrite, const nb::object &per_thread_output,
@@ -1146,11 +1166,13 @@ void DuckDBPyRelation::ToParquet(const string &filename, const nb::object &compr
 		options["append"] = {Value::BOOLEAN((bool)nb::bool_(append))};
 	}
 
+	bool refuse_existing_file = false;
 	if (!nb::none().is(overwrite)) {
 		if (!nb::isinstance<nb::bool_>(overwrite)) {
 			throw InvalidInputException("to_parquet only accepts 'overwrite' as a boolean");
 		}
-		options["overwrite_or_ignore"] = {Value::BOOLEAN((bool)nb::bool_(overwrite))};
+		refuse_existing_file = !(bool)nb::bool_(overwrite);
+		options["overwrite_or_ignore"] = {Value::BOOLEAN(!refuse_existing_file)};
 	}
 
 	if (!nb::none().is(per_thread_output)) {
@@ -1183,6 +1205,10 @@ void DuckDBPyRelation::ToParquet(const string &filename, const nb::object &compr
 		} else {
 			throw InvalidInputException("to_parquet only accepts 'file_size_bytes' as an integer or string");
 		}
+	}
+
+	if (refuse_existing_file) {
+		RefuseExistingSingleFile(*rel->context->GetContext(), filename, options);
 	}
 
 	auto write_parquet = rel->WriteParquetRel(filename, std::move(options));
@@ -1286,11 +1312,13 @@ void DuckDBPyRelation::ToCSV(const string &filename, const nb::object &sep, cons
 		options["compression"] = {Value(nb::cast<std::string>(compression))};
 	}
 
+	bool refuse_existing_file = false;
 	if (!nb::none().is(overwrite)) {
 		if (!nb::isinstance<nb::bool_>(overwrite)) {
 			throw InvalidInputException("to_csv only accepts 'overwrite' as a boolean");
 		}
-		options["overwrite_or_ignore"] = {Value::BOOLEAN((bool)nb::bool_(overwrite))};
+		refuse_existing_file = !(bool)nb::bool_(overwrite);
+		options["overwrite_or_ignore"] = {Value::BOOLEAN(!refuse_existing_file)};
 	}
 
 	if (!nb::none().is(per_thread_output)) {
@@ -1327,6 +1355,10 @@ void DuckDBPyRelation::ToCSV(const string &filename, const nb::object &sep, cons
 			throw InvalidInputException("to_csv only accepts 'write_partition_columns' as a boolean");
 		}
 		options["write_partition_columns"] = {Value::BOOLEAN((bool)nb::bool_(write_partition_columns))};
+	}
+
+	if (refuse_existing_file) {
+		RefuseExistingSingleFile(*rel->context->GetContext(), filename, options);
 	}
 
 	auto write_csv = rel->WriteCSVRel(filename, std::move(options));
