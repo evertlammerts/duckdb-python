@@ -603,7 +603,6 @@ void DuckDBPyConnection::Initialize(nb::handle &m) {
 	connection_module.def_prop_ro("description", &DuckDBPyConnection::GetDescription,
 	                              "Get result set attributes, mainly column names");
 	connection_module.def_prop_ro("rowcount", &DuckDBPyConnection::GetRowcount, "Get result set row count");
-	PyDateTime_IMPORT; // NOLINT
 	DuckDBPyConnection::ImportCache();
 }
 

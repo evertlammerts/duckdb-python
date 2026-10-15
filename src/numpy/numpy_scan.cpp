@@ -6,7 +6,6 @@
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/vector/struct_vector.hpp"
 #include "duckdb/common/vector/map_vector.hpp"
-#include "utf8proc_wrapper.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb_python/pandas/pandas_bind.hpp"
 #include "duckdb_python/numpy/numpy_type.hpp"
@@ -109,27 +108,6 @@ void ScanNumpyFpColumn(PandasColumnBindData &bind_data, const T *src_ptr, idx_t 
 		auto &result_mask = FlatVector::ValidityMutable(out);
 		ApplyMask(bind_data, result_mask, count, offset);
 	}
-}
-
-template <class T>
-static string_t DecodePythonUnicode(T *codepoints, idx_t codepoint_count, Vector &out) {
-	// first figure out how many bytes to allocate
-	idx_t utf8_length = 0;
-	for (idx_t i = 0; i < codepoint_count; i++) {
-		int len = Utf8Proc::CodepointLength(int(codepoints[i]));
-		D_ASSERT(len >= 1);
-		utf8_length += len;
-	}
-	int sz;
-	auto result = StringVector::EmptyString(out, utf8_length);
-	auto target = result.GetDataWriteable();
-	for (idx_t i = 0; i < codepoint_count; i++) {
-		Utf8Proc::CodepointToUtf8(int(codepoints[i]), sz, target);
-		D_ASSERT(sz >= 1);
-		target += sz;
-	}
-	result.Finalize();
-	return result;
 }
 
 static void SetInvalidRecursive(Vector &out, idx_t index) {
@@ -363,7 +341,8 @@ void NumpyScan::Scan(ClientContext &context, PandasColumnBindData &bind_data, id
 		// Get the data pointer and the validity mask of the result vector
 		auto tgt_ptr = FlatVector::GetDataMutable<string_t>(out);
 		auto &out_mask = FlatVector::ValidityMutable(out);
-		std::unique_ptr<nb::gil_scoped_acquire> gil;
+		// A str's UTF-8 is reachable only through the C API, which needs the GIL
+		nb::gil_scoped_acquire gil;
 		auto &import_cache = *DuckDBPyConnection::ImportCache();
 
 		// Loop over every row of the arrays contents
@@ -399,55 +378,23 @@ void NumpyScan::Scan(ClientContext &context, PandasColumnBindData &bind_data, id
 					continue;
 				}
 				if (!nb::isinstance<nb::str>(val)) {
-					if (!gil) {
-						gil = std::make_unique<nb::gil_scoped_acquire>();
-					}
 					bind_data.object_str_val.Push(std::move(nb::str(val)));
 					val = reinterpret_cast<PyObject *>(bind_data.object_str_val.LastAddedObject().ptr());
 				}
 			}
-			// Python 3 string representation:
-			// https://github.com/python/cpython/blob/3a8fdb28794b2f19f6c8464378fb8b46bce1f5f4/Include/cpython/unicodeobject.h#L79
 			nb::handle val_handle(val);
 			if (!nb::isinstance<nb::str>(val_handle)) {
 				out_mask.SetInvalid(row);
 				continue;
 			}
-			if (PyUtil::PyUnicodeIsCompactASCII(val_handle)) {
-				// ascii string: we can zero copy
-				tgt_ptr[row] = string_t(PyUtil::PyUnicodeData(val_handle), PyUtil::PyUnicodeGetLength(val_handle));
-			} else {
-				// unicode gunk
-				auto ascii_obj = reinterpret_cast<PyASCIIObject *>(val);
-				auto unicode_obj = reinterpret_cast<PyCompactUnicodeObject *>(val);
-				// compact unicode string: is there utf8 data available?
-				if (unicode_obj->utf8) {
-					// there is! zero copy
-					tgt_ptr[row] = string_t(const_char_ptr_cast(unicode_obj->utf8), unicode_obj->utf8_length);
-				} else if (PyUtil::PyUnicodeIsCompact(unicode_obj) &&
-				           !PyUtil::PyUnicodeIsASCII(unicode_obj)) { // NOLINT
-					auto kind = PyUtil::PyUnicodeKind(val_handle);
-					switch (kind) {
-					case PyUnicode_1BYTE_KIND:
-						tgt_ptr[row] = DecodePythonUnicode<Py_UCS1>(PyUtil::PyUnicode1ByteData(val_handle),
-						                                            PyUtil::PyUnicodeGetLength(val_handle), out);
-						break;
-					case PyUnicode_2BYTE_KIND:
-						tgt_ptr[row] = DecodePythonUnicode<Py_UCS2>(PyUtil::PyUnicode2ByteData(val_handle),
-						                                            PyUtil::PyUnicodeGetLength(val_handle), out);
-						break;
-					case PyUnicode_4BYTE_KIND:
-						tgt_ptr[row] = DecodePythonUnicode<Py_UCS4>(PyUtil::PyUnicode4ByteData(val_handle),
-						                                            PyUtil::PyUnicodeGetLength(val_handle), out);
-						break;
-					default:
-						throw NotImplementedException(
-						    "Unsupported typekind constant %d for Python Unicode Compact decode", kind);
-					}
-				} else {
-					throw InvalidInputException("Unsupported string type: no clue what this string is");
-				}
+			Py_ssize_t size;
+			// Zero copy: the bytes are the str's own or its cached UTF-8, both alive as long as the str
+			auto utf8 = PyUnicode_AsUTF8AndSize(val, &size);
+			if (!utf8) {
+				nb::python_error error;
+				throw InvalidInputException("Failed to convert a Python str to VARCHAR: %s", error.what());
 			}
+			tgt_ptr[row] = string_t(utf8, UnsafeNumericCast<uint32_t>(size));
 		}
 		break;
 	}

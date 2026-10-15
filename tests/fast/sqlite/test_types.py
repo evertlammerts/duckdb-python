@@ -28,6 +28,8 @@ import datetime
 import decimal
 import unittest
 
+import pytest
+
 import duckdb
 
 
@@ -128,6 +130,25 @@ class DuckDBTypeTests(unittest.TestCase):
         self.cur.execute("select b from test")
         row = self.cur.fetchone()
         assert row[0] == sample
+
+    def test_CheckMemoryviewSliceBlob(self):
+        val = memoryview(b"Guglhupf")[2:5]
+        self.cur.execute("insert into test(b) values (?)", (val,))
+        self.cur.execute("select b from test")
+        assert self.cur.fetchone()[0] == b"glh"
+
+    def test_CheckMemoryviewCastBlob(self):
+        val = memoryview(b"Guglhupf").cast("I")
+        self.cur.execute("insert into test(b) values (?)", (val,))
+        self.cur.execute("select b from test")
+        assert self.cur.fetchone()[0] == b"Guglhupf"
+
+    def test_CheckMemoryviewWithStridesIsRefused(self):
+        # a view that skips bytes has no single run of bytes to copy; before it was stored as the wrong bytes
+        val = memoryview(b"Guglhupf")[::2]
+        with pytest.raises(BufferError, match="not C-contiguous"):
+            self.cur.execute("insert into test(b) values (?)", (val,))
+        assert self.cur.execute("select 42").fetchone() == (42,)
 
     def test_CheckNoneBlob(self):
         val = None

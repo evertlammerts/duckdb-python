@@ -10,19 +10,6 @@
 #include "duckdb/common/types/cast_helpers.hpp"
 #include "duckdb/main/client_properties.hpp"
 
-#include "datetime.h" //from python
-
-/* Backport for Python < 3.10 */
-#if PY_VERSION_HEX < 0x030a00a1
-#ifndef PyDateTime_TIME_GET_TZINFO
-#define PyDateTime_TIME_GET_TZINFO(o) ((((PyDateTime_Time *)o)->hastzinfo) ? ((PyDateTime_Time *)o)->tzinfo : Py_None)
-#endif
-#ifndef PyDateTime_DATE_GET_TZINFO
-#define PyDateTime_DATE_GET_TZINFO(o)                                                                                  \
-	((((PyDateTime_DateTime *)o)->hastzinfo) ? ((PyDateTime_DateTime *)o)->tzinfo : Py_None)
-#endif
-#endif
-
 namespace duckdb {
 
 struct PyDictionary {
@@ -124,7 +111,7 @@ private:
 struct PyTime {
 public:
 	PyTime(nb::handle &obj);
-	nb::handle &obj;
+	nb::object obj;
 	int32_t hour;
 	int32_t minute;
 	int32_t second;
@@ -146,7 +133,7 @@ private:
 struct PyDateTime {
 public:
 	PyDateTime(nb::handle &obj);
-	nb::handle &obj;
+	nb::object obj;
 	int32_t year;
 	int32_t month;
 	int32_t day;
@@ -195,7 +182,6 @@ public:
 };
 
 struct PythonObject {
-	static void Initialize();
 	static nb::object FromStruct(const Value &value, const LogicalType &id, const ClientProperties &client_properties);
 	static nb::object FromValue(const Value &value, const LogicalType &id, const ClientProperties &client_properties);
 };

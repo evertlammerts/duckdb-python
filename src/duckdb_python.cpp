@@ -1107,7 +1107,6 @@ NB_MODULE(DUCKDB_PYTHON_LIB_NAME, m) { // NOLINT
 	DuckDBPyRelation::Initialize(m);
 	DuckDBPyAppender::Initialize(m);
 	DuckDBPyConnection::Initialize(m);
-	PythonObject::Initialize();
 
 	m.doc() = "DuckDB is an embeddable SQL OLAP Database Management System";
 	m.attr("__package__") = "duckdb";

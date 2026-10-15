@@ -435,6 +435,21 @@ Value TransformDictionary(optional_ptr<ClientContext> context, const PyDictionar
 	return TransformDictionaryToStruct(context, dict);
 }
 
+struct ContiguousBuffer {
+	explicit ContiguousBuffer(nb::handle obj) {
+		if (PyObject_GetBuffer(obj.ptr(), &view, PyBUF_SIMPLE) != 0) {
+			throw nb::python_error();
+		}
+	}
+	~ContiguousBuffer() {
+		PyBuffer_Release(&view);
+	}
+	ContiguousBuffer(const ContiguousBuffer &) = delete;
+	ContiguousBuffer &operator=(const ContiguousBuffer &) = delete;
+
+	Py_buffer view;
+};
+
 // Importing pandas here instead would run the import on whichever thread of the query converts the value, and a None
 // entry in sys.modules is how a program blocks the import
 bool PandasIsImported(PythonImportCache &import_cache) {
@@ -1088,14 +1103,13 @@ void TransformPythonObjectInternal(optional_ptr<ClientContext> context, nb::hand
 	case PythonObjectType::ByteArray: {
 		auto byte_array = ele;
 		const_data_ptr_t bytes = const_data_ptr_cast(PyByteArray_AsString(byte_array.ptr())); // NOLINT
-		idx_t byte_length = PyUtil::PyByteArrayGetSize(byte_array);                           // NOLINT
+		idx_t byte_length = PyByteArray_Size(byte_array.ptr());
 		OP::HandleBlob(result, param, bytes, byte_length);
 		break;
 	}
 	case PythonObjectType::MemoryView: {
-		nb::memoryview py_view = nb::cast<nb::memoryview>(ele);
-		Py_buffer *py_buf = PyUtil::PyMemoryViewGetBuffer(py_view); // NOLINT
-		OP::HandleBlob(result, param, const_data_ptr_t(py_buf->buf), idx_t(py_buf->len));
+		ContiguousBuffer buffer(ele);
+		OP::HandleBlob(result, param, const_data_ptr_t(buffer.view.buf), idx_t(buffer.view.len));
 		break;
 	}
 	case PythonObjectType::Bytes: {

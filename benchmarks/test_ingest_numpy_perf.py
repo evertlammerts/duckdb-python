@@ -45,7 +45,7 @@ def df_double_with_nan() -> pd.DataFrame:
 
 @pytest.fixture(scope="module")
 def df_object_string_mixed() -> pd.DataFrame:
-    return pd.DataFrame({"s": pd.array(_MIXED_STRINGS, dtype=object)})
+    return pd.DataFrame({"s": pd.Series(_MIXED_STRINGS, dtype=object)})
 
 
 @pytest.fixture(scope="module")
