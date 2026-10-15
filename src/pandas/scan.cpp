@@ -7,6 +7,7 @@
 #include "duckdb_python/numpy/numpy_bind.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb_python/pandas/column/pandas_numpy_column.hpp"
+#include "duckdb_python/pyutil.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 
 #include "duckdb/common/atomic.hpp"
@@ -110,7 +111,7 @@ unique_ptr<FunctionData> PandasScanFunction::PandasScanBind(ClientContext &conte
 
 unique_ptr<GlobalTableFunctionState> PandasScanFunction::PandasScanInitGlobal(ClientContext &context,
                                                                               TableFunctionInitInput &input) {
-	if (PyGILState_Check()) {
+	if (PyUtil::GilCheck()) {
 		throw InvalidInputException("PandasScan called but GIL was already held!");
 	}
 	return make_uniq<PandasScanGlobalState>(PandasScanMaxThreads(context, input.bind_data.get()));

@@ -46,6 +46,7 @@ if typing.TYPE_CHECKING:
     from duckdb import sqltypes, func
 
 __all__: lst[str] = [
+    "Appender",
     "BinderException",
     "CSVLineTerminator",
     "CaseExpression",
@@ -103,6 +104,7 @@ __all__: lst[str] = [
     "alias",
     "apilevel",
     "append",
+    "appender",
     "array_type",
     "arrow",
     "begin",
@@ -153,6 +155,7 @@ __all__: lst[str] = [
     "paramstyle",
     "project",
     "query",
+    "query_appender",
     "query_df",
     "query_progress",
     "read_csv",
@@ -185,6 +188,14 @@ __all__: lst[str] = [
     "write_csv",
 ]
 
+class Appender:
+    def __enter__(self) -> Self: ...
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None: ...
+    def append_row(self, *values: typing.Any) -> None: ...
+    def append_rows(self, rows: Iterable[Sequence[typing.Any]]) -> None: ...
+    def clear(self) -> None: ...
+    def flush(self) -> None: ...
+
 class BinderException(ProgrammingError): ...
 class CatalogException(ProgrammingError): ...
 class ConnectionException(OperationalError): ...
@@ -199,6 +210,14 @@ class DuckDBPyConnection:
     def __enter__(self) -> Self: ...
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None: ...
     def append(self, table_name: str, df: pandas.DataFrame, *, by_name: bool = False) -> DuckDBPyConnection: ...
+    def appender(
+        self,
+        table: str,
+        *,
+        columns: lst[str] | None = None,
+        action: typing.Literal["insert", "upsert", "update", "delete"] = "insert",
+        key: lst[str] | None = None,
+    ) -> Appender: ...
     def array_type(self, type: IntoPyType, size: typing.SupportsInt) -> sqltypes.DuckDBPyType: ...
     def begin(self) -> DuckDBPyConnection: ...
     def checkpoint(self) -> DuckDBPyConnection: ...
@@ -335,6 +354,7 @@ class DuckDBPyConnection:
     def load_extension(self, extension: str) -> None: ...
     def map_type(self, key: IntoPyType, value: IntoPyType) -> sqltypes.DuckDBPyType: ...
     def query(self, query: str, *, alias: str = "", params: object = None) -> DuckDBPyRelation: ...
+    def query_appender(self, dml: str, columns: Mapping[str, IntoPyType], *, source: str | None = None) -> Appender: ...
     def query_progress(self) -> float: ...
     def read_csv(
         self,
@@ -849,6 +869,14 @@ def alias(df: pandas.DataFrame, alias: str, *, connection: DuckDBPyConnection | 
 def append(
     table_name: str, df: pandas.DataFrame, *, by_name: bool = False, connection: DuckDBPyConnection | None = None
 ) -> DuckDBPyConnection: ...
+def appender(
+    table: str,
+    *,
+    columns: lst[str] | None = None,
+    action: typing.Literal["insert", "upsert", "update", "delete"] = "insert",
+    key: lst[str] | None = None,
+    connection: DuckDBPyConnection | None = None,
+) -> Appender: ...
 def array_type(
     type: IntoPyType, size: typing.SupportsInt, *, connection: DuckDBPyConnection | None = None
 ) -> sqltypes.DuckDBPyType: ...
@@ -1066,6 +1094,13 @@ def query(
     params: object = None,
     connection: DuckDBPyConnection | None = None,
 ) -> DuckDBPyRelation: ...
+def query_appender(
+    dml: str,
+    columns: Mapping[str, IntoPyType],
+    *,
+    source: str | None = None,
+    connection: DuckDBPyConnection | None = None,
+) -> Appender: ...
 def query_df(
     df: pandas.DataFrame,
     virtual_table_name: str,

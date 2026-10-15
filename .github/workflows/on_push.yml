@@ -4,6 +4,7 @@ on:
     branches-ignore:
       - main
       - v*.*-*
+      - gh-readonly-queue/**
     paths-ignore:
       - '**.md'
       - 'LICENSE'
