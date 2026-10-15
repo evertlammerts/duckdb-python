@@ -1811,21 +1811,39 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::RunQuery(const nb::object 
 	return CreateRelation(std::move(relation));
 }
 
+static bool NamesSchemaOrCatalog(ClientContext &context, const Identifier &name) {
+	bool found = false;
+	// Both lookups return null rather than throw, so the check cannot abort an open transaction
+	context.RunFunctionInTransaction([&]() {
+		found = Catalog::GetCatalogEntry(context, name) ||
+		        Catalog::GetSchema(context, Identifier::InvalidCatalog(), name, OnEntryNotFound::RETURN_NULL);
+	});
+	return found;
+}
+
 std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::Table(const string &tname) {
 	auto &connection = con.GetConnection();
 	auto qualified_name = QualifiedName::Parse(tname);
-	if (qualified_name.Schema().empty()) {
-		qualified_name = QualifiedName(qualified_name.Catalog(), DEFAULT_SCHEMA, qualified_name.Name());
+	string error;
+	auto parsed = QualifiedName::TryParse(tname, qualified_name, error);
+	auto &path = qualified_name.Path();
+	// Connection::Table takes only a catalog, a schema and a name, so a nested schema path would lose its middle
+	if (parsed && path.size() <= 3) {
+		try {
+			return CreateRelation(
+			    connection.Table(qualified_name.Catalog(), qualified_name.Schema(), qualified_name.Name()));
+		} catch (const CatalogException &) {
+			// A missing table is reported without aborting the transaction, so SQL can still read the name below
+		}
 	}
-	try {
-		return CreateRelation(
-		    connection.Table(qualified_name.Catalog(), qualified_name.Schema(), qualified_name.Name()));
-	} catch (const CatalogException &) {
-		// CatalogException will be of the type '... is not a table'
-		// Not a table in the database, make a query relation that can perform replacement scans
-		auto sql_query = StringUtil::Format("from %s", SQLIdentifier::ToString(tname));
+	// A name is qualified only when its first part is a schema or a database, so that names SQL cannot resolve, such
+	// as people.csv, ./x.csv or a frame registered as "s.r", still read as one identifier
+	if (!parsed || (path.size() > 1 && !NamesSchemaOrCatalog(*connection.context, path[0]))) {
+		auto sql_query = "from " + SQLIdentifier::ToString(tname);
 		return RunQuery(nb::str(sql_query.c_str(), sql_query.size()), tname);
 	}
+	auto sql_query = "from " + qualified_name.ToString();
+	return RunQuery(nb::str(sql_query.c_str(), sql_query.size()), qualified_name.Name().GetIdentifierName());
 }
 
 static vector<unique_ptr<ParsedExpression>> ValueListFromExpressions(const nb::args &expressions) {

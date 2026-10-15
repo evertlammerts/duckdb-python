@@ -18,19 +18,8 @@ def evil1(df):
 
 
 class TestMap:
-    @pytest.mark.xfail(
-        reason="#10 deferred: the arg-tuple leak keeps the input DataFrame alive, and that reference is "
-        "load-bearing because ArrayWrapper::ToArray std::move's the result buffers into the input df; "
-        "releasing the tuple frees them too early and regresses test_isse_3237. A correct fix needs a "
-        "lifetime refactor. Pre-existing (byte-identical to main), not a cutover regression.",
-        strict=True,
-    )
     def test_map_does_not_leak_input_dataframe(self, duckdb_cursor):
-        """Known-leak marker (#10): the map callback's arg tuple is not released.
-
-        The PyTuple_Pack tuple pins each chunk's input DataFrame. Deferred (see xfail reason), so this
-        test documents the leak and will xpass once the lifetime refactor lands.
-        """
+        """Each chunk's input DataFrame is released once the query is fetched."""
         import gc
         import weakref
 
@@ -48,7 +37,7 @@ class TestMap:
         gc.collect()
         assert len(refs) >= 2, f"expected multiple chunks, got {len(refs)}"
         alive = sum(1 for r in refs if r() is not None)
-        assert alive == 0, f"{alive}/{len(refs)} per-chunk input DataFrames leaked (pinned by arg tuple)"
+        assert alive == 0, f"{alive}/{len(refs)} per-chunk input DataFrames leaked"
 
     def test_map_function_takes_no_sql_arguments(self, duckdb_cursor):
         # The callable travels through the bind input, never through a value SQL text can forge
