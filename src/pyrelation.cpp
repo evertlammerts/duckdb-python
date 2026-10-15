@@ -4,6 +4,7 @@
 #include "duckdb_python/pytype.hpp"
 #include "duckdb_python/pyresult.hpp"
 #include "duckdb_python/python_dependency.hpp"
+#include "duckdb_python/python_conversion.hpp"
 #include "duckdb/parser/qualified_name.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/relation/query_relation.hpp"
@@ -1235,7 +1236,7 @@ void DuckDBPyRelation::ToCSV(const string &filename, const nb::object &sep, cons
 		if (!nb::isinstance<nb::str>(na_rep)) {
 			throw InvalidInputException("to_csv only accepts 'na_rep' as a string");
 		}
-		options["null"] = {Value(nb::cast<std::string>(na_rep))};
+		options["null"] = {Value(TransformPythonString(na_rep))};
 	}
 
 	if (!nb::none().is(header)) {

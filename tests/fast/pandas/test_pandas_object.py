@@ -30,7 +30,7 @@ class TestPandasObject:
 
     def test_object_string_with_a_lone_surrogate(self, duckdb_cursor):
         df = pd.DataFrame({"s": pd.Series(["fine", "x\ud800y"], dtype=object)})  # noqa: F841
-        with pytest.raises(duckdb.InvalidInputException, match="surrogates not allowed"):
+        with pytest.raises(duckdb.InvalidInputException, match=r"surrogate '\\ud800' at position 1 is not allowed"):
             duckdb_cursor.sql("SELECT s FROM df").fetchall()
         assert duckdb_cursor.sql("SELECT 42").fetchall() == [(42,)]
 

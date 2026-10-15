@@ -53,5 +53,10 @@ void TransformPythonObject(optional_ptr<ClientContext> context, nb::handle ele, 
                            bool nan_as_null = true);
 Value TransformPythonValue(optional_ptr<ClientContext> context, nb::handle ele,
                            const LogicalType &target_type = LogicalType::UNKNOWN, bool nan_as_null = true);
+string TransformPythonString(nb::handle str);
+//! Needs no GIL
+InvalidInputException UnencodableStrError(uint32_t codepoint, idx_t position);
+//! Raises the pending UnicodeEncodeError of a failed UTF-8 conversion of str as the typed error above
+[[noreturn]] void ThrowUnencodableStr(nb::handle str);
 
 } // namespace duckdb
