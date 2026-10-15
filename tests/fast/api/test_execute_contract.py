@@ -503,8 +503,7 @@ class TestOpenResultIsExclusive:
         assert "usable after: [(42,)]" in output
 
     def test_a_udf_on_a_worker_between_two_fetches_is_refused(self):
-        # The engine keeps producing rows on its worker threads after a fetch returns, so a UDF can run while no
-        # call drives the query at all
+        # A worker can still be inside a UDF after a fetch returns, while no call drives the query at all
         code, output = run_isolated(
             """
             import threading
@@ -513,15 +512,22 @@ class TestOpenResultIsExclusive:
             con = duckdb.connect()
             # Workers are what runs the scan between fetches, so a one-CPU host must still get some
             con.execute("SET threads = 4")
-            fetched, called = threading.Event(), threading.Event()
+            # An unordered result lets any chunk answer the fetch, so the worker held below cannot stall it
+            con.execute("SET preserve_insertion_order = false")
+            main = threading.get_ident()
+            claim, fetched, called = threading.Lock(), threading.Event(), threading.Event()
             def inner(x):
-                if fetched.is_set() and not called.is_set():
-                    called.set()
+                # Producers park once the result buffer fills, possibly before the fetch returns, so one worker is
+                # held here until it does
+                if threading.get_ident() != main and claim.acquire(blocking=False):
+                    assert fetched.wait(30), "the fetch never returned"
                     try:
                         con.execute("SELECT 1")
                         print("ran", flush=True)
                     except duckdb.Error as error:
                         print("refused:", error, flush=True)
+                    finally:
+                        called.set()
                 return x
             con.create_function("inner", inner, [BIGINT], BIGINT)
             # A table scan splits into a task per row group; one range() source may only run when a fetch drives it
