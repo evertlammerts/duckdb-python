@@ -37,7 +37,7 @@ import importlib
 
 interpreters = importlib.import_module({INTERPRETERS!r})
 interpreters.destroy(interpreters.create())
-answer = ctypes.CDLL(None, handle=getattr(sys, "dllhandle", None)).PyGILState_Check()
+answer = ctypes.CDLL(None, handle=getattr(sys, "dllhandle", None), winmode=0).PyGILState_Check()
 print({PRECONDITION!r} + str(answer))
 if answer != 1:
     sys.exit(0)
