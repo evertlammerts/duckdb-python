@@ -529,6 +529,31 @@ static void InitializeConnectionMethods(nb::module_ &m) {
 	    "Append the passed DataFrame to the named table", nb::arg("table_name"), nb::arg("df"), nb::kw_only(),
 	    nb::arg("by_name") = false, nb::arg("connection").none() = nb::none());
 	m.def(
+	    "appender",
+	    [](const string &table, const std::optional<nb::list> &columns, const string &action,
+	       const std::optional<nb::list> &key, std::shared_ptr<DuckDBPyConnection> conn = nullptr) {
+		    if (!conn) {
+			    conn = DuckDBPyConnection::DefaultConnection();
+		    }
+		    return conn->CreateAppender(table, columns, action, key);
+	    },
+	    "Create an appender that buffers rows and inserts, upserts, updates or deletes them in the named table at each "
+	    "flush",
+	    nb::arg("table"), nb::kw_only(), nb::arg("columns").none() = nb::none(), nb::arg("action") = "insert",
+	    nb::arg("key").none() = nb::none(), nb::arg("connection").none() = nb::none());
+	m.def(
+	    "query_appender",
+	    [](const string &dml, const nb::dict &columns, const std::optional<string> &source,
+	       std::shared_ptr<DuckDBPyConnection> conn = nullptr) {
+		    if (!conn) {
+			    conn = DuckDBPyConnection::DefaultConnection();
+		    }
+		    return conn->CreateQueryAppender(dml, columns, source);
+	    },
+	    "Create an appender that buffers rows of the declared columns and runs the DML over them at each flush",
+	    nb::arg("dml"), nb::arg("columns"), nb::kw_only(), nb::arg("source").none() = nb::none(),
+	    nb::arg("connection").none() = nb::none());
+	m.def(
 	    "register",
 	    [](const string &name, const nb::object &python_object, std::shared_ptr<DuckDBPyConnection> conn = nullptr) {
 		    if (!conn) {
@@ -1080,6 +1105,7 @@ NB_MODULE(DUCKDB_PYTHON_LIB_NAME, m) { // NOLINT
 	DuckDBPyExpression::Initialize(m);
 	DuckDBPyStatement::Initialize(m);
 	DuckDBPyRelation::Initialize(m);
+	DuckDBPyAppender::Initialize(m);
 	DuckDBPyConnection::Initialize(m);
 	PythonObject::Initialize();
 

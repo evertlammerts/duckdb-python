@@ -328,6 +328,15 @@ static void InitializeConnectionMethods(nb::class_<DuckDBPyConnection> &m) {
 	      "Synchronizes data in the write-ahead log (WAL) to the database data file (no-op for in-memory connections)");
 	m.def("append", &DuckDBPyConnection::Append, "Append the passed DataFrame to the named table",
 	      nb::arg("table_name"), nb::arg("df"), nb::kw_only(), nb::arg("by_name") = false);
+	m.def(
+	    "appender", &DuckDBPyConnection::CreateAppender,
+	    "Create an appender that buffers rows and inserts, upserts, updates or deletes them in the named table at each "
+	    "flush",
+	    nb::arg("table"), nb::kw_only(), nb::arg("columns").none() = nb::none(), nb::arg("action") = "insert",
+	    nb::arg("key").none() = nb::none());
+	m.def("query_appender", &DuckDBPyConnection::CreateQueryAppender,
+	      "Create an appender that buffers rows of the declared columns and runs the DML over them at each flush",
+	      nb::arg("dml"), nb::arg("columns"), nb::kw_only(), nb::arg("source").none() = nb::none());
 	m.def("register", &DuckDBPyConnection::RegisterPythonObject,
 	      "Register the passed Python Object value for querying with a view", nb::arg("view_name"),
 	      nb::arg("python_object"));
@@ -854,6 +863,18 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::Execute(const nb::object
 	auto py_result = std::make_shared<DuckDBPyResult>(std::move(res));
 	con.SetResult(std::make_unique<DbapiResult>(std::move(py_result)));
 	return shared_from_this();
+}
+
+std::unique_ptr<DuckDBPyAppender> DuckDBPyConnection::CreateAppender(const string &table,
+                                                                     const std::optional<nb::list> &columns,
+                                                                     const string &action,
+                                                                     const std::optional<nb::list> &key) {
+	return DuckDBPyAppender::ForTable(shared_from_this(), table, columns, action, key);
+}
+
+std::unique_ptr<DuckDBPyAppender> DuckDBPyConnection::CreateQueryAppender(const string &dml, const nb::dict &columns,
+                                                                          const std::optional<string> &source) {
+	return DuckDBPyAppender::ForQuery(shared_from_this(), dml, columns, source);
 }
 
 std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::Append(const string &name, const PandasDataFrame &value,
