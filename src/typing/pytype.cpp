@@ -1,5 +1,6 @@
 #include "duckdb_python/pytype.hpp"
 #include "duckdb/common/types.hpp"
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb_python/pyconnection/pyconnection.hpp"
@@ -128,12 +129,7 @@ static LogicalType FromString(const string &type_str, std::shared_ptr<DuckDBPyCo
 	if (!pycon) {
 		pycon = DuckDBPyConnection::DefaultConnection();
 	}
-	auto &connection = pycon->con.GetConnection();
-
-	LogicalType type;
-	connection.context->RunFunctionInTransaction(
-	    [&]() { type = TransformStringToLogicalType(type_str, *connection.context); });
-	return type;
+	return DuckDBPyType::ParseTypeName(*pycon->con.GetConnection().context, type_str);
 }
 
 static bool FromNumpyType(const nb::object &type, LogicalType &result) {
@@ -332,6 +328,28 @@ static LogicalType FromObject(const nb::object &object, const std::shared_ptr<Du
 
 LogicalType DuckDBPyType::Resolve(const nb::object &object, const std::shared_ptr<DuckDBPyConnection> &connection) {
 	return FromObject(object, connection);
+}
+
+LogicalType DuckDBPyType::ParseTypeName(ClientContext &context, const string &name) {
+	LogicalType type;
+	ErrorData refusal;
+	context.RunFunctionInTransaction([&]() {
+		// An error thrown through RunFunctionInTransaction invalidates the caller's transaction, so the refusal is
+		// caught inside and thrown after
+		try {
+			type = TransformStringToLogicalType(name, context);
+		} catch (std::exception &ex) {
+			ErrorData error(ex);
+			if (Exception::InvalidatesDatabase(error.Type())) {
+				throw;
+			}
+			refusal = std::move(error);
+		}
+	});
+	if (refusal.HasError()) {
+		refusal.Throw();
+	}
+	return type;
 }
 
 bool DuckDBPyType::TryConvert(const nb::object &object, std::unique_ptr<DuckDBPyType> &result) {

@@ -112,7 +112,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::ProjectFromTypes(const nb::o
 			string type_str = nb::cast<std::string>(nb::str(item));
 			auto context = rel->context->GetContext();
 			engine::ConnectionClaim claim(*context);
-			context->RunFunctionInTransaction([&]() { type = TransformStringToLogicalType(type_str, *context); });
+			type = DuckDBPyType::ParseTypeName(*context, type_str);
 		} else if (nb::isinstance<DuckDBPyType>(item)) {
 			auto *type_p = nb::cast<DuckDBPyType *>(item);
 			type = type_p->Type();

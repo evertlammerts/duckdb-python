@@ -1,4 +1,5 @@
 #include "duckdb/main/query_result.hpp"
+#include "duckdb/common/error_data.hpp"
 #include <optional>
 #include "duckdb_python/nb/casters.hpp"
 #include "duckdb/function/scalar_function.hpp"
@@ -418,8 +419,9 @@ static bool NumpyDeprecatesAccessToCore(const nb::tuple &numpy_version) {
 
 struct PythonUDFData {
 public:
-	PythonUDFData(const string &name, bool vectorized, FunctionNullHandling null_handling)
-	    : name(name), null_handling(null_handling), vectorized(vectorized) {
+	PythonUDFData(const string &name, bool vectorized, FunctionNullHandling null_handling,
+	              std::shared_ptr<DuckDBPyConnection> connection_p)
+	    : name(name), null_handling(null_handling), vectorized(vectorized), connection(std::move(connection_p)) {
 		return_type = LogicalType::INVALID;
 		param_count = DConstants::INVALID_INDEX;
 	}
@@ -432,6 +434,7 @@ public:
 	FunctionNullHandling null_handling;
 	idx_t param_count;
 	bool vectorized;
+	std::shared_ptr<DuckDBPyConnection> connection;
 
 public:
 	void Verify() {
@@ -447,11 +450,7 @@ public:
 		if (nb::none().is(type)) {
 			return;
 		}
-		std::unique_ptr<DuckDBPyType> converted;
-		if (!DuckDBPyType::TryConvert(type, converted)) {
-			throw InvalidInputException("Could not convert the provided 'return_type' to a DuckDBPyType");
-		}
-		return_type = converted->Type();
+		return_type = DuckDBPyType::Resolve(type, connection);
 	}
 
 	void OverrideParameters(const nb::object &parameters_p) {
@@ -475,11 +474,7 @@ public:
 		}
 		idx_t i = 0;
 		for (auto param : params) {
-			std::unique_ptr<DuckDBPyType> type;
-			if (!DuckDBPyType::TryConvert(nb::borrow<nb::object>(param), type)) {
-				throw InvalidInputException("Could not convert a provided parameter to a DuckDBPyType");
-			}
-			parameters[i++] = type->Type();
+			parameters[i++] = DuckDBPyType::Resolve(nb::borrow<nb::object>(param), connection);
 		}
 	}
 
@@ -495,15 +490,35 @@ public:
 		}
 	}
 
+	//! Annotations need not be types, so one that converts to no type is ignored rather than refused
+	bool TryResolveAnnotation(const nb::object &annotation, LogicalType &result) {
+		try {
+			result = DuckDBPyType::Resolve(annotation, connection);
+			return true;
+		} catch (Exception &ex) {
+			auto type = ErrorData(ex).Type();
+			// A connection state failure is never read as an unconvertible annotation
+			if (type == ExceptionType::RESOURCE_IN_USE || type == ExceptionType::CONNECTION ||
+			    type == ExceptionType::TRANSACTION) {
+				throw;
+			}
+			PyErr_Clear();
+			return false;
+		} catch (...) {
+			PyErr_Clear();
+			return false;
+		}
+	}
+
 	void AnalyzeSignature(const nb::object &udf) {
 		auto signature = GetSignature(udf);
 		nb::object sig_params = signature.attr("parameters");
 		auto return_annotation = signature.attr("return_annotation");
 		auto empty = nb::module_::import_("inspect").attr("Signature").attr("empty");
 		if (!nb::none().is(return_annotation) && !empty.is(return_annotation)) {
-			std::unique_ptr<DuckDBPyType> pytype;
-			if (DuckDBPyType::TryConvert(nb::borrow<nb::object>(return_annotation), pytype)) {
-				return_type = pytype->Type();
+			LogicalType annotated;
+			if (TryResolveAnnotation(nb::borrow<nb::object>(return_annotation), annotated)) {
+				return_type = std::move(annotated);
 			}
 		}
 		param_count = nb::len(sig_params);
@@ -514,9 +529,10 @@ public:
 		params.update(sig_params);
 		for (auto item : params) {
 			auto value = item.second;
-			std::unique_ptr<DuckDBPyType> pytype;
-			if (DuckDBPyType::TryConvert(nb::borrow<nb::object>(value.attr("annotation")), pytype)) {
-				parameters.push_back(pytype->Type());
+			auto annotation = nb::borrow<nb::object>(value.attr("annotation"));
+			LogicalType annotated;
+			if (!empty.is(annotation) && TryResolveAnnotation(annotation, annotated)) {
+				parameters.push_back(std::move(annotated));
 			} else {
 				std::string kind = nb::cast<std::string>(value.attr("kind").attr("name"));
 				auto parameter_kind = ParameterKind::FromString(kind);
@@ -572,14 +588,13 @@ ScalarFunction DuckDBPyConnection::CreateScalarUDF(const string &name, const nb:
                                                    const nb::object &parameters, const nb::object &return_type,
                                                    bool vectorized, FunctionNullHandling null_handling,
                                                    PythonExceptionHandling exception_handling, bool side_effects) {
-	PythonUDFData data(name, vectorized, null_handling);
-	// Only the client properties are read, which runs no engine work, so it may happen under the caller's claim
-	auto &connection = con.GetConnectionWhileBusy();
-
+	PythonUDFData data(name, vectorized, null_handling, shared_from_this());
 	data.AnalyzeSignature(udf);
 	data.OverrideParameters(parameters);
 	data.OverrideReturnType(return_type);
 	data.Verify();
+	// Read after the conversion, because converting runs Python code that can close the connection
+	auto &connection = con.GetConnection();
 	return data.GetFunction(udf, exception_handling, side_effects, connection.context->GetClientProperties());
 }
 
