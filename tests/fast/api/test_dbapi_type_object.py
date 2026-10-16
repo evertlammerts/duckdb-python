@@ -415,6 +415,7 @@ FINALIZER_FETCHES_THE_DEFAULT_SCRIPT = """
 
 SHUTDOWN_FINALIZER_SCRIPT = """
     import os
+    import time
     import duckdb
     from duckdb import sqltypes
 
@@ -440,12 +441,20 @@ SHUTDOWN_FINALIZER_SCRIPT = """
             thread_count=thread_count,
             connect=duckdb.connect,
             set_default_connection=duckdb.set_default_connection,
+            sleep=time.sleep,
+            monotonic=time.monotonic,
         ):
             before = thread_count()
             first = fetch()
             set_default_connection(connect())
             second = fetch()
-            write(1, f"{first} {second} {before} {thread_count()}\\n".encode())
+            # A joined thread can stay listed in /proc for a moment, so the count gets two seconds to settle.
+            after = thread_count()
+            deadline = monotonic() + 2.0
+            while after > before and monotonic() < deadline:
+                sleep(0.001)
+                after = thread_count()
+            write(1, f"{first} {second} {before} {after}\\n".encode())
 
     duckdb.default_connection().create_function("identity", Identity(), [sqltypes.BIGINT], sqltypes.BIGINT)
     print("STARTED")
