@@ -3,6 +3,7 @@
 #include "duckdb_python/pandas/column/pandas_numpy_column.hpp"
 #include "duckdb_python/numpy/numpy_array.hpp"
 #include "duckdb_python/pyconnection/pyconnection.hpp"
+#include "duckdb_python/python_conversion.hpp"
 #include "duckdb_python/pyutil.hpp"
 
 namespace duckdb {
@@ -75,7 +76,7 @@ static LogicalType BindColumn(ClientContext &context, PandasBindColumn &column_p
 			// on the array throws). Iterating + nb::str handles both that and the legacy object[str] case.
 			vector<string> enum_entries;
 			for (auto category : categories.GetArray()) {
-				enum_entries.push_back(nb::cast<std::string>(nb::str(category)));
+				enum_entries.push_back(TransformPythonString(nb::str(category)));
 			}
 			idx_t size = enum_entries.size();
 			Vector enum_entries_vec(LogicalType::VARCHAR, size);

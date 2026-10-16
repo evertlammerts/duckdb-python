@@ -56,6 +56,30 @@ static Value CastToTarget(Value val, const LogicalType &target_type) {
 	                          target_type.ToString());
 }
 
+InvalidInputException UnencodableStrError(uint32_t codepoint, idx_t position) {
+	return InvalidInputException(
+	    "Python Conversion Failure: cannot encode str as UTF-8, surrogate '\\u%04x' at position %d is not allowed",
+	    codepoint, position);
+}
+
+void ThrowUnencodableStr(nb::handle str) {
+	nb::python_error error;
+	Py_ssize_t start;
+	if (!error.matches(PyExc_UnicodeEncodeError) || PyUnicodeEncodeError_GetStart(error.value().ptr(), &start) != 0) {
+		throw error;
+	}
+	throw UnencodableStrError(PyUnicode_ReadChar(str.ptr(), start), NumericCast<idx_t>(start));
+}
+
+string TransformPythonString(nb::handle str) {
+	Py_ssize_t size;
+	const char *data = PyUnicode_AsUTF8AndSize(str.ptr(), &size);
+	if (data) {
+		return string(data, NumericCast<idx_t>(size));
+	}
+	ThrowUnencodableStr(str);
+}
+
 static Value EmptyMapValue() {
 	auto map_type = LogicalType::MAP(LogicalType::SQLNULL, LogicalType::SQLNULL);
 	return Value::MAP(ListType::GetChildType(map_type), vector<Value>());
@@ -1071,7 +1095,7 @@ void TransformPythonObjectInternal(optional_ptr<ClientContext> context, nb::hand
 		break;
 	}
 	case PythonObjectType::String: {
-		auto stringified = nb::cast<string>(ele);
+		auto stringified = TransformPythonString(ele);
 		OP::HandleString(result, param, stringified);
 		break;
 	}

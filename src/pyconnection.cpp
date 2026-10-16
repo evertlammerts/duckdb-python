@@ -1422,10 +1422,10 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadCSV(const nb::object &
 	if (has_sep && has_delimiter) {
 		throw InvalidInputException("read_csv takes either 'delimiter' or 'sep', not both");
 	}
-	if (has_sep) {
-		bind_parameters["delim"] = Value(duckdb::PyUtil::CastToString(sep));
-	} else if (has_delimiter) {
-		bind_parameters["delim"] = Value(duckdb::PyUtil::CastToString(delimiter));
+	if (has_sep || has_delimiter) {
+		auto &delim = has_sep ? sep : delimiter;
+		bind_parameters["delim"] =
+		    Value(nb::isinstance<nb::str>(delim) ? TransformPythonString(delim) : duckdb::PyUtil::CastToString(delim));
 	}
 
 	if (!nb::none().is(files_to_sniff)) {
@@ -1455,14 +1455,14 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::ReadCSV(const nb::object &
 		if (!nb::isinstance<nb::str>(na_values) && !duckdb::PyUtil::IsListLike(na_values)) {
 			throw InvalidInputException("read_csv only accepts 'na_values' as a string or a list of strings");
 		} else if (nb::isinstance<nb::str>(na_values)) {
-			null_values.push_back(Value(nb::cast<std::string>(na_values)));
+			null_values.push_back(Value(TransformPythonString(na_values)));
 		} else {
 			nb::list null_list = nb::cast<nb::list>(na_values);
 			for (auto elem : null_list) {
 				if (!nb::isinstance<nb::str>(elem)) {
 					throw InvalidInputException("read_csv 'na_values' list has to consist of only strings");
 				}
-				null_values.push_back(Value(nb::cast<std::string>(nb::str(elem))));
+				null_values.push_back(Value(TransformPythonString(nb::str(elem))));
 			}
 		}
 		bind_parameters["nullstr"] = Value::LIST(LogicalType::VARCHAR, std::move(null_values));

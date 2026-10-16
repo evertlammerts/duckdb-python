@@ -391,8 +391,7 @@ void NumpyScan::Scan(ClientContext &context, PandasColumnBindData &bind_data, id
 			// Zero copy: the bytes are the str's own or its cached UTF-8, both alive as long as the str
 			auto utf8 = PyUnicode_AsUTF8AndSize(val, &size);
 			if (!utf8) {
-				nb::python_error error;
-				throw InvalidInputException("Failed to convert a Python str to VARCHAR: %s", error.what());
+				ThrowUnencodableStr(val_handle);
 			}
 			tgt_ptr[row] = string_t(utf8, UnsafeNumericCast<uint32_t>(size));
 		}
