@@ -62,7 +62,7 @@ bool DuckDBPyRelation::CanBeRegisteredBy(shared_ptr<ClientContext> &con) {
 }
 
 DuckDBPyRelation::~DuckDBPyRelation() {
-	D_ASSERT(duckdb::PyUtil::GilCheck());
+	DUCKDB_PY_ASSERT_GIL_HELD();
 	nb::gil_scoped_release gil;
 	rel.reset();
 }
@@ -757,7 +757,7 @@ static shared_ptr<engine::Result> PyExecuteRelation(const shared_ptr<Relation> &
 	if (!rel) {
 		return nullptr;
 	}
-	D_ASSERT(duckdb::PyUtil::GilCheck());
+	DUCKDB_PY_ASSERT_GIL_HELD();
 	nb::gil_scoped_release release;
 	auto result = PySubmitRelation(rel, engine::Format::Chunks());
 	result->Retain(DuckDBPyConnection::CheckSignals);
@@ -851,7 +851,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Materialize() {
 	unique_ptr<ColumnDataCollection> collection;
 	vector<Identifier> result_names;
 	{
-		D_ASSERT(duckdb::PyUtil::GilCheck());
+		DUCKDB_PY_ASSERT_GIL_HELD();
 		// Ending a query waits for its tasks, and a Python UDF among them needs the GIL, so the result must go
 		// out of scope, also on an error, before the GIL is taken back
 		nb::gil_scoped_release release;
@@ -1451,7 +1451,7 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Query(const string &view_nam
 		return DeriveRelation(std::move(query_relation));
 	}
 	{
-		D_ASSERT(duckdb::PyUtil::GilCheck());
+		DUCKDB_PY_ASSERT_GIL_HELD();
 		nb::gil_scoped_release release;
 		// Execute it anyways, for creation/altering statements
 		// We only care that it succeeds, we can't store the result
@@ -1520,7 +1520,7 @@ void DuckDBPyRelation::Insert(const nb::object &params) const {
 	vector<vector<Value>> values {
 	    DuckDBPyConnection::TransformPythonParamList(*this->rel->context->GetContext(), params)};
 
-	D_ASSERT(duckdb::PyUtil::GilCheck());
+	DUCKDB_PY_ASSERT_GIL_HELD();
 	nb::gil_scoped_release release;
 	engine::ConnectionClaim claim(*rel->context->GetContext());
 	try {
@@ -1623,7 +1623,7 @@ string DuckDBPyRelation::Explain(ExplainType type, const string &format) {
 	auto explain_format = auto_format ? GetExplainFormat(type) : ProfilerPrintFormat(format);
 	unique_ptr<ColumnDataCollection> collection;
 	{
-		D_ASSERT(duckdb::PyUtil::GilCheck());
+		DUCKDB_PY_ASSERT_GIL_HELD();
 		nb::gil_scoped_release release;
 		auto explain = make_shared_ptr<ExplainRelation>(rel, type, explain_format);
 		collection = PySubmitRelation(explain, engine::Format::Chunks())->TakeChunks(DuckDBPyConnection::CheckSignals);

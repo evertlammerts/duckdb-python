@@ -223,7 +223,7 @@ public:
 	class ConnectionLockGuard {
 	public:
 		explicit ConnectionLockGuard(DuckDBPyConnection &conn) : lock_(conn.py_connection_lock, std::defer_lock) {
-			D_ASSERT(duckdb::PyUtil::GilCheck());
+			DUCKDB_PY_ASSERT_GIL_HELD();
 			// The holder of the mutex may be running a query that is waiting for this very call
 			conn.con.ThrowIfBusy();
 			nb::gil_scoped_release release;
