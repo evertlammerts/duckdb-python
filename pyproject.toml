@@ -29,6 +29,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Programming Language :: C++",
 ]
 authors = [{name = "DuckDB Foundation"}]
@@ -215,7 +216,8 @@ exclude = [
 #          tensorflow-cpu-aws and there is no distribution availalbe for Linux aarch64.
 # - torch: since we can't use gpu acceleration, we need to rely on torch-cpu, which isn't available on pypi. We use
 #          `tool.uv.index` and `tool.uv.sources` to make sure the official pytorch index is used. Even there, we don't
-#          have a wheel available for x86_64 OSX + cp313.
+#          have a wheel available for x86_64 OSX + cp313 and later.
+# - adbc-driver-manager: no cp315 wheels yet (1.12.0 stops at cp314); the adbc tests importorskip it on 3.15.
 # - numpy: tensorflow doesn't play nice with numpy>2 so for every platform that can run tensorflow (cp311) we use
 #          numpy<2. numpy<2 has no wheels for cp31[2|3], meaning an sdist will be used. However, on Windows amd64 +
 #          cp313 this results in a segfault / access violation. To get around this, we install numpy>=2 on all >=cp312
@@ -261,7 +263,7 @@ torchvision = [ { index = "pytorch-cpu" } ]
 # todo: adjust for windows arm64 while test dependencies become available
 [dependency-groups] # used for development only, requires pip >=25.1.0
 test = [ # dependencies used for running tests
-    "adbc-driver-manager>=1.10.0; sys_platform != 'win32' or platform_machine != 'ARM64'",
+    "adbc-driver-manager>=1.10.0; python_version < '3.15' and (sys_platform != 'win32' or platform_machine != 'ARM64')",
     "pytest",
     "pytest-reraise",
     "pytest-timeout",
