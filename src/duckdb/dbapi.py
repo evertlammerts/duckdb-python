@@ -10,6 +10,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from . import _duckdb
+from ._appender import Appender, _query_appender, _read_declared, _read_once, _table_appender
 from ._sources import NumpyScanSource, Source, adapt
 from .exceptions import (
     DatabaseError,
@@ -28,12 +29,15 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from types import TracebackType
 
+    from .frame.typing import ColumnNames, QualifiedName, SqlText, _AppenderAction, _AppenderColumns
+
 __all__ = [
     "BINARY",
     "DATETIME",
     "NUMBER",
     "ROWID",
     "STRING",
+    "Appender",
     "Binary",
     "Connection",
     "Cursor",
@@ -423,14 +427,14 @@ class Connection:
         self._busy_lock = threading.Lock()
 
     @contextlib.contextmanager
-    def _driving(self) -> Iterator[None]:
-        """Hold the connection for a stretch of engine work; every other call refuses meanwhile."""
+    def _driving(self, refusal: type[Error] = ProgrammingError) -> Iterator[None]:
+        """Hold the connection for a stretch of engine work; every other call refuses meanwhile, with `refusal`."""
         claimed = False
         try:
             # The claim is taken inside the try, so a signal landing right after it still reaches the release.
             with self._busy_lock:
                 if self._busy:
-                    raise ProgrammingError(_BUSY)
+                    raise refusal(_BUSY)
                 # Marked claimed first: an interrupt between the two leaves a release with nothing to undo, never
                 # a claim nothing releases.
                 claimed = True
@@ -553,6 +557,42 @@ class Connection:
             message = f"nothing is registered as {name!r}"
             raise ProgrammingError(message)
 
+    def appender(
+        self,
+        table: QualifiedName,
+        *,
+        columns: ColumnNames | None = None,
+        action: _AppenderAction = "insert",
+        key: ColumnNames | None = None,
+    ) -> Appender:
+        """An appender that inserts the rows it buffers into `table`, with one statement at each flush.
+
+        It is not a cursor: its flush runs in this connection's transaction, opening one as `execute` does, and is
+        refused with `OperationalError`, keeping its rows, while a cursor holds an unread result.
+        """
+        # Read before the connection is checked: reading them runs code, which may close it.
+        names, keyed = _read_once(columns), _read_once(key)
+        engine = self._engine()
+        with self._driving():
+            raw = _table_appender(engine, table, names, action, keyed)
+        return Appender(raw, self._flush_appender)
+
+    def query_appender(self, dml: SqlText, columns: _AppenderColumns, *, source: SqlText | None = None) -> Appender:
+        """An appender whose flush runs your statement over the rows it buffers; not available yet."""
+        declared = _read_declared(columns)
+        engine = self._engine()
+        with self._driving():
+            raw = _query_appender(engine, dml, declared, source)
+        return Appender(raw, self._flush_appender)
+
+    def _flush_appender(self, raw: _duckdb.Appender) -> None:
+        """Run an appender's flush in this connection's transaction, refused with `OperationalError` while busy."""
+        self._engine()
+        with self._driving(OperationalError):
+            # Called by the flush once it holds the appender and has found rows, so no other caller can add the first
+            # row between that check and the statement, and an empty flush opens no transaction.
+            raw.flush(self._begin_if_needed)
+
     def cursor(self) -> Cursor:
         """A new cursor sharing this connection's transaction."""
         self._engine()
@@ -586,16 +626,24 @@ class Connection:
         Refused while another call is driving the engine, with the connection left open and usable:
         marking it closed under a live drive would strand that work and skip the rollback.
         """
-        if self._raw is None:
-            return
+        if self._raw is not None:
+            self._close_under_guard()
+
+    def _close_under_guard(self) -> None:
         with self._driving():
+            # Another close may have finished since the caller looked.
+            if self._raw is None:
+                return
             self._release_open_result(drain=False)
             try:
                 if self._in_transaction:
                     self._in_transaction = False
                     self._run("ROLLBACK")
             finally:
-                self._raw = None
+                raw, self._raw = self._raw, None
+                # Closed here, not left to its last reference going away, which a kept traceback can postpone; the
+                # close also releases its appenders' buffers, and with them the database.
+                raw.close()
 
     def __enter__(self) -> Connection:
         return self

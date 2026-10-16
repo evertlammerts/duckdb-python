@@ -9,6 +9,7 @@ import weakref
 from typing import TYPE_CHECKING, Any, cast
 
 from .. import _duckdb
+from .._appender import Appender, _query_appender, _read_declared, _read_once, _table_appender
 from .._expressions.expr import _as_name, _as_sql, _items
 from .._sources import NumpyScanSource, Source, adapt
 from ..exceptions import Error, InterfaceError, InvalidInputError
@@ -21,10 +22,13 @@ if TYPE_CHECKING:
     from .._expressions.expr import Expr
     from .plan import Frame
     from .typing import (
+        ColumnNames,
         FilePath,
         Parameters,
         QualifiedName,
         SqlText,
+        _AppenderAction,
+        _AppenderColumns,
         _FunctionParameters,
         _MacroParameters,
         _NullHandling,
@@ -397,6 +401,37 @@ class Connection:
             message = f"Invalid Input Error: nothing is registered as {name!r}"
             raise InvalidInputError(message)
         self._catalog.changed()
+
+    def appender(
+        self,
+        table: QualifiedName,
+        *,
+        columns: ColumnNames | None = None,
+        action: _AppenderAction = "insert",
+        key: ColumnNames | None = None,
+    ) -> Appender:
+        """An appender that inserts the rows it buffers into `table`, with one statement at each flush.
+
+        Args:
+            table: The table, resolved now as SQL resolves the name, and kept; a tuple qualifies it.
+            columns: The columns each row gives values for, in that order; the others take their defaults. Without
+                it, every column the table does not generate, in the table's order.
+            action: What a flush does with the rows; only "insert" is available.
+            key: The columns that pick the rows to update or delete; not available yet.
+        """
+        # Read before the connection is checked: reading them runs code, which may close it.
+        names, keyed = _read_once(columns), _read_once(key)
+        return Appender(_table_appender(self._engine(), table, names, action, keyed), self._flush_appender)
+
+    def query_appender(self, dml: SqlText, columns: _AppenderColumns, *, source: SqlText | None = None) -> Appender:
+        """An appender whose flush runs your statement over the rows it buffers; not available yet."""
+        declared = _read_declared(columns)
+        return Appender(_query_appender(self._engine(), dml, declared, source), self._flush_appender)
+
+    def _flush_appender(self, raw: _duckdb.Appender) -> None:
+        """Run an appender's flush, as any statement on this connection runs."""
+        self._ready()
+        raw.flush()
 
     def duplicate(self) -> Connection:
         """A second connection to the same database, with its own transaction; a subclass duplicates as itself."""

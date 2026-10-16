@@ -120,6 +120,60 @@ cxx::idx_t Result::Drain() {
 	return changed;
 }
 
+void Result::Finish(const std::function<void()> &cancel, Ending &ending) {
+	pending.reset();
+	ending = Ending::FAILED;
+	bool reported = false;
+	auto sink = [&](cxx::QueryResult &, cxx::DataChunk) {
+		reported = true;
+		return false;
+	};
+	std::optional<nb::python_error> signalled;
+	while (true) {
+		auto live = Live();
+		Pumped pumped;
+		try {
+			pumped = Pump(*live.engine, sink);
+		} catch (const cxx::Exception &error) {
+			if (reported) {
+				ending = Ending::TOOK_EFFECT;
+			} else {
+				ending = error.GetCode() == DUCKDB_V2_ERROR_RUNTIME_INTERRUPT ? Ending::CANCELLED : Ending::FAILED;
+			}
+			if (signalled) {
+				if (ending == Ending::FAILED) {
+					// The held exception is raised, so the statement's own failure goes with it as its cause.
+					auto cause = result.Module()->ClassForCode(error.GetCode())(error.what());
+					PyException_SetCause(signalled->value().ptr(), cause.release().ptr());
+				}
+				throw *signalled;
+			}
+			throw;
+		}
+		if (pumped == Pumped::Finished || pumped == Pumped::Cancelled) {
+			// A result that reported its rows took effect, whatever its last step says.
+			const bool took_effect = pumped == Pumped::Finished || reported;
+			ending = took_effect ? Ending::TOOK_EFFECT : Ending::CANCELLED;
+			finished = pumped == Pumped::Finished;
+			if (signalled) {
+				throw *signalled;
+			}
+			if (!took_effect) {
+				Raise(result.Module()->InterruptError(), "query was cancelled");
+			}
+			return;
+		}
+		if (!signalled && PyErr_CheckSignals() != 0) {
+			signalled.emplace();
+			try {
+				cancel();
+			} catch (const cxx::Exception &) {
+				// Not cancelled, the statement runs to its end, and how it ended still decides the rows.
+			}
+		}
+	}
+}
+
 void Result::Close() {
 	result.Release();
 }

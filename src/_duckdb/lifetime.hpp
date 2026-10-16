@@ -148,14 +148,26 @@ public:
 		return Exceptions().interrupt_error;
 	}
 
-	/// The exception class duckdb.exceptions maps a DuckDB error code to.
+	/// The exception class duckdb.exceptions maps a DuckDB error code to, as its `class_for_code` does. Read from its
+	/// table rather than by calling that function: a call runs Python code, where a pending Ctrl-C would raise and
+	/// replace the error being translated.
 	nb::object ClassForCode(int code) {
-		return Exceptions().class_for_code(code);
+		const auto &classes = Exceptions();
+		nb::object key = nb::int_(code);
+		PyObject *found = PyDict_GetItemWithError(classes.by_code.ptr(), key.ptr());
+		if (found != nullptr) {
+			return nb::borrow(found);
+		}
+		if (PyErr_Occurred() != nullptr) {
+			throw nb::python_error();
+		}
+		return classes.database_error;
 	}
 
 private:
 	struct ExceptionClasses {
-		nb::object class_for_code;
+		nb::object by_code;
+		nb::object database_error;
 		nb::object interface_error;
 		nb::object interrupt_error;
 	};
@@ -165,8 +177,8 @@ private:
 		nb::ft_lock_guard guard(exceptions_lock);
 		if (!exceptions) {
 			nb::object module = nb::module_::import_("duckdb.exceptions");
-			exceptions = ExceptionClasses {module.attr("class_for_code"), module.attr("InterfaceError"),
-			                               module.attr("InterruptError")};
+			exceptions = ExceptionClasses {module.attr("_BY_CODE"), module.attr("DatabaseError"),
+			                               module.attr("InterfaceError"), module.attr("InterruptError")};
 		}
 		return *exceptions;
 	}
@@ -271,6 +283,12 @@ public:
 			Raise(module->InterfaceError(), closed_message);
 		}
 		return live;
+	}
+
+	/// Whether Release has run.
+	bool Released() {
+		nb::ft_lock_guard guard(lifetime);
+		return !held;
 	}
 
 	/// Drop this owner's references, repeatably; the last one calls into DuckDB, so the GIL is dropped first.
@@ -452,6 +470,18 @@ private:
 	/// The hold that has the connection, 0 for none, and how many holds there have been, so each has its own number.
 	uint64_t holder = 0;
 	uint64_t holds = 0;
+};
+
+/// A call's pin on a connection and its claim, taken in that order.
+/// A constructor rather than aggregate initialization: GCC 11 leaks an aggregate's initialized members when a later
+/// one throws, and a refused claim throws.
+struct Claimed {
+	Claimed(Pinned<cxx::Connection> pinned, ConnectionUse &use, ConnectionUse::Needs needs)
+	    : held(std::move(pinned)), call(use, needs) {
+	}
+
+	Pinned<cxx::Connection> held;
+	ConnectionUse::Call call;
 };
 
 /// Run a DuckDB call with the GIL released and hand back what it returned.

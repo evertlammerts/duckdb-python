@@ -186,6 +186,7 @@ _BY_NAME: dict[str, type[Error]] = {
     "RUNTIME_NULL_POINTER": InterfaceError,
 }
 
+# The extension reads this table itself when it translates an error, rather than calling class_for_code.
 _BY_CODE: dict[int, type[Error]] = {ERROR_CODES[name]: cls for name, cls in _BY_NAME.items() if name in ERROR_CODES}
 
 

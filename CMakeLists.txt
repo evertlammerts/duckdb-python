@@ -59,6 +59,7 @@ find_package(nanobind CONFIG REQUIRED)
 
 # nanobind ignores STABLE_ABI below 3.12 and FREE_THREADED off that build, so one call covers every wheel.
 nanobind_add_module(_duckdb STABLE_ABI FREE_THREADED NB_DOMAIN duckdb
+  src/_duckdb/appender.cpp
   src/_duckdb/chunkview.cpp
   src/_duckdb/module.cpp
   src/_duckdb/conversion/conversion.cpp

@@ -190,6 +190,18 @@ _FunctionParameters: TypeAlias = Sequence[SqlText] | Mapping[NewName, SqlText]
 Reader: `duckdb.frame._signature.sql_signature`.
 """
 
+_AppenderRows: TypeAlias = Iterable[Iterable[PythonValue]]
+"""The rows an appender buffers, each a sequence of values; a string, bytes or a mapping is never a row.
+
+Reader: `duckdb._appender.Appender.append_rows`.
+"""
+
+_AppenderColumns: TypeAlias = Mapping[NewName, SqlText]
+"""The columns a query appender buffers, in order: each name and its SQL type.
+
+Reader: `duckdb._appender._read_declared`.
+"""
+
 _TextValue: TypeAlias = str
 """A value that must be text. Reader: `duckdb._expressions.expr._as_text`."""
 
@@ -235,3 +247,6 @@ _NullHandling: TypeAlias = Literal["default", "special"]
 
 _Stability: TypeAlias = Literal["consistent", "volatile", "consistent_within_query"]
 """When DuckDB may reuse a function's result. Reader: `duckdb.frame.connection._STABILITY`."""
+
+_AppenderAction: TypeAlias = Literal["insert", "upsert", "update", "delete"]
+"""What a table appender's flush does with each row. Reader: `duckdb._appender._table_appender`."""

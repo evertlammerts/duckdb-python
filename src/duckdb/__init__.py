@@ -1,7 +1,7 @@
 """The DuckDB Python package: the engine, its errors, and two ways to talk to it.
 
 `duckdb.frame` builds queries as plans and runs them on a connection; `duckdb.dbapi` is PEP 249. They share the
-engine and `duckdb.exceptions`, and nothing else.
+engine, `duckdb.exceptions` and the `Appender` class, and nothing else.
 """
 
 from importlib.metadata import version as _package_version

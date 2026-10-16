@@ -6,12 +6,13 @@ import collections
 import datetime
 import threading
 import time
+import traceback
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 import pytest
 
-from duckdb import dbapi, exceptions
+from duckdb import _duckdb, dbapi, exceptions
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -320,6 +321,55 @@ class TestConnection:
         finally:
             con.close()
         assert (tmp_path / "by_path.db").exists()
+
+    def test_a_close_that_another_close_overtakes_returns_quietly(self) -> None:
+        con = dbapi.connect()
+
+        class CloseFirst:
+            """The connection's guard lock, which lets a second close run to its end before the first takes it."""
+
+            def __init__(self) -> None:
+                self.lock = threading.Lock()
+                self.first = True
+
+            def __enter__(self) -> None:
+                if self.first:
+                    self.first = False
+                    con.close()
+                self.lock.acquire()
+
+            def __exit__(self, *exc: object) -> None:
+                self.lock.release()
+
+        con._busy_lock = CloseFirst()  # type: ignore[assignment]
+        con.close()
+        with pytest.raises(dbapi.InterfaceError):
+            con.cursor()
+
+    def test_close_lets_go_of_the_file_while_a_kept_traceback_still_holds_the_engine_connection(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "kept.db"
+        con = dbapi.connect(path)
+        con.cursor().execute("CREATE TABLE t (i INTEGER)")
+        con.commit()
+        app = con.appender("t")
+        app.append_row(1)
+        # The failure's traceback keeps the frames that held the engine connection while the call ran.
+        with pytest.raises(exceptions.CatalogError) as kept:
+            con.appender("missing")
+        held = [
+            v for f, _ in traceback.walk_tb(kept.tb) for v in f.f_locals.values() if isinstance(v, _duckdb.Connection)
+        ]
+        assert held, "the kept traceback no longer holds the engine connection, so this test checks nothing"
+        con.close()
+        with pytest.raises(exceptions.InterfaceError):
+            app.append_row(2)
+        dbapi.connect(path).close()
+        # The close dropped the buffered row; clearing forgets it, so letting go of the appender does not warn.
+        with pytest.raises(exceptions.InterfaceError):
+            app.clear()
+        assert kept.value is not None
 
     def test_errors_are_typed(self, con: dbapi.Connection) -> None:
         cur = con.cursor()

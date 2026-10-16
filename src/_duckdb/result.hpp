@@ -10,6 +10,7 @@
 
 #include <nanobind/nanobind.h>
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -66,6 +67,16 @@ public:
 	/// lands partway, and every batch is consumed inside its burst, since handing them back would starve the
 	/// thread delivering it.
 	cxx::idx_t Drain();
+
+	/// How a statement run by `Finish` ended: it ran to its end and took effect, the engine cancelled it, or it failed.
+	enum class Ending : uint8_t { TOOK_EFFECT, CANCELLED, FAILED };
+
+	/// Run the statement to its end like `Drain`, for a caller that must know whether it took effect. A signal does
+	/// not leave the statement half known: its exception is held, the statement cancelled through `cancel`, and the
+	/// engine stepped with no further signal checks until it says how the statement ended; then the held exception is
+	/// raised. A write takes effect a step before its result reports it, so stopping at the signal could not tell.
+	/// `ending` is set before anything raises.
+	void Finish(const std::function<void()> &cancel, Ending &ending);
 
 	/// Release the result: DuckDB allows one live result per connection, and holding it keeps the file in use.
 	void Close();

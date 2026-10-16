@@ -7,6 +7,7 @@ con = frame.connect("shop.db")
 table("orders").filter(col("total") > 1000).rows(con)
 """
 
+from .._appender import Appender
 from .._expressions import (
     Expr,
     Side,
@@ -45,6 +46,7 @@ from .plan import (
 )
 
 __all__ = [
+    "Appender",
     "Bound",
     "Column",
     "Connection",

@@ -23,6 +23,7 @@
 #include <utility>
 #include <vector>
 
+#include "appender.hpp"
 #include "arrow_export.hpp"
 #include "arrowc.hpp"
 #include "chunkview.hpp"
@@ -261,11 +262,12 @@ cxx::SqlStatement ParseExactlyOne(cxx::Connection &live, const std::string &sql)
 class Connection {
 public:
 	Connection(nb::object database, std::shared_ptr<ModuleState> module, cxx::Connection connection)
-	    : connection(std::move(module), std::move(database), std::move(connection)) {
+	    : connection(
+	          std::make_shared<Owned<cxx::Connection>>(std::move(module), std::move(database), std::move(connection))) {
 	}
 
 	nb::handle Parent() const {
-		return connection.Parent();
+		return connection->Parent();
 	}
 
 	/// Run one statement, with `parameters` either a sequence filling $1, $2, ... in order or a mapping by name.
@@ -278,12 +280,12 @@ public:
 		} else {
 			std::vector<cxx::NamedParam> bound;
 			std::vector<bool> untyped;
-			ConvertParameters(live, parameters, connection.Module()->conversion, bound, untyped);
+			ConvertParameters(live, parameters, connection->Module()->conversion, bound, untyped);
 			auto statement = WithoutGil([&] { return ParseExactlyOne(live, sql); });
 			FillUntypedFromStatement(live, statement, bound, untyped);
 			result.emplace(WithoutGil([&] { return live.Execute(statement, bound); }));
 		}
-		return std::make_unique<Result>(std::move(claimed.held.database), connection.Module(), std::move(*result),
+		return std::make_unique<Result>(std::move(claimed.held.database), connection->Module(), std::move(*result),
 		                                ConnectionUse::Hold(use));
 	}
 
@@ -298,7 +300,7 @@ public:
 		} else {
 			std::vector<cxx::NamedParam> bound;
 			std::vector<bool> untyped;
-			ConvertParameters(live, parameters, connection.Module()->conversion, bound, untyped);
+			ConvertParameters(live, parameters, connection->Module()->conversion, bound, untyped);
 			auto statement = WithoutGil([&] { return ParseExactlyOne(live, sql); });
 			FillUntypedFromStatement(live, statement, bound, untyped);
 			result.emplace(WithoutGil([&] { return live.Execute(statement, bound, format); }));
@@ -317,7 +319,7 @@ public:
 			    "Invalid Input Error: the statement returns no rows, so there is no Arrow stream to read");
 		}
 		auto kept = Database::From(claimed.held.database).CallablesSnapshot();
-		return std::make_unique<ArrowStream>(std::move(claimed.held.database), connection.Module(),
+		return std::make_unique<ArrowStream>(std::move(claimed.held.database), connection->Module(),
 		                                     std::weak_ptr<cxx::Connection>(claimed.held.engine), std::move(*result),
 		                                     ConnectionUse::Hold(use), std::move(kept));
 	}
@@ -387,7 +389,7 @@ public:
 		owner.KeepCallable(callable);
 		try {
 			RegisterScalarFunction(*claimed.held.engine, name, callable, specs, returns, nulls, level,
-			                       connection.Module());
+			                       connection->Module());
 		} catch (...) {
 			owner.AbandonCallable(callable);
 			throw;
@@ -440,34 +442,42 @@ public:
 		WithoutGil([&] { claimed.held.engine->GetConfig().SetOption(name, value); });
 	}
 
+	/// Raise what a statement would meet before it runs, running nothing: InterfaceError once closed,
+	/// OperationalError while a query runs, TransactionError inside an aborted transaction.
+	void CheckTransaction() {
+		auto claimed = Claim(ConnectionUse::Needs::NOT_RUNNING);
+		auto &live = *claimed.held.engine;
+		// The C++ API cannot say whether the transaction is aborted. Resolving a type name through the connection's
+		// factory runs inside its transaction, so it is refused there, and does nothing else.
+		WithoutGil([&] { live.GetFactory().CreateType(cxx::QualifiedName::Create({"INTEGER"})); });
+	}
+
+	/// An appender inserting into the table `table` names, over `columns` or every column the table does not generate.
+	std::unique_ptr<Appender> CreateAppender(const std::vector<std::string> &table,
+	                                         const std::optional<std::vector<std::string>> &columns) {
+		return Appender::ForTable(connection, use, appenders, table, columns);
+	}
+
 	/// Disconnect now rather than at collection; repeatable, and every other method refuses afterwards.
 	void Close() {
-		connection.Release();
+		appenders.ReleaseAll();
+		connection->Release();
 	}
 
 private:
 	Pinned<cxx::Connection> Live() {
-		return connection.Acquire("connection is closed");
+		return connection->Acquire("connection is closed");
 	}
-
-	/// A call's pin on the connection and its claim, taken in that order.
-	/// A constructor rather than aggregate initialization: GCC 11 leaks an aggregate's initialized members when a later
-	/// one throws, and a refused claim throws.
-	struct Claimed {
-		Claimed(Pinned<cxx::Connection> pinned, ConnectionUse &use, ConnectionUse::Needs needs)
-		    : held(std::move(pinned)), call(use, needs) {
-		}
-
-		Pinned<cxx::Connection> held;
-		ConnectionUse::Call call;
-	};
 
 	Claimed Claim(ConnectionUse::Needs needs) {
 		return Claimed(Live(), *use, needs);
 	}
 
-	Owned<cxx::Connection> connection;
+	// Shared so an appender can hold it weakly.
+	std::shared_ptr<Owned<cxx::Connection>> connection;
 	std::shared_ptr<ConnectionUse> use = std::make_shared<ConnectionUse>();
+	// Declared last, so destroying the connection releases its appenders' buffers before the connection itself.
+	AppenderBuffers appenders;
 };
 
 std::unique_ptr<Connection> Database::Connect() {
@@ -622,7 +632,17 @@ NB_MODULE(_duckdb, m) {
 	    .def("interrupt", &Connection::Interrupt)
 	    .def("get_option", &Connection::GetOption, nb::arg("name"))
 	    .def("set_option", &Connection::SetOption, nb::arg("name"), nb::arg("value"))
+	    .def("check_transaction", &Connection::CheckTransaction)
+	    .def("appender", &Connection::CreateAppender, nb::arg("table"), nb::arg("columns").none())
 	    .def("close", &Connection::Close);
+
+	nb::class_<Appender>(m, "Appender", nb::type_slots(ChildSlots<Appender>()))
+	    .def("append_row", &Appender::AppendRow, nb::arg("values"))
+	    .def("append_rows", &Appender::AppendRows, nb::arg("rows"))
+	    .def("flush", &Appender::Flush, nb::arg("before_run") = nb::none())
+	    .def("clear", &Appender::Clear)
+	    .def_prop_ro("buffered", &Appender::Buffered)
+	    .def_prop_ro("closed", &Appender::Closed);
 
 	nb::class_<Result>(m, "Result", nb::type_slots(ChildSlots<Result>()))
 	    .def_prop_ro("schema", &Result::Schema)

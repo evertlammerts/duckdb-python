@@ -166,8 +166,41 @@ class Connection:
     def interrupt(self) -> None: ...
     def get_option(self, name: str) -> str: ...
     def set_option(self, name: str, value: str) -> None: ...
+    def check_transaction(self) -> None:
+        """Raise what a statement would meet first, running nothing: closed, a query running, an aborted transaction."""
+
+    def appender(self, table: Sequence[str], columns: Sequence[str] | None) -> Appender:
+        """An appender inserting into the table `table` names, over `columns` or every column it does not generate."""
+
     def close(self) -> None:
-        """Close the connection now. Idempotent; every other method raises InterfaceError afterwards."""
+        """Close the connection now, its appenders' buffers first. Idempotent; every other method raises afterwards."""
+
+class Appender:
+    """Rows buffered on the client and written to the database by one statement at each flush."""
+
+    def append_row(self, values: tuple[object, ...]) -> None:
+        """Buffer one row, one value per column."""
+
+    def append_rows(self, rows: Iterable[object]) -> None:
+        """Buffer each row of `rows`, stopping at the first that fails and keeping the rows before it."""
+
+    def flush(self, before_run: Callable[[], object] | None = None) -> None:
+        """Write every buffered row with one run of the statement, then empty the buffer.
+
+        `before_run` is called once the appender is held and found to have rows, before the statement claims the
+        connection.
+        """
+
+    def clear(self) -> None:
+        """Drop every buffered row; once the connection is closed, forget them and raise InterfaceError."""
+
+    @property
+    def buffered(self) -> int:
+        """How many rows are buffered, also once the connection's close dropped them."""
+
+    @property
+    def closed(self) -> bool:
+        """Whether the connection is closed."""
 
 class Database:
     """One open database, kept alive by every connection and result on it."""
