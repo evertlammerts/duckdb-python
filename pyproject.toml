@@ -45,7 +45,7 @@ Changelog = "https://github.com/duckdb/duckdb-python/releases"
 all = [ # users can install duckdb with 'duckdb[all]', which will install this list
     "ipython", # used in duckdb.query_graph
     "fsspec",  # used in duckdb.filesystem
-    "numpy",   # used in duckdb.experimental.spark and in duckdb.fetchnumpy()
+    "numpy",   # used in duckdb.fetchnumpy()
     "pandas",  # used for pandas dataframes all over the place
     "pyarrow", # used for pyarrow support
     "adbc-driver-manager", # for the adbc driver
@@ -366,8 +366,10 @@ filterwarnings = [
     # Jupyter is throwing DeprecationWarnings
     "ignore:function ham() is deprecated:DeprecationWarning",
     # Pyspark is throwing these warnings
-    "ignore:distutils Version classes are deprecated:DeprecationWarning",
-    "ignore:is_datetime64tz_dtype is deprecated:DeprecationWarning",
+    "ignore:distutils Version classes are deprecated:DeprecationWarning:pyspark",
+    "ignore:is_datetime64tz_dtype is deprecated:DeprecationWarning:pyspark",
+    "ignore:The distutils package is deprecated:DeprecationWarning:pyspark",
+    "ignore:The copy keyword is deprecated:DeprecationWarning:pyspark",
 ]
 
 [tool.mypy]
