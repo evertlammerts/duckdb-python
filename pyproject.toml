@@ -211,12 +211,12 @@ exclude = [
 #
 # This section has dependency groups for testing and development. Tread carefully, the current setup makes sure that
 # test dependencies can be installed on as many platforms we build wheel for. Especially picky are:
-# - tensorflow: we can only run tests on cp310-cp311, for osx there is no tensorflow-cpu, for windows we need
+# - tensorflow: we can only run tests on cp311, for osx there is no tensorflow-cpu, for windows we need
 #          tensorflow-cpu-aws and there is no distribution availalbe for Linux aarch64.
 # - torch: since we can't use gpu acceleration, we need to rely on torch-cpu, which isn't available on pypi. We use
 #          `tool.uv.index` and `tool.uv.sources` to make sure the official pytorch index is used. Even there, we don't
 #          have a wheel available for x86_64 OSX + cp313.
-# - numpy: tensorflow doesn't play nice with numpy>2 so for every platform that can run tensorflow (cp310-cp311) we use
+# - numpy: tensorflow doesn't play nice with numpy>2 so for every platform that can run tensorflow (cp311) we use
 #          numpy<2. numpy<2 has no wheels for cp31[2|3], meaning an sdist will be used. However, on Windows amd64 +
 #          cp313 this results in a segfault / access violation. To get around this, we install numpy>=2 on all >=cp312
 #          platforms. Then for windows arm64, for which there is no tensorflow, we only allow numpy>=2.3 because that
@@ -231,20 +231,20 @@ default-groups = ["dev"]
 # build wheels for.
 # See https://docs.astral.sh/uv/concepts/resolution/#universal-resolution
 environments = [ # no need to resolve packages beyond these platforms with uv...
-    "python_version >= '3.10' and sys_platform == 'darwin' and platform_machine == 'arm64'",
-    "python_version >= '3.10' and sys_platform == 'darwin' and platform_machine == 'x86_64'",
-    "python_version >= '3.10' and sys_platform == 'win32' and platform_machine == 'AMD64'",
+    "python_version >= '3.11' and sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "python_version >= '3.11' and sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "python_version >= '3.11' and sys_platform == 'win32' and platform_machine == 'AMD64'",
     "python_version >= '3.11' and sys_platform == 'win32' and platform_machine == 'ARM64'",
-    "python_version >= '3.10' and sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "python_version >= '3.10' and sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "python_version >= '3.11' and sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "python_version >= '3.11' and sys_platform == 'linux' and platform_machine == 'aarch64'",
 ]
 required-environments = [ # ... but do always resolve for all of them
-    "python_version >= '3.10' and sys_platform == 'darwin' and platform_machine == 'arm64'",
-    "python_version >= '3.10' and sys_platform == 'darwin' and platform_machine == 'x86_64'",
-    "python_version >= '3.10' and sys_platform == 'win32' and platform_machine == 'AMD64'",
+    "python_version >= '3.11' and sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "python_version >= '3.11' and sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "python_version >= '3.11' and sys_platform == 'win32' and platform_machine == 'AMD64'",
     "python_version >= '3.11' and sys_platform == 'win32' and platform_machine == 'ARM64'",
-    "python_version >= '3.10' and sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "python_version >= '3.10' and sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "python_version >= '3.11' and sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "python_version >= '3.11' and sys_platform == 'linux' and platform_machine == 'aarch64'",
 ]
 
 # We just need pytorch for tests, wihtout GPU acceleration. PyPI doesn't host a cpu-only version for Linux, so we have
@@ -260,18 +260,8 @@ torchvision = [ { index = "pytorch-cpu" } ]
 
 # todo: adjust for windows arm64 while test dependencies become available
 [dependency-groups] # used for development only, requires pip >=25.1.0
-stubdeps = [ # dependencies used for typehints in the stubs
-    "pybind11-stubgen",
-    "mypy",
-    "fsspec",
-    "pandas",
-    "polars>=1.33.0",
-    "pyarrow; sys_platform != 'win32' or platform_machine != 'ARM64'",
-    "typing-extensions",
-]
 test = [ # dependencies used for running tests
-    "adbc-driver-manager>=1.10.0; python_version >= '3.10' and (sys_platform != 'win32' or platform_machine != 'ARM64')",
-    "adbc-driver-manager>=1.7.0; python_version < '3.10' and (sys_platform != 'win32' or platform_machine != 'ARM64')",
+    "adbc-driver-manager>=1.10.0; sys_platform != 'win32' or platform_machine != 'ARM64'",
     "pytest",
     "pytest-reraise",
     "pytest-timeout",
@@ -291,11 +281,9 @@ test = [ # dependencies used for running tests
     "requests",
     "urllib3",
     "fsspec>=2022.11.0; sys_platform != 'win32' or platform_machine != 'ARM64'",
-    "pandas>=3.0.0; python_version > '3.10'",
-    "pandas<3.0.0; python_version < '3.11'",
-    "pyarrow>=23.0.0,<26; python_version >= '3.10' and python_version < '3.12' and (sys_platform != 'win32' or platform_machine != 'ARM64')",
+    "pandas>=3.0.0",
+    "pyarrow>=23.0.0,<26; python_version < '3.12' and (sys_platform != 'win32' or platform_machine != 'ARM64')",
     "pyarrow>=23.0.0; python_version >= '3.12' and (sys_platform != 'win32' or platform_machine != 'ARM64')",
-    "pyarrow>=18.0.0; python_version < '3.10' and (sys_platform != 'win32' or platform_machine != 'ARM64')",
     "torch>=2.2.2; python_version < '3.13' and ( sys_platform != 'win32' or platform_machine != 'ARM64' )",
     "torch>=2.2.2,<2.12.1; python_version > '3.11' and python_version < '3.13' and sys_platform == 'win32' and platform_machine == 'ARM64'",
     "torch>=2.2.2,<2.11.0; python_version >= '3.13' and python_version < '3.14' and ( sys_platform != 'darwin' or platform_machine != 'x86_64' ) and ( sys_platform != 'win32' or platform_machine != 'ARM64' )",
@@ -307,7 +295,7 @@ test = [ # dependencies used for running tests
     "typing-extensions",
     "numpy<2; ( sys_platform != 'win32' or platform_machine != 'ARM64' ) and python_version < '3.12'",
     "numpy>=2; ( sys_platform != 'win32' or platform_machine != 'ARM64' ) and python_version >= '3.12'",
-    "numpy>=2.3; sys_platform == 'win32' and platform_machine == 'ARM64' and python_version >= '3.11'",
+    "numpy>=2.3; sys_platform == 'win32' and platform_machine == 'ARM64'",
 ]
 bench = [ # Pinned deps for the benchmark suite (see benchmarks/README.md). Minimal, not the heavy `test` group.
           # Constraints mirror `test` so the lockfile resolves identically; torch/tf are local-only (importorskip).
@@ -317,20 +305,16 @@ bench = [ # Pinned deps for the benchmark suite (see benchmarks/README.md). Mini
     "pytz",
     "numpy<2; ( sys_platform != 'win32' or platform_machine != 'ARM64' ) and python_version < '3.12'",
     "numpy>=2; ( sys_platform != 'win32' or platform_machine != 'ARM64' ) and python_version >= '3.12'",
-    "numpy>=2.3; sys_platform == 'win32' and platform_machine == 'ARM64' and python_version >= '3.11'",
-    "pandas>=3.0.0; python_version > '3.10'",
-    "pandas<3.0.0; python_version < '3.11'",
-    "pyarrow>=23.0.0,<26; python_version >= '3.10' and python_version < '3.12' and (sys_platform != 'win32' or platform_machine != 'ARM64')",
+    "numpy>=2.3; sys_platform == 'win32' and platform_machine == 'ARM64'",
+    "pandas>=3.0.0",
+    "pyarrow>=23.0.0,<26; python_version < '3.12' and (sys_platform != 'win32' or platform_machine != 'ARM64')",
     "pyarrow>=23.0.0; python_version >= '3.12' and (sys_platform != 'win32' or platform_machine != 'ARM64')",
-    "pyarrow>=18.0.0; python_version < '3.10' and (sys_platform != 'win32' or platform_machine != 'ARM64')",
 ]
 scripts = [ # dependencies used for running scripts
-    "cxxheaderparser",
     "ipython",
     "ipywidgets",
     "numpy",
     "pandas",
-    "pcpp",
     "polars>=1.33.0",
     "pyarrow; sys_platform != 'win32' or platform_machine != 'ARM64'",
     "pytz"
@@ -353,7 +337,6 @@ dev = [ # tooling like uv will install this automatically when syncing the envir
     "pre-commit",
     "mypy",
     "ruff>=0.13.0",
-    {include-group = "stubdeps"},
     {include-group = "build"},
     {include-group = "test"},
     {include-group = "scripts"},
