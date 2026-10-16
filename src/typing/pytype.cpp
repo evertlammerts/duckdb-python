@@ -364,6 +364,19 @@ void DuckDBPyType::Initialize(nb::handle &m) {
 	                nb::is_operator());
 	type_module.def("__eq__", &DuckDBPyType::EqualsString, "Compare two types for equality", nb::arg("other"),
 	                nb::is_operator());
+	// Binds every other operand in nanobind's strict first pass, because its implicit conversion pass prints to
+	// stderr each time the conversion to DuckDBPyType fails; registered after the str overload, so a plain str
+	// operand is compared by its text and never parsed.
+	type_module.def(
+	    "__eq__",
+	    [](const DuckDBPyType &self, const nb::object &other) -> nb::object {
+		    std::unique_ptr<DuckDBPyType> converted;
+		    if (!DuckDBPyType::TryConvert(other, converted)) {
+			    return nb::borrow(nb::handle(Py_NotImplemented));
+		    }
+		    return nb::bool_(self.Equals(*converted));
+	    },
+	    "Compare two types for equality", nb::arg("other").none(), nb::is_operator());
 	type_module.def("__hash__", [](const DuckDBPyType &type) {
 		auto s = type.ToString();
 		return nb::hash(nb::str(s.c_str(), s.size()));

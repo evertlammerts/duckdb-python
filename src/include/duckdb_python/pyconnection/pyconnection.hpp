@@ -49,9 +49,13 @@ public:
 public:
 	std::shared_ptr<DuckDBPyConnection> Get();
 	void Set(std::shared_ptr<DuckDBPyConnection> conn);
+	//! Once the module's cleanup ran and the interpreter is finalizing, the holder neither opens nor keeps a
+	//! connection, because nothing would close it
+	void Release();
 
 private:
 	std::shared_ptr<DuckDBPyConnection> connection;
+	bool released = false;
 	mutex l;
 };
 

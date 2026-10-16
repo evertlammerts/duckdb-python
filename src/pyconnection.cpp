@@ -2155,18 +2155,77 @@ void DuckDBPyConnection::LoadExtension(const string &extension) {
 	ExtensionHelper::LoadExternalExtension(*connection.context, extension_opts);
 }
 
-std::shared_ptr<DuckDBPyConnection> DefaultConnectionHolder::Get() {
-	lock_guard<mutex> guard(l);
-	if (!connection || connection->con.ConnectionIsClosed()) {
-		nb::dict config_dict;
-		connection = DuckDBPyConnection::Connect(nb::str(":memory:"), false, config_dict);
+// sys.is_finalizing is asked because Py_IsFinalizing is public only from Python 3.13; without sys the interpreter is
+// finalizing.
+static bool InterpreterIsFinalizing() {
+	PyObject *is_finalizing = PySys_GetObject("is_finalizing");
+	if (!is_finalizing) {
+		return true;
 	}
-	return connection;
+	PyObject *result = PyObject_CallNoArgs(is_finalizing);
+	if (!result) {
+		PyErr_Clear();
+		return true;
+	}
+	const int truth = PyObject_IsTrue(result);
+	Py_DECREF(result);
+	if (truth < 0) {
+		PyErr_Clear();
+		return true;
+	}
+	return truth != 0;
+}
+
+// The mutex guards only reads and swaps of the pointer: opening or destroying a connection releases the GIL and can run
+// Python code that fetches the default connection again, so both happen after the mutex is released.
+std::shared_ptr<DuckDBPyConnection> DefaultConnectionHolder::Get() {
+	bool was_released;
+	{
+		lock_guard<mutex> guard(l);
+		if (connection && !connection->con.ConnectionIsClosed()) {
+			return connection;
+		}
+		was_released = released;
+	}
+	if (was_released && InterpreterIsFinalizing()) {
+		throw ConnectionException("the default connection is not available during interpreter shutdown");
+	}
+	nb::dict config_dict;
+	auto opened = DuckDBPyConnection::Connect(nb::str(":memory:"), false, config_dict);
+	std::shared_ptr<DuckDBPyConnection> replaced;
+	{
+		lock_guard<mutex> guard(l);
+		if (connection && !connection->con.ConnectionIsClosed()) {
+			return connection;
+		}
+		replaced = std::move(connection);
+		connection = opened;
+	}
+	return opened;
 }
 
 void DefaultConnectionHolder::Set(std::shared_ptr<DuckDBPyConnection> conn) {
-	lock_guard<mutex> guard(l);
-	connection = conn;
+	bool was_released;
+	{
+		lock_guard<mutex> guard(l);
+		was_released = released;
+	}
+	if (was_released && InterpreterIsFinalizing()) {
+		return;
+	}
+	{
+		lock_guard<mutex> guard(l);
+		connection.swap(conn);
+	}
+}
+
+void DefaultConnectionHolder::Release() {
+	std::shared_ptr<DuckDBPyConnection> released_connection;
+	{
+		lock_guard<mutex> guard(l);
+		released = true;
+		connection.swap(released_connection);
+	}
 }
 
 void DuckDBPyConnection::Cursors::AddCursor(std::shared_ptr<DuckDBPyConnection> conn) {
@@ -2519,7 +2578,7 @@ void DuckDBPyConnection::Exit(DuckDBPyConnection &self, const nb::object &exc_ty
 }
 
 void DuckDBPyConnection::Cleanup() {
-	GetModuleState().default_connection.Set(nullptr);
+	GetModuleState().default_connection.Release();
 	GetModuleState().import_cache.reset();
 	GetModuleState().consumed_arrow_readers.reset();
 }
