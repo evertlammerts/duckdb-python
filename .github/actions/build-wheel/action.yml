@@ -134,6 +134,13 @@ runs:
         CIBW_TEST_COMMAND: >
           uv run -v pytest --confcutdir=. --rootdir . -c {project}/pyproject.toml ${{ inputs.testsuite == 'fast' && './tests/fast' || './tests' }}
 
+    # The stable ABI wheel must import nothing outside the stable ABI, which compiling with Py_LIMITED_API does
+    # not prove for symbols pulled in by inline functions or dependencies.
+    - name: Audit the stable ABI wheel
+      if: ${{ inputs.python == 'cp312' }}
+      shell: bash
+      run: uvx abi3audit==0.0.26 --strict wheelhouse/*.whl
+
     - name: Upload wheel
       uses: actions/upload-artifact@v4
       with:

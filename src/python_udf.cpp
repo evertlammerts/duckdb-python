@@ -79,7 +79,7 @@ void AreExtensionsRegistered(const LogicalType &arrow_type, const LogicalType &d
 	}
 }
 static void ConvertArrowTableToVector(const nb::object &table, Vector &out, ClientContext &context, idx_t count) {
-	D_ASSERT(duckdb::PyUtil::GilCheck());
+	DUCKDB_PY_ASSERT_GIL_HELD();
 	// Declared before the GIL release so the factory's last reference drops with the GIL held
 	TableFunctionRef empty;
 	empty.bind_info = make_shared_ptr<PythonTableArrowArrayStreamFactory>(table, context.GetClientProperties(),

@@ -43,9 +43,13 @@ endif()
 # ────────────────────────────────────────────
 # nanobind (requires Python to be located first; pybind11 used to do this
 # internally)
+#
+# The stable ABI component rides along in this call because FindPython creates
+# Python::SABIModule only when asked for it here, and nanobind's abi3 library
+# links that target.
 find_package(
   Python
-  COMPONENTS Interpreter Development.Module NumPy
+  COMPONENTS Interpreter Development.Module ${SKBUILD_SABI_COMPONENT} NumPy
   REQUIRED)
 # Nanobind ships its CMake config inside site-packages/nanobind/cmake, so
 # find_package() can't discover it unless we set it. (scikit-build-core does
@@ -57,10 +61,25 @@ if(NOT nanobind_ROOT)
     OUTPUT_VARIABLE nanobind_ROOT)
 endif()
 find_package(nanobind CONFIG REQUIRED)
+# nanobind puts Py_LIMITED_API on its abi3 library as a public define. The
+# object libraries below compile against that library too, so they see the same
+# define as the module; mixing the two libraries would compile the two sides
+# against different Python headers. The condition is the one nanobind applies in
+# linked mode: CPython 3.12 or later, not free-threaded.
+if(TARGET Python::SABIModule
+   AND Python_INTERPRETER_ID STREQUAL "Python"
+   AND NOT Python_VERSION VERSION_LESS 3.12
+   AND NOT NB_ABI MATCHES "[0-9]t")
+  set(DUCKDB_PY_STABLE_ABI STABLE_ABI)
+  set(DUCKDB_PY_NANOBIND nanobind-static-abi3)
+else()
+  set(DUCKDB_PY_STABLE_ABI)
+  set(DUCKDB_PY_NANOBIND nanobind-static)
+endif()
 # Build nanobind's core support library up front so the object libraries below
 # (which include nanobind headers via the umbrella) compile against its include
 # dirs + Python headers + flags.
-nanobind_build_library(nanobind-static)
+nanobind_build_library(${DUCKDB_PY_NANOBIND})
 
 # DuckDB
 include(cmake/duckdb_loader.cmake)
@@ -73,7 +92,7 @@ duckdb_add_library(duckdb_target)
 
 # Bundle in INTERFACE library
 add_library(_duckdb_dependencies INTERFACE)
-target_link_libraries(_duckdb_dependencies INTERFACE nanobind-static
+target_link_libraries(_duckdb_dependencies INTERFACE ${DUCKDB_PY_NANOBIND}
                                                      duckdb_target)
 # Also add include directory
 target_include_directories(
@@ -109,6 +128,7 @@ add_subdirectory(src)
 nanobind_add_module(
   _duckdb
   NB_STATIC
+  ${DUCKDB_PY_STABLE_ABI}
   $<TARGET_OBJECTS:python_src>
   $<TARGET_OBJECTS:python_arrow>
   $<TARGET_OBJECTS:python_engine>

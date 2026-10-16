@@ -32,7 +32,7 @@ DuckDBPyResult::~DuckDBPyResult() {
 	// (as the previous implementation did) causes Py_DECREF / PyObject_Free
 	// to run without a valid PyThreadState — see duckdb-python#456.
 	try {
-		D_ASSERT(duckdb::PyUtil::GilCheck());
+		DUCKDB_PY_ASSERT_GIL_HELD();
 		Close();
 	} catch (...) { // NOLINT
 	}
@@ -201,7 +201,7 @@ std::unique_ptr<NumpyResultConversion> DuckDBPyResult::InitializeNumpyConversion
 
 	idx_t initial_capacity = STANDARD_VECTOR_SIZE * 2ULL;
 	if (result->IsRetained()) {
-		D_ASSERT(duckdb::PyUtil::GilCheck());
+		DUCKDB_PY_ASSERT_GIL_HELD();
 		nb::gil_scoped_release release;
 		initial_capacity = result->RowCount(DuckDBPyConnection::CheckSignals);
 	}
@@ -235,7 +235,7 @@ nb::dict DuckDBPyResult::FetchNumpyInternal(bool chunked, idx_t vectors_per_chun
 	for (; count_vec < vectors_per_chunk; count_vec++) {
 		unique_ptr<DataChunk> chunk;
 		{
-			D_ASSERT(duckdb::PyUtil::GilCheck());
+			DUCKDB_PY_ASSERT_GIL_HELD();
 			nb::gil_scoped_release release;
 			chunk = FetchNextRaw();
 		}
@@ -283,7 +283,7 @@ void DuckDBPyResult::ConvertDateTimeTypes(PandasDataFrame &df, bool date_as_obje
 }
 
 static nb::object ConvertNumpyDtype(nb::handle numpy_array) {
-	D_ASSERT(duckdb::PyUtil::GilCheck());
+	DUCKDB_PY_ASSERT_GIL_HELD();
 	auto &import_cache = *DuckDBPyConnection::ImportCache();
 
 	auto dtype = numpy_array.attr("dtype");
@@ -329,7 +329,7 @@ static nb::object ConvertNumpyDtype(nb::handle numpy_array) {
 }
 
 PandasDataFrame DuckDBPyResult::FrameFromNumpy(bool date_as_object, const nb::handle &o) {
-	D_ASSERT(duckdb::PyUtil::GilCheck());
+	DUCKDB_PY_ASSERT_GIL_HELD();
 	auto &import_cache = *DuckDBPyConnection::ImportCache();
 	auto pandas = import_cache.pandas();
 	if (!pandas) {
@@ -420,7 +420,7 @@ duckdb::pyarrow::Table DuckDBPyResult::FetchArrowTable(const idx_t rows_per_batc
 		    auto pyarrow_schema = pyarrow::ToPyArrowSchema(schema);
 		    vector<unique_ptr<ArrowArrayWrapper>> arrays;
 		    {
-			    D_ASSERT(duckdb::PyUtil::GilCheck());
+			    DUCKDB_PY_ASSERT_GIL_HELD();
 			    nb::gil_scoped_release release;
 			    arrays = result->TakeArrays(DuckDBPyConnection::CheckSignals);
 		    }
@@ -448,10 +448,7 @@ namespace {
 //! Pulling batches has the same shape when a caller holds the GIL, so every callback drops it.
 template <class FUN>
 auto WithoutGil(FUN &&fun) -> decltype(fun()) {
-	if (duckdb::PyUtil::GilCheck()) {
-		nb::gil_scoped_release release;
-		return fun();
-	}
+	duckdb::PyUtil::GilReleaseIfHeld release;
 	return fun();
 }
 
@@ -636,12 +633,8 @@ void DuckDBPyResult::Close() {
 	if (result) {
 		// Ending the query waits for its running tasks, and a task inside a Python UDF cannot finish
 		// until the GIL is free.
-		if (duckdb::PyUtil::GilCheck()) {
-			nb::gil_scoped_release release;
-			result->Close();
-		} else {
-			result->Close();
-		}
+		duckdb::PyUtil::GilReleaseIfHeld release;
+		result->Close();
 	}
 	result.reset();
 	current_chunk.reset();
@@ -660,7 +653,7 @@ void DuckDBPyResult::Complete() {
 		unique_ptr<DataChunk> chunk;
 		unique_ptr<ArrowArrayWrapper> array;
 		{
-			D_ASSERT(duckdb::PyUtil::GilCheck());
+			DUCKDB_PY_ASSERT_GIL_HELD();
 			nb::gil_scoped_release release;
 			if (arrow) {
 				array = result->FetchArray(DuckDBPyConnection::CheckSignals);
