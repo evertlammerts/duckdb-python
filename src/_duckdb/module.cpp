@@ -452,10 +452,12 @@ public:
 		WithoutGil([&] { live.GetFactory().CreateType(cxx::QualifiedName::Create({"INTEGER"})); });
 	}
 
-	/// An appender inserting into the table `table` names, over `columns` or every column the table does not generate.
+	/// An appender applying `action` to the table `table` names, over `columns` or every column the table does not
+	/// generate; an update or a delete matches rows on `key`.
 	std::unique_ptr<Appender> CreateAppender(const std::vector<std::string> &table,
-	                                         const std::optional<std::vector<std::string>> &columns) {
-		return Appender::ForTable(connection, use, appenders, table, columns);
+	                                         const std::optional<std::vector<std::string>> &columns, TableAction action,
+	                                         const std::optional<std::vector<std::string>> &key) {
+		return Appender::ForTable(connection, use, appenders, table, columns, action, key);
 	}
 
 	/// Disconnect now rather than at collection; repeatable, and every other method refuses afterwards.
@@ -595,6 +597,12 @@ NB_MODULE(_duckdb, m) {
 	    .value("VOLATILE", cxx::FunctionStability::VOLATILE)
 	    .value("CONSISTENT_WITHIN_QUERY", cxx::FunctionStability::CONSISTENT_WITHIN_QUERY);
 
+	nb::enum_<TableAction>(m, "TableAction")
+	    .value("INSERT_ROWS", TableAction::INSERT_ROWS)
+	    .value("UPSERT_ROWS", TableAction::UPSERT_ROWS)
+	    .value("UPDATE_ROWS", TableAction::UPDATE_ROWS)
+	    .value("DELETE_ROWS", TableAction::DELETE_ROWS);
+
 	nb::class_<Database>(m, "Database", nb::type_slots(kDatabaseSlots))
 	    .def(
 	        "__init__",
@@ -633,7 +641,8 @@ NB_MODULE(_duckdb, m) {
 	    .def("get_option", &Connection::GetOption, nb::arg("name"))
 	    .def("set_option", &Connection::SetOption, nb::arg("name"), nb::arg("value"))
 	    .def("check_transaction", &Connection::CheckTransaction)
-	    .def("appender", &Connection::CreateAppender, nb::arg("table"), nb::arg("columns").none())
+	    .def("appender", &Connection::CreateAppender, nb::arg("table"), nb::arg("columns").none(), nb::arg("action"),
+	         nb::arg("key").none())
 	    .def("close", &Connection::Close);
 
 	nb::class_<Appender>(m, "Appender", nb::type_slots(ChildSlots<Appender>()))

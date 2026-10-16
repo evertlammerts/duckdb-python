@@ -33,6 +33,10 @@ constexpr const char *kBroken =
 // The names the statement reads the buffer by.
 constexpr const char *kDataName = "appender_data";
 constexpr const char *kBufferName = "appender_buffer";
+// The alias every action but the insert gives its target, so its columns stay apart from the buffer's whatever the
+// table is called; without it an upsert into a table named excluded fails, since the engine rewrites the upsert into
+// a merge that uses that name too.
+constexpr const char *kTargetName = "appender_target";
 
 /// The names and types of the columns a table appender buffers.
 struct BufferColumns {
@@ -40,14 +44,44 @@ struct BufferColumns {
 	std::vector<cxx::LogicalType> types;
 };
 
-BufferColumns ChooseColumns(const cxx::TableDescription &table, const std::string &target,
-                            const std::optional<std::vector<std::string>> &requested) {
+std::vector<cxx::ColumnDescription> AllColumns(const cxx::TableDescription &table) {
 	std::vector<cxx::ColumnDescription> all;
 	for (cxx::idx_t i = 0; i < table.GetColumnCount(); i++) {
 		all.push_back(table.GetColumn(i));
 	}
-	BufferColumns chosen;
+	return all;
+}
+
+/// The columns `listed` names, in that order, each matched ignoring ASCII case; `argument` names the list in a refusal.
+BufferColumns ResolveListed(const std::vector<cxx::ColumnDescription> &all, const std::string &target,
+                            const std::vector<std::string> &listed, const std::string &argument) {
+	BufferColumns resolved;
+	for (const auto &name : listed) {
+		const auto found = std::find_if(all.begin(), all.end(), [&](const cxx::ColumnDescription &column) {
+			return EqualIgnoringCase(column.GetName(), name);
+		});
+		if (found == all.end()) {
+			throw nb::value_error((name + " is not a column of " + target).c_str());
+		}
+		if (found->HasGenerated()) {
+			throw nb::value_error(
+			    (name + " is a generated column: the engine computes it, so it takes no value").c_str());
+		}
+		const auto repeated = std::any_of(resolved.names.begin(), resolved.names.end(),
+		                                  [&](const std::string &taken) { return EqualIgnoringCase(taken, name); });
+		if (repeated) {
+			throw nb::value_error((argument + " names " + name + " twice").c_str());
+		}
+		resolved.names.emplace_back(found->GetName());
+		resolved.types.push_back(found->GetType());
+	}
+	return resolved;
+}
+
+BufferColumns ChooseColumns(const std::vector<cxx::ColumnDescription> &all, const std::string &target,
+                            const std::optional<std::vector<std::string>> &requested) {
 	if (!requested) {
+		BufferColumns chosen;
 		for (const auto &column : all) {
 			if (!column.HasGenerated()) {
 				chosen.names.emplace_back(column.GetName());
@@ -59,26 +93,76 @@ BufferColumns ChooseColumns(const cxx::TableDescription &table, const std::strin
 	if (requested->empty()) {
 		throw nb::value_error("columns names no column; an appender writes at least one");
 	}
-	for (const auto &name : *requested) {
-		const auto found = std::find_if(all.begin(), all.end(), [&](const cxx::ColumnDescription &column) {
-			return EqualIgnoringCase(column.GetName(), name);
-		});
-		if (found == all.end()) {
-			throw nb::value_error((name + " is not a column of " + target).c_str());
+	return ResolveListed(all, target, *requested, "columns");
+}
+
+bool Contains(const std::vector<std::string> &names, const std::string &name) {
+	return std::any_of(names.begin(), names.end(),
+	                   [&](const std::string &listed) { return EqualIgnoringCase(listed, name); });
+}
+
+/// The buffered columns an update sets: every one not in the key, whose columns must all be buffered. `listed` is
+/// the key as the caller spelled it, for the refusal.
+std::vector<std::string> ColumnsToSet(const std::vector<std::string> &buffered, const std::vector<std::string> &key,
+                                      const std::vector<std::string> &listed) {
+	for (std::size_t i = 0; i < key.size(); i++) {
+		if (!Contains(buffered, key[i])) {
+			throw nb::value_error(("key column " + listed[i] +
+			                       " is not one of the appender's columns, so no row has a value to match it on")
+			                          .c_str());
 		}
-		if (found->HasGenerated()) {
-			throw nb::value_error(
-			    (name + " is a generated column: the engine computes it, so it takes no value").c_str());
-		}
-		const auto repeated = std::any_of(chosen.names.begin(), chosen.names.end(),
-		                                  [&](const std::string &taken) { return EqualIgnoringCase(taken, name); });
-		if (repeated) {
-			throw nb::value_error(("columns names " + name + " twice").c_str());
-		}
-		chosen.names.emplace_back(found->GetName());
-		chosen.types.push_back(found->GetType());
 	}
-	return chosen;
+	std::vector<std::string> assigned;
+	for (const auto &name : buffered) {
+		if (!Contains(key, name)) {
+			assigned.push_back(name);
+		}
+	}
+	if (assigned.empty()) {
+		throw nb::value_error("an update sets the appender's columns other than the key, and there are none");
+	}
+	return assigned;
+}
+
+template <class Render>
+std::string Join(const std::vector<std::string> &names, const std::string &separator, const Render &render) {
+	std::string joined;
+	for (std::size_t i = 0; i < names.size(); i++) {
+		joined += (i == 0 ? "" : separator) + render(names[i]);
+	}
+	return joined;
+}
+
+/// The statement a flush runs over the buffer, which holds `buffered`: `key` serves the update and the delete, and
+/// `assigned` the update.
+std::string RenderStatement(TableAction action, const std::string &target, const std::vector<std::string> &buffered,
+                            const std::vector<std::string> &key, const std::vector<std::string> &assigned) {
+	const auto quoted = [](const std::string &name) {
+		return cxx::RenderQuotedIdentifier(name);
+	};
+	const auto read = [&](const std::string &name) {
+		return std::string(kDataName) + "." + quoted(name);
+	};
+	const auto match = [&](const std::string &name) {
+		return std::string(kTargetName) + "." + quoted(name) + " = " + read(name);
+	};
+	const auto set = [&](const std::string &name) {
+		return quoted(name) + " = " + read(name);
+	};
+	const auto aliased = target + " AS " + kTargetName;
+	switch (action) {
+	case TableAction::INSERT_ROWS:
+		return "INSERT INTO " + target + " (" + Join(buffered, ", ", quoted) + ") SELECT * FROM " + kDataName;
+	case TableAction::UPSERT_ROWS:
+		return "INSERT OR REPLACE INTO " + aliased + " (" + Join(buffered, ", ", quoted) + ") SELECT * FROM " +
+		       kDataName;
+	case TableAction::UPDATE_ROWS:
+		return "UPDATE " + aliased + " SET " + Join(assigned, ", ", set) + " FROM " + kDataName + " WHERE " +
+		       Join(key, " AND ", match);
+	case TableAction::DELETE_ROWS:
+		break;
+	}
+	return "DELETE FROM " + aliased + " USING " + kDataName + " WHERE " + Join(key, " AND ", match);
 }
 
 /// `value` cast to `type` as a bound INSERT casts it: one row through the vector cast, which raises the failing cast's
@@ -235,22 +319,25 @@ Appender::~Appender() {
 std::unique_ptr<Appender> Appender::ForTable(const std::shared_ptr<Owned<cxx::Connection>> &engine,
                                              const std::shared_ptr<ConnectionUse> &use, AppenderBuffers &buffers,
                                              const std::vector<std::string> &parts,
-                                             const std::optional<std::vector<std::string>> &columns) {
+                                             const std::optional<std::vector<std::string>> &columns, TableAction action,
+                                             const std::optional<std::vector<std::string>> &key) {
 	Claimed claimed(engine->Acquire(kClosed), *use, ConnectionUse::Needs::NOT_RUNNING);
 	auto &live = *claimed.held.engine;
 	const auto name = cxx::QualifiedName::Create(parts);
 	const auto table = WithoutGil([&] { return live.DescribeTable(name); });
 	const auto target = table.GetQualifiedName().Render();
 	if (table.IsReadOnly()) {
-		const auto body = "cannot append to " + target + ": its database is attached read-only";
+		const auto body = "an appender cannot write to " + target + ": its database is read-only";
 		throw cxx::InvalidInputException("Invalid Input Error: " + body, body);
 	}
-	auto chosen = ChooseColumns(table, target, columns);
-	std::string listed;
-	for (const auto &column : chosen.names) {
-		listed += (listed.empty() ? "" : ", ") + cxx::RenderQuotedIdentifier(column);
-	}
-	const auto sql = "INSERT INTO " + target + " (" + listed + ") SELECT * FROM " + kDataName;
+	const auto all = AllColumns(table);
+	auto keyed = key ? ResolveListed(all, target, *key, "key") : BufferColumns {};
+	const auto key_names = keyed.names;
+	auto chosen = action == TableAction::DELETE_ROWS ? std::move(keyed) : ChooseColumns(all, target, columns);
+	const auto assigned = action == TableAction::UPDATE_ROWS
+	                          ? ColumnsToSet(chosen.names, key_names, key.value_or(key_names))
+	                          : std::vector<std::string> {};
+	const auto sql = RenderStatement(action, target, chosen.names, key_names, assigned);
 	auto made = WithoutGil([&] {
 		AppenderBuffer buffer(live, sql, chosen.names, chosen.types);
 		live.Bind(buffer.statement);

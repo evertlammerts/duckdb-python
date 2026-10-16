@@ -410,14 +410,19 @@ class Connection:
         action: _AppenderAction = "insert",
         key: ColumnNames | None = None,
     ) -> Appender:
-        """An appender that inserts the rows it buffers into `table`, with one statement at each flush.
+        """An appender that writes the rows it buffers to `table`, with one statement at each flush.
 
         Args:
             table: The table, resolved now as SQL resolves the name, and kept; a tuple qualifies it.
-            columns: The columns each row gives values for, in that order; the others take their defaults. Without
-                it, every column the table does not generate, in the table's order.
-            action: What a flush does with the rows; only "insert" is available.
-            key: The columns that pick the rows to update or delete; not available yet.
+            columns: The columns each row gives values for, in that order. Without it, every column the table does
+                not generate, in the table's order. A delete takes none: its rows hold the key alone.
+            action: What a flush does with each row. "insert" adds it, and the columns it does not give take their
+                defaults. "upsert" adds it too, unless a row with the same value of the table's unique key exists,
+                whose given columns it then replaces; the table needs exactly one unique key: its primary key, one
+                unique constraint or one unique index. "update" sets the given columns other than the key on every
+                row whose key matches. "delete" removes every row whose key matches.
+            key: The columns that pick the rows an update or a delete acts on, which both need; a delete's rows are
+                values of exactly these columns, in this order. Refused for an insert or an upsert.
         """
         # Read before the connection is checked: reading them runs code, which may close it.
         names, keyed = _read_once(columns), _read_once(key)

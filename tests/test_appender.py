@@ -24,7 +24,6 @@ if TYPE_CHECKING:
 
     from duckdb.frame.typing import PythonValue
 
-NEEDS_TABLE_ACTIONS = pytest.mark.xfail(strict=True, reason="the table actions are not built yet")
 NEEDS_QUERY_FORM = pytest.mark.xfail(strict=True, reason="query_appender is not built yet")
 NEEDS_TABLE_LOOKUP_FIX = pytest.mark.xfail(
     strict=True,
@@ -481,7 +480,6 @@ class TestDefaultInsert:
         assert table_rows(con, "t2") == [(1, 2)]
 
 
-@NEEDS_TABLE_ACTIONS
 class TestTableActions:
     def test_upsert_replaces_rows_on_the_unique_key(self, con: frame.Connection) -> None:
         con.run("INSERT INTO t VALUES (1, 'old'), (2, 'kept')")
@@ -756,6 +754,61 @@ class TestTableActions:
         app.append_row(1, "A")
         app.flush()
         assert table_rows(con, "u") == [(1, "A")]
+
+    @pytest.mark.parametrize("action", ["update", "delete"])
+    def test_the_key_is_not_a_dict(self, con: frame.Connection, action: Action) -> None:
+        with refused(TypeError):
+            con.appender("t", action=action, key={"k": 1})
+
+    @pytest.mark.parametrize("action", [1, None, ["insert"]], ids=["int", "none", "list"])
+    def test_an_action_that_is_not_a_string_is_refused(self, con: frame.Connection, action: object) -> None:
+        with refused(TypeError, match=re.escape('"insert", "upsert", "update" or "delete"')):
+            con.appender("t", action=action)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize(
+        ("action", "key", "rows", "expected"),
+        [
+            pytest.param("INSERT", None, [(3, "c")], [(1, "a"), (2, "b"), (3, "c")], id="INSERT"),
+            pytest.param("Upsert", None, [(1, "A"), (3, "c")], [(1, "A"), (2, "b"), (3, "c")], id="Upsert"),
+            pytest.param("UPDATE", ["k"], [(2, "B")], [(1, "a"), (2, "B")], id="UPDATE"),
+            pytest.param("dElEtE", ["k"], [(1,)], [(2, "b")], id="dElEtE"),
+        ],
+    )
+    def test_an_action_word_ignores_the_case_of_its_letters(
+        self,
+        con: frame.Connection,
+        action: str,
+        key: list[str] | None,
+        rows: list[tuple[PythonValue, ...]],
+        expected: list[tuple[object, ...]],
+    ) -> None:
+        con.run("INSERT INTO t VALUES (1, 'a'), (2, 'b')")
+        app = con.appender("t", action=action, key=key)  # type: ignore[arg-type]
+        app.append_rows(rows)
+        app.flush()
+        assert table_rows(con) == expected
+
+    @pytest.mark.parametrize("action", ["update", "delete"])
+    def test_a_null_in_either_column_of_a_two_column_key_matches_nothing(
+        self, con: frame.Connection, action: Action
+    ) -> None:
+        con.run("CREATE TABLE pairs (a INTEGER, b INTEGER, note VARCHAR)")
+        con.run("INSERT INTO pairs VALUES (1, NULL, 'x'), (NULL, 1, 'y'), (NULL, NULL, 'z'), (1, 1, 'w')")
+        app = con.appender("pairs", action=action, key=["a", "b"])
+        keys: list[tuple[PythonValue, ...]] = [(1, None), (None, 1), (None, None), (1, 1)]
+        app.append_rows([(*k, "new") for k in keys] if action == "update" else keys)
+        app.flush()
+        untouched = [(1, None, "x"), (None, 1, "y"), (None, None, "z")]
+        assert table_rows(con, "pairs") == ([(1, 1, "new"), *untouched] if action == "update" else untouched)
+
+    @pytest.mark.parametrize("action", ["update", "delete"])
+    def test_a_null_key_matches_no_row_whose_key_is_null(self, con: frame.Connection, action: Action) -> None:
+        con.run("CREATE TABLE groups (g INTEGER, v VARCHAR)")
+        con.run("INSERT INTO groups VALUES (NULL, 'a'), (1, 'b')")
+        app = con.appender("groups", action=action, key=["g"])
+        app.append_rows([(None, "new"), (1, "new")] if action == "update" else [(None,), (1,)])
+        app.flush()
+        assert table_rows(con, "groups") == ([(1, "new"), (None, "a")] if action == "update" else [(None, "a")])
 
 
 @NEEDS_QUERY_FORM
@@ -1150,7 +1203,6 @@ class TestCheckedAtCreation:
     @pytest.mark.parametrize(
         "options", [{"action": "merge"}, {"action": "update"}], ids=["unknown_action", "update_without_key"]
     )
-    @NEEDS_TABLE_ACTIONS
     def test_an_aborted_transaction_is_reported_before_a_bad_action(
         self, con: frame.Connection, options: dict[str, Any]
     ) -> None:
@@ -1605,6 +1657,31 @@ class TestFlush:
         with refused(exceptions.InvalidInputError, match="more than once"):
             app.flush()
 
+    @pytest.mark.parametrize("action", ["insert", "upsert", "update", "delete"])
+    def test_one_appender_applies_each_of_three_flushes_larger_than_a_staging_chunk(
+        self, con: frame.Connection, action: Action
+    ) -> None:
+        per_flush = VECTOR + 100
+        keyed = action in ("update", "delete")
+        expected: dict[int, str] = {}
+        if keyed:
+            con.run(f"INSERT INTO t SELECT range, 'old' FROM range({3 * per_flush})")
+            expected = dict.fromkeys(range(3 * per_flush), "old")
+        app = con.appender("t", action=action, key=["k"] if keyed else None)
+        for flush in range(3):
+            # An upsert's flushes overlap by half, so each one both replaces rows and adds them.
+            start = flush * (per_flush // 2 if action == "upsert" else per_flush)
+            keys = range(start, start + per_flush)
+            if action == "delete":
+                app.append_rows((k,) for k in keys)
+                for k in keys:
+                    del expected[k]
+            else:
+                app.append_rows((k, f"flush {flush}") for k in keys)
+                expected.update(dict.fromkeys(keys, f"flush {flush}"))
+            app.flush()
+            assert dict(table_rows(con)) == expected
+
 
 #: A child that presses Ctrl-C at a range of moments during a flush of one large row, and retries the flush after it.
 CTRL_C_TRIALS = """
@@ -1667,6 +1744,61 @@ def ctrl_c_trials(tmp_path_factory: pytest.TempPathFactory) -> list[tuple[str, .
     trials = [tuple(line.split()[1:]) for line in output.splitlines() if line.startswith("trial ")]
     assert len(trials) == 36, output
     return trials
+
+
+#: A child that cancels an upsert or update flush while the table's CHECK runs on its rows, then retries the flush.
+CANCELLED_TABLE_ACTION = """
+import _thread
+import signal
+import threading
+import time
+from duckdb import exceptions, frame
+# A background job starts with SIGINT ignored, which would turn the simulated Ctrl-C into nothing
+signal.signal(signal.SIGINT, signal.default_int_handler)
+con = frame.connect(threads=4)
+# A builtin runs no bytecode, so the Ctrl-C reaches the flush, not a Python function it runs
+calls = []
+con.create_function("record", calls.append, ["BIGINT"], "BIGINT", null_handling="special", stability="volatile")
+con.run("CREATE TABLE t (k INTEGER PRIMARY KEY, v VARCHAR CHECK (record(length(v)) IS NULL))")
+con.run("INSERT INTO t SELECT range, 'old' FROM range(1000000)")
+app = con.appender("t", action={action!r}, key={key!r})
+app.append_rows((i, "new") for i in range({first}, {first} + 1000000))
+calls.clear()
+print("started", flush=True)
+
+# The CHECK runs on every written row before the write takes effect, so the cancel lands while it runs
+def cancel_once_the_check_runs():
+    while len(calls) < 10000:
+        time.sleep(0.001)
+    {cancel}
+
+threading.Thread(target=cancel_once_the_check_runs, daemon=True).start()
+try:
+    app.flush()
+    print("flush: returned")
+except (KeyboardInterrupt, exceptions.Error) as error:
+    print("flush:", type(error).__name__, flush=True)
+written = "SELECT count(*), count(*) FILTER (v = 'new') FROM t"
+print("stored:", frame.sql(written).rows(con))
+app.flush()
+print("after the retry:", frame.sql(written).rows(con))
+"""
+
+#: Per action: its key, the first key its rows write, and the table's rows and rows holding the new value once applied.
+CANCELLED_TABLE_ACTION_CASES = [
+    pytest.param("upsert", None, 500_000, (1_500_000, 1_000_000), id="upsert"),
+    pytest.param("update", ["k"], 0, (1_000_000, 1_000_000), id="update"),
+]
+
+
+def cancelled_table_action(action: str, key: list[str] | None, first: int, cancel: str) -> str:
+    # In a child, because a flush the cancel fails to end would otherwise hang the whole suite.
+    code, output = run_isolated(
+        CANCELLED_TABLE_ACTION.format(action=action, key=key, first=first, cancel=cancel), timeout=60
+    )
+    assert code == 0, output
+    assert "stored: [(1000000, 0)]" in output
+    return output
 
 
 class TestFlushFailures:
@@ -1796,6 +1928,22 @@ class TestFlushFailures:
         assert "interrupted: KeyboardInterrupt" in output
         assert "stored: [(0,)]" in output
         assert "after the retry: [(1000000,)]" in output
+
+    @pytest.mark.parametrize(("action", "key", "first", "applied"), CANCELLED_TABLE_ACTION_CASES)
+    def test_a_ctrl_c_during_an_upsert_or_update_flush_keeps_the_rows_for_the_retry(
+        self, action: Action, key: list[str] | None, first: int, applied: tuple[int, int]
+    ) -> None:
+        output = cancelled_table_action(action, key, first, "_thread.interrupt_main()")
+        assert "flush: KeyboardInterrupt\n" in output
+        assert f"after the retry: [{applied}]" in output
+
+    @pytest.mark.parametrize(("action", "key", "first", "applied"), CANCELLED_TABLE_ACTION_CASES)
+    def test_an_interrupt_during_an_upsert_or_update_flush_keeps_the_rows_for_the_retry(
+        self, action: Action, key: list[str] | None, first: int, applied: tuple[int, int]
+    ) -> None:
+        output = cancelled_table_action(action, key, first, "con.interrupt()")
+        assert "flush: InterruptError\n" in output
+        assert f"after the retry: [{applied}]" in output
 
     @NEEDS_QUERY_FORM
     def test_a_flush_interrupted_by_ctrl_c_keeps_the_rows(self) -> None:
@@ -2070,7 +2218,6 @@ class TestWithBlock:
         assert table_rows(con) == [(1, "a"), (2, "b")]
 
 
-@NEEDS_QUERY_FORM
 class TestOneCallerAtATime:
     @pytest.mark.parametrize(
         "call",
@@ -2081,6 +2228,7 @@ class TestOneCallerAtATime:
             pytest.param(lambda app: app.clear(), id="clear"),
         ],
     )
+    @NEEDS_QUERY_FORM
     def test_another_thread_is_refused_during_a_flush_without_waiting(
         self,
         con: frame.Connection,
@@ -2100,6 +2248,7 @@ class TestOneCallerAtATime:
         assert table_rows(con) == [(1, "a")]
 
     @pytest.mark.parametrize("call", ["app.append_row(9, 'z')", "app.flush()", "app.clear()"])
+    @NEEDS_QUERY_FORM
     def test_a_callback_during_its_flush_is_refused(self, call: str) -> None:
         code, output = run_isolated(
             f"""
@@ -2124,6 +2273,132 @@ class TestOneCallerAtATime:
         assert code == 0, output
         assert f"refused: {CONCURRENT_USE.__name__}\n" in output
         assert "after: [(1, 'a')]" in output
+
+    @pytest.mark.parametrize(
+        ("action", "key", "row", "expected"),
+        [
+            pytest.param("insert", None, (2, "b"), [(1, "a"), (2, "b")], id="insert"),
+            pytest.param("upsert", None, (1, "A"), [(1, "A")], id="upsert"),
+            pytest.param("update", ["k"], (1, "A"), [(1, "A")], id="update"),
+        ],
+    )
+    def test_another_thread_is_refused_during_a_table_flush_without_waiting(
+        self,
+        con: frame.Connection,
+        action: Action,
+        key: list[str] | None,
+        row: tuple[PythonValue, ...],
+        expected: list[tuple[object, ...]],
+    ) -> None:
+        running, release, armed = threading.Event(), threading.Event(), threading.Event()
+
+        def hold(x: int) -> int:
+            if armed.is_set():
+                running.set()
+                release.wait(10)
+            return x
+
+        con.create_function("hold_write", hold, ["BIGINT"], "BIGINT", stability="volatile")
+        con.run("CREATE TABLE h (k INTEGER PRIMARY KEY, v VARCHAR CHECK (hold_write(length(v)) >= 0))")
+        con.run("INSERT INTO h VALUES (1, 'a')")
+        # Armed only now, so the CHECK holds the flush and not the row the table starts with.
+        armed.set()
+        app = con.appender("h", action=action, key=key)
+        app.append_row(*row)
+        outcome: list[object] = []
+        thread = threading.Thread(
+            target=contend, args=(running, release, lambda: app.append_row(9, "z"), outcome, exceptions.Error)
+        )
+        thread.start()
+        app.flush()
+        thread.join(10)
+        assert [type(o) for o in outcome] == [CONCURRENT_USE]
+        assert table_rows(con, "h") == expected
+
+    @pytest.mark.parametrize(
+        ("action", "key", "row", "expected"),
+        [
+            pytest.param("insert", None, (2, "b"), [(1, "a"), (2, "b")], id="insert"),
+            pytest.param("upsert", None, (1, "A"), [(1, "A")], id="upsert"),
+            pytest.param("update", ["k"], (1, "A"), [(1, "A")], id="update"),
+        ],
+    )
+    def test_a_check_that_reenters_its_table_flush_is_refused(
+        self,
+        action: Action,
+        key: list[str] | None,
+        row: tuple[PythonValue, ...],
+        expected: list[tuple[object, ...]],
+    ) -> None:
+        code, output = run_isolated(
+            f"""
+            from duckdb import exceptions, frame
+            con = frame.connect()
+            app = None
+            def reenter(x):
+                # Only the flush reenters: the appender does not exist yet when the table gets its first row.
+                if app is not None:
+                    try:
+                        app.append_row(9, "z")
+                        print("ran", flush=True)
+                    except exceptions.Error as error:
+                        print("refused:", type(error).__name__, flush=True)
+                return x
+            con.create_function("reenter", reenter, ["BIGINT"], "BIGINT", stability="volatile")
+            con.run("CREATE TABLE t (k INTEGER PRIMARY KEY, v VARCHAR CHECK (reenter(length(v)) >= 0))")
+            con.run("INSERT INTO t VALUES (1, 'a')")
+            app = con.appender("t", action={action!r}, key={key!r})
+            app.append_row(*{row!r})
+            print("started", flush=True)
+            app.flush()
+            print("after:", frame.sql("SELECT * FROM t ORDER BY ALL").rows(con))
+            """
+        )
+        assert code == 0, output
+        assert f"refused: {CONCURRENT_USE.__name__}\n" in output
+        assert f"after: {expected}" in output
+
+    @pytest.mark.parametrize("caller", ["the_flush_itself", "another_thread"])
+    def test_a_delete_flush_refuses_a_second_caller_without_waiting(self, caller: str) -> None:
+        code, output = run_isolated(
+            f"""
+            import threading
+            from duckdb import dbapi, exceptions
+            connection = dbapi.connect()
+            cursor = connection.cursor()
+            cursor.execute("CREATE TABLE t (k INTEGER PRIMARY KEY, v VARCHAR)")
+            cursor.execute("INSERT INTO t VALUES (1, 'a'), (2, 'b')")
+            connection.commit()
+            app = connection.appender("t", action="delete", key="k")
+            app.append_row(1)
+            begin = connection._begin_if_needed
+            def second_caller():
+                try:
+                    app.append_row(2)
+                    print("ran", flush=True)
+                except exceptions.Error as error:
+                    print("refused:", type(error).__name__, flush=True)
+            # A delete runs no expression of the table's, so a second caller meets the flush in its transaction
+            # hook, which runs while the flush holds the appender.
+            def begin_beside_a_second_caller():
+                if {caller!r} == "the_flush_itself":
+                    second_caller()
+                else:
+                    thread = threading.Thread(target=second_caller)
+                    thread.start()
+                    thread.join(10)
+                begin()
+            connection._begin_if_needed = begin_beside_a_second_caller
+            print("started", flush=True)
+            app.flush()
+            connection.commit()
+            cursor.execute("SELECT * FROM t ORDER BY ALL")
+            print("after:", cursor.fetchall())
+            """
+        )
+        assert code == 0, output
+        assert f"refused: {CONCURRENT_USE.__name__}\n" in output
+        assert "after: [(2, 'b')]" in output
 
 
 class TestClosedConnection:
@@ -2338,13 +2613,36 @@ class TestDbapiConnection:
         app.flush()
         assert self.rows(dcon) == [(1, "a")]
 
-    @NEEDS_TABLE_ACTIONS
     def test_an_action_and_a_key(self, dcon: dbapi.Connection) -> None:
         dcon.cursor().execute("INSERT INTO t VALUES (1, 'a'), (2, 'b')")
         app = dcon.appender("t", action="delete", key=["k"])
         app.append_row(1)
         app.flush()
         assert self.rows(dcon) == [(2, "b")]
+
+    @pytest.mark.parametrize(
+        ("action", "key", "row", "inside"),
+        [
+            pytest.param("upsert", None, (1, "A"), [(1, "A"), (2, "b")], id="upsert"),
+            pytest.param("update", ["k"], (2, "B"), [(1, "a"), (2, "B")], id="update"),
+        ],
+    )
+    def test_an_upsert_or_update_joins_the_transaction_and_rolls_back_with_it(
+        self,
+        dcon: dbapi.Connection,
+        action: Action,
+        key: list[str] | None,
+        row: tuple[PythonValue, ...],
+        inside: list[tuple[object, ...]],
+    ) -> None:
+        dcon.cursor().execute("INSERT INTO t VALUES (1, 'a'), (2, 'b')")
+        dcon.commit()
+        app = dcon.appender("t", action=action, key=key)
+        app.append_row(*row)
+        app.flush()
+        assert self.rows(dcon) == inside
+        dcon.rollback()
+        assert self.rows(dcon) == [(1, "a"), (2, "b")]
 
     @NEEDS_QUERY_FORM
     def test_a_query_appender(self, dcon: dbapi.Connection) -> None:

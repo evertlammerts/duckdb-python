@@ -565,7 +565,10 @@ class Connection:
         action: _AppenderAction = "insert",
         key: ColumnNames | None = None,
     ) -> Appender:
-        """An appender that inserts the rows it buffers into `table`, with one statement at each flush.
+        """An appender that writes the rows it buffers to `table`, with one statement at each flush.
+
+        `action` is "insert", "upsert", "update" or "delete"; an update or a delete picks rows by `key`, and a delete's
+        rows hold the key alone. The arguments are as for `duckdb.frame.Connection.appender`.
 
         It is not a cursor: its flush runs in this connection's transaction, opening one as `execute` does, and is
         refused with `OperationalError`, keeping its rows, while a cursor holds an unread result.

@@ -7,14 +7,14 @@ import warnings
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
-from ._expressions.expr import _as_names, _items, name_parts
+from . import _duckdb
+from ._expressions.expr import _as_names, _items, fold_name, name_parts
 from .exceptions import Error, InterfaceError, NotSupportedError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from types import TracebackType
 
-    from . import _duckdb
     from .frame.typing import PythonValue, _AppenderRows
 
 
@@ -106,29 +106,62 @@ def _read_declared(columns: object) -> object:
     return columns
 
 
+_ACTIONS = {
+    "insert": _duckdb.TableAction.INSERT_ROWS,
+    "upsert": _duckdb.TableAction.UPSERT_ROWS,
+    "update": _duckdb.TableAction.UPDATE_ROWS,
+    "delete": _duckdb.TableAction.DELETE_ROWS,
+}
+_ACTION_WORDS = '"insert", "upsert", "update" or "delete"'
+_MATCHES_ON_KEY = (_duckdb.TableAction.UPDATE_ROWS, _duckdb.TableAction.DELETE_ROWS)
+
+
+def _column_names(names: object, argument: str) -> tuple[str, ...] | None:
+    """`columns` or `key` of a table appender as names, read already; a mapping is refused, its values unused."""
+    if names is None:
+        return None
+    if isinstance(names, Mapping):
+        message = (
+            f"{argument} takes names of the table's columns, not a mapping; the table gives each column's type, so "
+            "its values would go unused"
+        )
+        raise TypeError(message)
+    return _as_names(names, "column name")
+
+
 def _table_appender(
     engine: _duckdb.Connection, table: object, columns: object, action: object, key: object
 ) -> _duckdb.Appender:
     """The engine's appender for the table form, its arguments checked after the connection and its transaction.
 
-    `columns` and `key` were read already; a dict as `columns` is refused, since its values would be ignored.
+    `columns` and `key` were read already. The checks here need no table; those against the table are the engine's.
     """
     engine.check_transaction()
     parts = name_parts(table, "table name")
     if len(parts) > 3:
         message = f"a table name has at most three parts, catalog, schema and table, not {len(parts)}: {table!r}"
         raise ValueError(message)
-    if isinstance(columns, Mapping):
-        message = (
-            "the columns of a table appender are names of the table's columns, not a mapping; the table gives "
-            "their types"
-        )
+    names = _column_names(columns, "columns")
+    if not isinstance(action, str):
+        message = f"action is one of the strings {_ACTION_WORDS}, not {action!r}"
         raise TypeError(message)
-    names = None if columns is None else _as_names(columns, "column name")
-    if action != "insert" or key is not None:
-        message = "only insert is available"
-        raise NotSupportedError(message)
-    return engine.appender(parts, names)
+    word = fold_name(action)
+    kind = _ACTIONS.get(word)
+    if kind is None:
+        message = f"action is {_ACTION_WORDS}, not {action!r}"
+        raise ValueError(message)
+    keyed = _column_names(key, "key")
+    matches_on_key = kind in _MATCHES_ON_KEY
+    if keyed is not None and not matches_on_key:
+        message = f"key applies to the update and delete actions, not to {word}"
+        raise ValueError(message)
+    if matches_on_key and not keyed:
+        message = f"the {word} action needs key, the columns that pick the rows to {word}"
+        raise ValueError(message)
+    if kind is _duckdb.TableAction.DELETE_ROWS and names is not None:
+        message = "the delete action buffers exactly its key columns, so it takes no columns"
+        raise ValueError(message)
+    return engine.appender(parts, names, kind, keyed)
 
 
 def _query_appender(engine: _duckdb.Connection, dml: object, columns: object, source: object) -> _duckdb.Appender:

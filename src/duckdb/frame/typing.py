@@ -249,4 +249,7 @@ _Stability: TypeAlias = Literal["consistent", "volatile", "consistent_within_que
 """When DuckDB may reuse a function's result. Reader: `duckdb.frame.connection._STABILITY`."""
 
 _AppenderAction: TypeAlias = Literal["insert", "upsert", "update", "delete"]
-"""What a table appender's flush does with each row. Reader: `duckdb._appender._table_appender`."""
+"""What a table appender's flush does with each row; the case of the letters does not matter.
+
+Reader: `duckdb._appender._table_appender`.
+"""

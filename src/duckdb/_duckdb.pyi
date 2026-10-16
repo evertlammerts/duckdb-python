@@ -26,6 +26,14 @@ class FunctionStability(enum.Enum):
     VOLATILE = 1
     CONSISTENT_WITHIN_QUERY = 2
 
+class TableAction(enum.Enum):
+    """What a table appender's flush does with each buffered row."""
+
+    INSERT_ROWS = 0
+    UPSERT_ROWS = 1
+    UPDATE_ROWS = 2
+    DELETE_ROWS = 3
+
 class ChunkView:
     """One fetched batch of rows, column by column; its buffer views borrow memory that dies with this object."""
 
@@ -169,8 +177,13 @@ class Connection:
     def check_transaction(self) -> None:
         """Raise what a statement would meet first, running nothing: closed, a query running, an aborted transaction."""
 
-    def appender(self, table: Sequence[str], columns: Sequence[str] | None) -> Appender:
-        """An appender inserting into the table `table` names, over `columns` or every column it does not generate."""
+    def appender(
+        self, table: Sequence[str], columns: Sequence[str] | None, action: TableAction, key: Sequence[str] | None
+    ) -> Appender:
+        """An appender applying `action` to the table `table` names, over `columns` or every column not generated.
+
+        An update or a delete matches rows on `key`, which it needs; a delete buffers `key` and takes no `columns`.
+        """
 
     def close(self) -> None:
         """Close the connection now, its appenders' buffers first. Idempotent; every other method raises afterwards."""

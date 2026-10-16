@@ -11,6 +11,7 @@
 #include <nanobind/nanobind.h>
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -19,6 +20,10 @@
 #include "lifetime.hpp"
 
 namespace duckdb_python {
+
+/// What a table appender's flush does with each buffered row.
+// Named with a suffix, since Windows headers define DELETE as a macro.
+enum class TableAction : std::uint8_t { INSERT_ROWS, UPSERT_ROWS, UPDATE_ROWS, DELETE_ROWS };
 
 /// The rows an appender holds and the statement its flush runs, all made from its connection. Rows are staged in the
 /// chunk and move into the collection a whole chunk at a time; the statement reads the collection.
@@ -77,12 +82,14 @@ public:
 	Appender(const Appender &) = delete;
 	Appender &operator=(const Appender &) = delete;
 
-	/// An appender inserting into the table `parts` names, resolved now, over `columns` in that order, or else over
-	/// every column the table does not generate, in its order.
+	/// An appender whose flush applies `action` to the table `parts` names, resolved now. It buffers `columns` in
+	/// that order, or else every column the table does not generate, in its order; a delete buffers `key` instead.
+	/// An update or a delete comes with a non-empty `key`, and a delete without `columns`.
 	static std::unique_ptr<Appender> ForTable(const std::shared_ptr<Owned<cxx::Connection>> &engine,
 	                                          const std::shared_ptr<ConnectionUse> &use, AppenderBuffers &buffers,
 	                                          const std::vector<std::string> &parts,
-	                                          const std::optional<std::vector<std::string>> &columns);
+	                                          const std::optional<std::vector<std::string>> &columns,
+	                                          TableAction action, const std::optional<std::vector<std::string>> &key);
 
 	/// Buffer one row, one value per column.
 	void AppendRow(nb::tuple values);
