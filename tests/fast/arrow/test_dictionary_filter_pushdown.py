@@ -259,13 +259,15 @@ def _params(cases, ops, marks_for, shapes=SHAPES):
     return params
 
 
-def _outcome_params(cases, ops, outcome_for):
+def _outcome_params(cases, ops, outcome_for, marks=()):
     params = []
     for case in cases:
         for shape in SHAPES:
             for op in ops:
                 outcome, error_text = outcome_for(case, shape, op)
-                params.append(pytest.param(case, shape, op, outcome, error_text, id=f"{case.id}-{shape}-{op}"))
+                params.append(
+                    pytest.param(case, shape, op, outcome, error_text, marks=list(marks), id=f"{case.id}-{shape}-{op}")
+                )
     return params
 
 
@@ -336,9 +338,21 @@ def _list_dictionary_outcome(case, shape, op):
     return ("either", LIST_IN_TEXT) if op == "in" and shape == "bare" else ("rows", None)
 
 
+# The engine leaves the struct children of a dictionary's NULL sentinel slot uninitialized, so scanning a dictionary
+# of structs with a NULL index reads garbage and crashes the process on dirty memory (Windows x86_64 in CI, any
+# platform with DUCKDB_JE_MALLOC_CONF=junk:true). A crash cannot be an xfail; skipped until the engine fix is pinned.
+STRUCT_SENTINEL = pytest.mark.skip(
+    reason="engine: the NULL sentinel of a dictionary of structs has uninitialized children"
+)
+
 EXPECTED_OUTCOMES = [
     *_outcome_params(NO_PYARROW_KERNEL, ALL_OPS, _no_kernel_outcome),
-    *_outcome_params(STRUCT_DICTIONARIES, ["eq", "lt", "between", "in", "is_null"], _struct_dictionary_outcome),
+    *_outcome_params(
+        STRUCT_DICTIONARIES,
+        ["eq", "lt", "between", "in", "is_null"],
+        _struct_dictionary_outcome,
+        marks=[STRUCT_SENTINEL],
+    ),
     *_outcome_params(LIST_DICTIONARIES, ["eq", "in", "is_null"], _list_dictionary_outcome),
 ]
 
