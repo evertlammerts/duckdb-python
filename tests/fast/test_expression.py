@@ -23,6 +23,16 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture
+def schema_join():
+    con = duckdb.connect()
+    con.execute("create schema s1")
+    con.execute("create table s1.t1 as select 1 as id, 2 as x")
+    con.execute("create table t2 as select 1 as id, 3 as y")
+    yield con.table("s1.t1").join(con.table("t2"), "t1.id = t2.id")
+    con.close()
+
+
+@pytest.fixture
 def filter_rel():
     con = duckdb.connect()
     rel = con.sql(
@@ -634,6 +644,70 @@ class TestExpression:
         rel2 = rel.select(star)
         res = rel2.fetchall()
         assert res == [(2,)]
+
+    @pytest.mark.parametrize(
+        "excluded",
+        [
+            "b.id",
+            ColumnExpression("b", "id"),
+            ColumnExpression("b.id"),
+        ],
+    )
+    def test_star_expression_exclude_qualified(self, excluded):
+        con = duckdb.connect()
+        a = con.sql("select 1 as id, 10 as x").set_alias("a")
+        b = con.sql("select 1 as id, 20 as y").set_alias("b")
+        joined = a.join(b, "a.id = b.id")
+
+        rel = joined.select(StarExpression(exclude=[excluded]))
+        assert rel.columns == ["id", "x", "y"]
+        assert rel.fetchall() == [(1, 10, 20)]
+
+    @pytest.mark.parametrize(
+        ("excluded", "columns"),
+        [
+            (ColumnExpression("s1", "t1", "id"), ["x", "id", "y"]),
+            (ColumnExpression("memory", "s1", "t1", "id"), ["x", "id", "y"]),
+            (ColumnExpression("memory.s1.t1.id"), ["x", "id", "y"]),
+            ("memory.s1.t1.id", ["x", "id", "y"]),
+            (ColumnExpression("t2", "id"), ["id", "x", "y"]),
+        ],
+    )
+    def test_star_expression_exclude_schema_and_catalog(self, schema_join, excluded, columns):
+        assert schema_join.select(StarExpression(exclude=[excluded])).columns == columns
+
+    @pytest.mark.parametrize("excluded", [ColumnExpression("zz", "id"), ColumnExpression("s9", "t1", "id")])
+    def test_star_expression_exclude_unknown_qualifier(self, schema_join, excluded):
+        with pytest.raises(duckdb.BinderException, match="in EXCLUDE list not found"):
+            schema_join.select(StarExpression(exclude=[excluded]))
+
+    @pytest.mark.parametrize("names", [(), ("c", "s", "t", "col", "x"), ("c.s.t.col.x",)])
+    def test_star_expression_exclude_name_part_count(self, names):
+        with pytest.raises(ValueError, match="1 to 4 name parts"):
+            StarExpression(exclude=[ColumnExpression(*names)])
+
+    @pytest.mark.parametrize(
+        ("dotted", "parts"),
+        [
+            ("a", ("a",)),
+            ("a.b.c.d", ("a", "b", "c", "d")),
+            ("a.b.c.d.e", ("a", "b", "c", "d", "e")),
+            ('"a.b".c', ("a.b", "c")),
+        ],
+    )
+    def test_column_expression_keeps_every_name_part(self, dotted, parts):
+        assert str(ColumnExpression(dotted)) == str(ColumnExpression(*parts))
+
+    @pytest.mark.parametrize("column", ["s.a.b.c", "t.s.a.b.c"])
+    def test_column_expression_nested_struct_path(self, column):
+        con = duckdb.connect()
+        rel = con.sql("select {'a': {'b': {'c': 1}}, 'b': {'c': 2}} as s").set_alias("t")
+        assert rel.select(ColumnExpression(column)).fetchall() == [(1,)]
+
+    def test_column_expression_quoted_dot(self):
+        con = duckdb.connect()
+        rel = con.sql('select 1 as "b.a", 2 as b')
+        assert rel.select(ColumnExpression('"b.a"')).fetchall() == [(1,)]
 
     def test_struct_expression(self):
         con = duckdb.connect()

@@ -296,8 +296,21 @@ static void PopulateExcludeList(qualified_column_set_t &exclude, nb::object list
 		if (expr->GetExpression().GetExpressionType() != ExpressionType::COLUMN_REF) {
 			throw nb::value_error("Only ColumnExpressions are accepted Expression types here");
 		}
-		auto &column = expr->GetExpression().Cast<ColumnRefExpression>();
-		exclude.insert(QualifiedColumnName(column.GetColumnName()));
+		auto &names = expr->GetExpression().Cast<ColumnRefExpression>().ColumnNames();
+		if (names.empty() || names.size() > 4) {
+			throw nb::value_error("Expected 1 to 4 name parts (catalog.schema.table.column) in an excluded column");
+		}
+		QualifiedColumnName qname(names.back());
+		if (names.size() >= 2) {
+			qname.table = names[names.size() - 2];
+		}
+		if (names.size() >= 3) {
+			qname.schema = names[names.size() - 3];
+		}
+		if (names.size() == 4) {
+			qname.catalog = names[0];
+		}
+		exclude.insert(qname);
 	}
 }
 
@@ -316,14 +329,10 @@ std::unique_ptr<DuckDBPyExpression> DuckDBPyExpression::ColumnExpression(const n
 			return StarExpression();
 		}
 
-		auto qualified_name = QualifiedName::Parse(column_name);
-		if (!qualified_name.Catalog().empty()) {
-			column_names.push_back(qualified_name.Catalog());
+		column_names = QualifiedName::ParseComponents(column_name);
+		if (column_names.empty()) {
+			column_names.emplace_back();
 		}
-		if (!qualified_name.Schema().empty()) {
-			column_names.push_back(qualified_name.Schema());
-		}
-		column_names.push_back(qualified_name.Name());
 	} else {
 		for (auto part : names) { // nanobind args iteration yields temporary handles; bind by value (cheap handle)
 			column_names.push_back(Identifier(nb::cast<std::string>(part)));

@@ -121,7 +121,7 @@ bool DictionaryHasMapFormat(const PyDictionary &dict) {
 }
 
 Value TransformDictionaryToStruct(optional_ptr<ClientContext> context, const PyDictionary &dict,
-                                  const LogicalType &target_type = LogicalType::UNKNOWN) {
+                                  const LogicalType &target_type, bool nan_as_null) {
 	auto conversion_error = [&]() {
 		return InvalidInputException("We could not convert the object %s to the desired target type (%s)",
 		                             dict.ToString(), target_type.ToString());
@@ -136,7 +136,7 @@ Value TransformDictionaryToStruct(optional_ptr<ClientContext> context, const PyD
 		// A TUPLE has no member names, so its members take the dict's values in dict order.
 		for (idx_t i = 0; i < dict.len; i++) {
 			auto val = TransformPythonValue(context, dict.values.attr("__getitem__")(i),
-			                                StructType::GetChildType(target_type, i));
+			                                StructType::GetChildType(target_type, i), nan_as_null);
 			struct_values.emplace_back(make_pair(StructType::GetChildName(target_type, i), std::move(val)));
 		}
 		return Value::STRUCT(std::move(struct_values));
@@ -145,7 +145,8 @@ Value TransformDictionaryToStruct(optional_ptr<ClientContext> context, const PyD
 	auto struct_keys = TransformStructKeys(dict.keys, dict.len);
 	if (!struct_target) {
 		for (idx_t i = 0; i < dict.len; i++) {
-			auto val = TransformPythonValue(context, dict.values.attr("__getitem__")(i), LogicalType::UNKNOWN);
+			auto val =
+			    TransformPythonValue(context, dict.values.attr("__getitem__")(i), LogicalType::UNKNOWN, nan_as_null);
 			struct_values.emplace_back(make_pair(std::move(struct_keys[i]), std::move(val)));
 		}
 		return Value::STRUCT(std::move(struct_values));
@@ -172,14 +173,14 @@ Value TransformDictionaryToStruct(optional_ptr<ClientContext> context, const PyD
 	}
 	for (idx_t i = 0; i < dict.len; i++) {
 		auto val = TransformPythonValue(context, dict.values.attr("__getitem__")(value_indexes[i]),
-		                                StructType::GetChildType(target_type, i));
+		                                StructType::GetChildType(target_type, i), nan_as_null);
 		struct_values.emplace_back(make_pair(StructType::GetChildName(target_type, i), std::move(val)));
 	}
 	return Value::STRUCT(std::move(struct_values));
 }
 
 Value TransformStructFormatDictionaryToMap(optional_ptr<ClientContext> context, const PyDictionary &dict,
-                                           const LogicalType &target_type) {
+                                           const LogicalType &target_type, bool nan_as_null) {
 	if (dict.len == 0) {
 		return EmptyMapValue();
 	}
@@ -204,8 +205,8 @@ Value TransformStructFormatDictionaryToMap(optional_ptr<ClientContext> context, 
 	vector<Value> elements;
 	for (idx_t i = 0; i < size; i++) {
 
-		Value new_key = TransformPythonValue(context, dict.keys.attr("__getitem__")(i), key_target);
-		Value new_value = TransformPythonValue(context, dict.values.attr("__getitem__")(i), value_target);
+		Value new_key = TransformPythonValue(context, dict.keys.attr("__getitem__")(i), key_target, nan_as_null);
+		Value new_value = TransformPythonValue(context, dict.values.attr("__getitem__")(i), value_target, nan_as_null);
 
 		key_type = ProxiedForceMaxLogicalType(context, key_type, new_key.type());
 		value_type = ProxiedForceMaxLogicalType(context, value_type, new_value.type());
@@ -229,10 +230,10 @@ Value TransformStructFormatDictionaryToMap(optional_ptr<ClientContext> context, 
 }
 
 Value TransformDictionaryToMap(optional_ptr<ClientContext> context, const PyDictionary &dict,
-                               const LogicalType &target_type = LogicalType::UNKNOWN) {
+                               const LogicalType &target_type, bool nan_as_null) {
 	if (target_type.id() != LogicalTypeId::UNKNOWN && !DictionaryHasMapFormat(dict)) {
 		// dict == { 'k1': v1, 'k2': v2, ..., 'kn': vn }
-		return TransformStructFormatDictionaryToMap(context, dict, target_type);
+		return TransformStructFormatDictionaryToMap(context, dict, target_type, nan_as_null);
 	}
 
 	auto keys = dict.values.attr("__getitem__")(0);
@@ -259,8 +260,8 @@ Value TransformDictionaryToMap(optional_ptr<ClientContext> context, const PyDict
 		value_target = LogicalType::LIST(MapType::ValueType(target_type));
 	}
 
-	auto key_list = TransformPythonValue(context, keys, key_target);
-	auto value_list = TransformPythonValue(context, values, value_target);
+	auto key_list = TransformPythonValue(context, keys, key_target, nan_as_null);
+	auto value_list = TransformPythonValue(context, values, value_target, nan_as_null);
 
 	LogicalType key_type = LogicalType::SQLNULL;
 	LogicalType value_type = LogicalType::SQLNULL;
@@ -286,8 +287,8 @@ Value TransformDictionaryToMap(optional_ptr<ClientContext> context, const PyDict
 	return Value::MAP(ListType::GetChildType(map_type), std::move(elements));
 }
 
-Value TransformTupleToStruct(optional_ptr<ClientContext> context, nb::handle ele,
-                             const LogicalType &target_type = LogicalType::UNKNOWN) {
+Value TransformTupleToStruct(optional_ptr<ClientContext> context, nb::handle ele, const LogicalType &target_type,
+                             bool nan_as_null) {
 	auto tuple = nb::cast<nb::tuple>(ele);
 	auto size = nb::len(tuple);
 
@@ -304,7 +305,7 @@ Value TransformTupleToStruct(optional_ptr<ClientContext> context, nb::handle ele
 		auto &type = child_types[i].second;
 		auto &name = StructType::GetChildName(target_type, i);
 		auto element = nb::handle(tuple[i]);
-		auto converted_value = TransformPythonValue(context, element, type);
+		auto converted_value = TransformPythonValue(context, element, type, nan_as_null);
 		children.emplace_back(make_pair(name, std::move(converted_value)));
 	}
 	auto result = Value::STRUCT(std::move(children));
@@ -416,7 +417,7 @@ LogicalType SniffPythonIntegerType(nb::handle ele) {
 	return res.type();
 }
 
-Value TransformDictionary(optional_ptr<ClientContext> context, const PyDictionary &dict) {
+Value TransformDictionary(optional_ptr<ClientContext> context, const PyDictionary &dict, bool nan_as_null) {
 	//! DICT -> MAP FORMAT
 	// keys() = [key, value]
 	// values() = [ [n keys] ], [ [n values] ]
@@ -430,9 +431,9 @@ Value TransformDictionary(optional_ptr<ClientContext> context, const PyDictionar
 	}
 
 	if (DictionaryHasMapFormat(dict)) {
-		return TransformDictionaryToMap(context, dict);
+		return TransformDictionaryToMap(context, dict, LogicalType::UNKNOWN, nan_as_null);
 	}
-	return TransformDictionaryToStruct(context, dict);
+	return TransformDictionaryToStruct(context, dict, LogicalType::UNKNOWN, nan_as_null);
 }
 
 struct ContiguousBuffer {
@@ -607,7 +608,7 @@ struct PythonValueConversion {
 	}
 
 	static void HandleList(optional_ptr<ClientContext> context, Value &result, const LogicalType &target_type,
-	                       nb::handle ele, idx_t list_size) {
+	                       nb::handle ele, idx_t list_size, bool nan_as_null) {
 		vector<Value> values;
 		values.reserve(list_size);
 
@@ -621,7 +622,7 @@ struct PythonValueConversion {
 		}
 		LogicalType element_type = LogicalType::SQLNULL;
 		for (idx_t i = 0; i < list_size; i++) {
-			Value new_value = TransformPythonValue(context, ele.attr("__getitem__")(i), child_type);
+			Value new_value = TransformPythonValue(context, ele.attr("__getitem__")(i), child_type, nan_as_null);
 			element_type = ProxiedForceMaxLogicalType(context, element_type, new_value.type());
 			values.push_back(std::move(new_value));
 		}
@@ -633,12 +634,12 @@ struct PythonValueConversion {
 	}
 
 	static void HandleTuple(optional_ptr<ClientContext> context, Value &result, const LogicalType &target_type,
-	                        nb::handle ele, idx_t list_size) {
+	                        nb::handle ele, idx_t list_size, bool nan_as_null) {
 		if (target_type.id() == LogicalTypeId::STRUCT || target_type.id() == LogicalTypeId::TUPLE) {
-			result = TransformTupleToStruct(context, ele, target_type);
+			result = TransformTupleToStruct(context, ele, target_type, nan_as_null);
 			return;
 		}
-		HandleList(context, result, target_type, ele, list_size);
+		HandleList(context, result, target_type, ele, list_size, nan_as_null);
 	}
 
 	static Value HandleObjectInternal(optional_ptr<ClientContext> context, nb::handle ele, PythonObjectType object_type,
@@ -661,11 +662,11 @@ struct PythonValueConversion {
 			switch (target_type.id()) {
 			case LogicalTypeId::STRUCT:
 			case LogicalTypeId::TUPLE:
-				return TransformDictionaryToStruct(context, dict, target_type);
+				return TransformDictionaryToStruct(context, dict, target_type, nan_as_null);
 			case LogicalTypeId::MAP:
-				return TransformDictionaryToMap(context, dict, target_type);
+				return TransformDictionaryToMap(context, dict, target_type, nan_as_null);
 			default:
-				return TransformDictionary(context, dict);
+				return TransformDictionary(context, dict, nan_as_null);
 			}
 		}
 		case PythonObjectType::Value: {
@@ -678,7 +679,7 @@ struct PythonValueConversion {
 				throw InvalidInputException("The 'type' of a Value should be of type DuckDBPyType, not '%s'",
 				                            actual_type);
 			}
-			return TransformPythonValue(context, object, internal_type->Type());
+			return TransformPythonValue(context, object, internal_type->Type(), nan_as_null);
 		}
 		default:
 			throw InternalException("Unsupported fallback");
@@ -889,7 +890,7 @@ struct PythonVectorConversion {
 
 	template <bool IS_LIST>
 	static void HandleListFast(optional_ptr<ClientContext> context, Vector &result, const idx_t &result_offset,
-	                           nb::handle ele, idx_t list_size) {
+	                           nb::handle ele, idx_t list_size, bool nan_as_null) {
 		auto &result_type = result.GetType();
 		if (result_type.id() == LogicalTypeId::ARRAY) {
 			idx_t array_size = ArrayType::GetSize(result_type);
@@ -902,7 +903,7 @@ struct PythonVectorConversion {
 			idx_t start_offset = result_offset * array_size;
 			for (idx_t i = 0; i < list_size; i++) {
 				auto child_ele = IS_LIST ? PyList_GetItem(ele.ptr(), i) : PyTuple_GetItem(ele.ptr(), i);
-				TransformPythonObject(context, child_ele, child_array, start_offset + i);
+				TransformPythonObject(context, child_ele, child_array, start_offset + i, nan_as_null);
 			}
 			return;
 		}
@@ -920,7 +921,7 @@ struct PythonVectorConversion {
 			auto &child_vector = ListVector::GetChildMutable(result);
 			for (idx_t i = 0; i < list_size; i++) {
 				auto child_ele = IS_LIST ? PyList_GetItem(ele.ptr(), i) : PyTuple_GetItem(ele.ptr(), i);
-				TransformPythonObject(context, child_ele, child_vector, start_offset + i);
+				TransformPythonObject(context, child_ele, child_vector, start_offset + i, nan_as_null);
 			}
 			ListVector::SetListSize(result, start_offset + list_size);
 			return;
@@ -929,20 +930,20 @@ struct PythonVectorConversion {
 	}
 
 	static void HandleList(optional_ptr<ClientContext> context, Vector &result, const idx_t &result_offset,
-	                       nb::handle ele, idx_t list_size) {
+	                       nb::handle ele, idx_t list_size, bool nan_as_null) {
 		auto &result_type = result.GetType();
 		if (result_type.id() == LogicalTypeId::ARRAY || result_type.id() == LogicalTypeId::LIST) {
-			HandleListFast<true>(context, result, result_offset, ele, list_size);
+			HandleListFast<true>(context, result, result_offset, ele, list_size, nan_as_null);
 			return;
 		}
 		// fallback to value conversion
 		Value result_val;
-		PythonValueConversion::HandleList(context, result_val, result_type, ele, list_size);
+		PythonValueConversion::HandleList(context, result_val, result_type, ele, list_size, nan_as_null);
 		FallbackValueConversion(result, result_offset, std::move(result_val));
 	}
 
 	static void ConvertTupleToStruct(optional_ptr<ClientContext> context, Vector &result, const idx_t &result_offset,
-	                                 nb::handle ele, idx_t size) {
+	                                 nb::handle ele, idx_t size, bool nan_as_null) {
 		auto &child_types = StructType::GetChildTypes(result.GetType());
 		auto child_count = child_types.size();
 		if (size != child_count) {
@@ -954,21 +955,21 @@ struct PythonVectorConversion {
 		auto &struct_children = StructVector::GetEntries(result);
 		for (idx_t i = 0; i < child_count; i++) {
 			auto child_ele = PyTuple_GetItem(ele.ptr(), i);
-			TransformPythonObject(context, child_ele, struct_children[i], result_offset);
+			TransformPythonObject(context, child_ele, struct_children[i], result_offset, nan_as_null);
 		}
 	}
 
 	static void HandleTuple(optional_ptr<ClientContext> context, Vector &result, const idx_t &result_offset,
-	                        nb::handle ele, idx_t tuple_size) {
+	                        nb::handle ele, idx_t tuple_size, bool nan_as_null) {
 		auto &result_type = result.GetType();
 		switch (result_type.id()) {
 		case LogicalTypeId::STRUCT:
 		case LogicalTypeId::TUPLE:
-			ConvertTupleToStruct(context, result, result_offset, ele, tuple_size);
+			ConvertTupleToStruct(context, result, result_offset, ele, tuple_size, nan_as_null);
 			break;
 		case LogicalTypeId::ARRAY:
 		case LogicalTypeId::LIST:
-			HandleListFast<false>(context, result, result_offset, ele, tuple_size);
+			HandleListFast<false>(context, result, result_offset, ele, tuple_size, nan_as_null);
 			break;
 		default:
 			throw InternalException("Unsupported type for HandleTuple");
@@ -1051,7 +1052,7 @@ void TransformPythonObjectInternal(optional_ptr<ClientContext> context, nb::hand
 	}
 	case PythonObjectType::List: {
 		auto list_size = nb::len(ele);
-		OP::HandleList(context, result, param, ele, list_size);
+		OP::HandleList(context, result, param, ele, list_size, nan_as_null);
 		break;
 	}
 	case PythonObjectType::Tuple: {
@@ -1063,7 +1064,7 @@ void TransformPythonObjectInternal(optional_ptr<ClientContext> context, nb::hand
 		case LogicalTypeId::UNKNOWN:
 		case LogicalTypeId::LIST:
 		case LogicalTypeId::ARRAY:
-			OP::HandleTuple(context, result, param, ele, list_size);
+			OP::HandleTuple(context, result, param, ele, list_size, nan_as_null);
 			break;
 		default:
 			throw InvalidInputException("Can't convert tuple to a Value of type %s", conversion_target);
