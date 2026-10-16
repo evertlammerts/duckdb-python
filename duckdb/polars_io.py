@@ -212,9 +212,10 @@ def _pl_tree_to_sql(tree: _ExpressionTree) -> str:
     if node_type == "Float":
         # Direct float literals
         float_literal = tree[node_type]
-        assert isinstance(float_literal, (float, int, str)), (
-            f"The value of a Float should be a float, int or str but got {type(float_literal)}"
-        )
+        if not isinstance(float_literal, (float, int, str)):
+            # JSON has no inf/nan, polars serializes them as null
+            msg = f"The value of a Float should be a float, int or str but got {type(float_literal)}"
+            raise NotImplementedError(msg)
         return str(float_literal)
 
     if node_type == "Function":
