@@ -104,8 +104,12 @@ class TestQueryBindsItsNameOnce:
         con = duckdb.connect()
         with pytest.raises(duckdb.ParserException) as from_sql:
             con.sql("pragma \"show\"('')")
-        with pytest.raises(duckdb.ParserException, match=re.escape(str(from_sql.value))):
+        # The engine renders the location of its internal pragma_show query under the user's text, so only the
+        # message is compared
+        message = str(from_sql.value).split("\n")[0]
+        with pytest.raises(duckdb.ParserException) as from_query:
             con.sql("select 1 as a").query("v", "pragma \"show\"('')")
+        assert str(from_query.value) == message
 
     @pytest.mark.parametrize(
         "sql", ["select column_name from pragma_show('v')", "select name from pragma_table_info('v')"]
