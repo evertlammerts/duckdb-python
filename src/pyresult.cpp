@@ -669,7 +669,14 @@ void DuckDBPyResult::Complete() {
 }
 
 bool DuckDBPyResult::HasWritesToRun() const {
-	return result && !result->Properties().modified_databases.empty() && result->Running();
+	if (!result) {
+		return false;
+	}
+	// A statement that expands into several is treated as writing until it ran and its properties are known
+	if (result->MetadataAvailable() && result->Properties().modified_databases.empty()) {
+		return false;
+	}
+	return result->Running();
 }
 
 int64_t DuckDBPyResult::Rowcount() {

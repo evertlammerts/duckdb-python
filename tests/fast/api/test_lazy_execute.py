@@ -1,7 +1,7 @@
 import pytest
 
 import duckdb
-from duckdb.sqltypes import BIGINT, INTEGER
+from duckdb.sqltypes import BIGINT, BOOLEAN, HUGEINT, INTEGER
 
 ROWS = 300_000
 TALLY_QUERY = f"SELECT tally(i) AS i FROM range({ROWS}) t(i)"
@@ -70,10 +70,38 @@ class TestExecutedQuery:
         assert duckdb_cursor.description[0][1] == INTEGER
         assert duckdb_cursor.fetchall() == [(42,)]
 
-    def test_a_pivot_group(self, duckdb_cursor):
+
+class TestStatementGroup:
+    """A statement the engine expands into several learns its columns only once the one producing the rows is bound."""
+
+    @pytest.fixture
+    def pivot_source(self, duckdb_cursor):
         duckdb_cursor.execute("CREATE TABLE p AS SELECT * FROM (VALUES ('a', 1), ('b', 2), ('a', 3)) t(k, v)")
-        duckdb_cursor.execute("PIVOT p ON k USING sum(v)")
-        assert duckdb_cursor.fetchall() == [(4, 2)]
+        return duckdb_cursor
+
+    def test_description_is_known_after_execute(self, pivot_source):
+        pivot_source.execute("PIVOT p ON k USING sum(v)")
+        assert [(name, kind) for name, kind, *_ in pivot_source.description] == [("a", HUGEINT), ("b", HUGEINT)]
+        assert pivot_source.fetchall() == [(4, 2)]
+
+    def test_a_group_without_rows_fetches_nothing(self, pivot_source):
+        pivot_source.execute("ALTER TABLE p ADD COLUMN r DOUBLE DEFAULT random()")
+        assert [(name, kind) for name, kind, *_ in pivot_source.description] == [("Success", BOOLEAN)]
+        assert pivot_source.rowcount == -1
+        assert pivot_source.fetchall() == []
+        assert pivot_source.execute("SELECT count(*) FILTER (r IS NOT NULL) FROM p").fetchone() == (3,)
+
+    def test_a_failure_in_the_result_statement_undoes_the_group(self, pivot_source):
+        with pytest.raises(duckdb.BinderException, match="missing"):
+            pivot_source.execute("PIVOT p ON k USING sum(v) ORDER BY missing")
+        enums = "SELECT count(*) FROM duckdb_types() WHERE type_name LIKE '__pivot_enum%'"
+        assert pivot_source.execute(enums).fetchone() == (0,)
+
+    def test_a_group_as_a_relation(self, pivot_source):
+        rel = pivot_source.sql("PIVOT p ON k USING sum(v)")
+        assert rel.columns == ["a", "b"]
+        assert rel.types == [HUGEINT, HUGEINT]
+        assert rel.fetchall() == [(4, 2)]
 
 
 class TestAnotherStatement:

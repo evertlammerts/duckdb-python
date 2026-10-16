@@ -66,13 +66,20 @@ public:
 	Result &operator=(const Result &) = delete;
 
 public:
+	//! False for a statement that expands into several until it completes
+	bool MetadataAvailable() const {
+		return metadata_available;
+	}
 	const vector<Identifier> &Names() const {
+		RequireMetadata();
 		return names;
 	}
 	const vector<LogicalType> &Types() const {
+		RequireMetadata();
 		return types;
 	}
 	const StatementProperties &Properties() const {
+		RequireMetadata();
 		return properties;
 	}
 	const ClientProperties &GetClientProperties() const {
@@ -123,6 +130,8 @@ private:
 
 	//! Retain for a caller that already holds the connection's claim
 	void RetainClaimed(const InterruptCheck &check);
+	void CaptureMetadata();
+	void RequireMetadata() const;
 	//! The connection's claim while the query can still run engine work, otherwise none
 	unique_ptr<ConnectionClaim> ClaimWhileRunning();
 	void OpenStream();
@@ -145,9 +154,11 @@ private:
 	vector<Identifier> names;
 	vector<LogicalType> types;
 	StatementProperties properties;
+	bool metadata_available = false;
 	bool completes_before_returning = false;
 	ClientProperties client_properties;
-	//! Copied at submission, while the producing transaction is live
+	//! An Arrow result never defers its metadata, so the copy happens at submission, while the producing
+	//! transaction is live
 	ArrowSchemaWrapper arrow_schema;
 };
 
