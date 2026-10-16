@@ -346,10 +346,15 @@ void DuckDBPyRelation::Initialize(nb::handle &m) {
 
 	    // Aren't these also technically consumers?
 	    .def("insert_into", &DuckDBPyRelation::InsertInto,
-	         "Inserts the relation object into an existing table named table_name", nb::arg("table_name"));
+	         "Inserts the relation object into an existing table named table_name. The name is table, schema.table or "
+	         "catalog.schema.table, and a part may be double quoted; a name of more than three parts needs SQL (INSERT "
+	         "INTO) for now.",
+	         nb::arg("table_name"));
 
 	DefineMethod({"create", "to_table"}, relation_module, &DuckDBPyRelation::Create,
-	             "Creates a new table named table_name with the contents of the relation object",
+	             "Creates a new table named table_name with the contents of the relation object. The name is table, "
+	             "schema.table or catalog.schema.table, and a part may be double quoted; a name of more than three "
+	             "parts needs SQL (CREATE TABLE AS) for now.",
 	             nb::arg("table_name"));
 
 	DefineMethod({"create_view", "to_view"}, relation_module, &DuckDBPyRelation::CreateView,

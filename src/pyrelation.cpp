@@ -1376,6 +1376,15 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::CreateView(const string &vie
 	return DeriveRelation(rel);
 }
 
+static QualifiedName ParseQualifiedName(const string &text) {
+	QualifiedName name;
+	string error;
+	if (!QualifiedName::TryParse(text, name, error)) {
+		throw ParserException(error);
+	}
+	return name;
+}
+
 //! DESCRIBE binds like a SELECT and so sees the source CTE, while PRAGMA show reads the catalog.
 static unique_ptr<SQLStatement> TryRewriteShowPragma(ClientContext &context, SQLStatement &statement, string &text) {
 	if (statement.type != StatementType::PRAGMA_STATEMENT) {
@@ -1390,12 +1399,7 @@ static unique_ptr<SQLStatement> TryRewriteShowPragma(ClientContext &context, SQL
 	if (literal.kind != LiteralKind::STRING) {
 		return nullptr;
 	}
-	QualifiedName table_name;
-	string error;
-	if (!QualifiedName::TryParse(literal.text, table_name, error)) {
-		throw ParserException(error);
-	}
-	text = "DESCRIBE " + table_name.ToString();
+	text = "DESCRIBE " + ParseQualifiedName(literal.text).ToString();
 	Parser parser(context);
 	parser.ParseQuery(text);
 	return std::move(parser.statements[0]);
@@ -1460,9 +1464,23 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyRelation::Query(const string &view_nam
 	return nullptr;
 }
 
+//! The relation API takes only a catalog, a schema and a name, so a longer path would lose its middle parts.
+static QualifiedName ParseWriteTarget(Relation &relation, const string &text, const string &sql_form) {
+	// A closed connection is refused before the name, as every relation method refuses it.
+	relation.context->GetContext();
+	auto name = ParseQualifiedName(text);
+	if (name.Path().size() > 3) {
+		auto rendered = name.ToString();
+		throw NotImplementedException(
+		    "The relation API cannot address a nested schema path such as %s yet; use SQL (%s) instead", rendered,
+		    StringUtil::Format(sql_form, rendered));
+	}
+	return name;
+}
+
 void DuckDBPyRelation::InsertInto(const string &table) {
-	auto parsed_info = QualifiedName::Parse(table);
-	auto insert = rel->InsertRel(parsed_info.Catalog(), parsed_info.Schema(), parsed_info.Name());
+	auto name = ParseWriteTarget(*rel, table, "INSERT INTO %s");
+	auto insert = rel->InsertRel(name.Catalog(), name.Schema(), name.Name());
 	PyExecuteRelation(insert);
 }
 
@@ -1532,8 +1550,8 @@ void DuckDBPyRelation::Insert(const nb::object &params) const {
 }
 
 void DuckDBPyRelation::Create(const string &table) {
-	auto parsed_info = QualifiedName::Parse(table);
-	auto create = rel->CreateRel(parsed_info.Schema(), parsed_info.Name(), false);
+	auto name = ParseWriteTarget(*rel, table, "CREATE TABLE %s AS");
+	auto create = rel->CreateRel(name.Catalog(), name.Schema(), name.Name(), false);
 	PyExecuteRelation(create);
 }
 
