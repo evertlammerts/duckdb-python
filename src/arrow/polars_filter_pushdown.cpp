@@ -24,9 +24,11 @@ struct PolarsBackend : public FilterBackend {
 		return col;
 	}
 
-	nb::object MakeScalar(const Value &v, const ArrowType *arrow_type, const string &timezone_config) override {
+	nb::object MakeScalar(const Value &v, const ArrowType *arrow_type, const ArrowSchema *arrow_schema,
+	                      const string &timezone_config) override {
 		// Polars handles type coercion for primitives; no ArrowType lookup is needed.
 		(void)arrow_type;
+		(void)arrow_schema;
 		(void)timezone_config;
 		return PythonObject::FromValue(v, v.type(), client_properties);
 	}
@@ -137,9 +139,9 @@ nb::object PolarsFilterPushdown::TransformFilter(const TableFilterSet &filter_co
 
 		vector<Identifier> column_path = {Identifier(column_name)};
 		// Polars does not need ArrowType information — `nullptr` here propagates through the
-		// shared walker; the PolarsBackend ignores the parameter in MakeScalar.
+		// shared walker; the PolarsBackend ignores both the ArrowType and the ArrowSchema node in MakeScalar.
 		nb::object child_expression = duckdb::TransformFilter(entry.Filter(), std::move(column_path), backend, nullptr,
-		                                                      client_properties.time_zone);
+		                                                      nullptr, client_properties.time_zone);
 		if (child_expression.is(nb::none())) {
 			continue;
 		}

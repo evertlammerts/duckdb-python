@@ -247,3 +247,19 @@ def was_pushed(con, query: str) -> bool:
             elif isinstance(filters, list) and len(filters) > 0:
                 return True
     return False
+
+
+def assert_fully_pushed(con, query: str, expected_count: int) -> None:
+    """Assert that EXPLAIN ANALYZE of `query` shows its filter inside the only Arrow scan, with nothing above it.
+
+    The scan must emit exactly `expected_count` rows, which shows the pushed filter ran inside the scan.
+    """
+    import json
+
+    plan = json.loads(con.execute(f"EXPLAIN (ANALYZE, FORMAT JSON) {query}").fetchone()[1])
+    scans = _find_arrow_scan_nodes(plan["operator"])
+    assert len(scans) == 1
+    scan, has_filter_above = scans[0]
+    assert scan["extra_info"].get("Filters"), "filter was not pushed into the Arrow scan"
+    assert not has_filter_above, "a FILTER operator stayed above the Arrow scan"
+    assert scan["intermediate_rows"] == expected_count, "the Arrow scan emitted rows the pushed filter rejects"

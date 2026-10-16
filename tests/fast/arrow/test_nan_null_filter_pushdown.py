@@ -345,15 +345,15 @@ class TestNaNWithNullRows:
         ("coltype", "op", "factory"),
         _make_combined_params_coltype_op(
             [
-                ("DOUBLE", "<", True),
-                ("DOUBLE", "=", True),
-                ("DOUBLE", "<>", True),
-                ("DOUBLE", ">=", True),
+                ("DOUBLE", "<", False),
+                ("DOUBLE", "=", False),
+                ("DOUBLE", "<>", False),
+                ("DOUBLE", ">=", False),
                 ("DOUBLE", ">", False),
-                ("FLOAT", "<", True),
-                ("FLOAT", "=", True),
-                ("FLOAT", "<>", True),
-                ("FLOAT", ">=", True),
+                ("FLOAT", "<", False),
+                ("FLOAT", "=", False),
+                ("FLOAT", "<>", False),
+                ("FLOAT", ">=", False),
                 ("FLOAT", ">", False),
             ]
         ),
@@ -408,13 +408,13 @@ class TestNaNWithNullRows:
         self._make_tables(coltype, VALUES_WITH_NULL, factory)
         assert_matches_native(self.con, f"b <= 'nan'::{coltype} OR b = 1.0")
 
-    @pytest.mark.parametrize("factory", _make_factory_params_with_xfail(xfail_on_dict=True))
+    @pytest.mark.parametrize("factory", _make_factory_params_with_xfail(xfail_on_dict=False))
     @pytest.mark.parametrize("coltype", ["DOUBLE", "FLOAT"])
     def test_le_nan_and_gt(self, coltype, factory):
         self._make_tables(coltype, VALUES_WITH_NULL, factory)
         assert_matches_native(self.con, f"b <= 'nan'::{coltype} AND b > 0")
 
-    @pytest.mark.parametrize("factory", _make_factory_params_with_xfail(xfail_on_dict=True))
+    @pytest.mark.parametrize("factory", _make_factory_params_with_xfail(xfail_on_dict=False))
     @pytest.mark.parametrize("coltype", ["DOUBLE", "FLOAT"])
     def test_between_zero_and_nan(self, coltype, factory):
         self._make_tables(coltype, VALUES_WITH_NULL, factory)
@@ -485,38 +485,38 @@ class TestNaNWithNullRows:
                 ("DOUBLE", "<=", "0::DOUBLE", False),
                 ("DOUBLE", "=", "0::DOUBLE", False),
                 ("DOUBLE", "<>", "0::DOUBLE", False),
-                ("DOUBLE", ">=", "0::DOUBLE", True),
-                ("DOUBLE", ">", "0::DOUBLE", True),
+                ("DOUBLE", ">=", "0::DOUBLE", False),
+                ("DOUBLE", ">", "0::DOUBLE", False),
                 ("DOUBLE", "<", "'inf'::DOUBLE", False),
                 ("DOUBLE", "<=", "'inf'::DOUBLE", False),
                 ("DOUBLE", "=", "'inf'::DOUBLE", False),
                 ("DOUBLE", "<>", "'inf'::DOUBLE", False),
-                ("DOUBLE", ">=", "'inf'::DOUBLE", True),
-                ("DOUBLE", ">", "'inf'::DOUBLE", True),
+                ("DOUBLE", ">=", "'inf'::DOUBLE", False),
+                ("DOUBLE", ">", "'inf'::DOUBLE", False),
                 ("DOUBLE", "<", "'-inf'::DOUBLE", False),
                 ("DOUBLE", "<=", "'-inf'::DOUBLE", False),
                 ("DOUBLE", "=", "'-inf'::DOUBLE", False),
                 ("DOUBLE", "<>", "'-inf'::DOUBLE", False),
-                ("DOUBLE", ">=", "'-inf'::DOUBLE", True),
-                ("DOUBLE", ">", "'-inf'::DOUBLE", True),
+                ("DOUBLE", ">=", "'-inf'::DOUBLE", False),
+                ("DOUBLE", ">", "'-inf'::DOUBLE", False),
                 ("FLOAT", "<", "0::FLOAT", False),
                 ("FLOAT", "<=", "0::FLOAT", False),
                 ("FLOAT", "=", "0::FLOAT", False),
                 ("FLOAT", "<>", "0::FLOAT", False),
-                ("FLOAT", ">=", "0::FLOAT", True),
-                ("FLOAT", ">", "0::FLOAT", True),
+                ("FLOAT", ">=", "0::FLOAT", False),
+                ("FLOAT", ">", "0::FLOAT", False),
                 ("FLOAT", "<", "'inf'::FLOAT", False),
                 ("FLOAT", "<=", "'inf'::FLOAT", False),
                 ("FLOAT", "=", "'inf'::FLOAT", False),
                 ("FLOAT", "<>", "'inf'::FLOAT", False),
-                ("FLOAT", ">=", "'inf'::FLOAT", True),
-                ("FLOAT", ">", "'inf'::FLOAT", True),
+                ("FLOAT", ">=", "'inf'::FLOAT", False),
+                ("FLOAT", ">", "'inf'::FLOAT", False),
                 ("FLOAT", "<", "'-inf'::FLOAT", False),
                 ("FLOAT", "<=", "'-inf'::FLOAT", False),
                 ("FLOAT", "=", "'-inf'::FLOAT", False),
                 ("FLOAT", "<>", "'-inf'::FLOAT", False),
-                ("FLOAT", ">=", "'-inf'::FLOAT", True),
-                ("FLOAT", ">", "'-inf'::FLOAT", True),
+                ("FLOAT", ">=", "'-inf'::FLOAT", False),
+                ("FLOAT", ">", "'-inf'::FLOAT", False),
             ]
         ),
     )

@@ -18,7 +18,7 @@ namespace duckdb {
 struct PyArrowFilterPushdown {
 	static nb::object TransformFilter(TableFilterSet &filter_collection, unordered_map<idx_t, string> &columns,
 	                                  unordered_map<idx_t, idx_t> filter_to_col, const ClientProperties &config,
-	                                  const ArrowTableSchema &arrow_table);
+	                                  const ArrowTableSchema &arrow_table, const ArrowSchema &arrow_schema);
 };
 
 } // namespace duckdb

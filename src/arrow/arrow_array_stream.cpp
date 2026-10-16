@@ -167,8 +167,9 @@ nb::object PythonTableArrowArrayStreamFactory::ProduceScanner(nb::object &arrow_
 	}
 
 	if (has_filter) {
-		auto filter = PyArrowFilterPushdown::TransformFilter(*filters, parameters.projected_columns.projection_map,
-		                                                     filter_to_col, client_properties, arrow_table);
+		auto filter =
+		    PyArrowFilterPushdown::TransformFilter(*filters, parameters.projected_columns.projection_map, filter_to_col,
+		                                           client_properties, arrow_table, schema.arrow_schema);
 		if (!filter.is(nb::none())) {
 			kwargs["filter"] = filter;
 		}
