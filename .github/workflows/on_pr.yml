@@ -18,24 +18,26 @@ jobs:
     name: Code-quality checks
     uses: ./.github/workflows/code_quality.yml
 
+  # A draft PR runs only the code quality checks; its pushes are built and tested
+  # by on_push.yml in the contributor's fork. The two jobs below run for ready
+  # PRs and in the merge queue, with the same inputs, so a queue failure is never
+  # a surprise.
   packaging_test:
-    name: Build a minimal set of packages and run all tests on them
+    name: Build a minimal set of packages and test them
     needs: code_quality
-    # Skip packaging tests for draft PRs
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     uses: ./.github/workflows/packaging.yml
     with:
       minimal: true
       testsuite: all
 
-  coverage_test:
-    name: Run coverage tests
+  assert_test:
+    name: Full-API build with assertions
     needs: code_quality
-    # Only run coverage test for draft PRs
-    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == true }}
-    uses: ./.github/workflows/coverage.yml
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    uses: ./.github/workflows/assert_test.yml
     with:
-      testsuite: all
+      testsuite: fast
 
   summary:
     name: Summary
@@ -45,7 +47,7 @@ jobs:
     needs:
       - code_quality
       - packaging_test
-      - coverage_test
+      - assert_test
     runs-on: ubuntu-latest
     steps:
       - name: Check job results

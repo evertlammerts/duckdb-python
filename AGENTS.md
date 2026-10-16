@@ -10,8 +10,8 @@ This is the **production** duckdb-python client, the `duckdb` package on PyPI. I
 - **Package name**: `duckdb`
 - **Bindings**: nanobind (3.x). The C++ extension module is `_duckdb`; the `duckdb` package wraps it.
 - **Build backend**: `duckdb_packaging.build_backend`, a wrapper around scikit-build-core
-- **Supported Python**: 3.11, 3.12, 3.13, 3.14
-- **Wheels**: starting with v2.0 (branch `v2.0-cyanoptera`) each platform ships one version-specific wheel for 3.11 and one stable ABI wheel tagged `cp312-abi3` that serves 3.12, 3.13, 3.14 and later releases. See "Stable ABI" below.
+- **Supported Python**: 3.11, 3.12, 3.13, 3.14, 3.15
+- **Wheels**: starting with v2.0 (branch `v2.0-cyanoptera`) each platform ships one version-specific wheel for 3.11 and one stable ABI wheel tagged `cp312-abi3` that serves 3.12 through 3.15 and later releases. See "Stable ABI" below.
 - **Free-threaded Python**: not supported. CI builds and tests no free-threaded interpreter, and no wheel is shipped for one. A separate prototype client based on DuckDB's C API targets free-threading and multi-interpreter support.
 
 ### Branches and binding libraries
@@ -89,7 +89,7 @@ From v2.0 the release wheels for CPython 3.12 and later are built against the li
 - `pyproject.toml` sets `wheel.py-api = "cp312"`. scikit-build-core tags the wheel abi3 on 3.12 and later and hands CMake the `Development.SABIModule` component; on 3.11 the same setting yields a version-specific wheel.
 - `CMakeLists.txt` builds `nanobind-static-abi3` and passes `STABLE_ABI` to `nanobind_add_module` under the same condition nanobind applies: CPython 3.12 or later, not free-threaded. nanobind puts `Py_LIMITED_API` on its abi3 library as a public define, so the binding object libraries and the module compile against the same Python headers.
 - The limited API has no way to ask whether the current thread holds the GIL. The two sites that release the GIL only when held use the scope guard `PyUtil::GilReleaseIfHeld`, which on 3.12+ relies on `PyThreadState_Swap(nullptr)`. GIL asserts go through macros that are empty in stable-ABI builds and active in editable (full API) builds.
-- CI runs `abi3audit --strict` on every cp312 wheel and installs that wheel into 3.13 and 3.14 to run the suite, because cibuildwheel tests a wheel only on the interpreter that built it.
+- CI builds the cp312 wheel once per platform with no inline tests, runs `abi3audit --strict` on it, and installs it into every interpreter it serves to run the suite: 3.12 to 3.15 on Linux, the oldest and newest of those on Windows and macOS in pull request runs, all of them in release runs. cibuildwheel would test a wheel only on the interpreter that built it.
 
 When adding C++ that touches the CPython API, use only functions in the limited API or guard the call with `Py_LIMITED_API` checks. abi3audit in CI is the backstop; do not rely on it instead of checking.
 
@@ -133,7 +133,7 @@ uv sync --no-build-isolation -v --reinstall -p 3.11
 uv sync --no-build-isolation -v --reinstall -p 3.14
 ```
 
-Supported: `3.11`, `3.12`, `3.13`, `3.14`. Do **not** use free-threaded variants (`3.13t`, `3.14t`): the build falls back to a version-specific nanobind on them, but the client does not support them.
+Supported: `3.11`, `3.12`, `3.13`, `3.14`, `3.15`. Do **not** use free-threaded variants (`3.13t`, `3.14t`, `3.15t`): the build falls back to a version-specific nanobind on them, but the client does not support them.
 
 ### Build configuration reference
 
@@ -333,6 +333,16 @@ git submodule update --init --recursive
 uv sync --only-group build --no-install-project -p 3.13
 uv sync --no-build-isolation -v --reinstall -p 3.13
 ```
+
+### Continuous integration
+
+One rule per event, all in `.github/workflows/`:
+
+- **Push to a fork branch** (`on_push.yml`): code quality, then the full-API editable build with assertions (Release plus `FORCE_ASSERT`) on the fast suite (`assert_test.yml`). Feature branches live in forks; upstream holds only the protected branches and the merge queue refs. This is the only build with `D_ASSERT` and the GIL asserts live; every wheel is Release.
+- **Ready pull request and merge queue** (`on_pr.yml`): identical runs. Code quality; the sdist built and smoke-imported; the cp312 abi3 wheel built once per platform with no inline tests; the cp311 wheel on Linux with its inline tests; the full-API Release build with assertions (the engine's relassert) on the fast suite; the abi3 wheel installed and tested per interpreter (`test_abi3_wheels`). A draft runs only code quality. `Summary` is the required check.
+- **Push to a protected branch** (`cache_warm.yml`): the only writer of every ccache: the seed wheels per platform, the assertions build and the pre-commit cache, builds only. Saving is gated on `github.ref_protected`, so a new release branch gets caches the day it gets a ruleset. Everything else restores and never saves.
+- **Release** (`release.yml`): the full matrix, every interpreter on every platform, the sdist with the suite, no cache writes.
+- **Coverage** (`coverage.yml`) and **benchmarks** (`codspeed.yml`): dispatch and nightly, not gates.
 
 ### GitHub CLI patterns
 
