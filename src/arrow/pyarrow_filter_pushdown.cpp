@@ -11,45 +11,23 @@ namespace duckdb {
 
 namespace {
 
-string ConvertTimestampUnit(ArrowDateTimeType unit) {
-	switch (unit) {
-	case ArrowDateTimeType::MICROSECONDS:
-		return "us";
-	case ArrowDateTimeType::MILLISECONDS:
-		return "ms";
-	case ArrowDateTimeType::NANOSECONDS:
-		return "ns";
-	case ArrowDateTimeType::SECONDS:
-		return "s";
-	default:
-		throw NotImplementedException("DatetimeType not recognized in ConvertTimestampUnit: %d",
-		                              static_cast<int>(unit));
+string ColumnTimeZone(const ArrowSchema *schema) {
+	const string format = schema && schema->format ? schema->format : "";
+	const auto colon = format.find(':');
+	if (format.rfind("ts", 0) != 0 || colon == string::npos || colon + 1 == format.size()) {
+		// A TIMESTAMP_TZ constant only meets a zoned timestamp column, so any other schema node is one the client
+		// cannot read.
+		throw NotImplementedException("Cannot read the time zone of column \"%s\" from the Arrow schema",
+		                              schema && schema->name ? schema->name : "");
 	}
-}
-
-int64_t ConvertTimestampTZValue(int64_t base_value, ArrowDateTimeType datetime_type) {
-	auto input = timestamp_t(base_value);
-	if (!Value::IsFinite(input)) {
-		return base_value;
-	}
-	switch (datetime_type) {
-	case ArrowDateTimeType::MICROSECONDS:
-		return Timestamp::GetEpochMicroSeconds(input);
-	case ArrowDateTimeType::MILLISECONDS:
-		return Timestamp::GetEpochMs(input);
-	case ArrowDateTimeType::NANOSECONDS:
-		return Timestamp::GetEpochNanoSeconds(input);
-	case ArrowDateTimeType::SECONDS:
-		return Timestamp::GetEpochSeconds(input);
-	default:
-		throw NotImplementedException("DatetimeType not recognized in ConvertTimestampTZValue");
-	}
+	return format.substr(colon + 1);
 }
 
 // Build a pyarrow.dataset scalar matching the given DuckDB Value and (optionally) ArrowType.
-// The ArrowType is needed for timestamp unit / decimal precision / blob-view disambiguation; the
+// The ArrowType is needed for decimal precision / blob-view disambiguation; the
 // DuckDB Value alone is not sufficient.
-nb::object MakePyArrowScalar(const Value &constant, const string &timezone_config, const ArrowType *arrow_type) {
+nb::object MakePyArrowScalar(const Value &constant, const string &timezone_config, const ArrowType *arrow_type,
+                             const ArrowSchema *arrow_schema) {
 	auto &import_cache = *DuckDBPyConnection::ImportCache();
 	auto scalar = import_cache.pyarrow.scalar();
 	nb::handle dataset_scalar = import_cache.pyarrow.dataset().attr("scalar");
@@ -101,16 +79,11 @@ nb::object MakePyArrowScalar(const Value &constant, const string &timezone_confi
 		return dataset_scalar(scalar(constant.GetValue<int64_t>(), date_type("s")));
 	}
 	case LogicalTypeId::TIMESTAMP_TZ: {
-		if (!arrow_type) {
-			throw NotImplementedException("Cannot push down TIMESTAMP_TZ filter without an arrow type");
-		}
-		auto &datetime_info = arrow_type->GetTypeInfo<ArrowDateTimeInfo>();
-		auto base_value = constant.GetValue<int64_t>();
-		auto arrow_datetime_type = datetime_info.GetDateTimeType();
-		auto time_unit_string = ConvertTimestampUnit(arrow_datetime_type);
-		auto converted_value = ConvertTimestampTZValue(base_value, arrow_datetime_type);
+		// The microsecond scalar keeps its UTC instant under the column's own zone, and pyarrow has no kernel for a
+		// comparison that differs in both unit and zone.
 		nb::handle date_type = import_cache.pyarrow.timestamp();
-		return dataset_scalar(scalar(converted_value, date_type(time_unit_string, nb::arg("tz") = timezone_config)));
+		auto zone = ColumnTimeZone(arrow_schema);
+		return dataset_scalar(scalar(constant.GetValue<int64_t>(), date_type("us", nb::arg("tz") = zone)));
 	}
 	case LogicalTypeId::TIMESTAMP_TZ_NS: {
 		nb::handle date_type = import_cache.pyarrow.timestamp();
@@ -200,8 +173,9 @@ struct PyArrowBackend : public FilterBackend {
 		return field_factory(nb::tuple(nb::cast(str_path)));
 	}
 
-	nb::object MakeScalar(const Value &v, const ArrowType *arrow_type, const string &timezone_config) override {
-		return MakePyArrowScalar(v, timezone_config, arrow_type);
+	nb::object MakeScalar(const Value &v, const ArrowType *arrow_type, const ArrowSchema *arrow_schema,
+	                      const string &timezone_config) override {
+		return MakePyArrowScalar(v, timezone_config, arrow_type, arrow_schema);
 	}
 
 	nb::object Compare(ExpressionType op, nb::object col, nb::object scalar) override {
@@ -228,10 +202,11 @@ struct PyArrowBackend : public FilterBackend {
 		switch (op) {
 		case ExpressionType::COMPARE_EQUAL:
 		case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
-			return col.attr("is_nan")();
+			return IsNaN(std::move(col));
 		case ExpressionType::COMPARE_LESSTHAN:
 		case ExpressionType::COMPARE_NOTEQUAL:
-			return col.attr("is_nan")().attr("__invert__")();
+			// Every value but NaN equals itself, and a NULL row stays NULL.
+			return col.attr("__eq__")(col);
 		case ExpressionType::COMPARE_GREATERTHAN:
 			// Nothing is greater than NaN.
 			return dataset_scalar(false);
@@ -245,7 +220,8 @@ struct PyArrowBackend : public FilterBackend {
 	}
 
 	nb::object IsNaN(nb::object col) override {
-		return col.attr("is_nan")();
+		// NaN is the only value unequal to itself, and pyarrow has no is_nan kernel for a dictionary column.
+		return col.attr("__ne__")(col);
 	}
 
 	nb::object IsNull(nb::object col) override {
@@ -330,7 +306,8 @@ private:
 nb::object PyArrowFilterPushdown::TransformFilter(TableFilterSet &filter_collection,
                                                   unordered_map<idx_t, string> &columns,
                                                   unordered_map<idx_t, idx_t> filter_to_col,
-                                                  const ClientProperties &config, const ArrowTableSchema &arrow_table) {
+                                                  const ClientProperties &config, const ArrowTableSchema &arrow_table,
+                                                  const ArrowSchema &arrow_schema) {
 	PyArrowBackend backend(config);
 	nb::object expression = nb::none();
 	for (auto &entry : filter_collection) {
@@ -339,9 +316,12 @@ nb::object PyArrowFilterPushdown::TransformFilter(TableFilterSet &filter_collect
 		D_ASSERT(columns.find(column_idx) != columns.end());
 
 		vector<Identifier> column_path = {Identifier(column_name)};
-		auto &arrow_type = arrow_table.GetColumns().at(filter_to_col.at(column_idx));
+		auto arrow_column_idx = filter_to_col.at(column_idx);
+		auto &arrow_type = arrow_table.GetColumns().at(arrow_column_idx);
+		D_ASSERT(arrow_column_idx < NumericCast<idx_t>(arrow_schema.n_children));
+		auto column_schema = arrow_schema.children[arrow_column_idx];
 		nb::object child_expression = duckdb::TransformFilter(entry.Filter(), std::move(column_path), backend,
-		                                                      arrow_type.get(), config.time_zone);
+		                                                      arrow_type.get(), column_schema, config.time_zone);
 		if (child_expression.is(nb::none())) {
 			continue;
 		}

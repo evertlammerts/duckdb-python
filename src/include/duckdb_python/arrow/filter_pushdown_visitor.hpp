@@ -39,11 +39,11 @@ struct FilterBackend {
 	// references the path accumulates one entry per `struct_extract`.
 	virtual nb::object MakeColumnRef(const vector<Identifier> &path) = 0;
 
-	// Convert a DuckDB Value to a backend-native Python scalar. `arrow_type`
-	// may be nullptr for backends that don't need Arrow type information
-	// (polars relies on DuckDB LogicalType only). `timezone_config` is the
-	// active session's time zone for `TIMESTAMP_TZ` handling.
-	virtual nb::object MakeScalar(const Value &v, const ArrowType *arrow_type, const string &timezone_config) = 0;
+	// Convert a constant to a backend scalar, where the column's `arrow_type` (nullable) gives the decimal bit width
+	// and the blob view distinction, its `arrow_schema` node (nullable) the time zone, and `timezone_config` the
+	// session's.
+	virtual nb::object MakeScalar(const Value &v, const ArrowType *arrow_type, const ArrowSchema *arrow_schema,
+	                              const string &timezone_config) = 0;
 
 	// Apply a comparison operator. `op` is one of the COMPARE_* ExpressionTypes.
 	// `scalar` is what MakeScalar returned. NaN special cases go through
@@ -54,7 +54,7 @@ struct FilterBackend {
 	// each operator decomposes into is_nan / ~is_nan / is_valid / lit(true|false).
 	virtual nb::object NaNCompare(ExpressionType op, nb::object col) = 0;
 
-	// Column-side NaN predicate: `col.is_nan()`. Used to re-include NaN rows for `>` / `>=` against a
+	// Column-side NaN predicate, true on NaN rows. Used to re-include NaN rows for `>` / `>=` against a
 	// finite float constant, since DuckDB orders NaN as the greatest value (so `nan > finite` is TRUE)
 	// while IEEE comparisons make them FALSE.
 	virtual nb::object IsNaN(nb::object col) = 0;
@@ -78,11 +78,12 @@ struct FilterBackend {
 // type is `EXPRESSION_FILTER`; this unwraps it and walks the expression tree.
 // - `column_path` is the top-level column name; struct paths are accumulated
 //    inside the expression walk via struct_extract.
-// - `arrow_type` is the ArrowType for the current path leaf (nullable for
-//    backends that don't track Arrow types).
+// - `arrow_type` is the column's root ArrowType (nullable for backends that don't track Arrow types); ResolveColumn
+//    finds the leaf.
+// - `arrow_schema` is the column's root node in the ArrowSchema the scan exported (nullable like `arrow_type`).
 // - Returns `nb::none()` if no part of the filter could be pushed.
 nb::object TransformFilter(const TableFilter &filter, const vector<Identifier> &column_path, FilterBackend &backend,
-                           const ArrowType *arrow_type, const string &timezone_config);
+                           const ArrowType *arrow_type, const ArrowSchema *arrow_schema, const string &timezone_config);
 
 // Walk a bound Expression tree (the contents of an `ExpressionFilter`) and emit
 // a backend-specific expression. Handles BOUND_FUNCTION comparisons,
@@ -93,6 +94,7 @@ nb::object TransformFilter(const TableFilter &filter, const vector<Identifier> &
 // / prefix-range, which are skipped). Returns `nb::none()` for an optional or
 // runtime filter that can't be pushed.
 nb::object TransformExpression(const Expression &expression, const vector<Identifier> &column_path,
-                               FilterBackend &backend, const ArrowType *arrow_type, const string &timezone_config);
+                               FilterBackend &backend, const ArrowType *arrow_type, const ArrowSchema *arrow_schema,
+                               const string &timezone_config);
 
 } // namespace duckdb

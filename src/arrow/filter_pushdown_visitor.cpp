@@ -23,18 +23,37 @@ bool ValueIsNan(const Value &value) {
 	return false;
 }
 
-// ResolveColumn walks a column-side expression to extract the (full path, leaf
-// ArrowType) pair. Accepts a bare BoundReferenceExpression and (nested)
+// ResolveColumn accepts a bare BoundReferenceExpression and (nested)
 // `struct_extract` chains. Anything else throws NotImplementedException —
 // that gives the OPTIONAL_FILTER catch point a chance to swallow it.
 struct ResolvedColumn {
 	vector<Identifier> path;
 	const ArrowType *leaf_type;
+	const ArrowSchema *leaf_schema;
 };
 
-ResolvedColumn ResolveColumn(const Expression &expr, const vector<Identifier> &root_path, const ArrowType *root_type) {
+// MakeScalar needs the type of the values, which a dictionary column's ArrowType and ArrowSchema keep apart from its
+// indices, and pyarrow has no kernel that compares a run end encoded column.
+const ArrowType *ValueType(const ArrowType *type, const vector<Identifier> &path) {
+	if (type && type->RunEndEncoded()) {
+		vector<string> names;
+		for (auto &segment : path) {
+			names.push_back(segment.GetIdentifierName());
+		}
+		throw NotImplementedException("Cannot push down a filter on run end encoded column \"%s\"",
+		                              StringUtil::Join(names, "."));
+	}
+	return type && type->HasDictionary() ? &type->GetDictionary() : type;
+}
+
+const ArrowSchema *ValueSchema(const ArrowSchema *schema) {
+	return schema && schema->dictionary ? schema->dictionary : schema;
+}
+
+ResolvedColumn ResolveColumn(const Expression &expr, const vector<Identifier> &root_path, const ArrowType *root_type,
+                             const ArrowSchema *root_schema) {
 	if (expr.GetExpressionClass() == ExpressionClass::BOUND_REF) {
-		return {root_path, root_type};
+		return {root_path, ValueType(root_type, root_path), ValueSchema(root_schema)};
 	}
 	if (expr.GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
 		throw NotImplementedException("Cannot push down arrow scan filter on column-side expression: %s",
@@ -47,20 +66,24 @@ ResolvedColumn ResolveColumn(const Expression &expr, const vector<Identifier> &r
 		                              ExpressionTypeToString(expr.GetExpressionType()));
 	}
 	// Recurse innermost-first so names accumulate root → leaf.
-	auto inner = ResolveColumn(*func.GetChildren()[0], root_path, root_type);
+	auto inner = ResolveColumn(*func.GetChildren()[0], root_path, root_type, root_schema);
 	inner.path.push_back(StructType::GetChildName(func.GetChildren()[0]->GetReturnType(), child_idx));
 	if (inner.leaf_type) {
-		inner.leaf_type = &inner.leaf_type->GetTypeInfo<ArrowStructInfo>().GetChild(child_idx);
+		inner.leaf_type = ValueType(&inner.leaf_type->GetTypeInfo<ArrowStructInfo>().GetChild(child_idx), inner.path);
+	}
+	if (inner.leaf_schema) {
+		D_ASSERT(child_idx < NumericCast<idx_t>(inner.leaf_schema->n_children));
+		inner.leaf_schema = ValueSchema(inner.leaf_schema->children[child_idx]);
 	}
 	return inner;
 }
 
 nb::object EmitCompare(FilterBackend &backend, ExpressionType op, nb::object col, const Value &constant,
-                       const ArrowType *arrow_type, const string &timezone_config) {
+                       const ResolvedColumn &resolved, const string &timezone_config) {
 	if (ValueIsNan(constant)) {
 		return backend.NaNCompare(op, std::move(col));
 	}
-	auto scalar = backend.MakeScalar(constant, arrow_type, timezone_config);
+	auto scalar = backend.MakeScalar(constant, resolved.leaf_type, resolved.leaf_schema, timezone_config);
 	// DuckDB orders NaN as the greatest float value, so `nan > finite` and `nan >= finite` are TRUE, while
 	// IEEE (pyarrow) makes them FALSE. For a finite FLOAT/DOUBLE constant with `>` / `>=`, the plain
 	// comparison would silently drop NaN column rows the engine keeps (the arrow scan never re-applies
@@ -85,7 +108,8 @@ nb::object EmitCompare(FilterBackend &backend, ExpressionType op, nb::object col
 } // anonymous namespace
 
 nb::object TransformExpression(const Expression &expression, const vector<Identifier> &column_path,
-                               FilterBackend &backend, const ArrowType *arrow_type, const string &timezone_config) {
+                               FilterBackend &backend, const ArrowType *arrow_type, const ArrowSchema *arrow_schema,
+                               const string &timezone_config) {
 	auto expression_class = expression.GetExpressionClass();
 	auto expression_type = expression.GetExpressionType();
 
@@ -109,9 +133,9 @@ nb::object TransformExpression(const Expression &expression, const vector<Identi
 				throw NotImplementedException("Can only push down constant comparisons.");
 			}
 
-			auto resolved = ResolveColumn(*column_side, column_path, arrow_type);
+			auto resolved = ResolveColumn(*column_side, column_path, arrow_type, arrow_schema);
 			auto col = backend.MakeColumnRef(resolved.path);
-			return EmitCompare(backend, expression_type, std::move(col), constant_side->GetValue(), resolved.leaf_type,
+			return EmitCompare(backend, expression_type, std::move(col), constant_side->GetValue(), resolved,
 			                   timezone_config);
 		}
 
@@ -143,7 +167,7 @@ nb::object TransformExpression(const Expression &expression, const vector<Identi
 				return nb::none();
 			}
 			try {
-				return TransformExpression(*child, column_path, backend, arrow_type, timezone_config);
+				return TransformExpression(*child, column_path, backend, arrow_type, arrow_schema, timezone_config);
 			} catch (const NotImplementedException &) {
 				return nb::none();
 			}
@@ -160,17 +184,17 @@ nb::object TransformExpression(const Expression &expression, const vector<Identi
 	if (expression_class == ExpressionClass::BOUND_OPERATOR) {
 		auto &op_expr = expression.Cast<BoundOperatorExpression>();
 		if (expression_type == ExpressionType::OPERATOR_IS_NULL) {
-			auto resolved = ResolveColumn(*op_expr.GetChildren()[0], column_path, arrow_type);
+			auto resolved = ResolveColumn(*op_expr.GetChildren()[0], column_path, arrow_type, arrow_schema);
 			auto col = backend.MakeColumnRef(resolved.path);
 			return backend.IsNull(std::move(col));
 		}
 		if (expression_type == ExpressionType::OPERATOR_IS_NOT_NULL) {
-			auto resolved = ResolveColumn(*op_expr.GetChildren()[0], column_path, arrow_type);
+			auto resolved = ResolveColumn(*op_expr.GetChildren()[0], column_path, arrow_type, arrow_schema);
 			auto col = backend.MakeColumnRef(resolved.path);
 			return backend.IsNotNull(std::move(col));
 		}
 		if (expression_type == ExpressionType::COMPARE_IN) {
-			auto resolved = ResolveColumn(*op_expr.GetChildren()[0], column_path, arrow_type);
+			auto resolved = ResolveColumn(*op_expr.GetChildren()[0], column_path, arrow_type, arrow_schema);
 			auto col = backend.MakeColumnRef(resolved.path);
 			vector<Value> values;
 			for (idx_t i = 1; i < op_expr.GetChildren().size(); i++) {
@@ -188,8 +212,8 @@ nb::object TransformExpression(const Expression &expression, const vector<Identi
 			auto &conj_expr = expression.Cast<BoundConjunctionExpression>();
 			nb::object result = nb::none();
 			for (idx_t i = 0; i < conj_expr.GetChildren().size(); i++) {
-				nb::object child_expression =
-				    TransformExpression(*conj_expr.GetChildren()[i], column_path, backend, arrow_type, timezone_config);
+				nb::object child_expression = TransformExpression(*conj_expr.GetChildren()[i], column_path, backend,
+				                                                  arrow_type, arrow_schema, timezone_config);
 				if (child_expression.is(nb::none())) {
 					if (is_and) {
 						// A conjunct we can't push can simply be dropped: the remaining AND
@@ -219,11 +243,13 @@ nb::object TransformExpression(const Expression &expression, const vector<Identi
 }
 
 nb::object TransformFilter(const TableFilter &filter, const vector<Identifier> &column_path, FilterBackend &backend,
-                           const ArrowType *arrow_type, const string &timezone_config) {
+                           const ArrowType *arrow_type, const ArrowSchema *arrow_schema,
+                           const string &timezone_config) {
 	switch (filter.filter_type) {
 	case TableFilterType::EXPRESSION_FILTER: {
 		auto &expression_filter = filter.Cast<ExpressionFilter>();
-		return TransformExpression(*expression_filter.expr, column_path, backend, arrow_type, timezone_config);
+		return TransformExpression(*expression_filter.expr, column_path, backend, arrow_type, arrow_schema,
+		                           timezone_config);
 	}
 	default:
 		throw NotImplementedException("Pushdown Filter Type %s is not currently supported in arrow scans",
