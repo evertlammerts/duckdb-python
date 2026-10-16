@@ -21,8 +21,8 @@ else:
 def _written(path):
     """The text of a CSV output, which Spark writes as a directory of part files."""
     if path.is_dir():
-        return "".join(part.read_text() for part in sorted(path.glob("part-*")))
-    return path.read_text()
+        return "".join(part.read_text(encoding="utf-8") for part in sorted(path.glob("part-*")))
+    return path.read_text(encoding="utf-8")
 
 
 def _one(df):
@@ -63,7 +63,7 @@ class TestSaveModes:
 
     def test_existing_file_fails_the_write(self, spark, tmp_path, kind):
         path = tmp_path / "out"
-        path.write_text("x\n")
+        path.write_text("x\n", newline="", encoding="utf-8")
         with pytest.raises(AnalysisException, match=re.escape(f"Path file:{path} already exists")) as error:
             _write(spark.createDataFrame([(1,)], "a int"), kind, path)
         assert error_condition(error.value) == "PATH_ALREADY_EXISTS"
@@ -94,7 +94,7 @@ class TestSaveModes:
                 _write(spark.createDataFrame([(2,)], "a int"), kind, path, mode="append")
 
     def test_file_url(self, spark, tmp_path, kind):
-        url = f"file:{(tmp_path / 'out').as_posix()}"
+        url = (tmp_path / "out").as_uri()
         _write(spark.createDataFrame([(1,)], "a int"), kind, tmp_path / "out")
         with pytest.raises(AnalysisException) as error:
             getattr(spark.createDataFrame([(2,)], "a int").write, kind)(url)

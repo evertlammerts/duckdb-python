@@ -1,5 +1,6 @@
 import pathlib
 import urllib.parse
+import urllib.request
 from collections import Counter
 from typing import TYPE_CHECKING, Any, cast
 
@@ -139,8 +140,8 @@ def _format_of(path: str) -> str:
 
 def _local_path(path: str) -> pathlib.Path | None:
     """The local file ``path`` names, as DuckDB expands it, or None for a path of another file system."""
-    if path.startswith("file:/"):
-        return pathlib.Path(urllib.parse.urlparse(path).path)
+    if path.startswith("file:"):
+        return pathlib.Path(urllib.request.url2pathname(urllib.parse.urlparse(path).path))
     if "://" in path:
         return None
     return pathlib.Path(path).expanduser()
@@ -153,6 +154,12 @@ def _path_exists(session: "SparkSession", path: str) -> bool:
     # A directory of an object store is the objects under its prefix.
     query = "SELECT 1 FROM glob($1) UNION ALL SELECT 1 FROM glob($2) LIMIT 1"
     return bool(session.conn.execute(query, [path, path.rstrip("/") + "/*"]).fetchall())
+
+
+def _duckdb_path(path: str) -> str:
+    """``path`` as DuckDB opens it: a file URL as the local path it names, since DuckDB reads it as a relative path."""
+    local = _local_path(path)
+    return path if local is None or not path.startswith("file:") else str(local)
 
 
 def _qualified_path(path: str) -> str:
@@ -397,7 +404,7 @@ class DataFrameWriter:  # noqa: D101
             raise NotImplementedError
         _check_unique_names(self.dataframe.columns)
         if _should_write(self.dataframe.session, path, mode):
-            relation.write_parquet(path, compression=compression)
+            relation.write_parquet(_duckdb_path(path), compression=compression)
 
     def csv(  # noqa: D102
         self,
@@ -442,7 +449,7 @@ class DataFrameWriter:  # noqa: D101
             if isinstance(field.dataType, (ArrayType, MapType, StructType, NullType)):
                 raise _unsupported_csv_type(field)
         self.dataframe.relation.write_csv(
-            path,
+            _duckdb_path(path),
             **_csv_dialect(sep, quote, escape),
             na_rep=nullValue,
             compression=compression,

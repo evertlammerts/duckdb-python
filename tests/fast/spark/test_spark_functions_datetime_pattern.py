@@ -1,3 +1,5 @@
+import sys
+
 import pytest
 
 _ = pytest.importorskip("duckdb.experimental.spark")
@@ -34,8 +36,22 @@ PARSED = [
     ("yyyy-MM-dd HH:mm:ss", "1997-02-28 10:30:00", datetime(1997, 2, 28, 10, 30)),
     ("dd/MM/yyyy", "05/01/2024", datetime(2024, 1, 5)),
     ("d/M/yyyy", "5/1/2024", datetime(2024, 1, 5)),
-    ("y-M-d", "24-1-5", datetime(24, 1, 5)),
-    ("yyy", "024", datetime(24, 1, 1)),
+    pytest.param(
+        "y-M-d",
+        "24-1-5",
+        datetime(24, 1, 5),
+        marks=pytest.mark.skipif(
+            sys.platform == "win32", reason="outside the range of the Windows C runtime, as for PySpark on Windows"
+        ),
+    ),
+    pytest.param(
+        "yyy",
+        "024",
+        datetime(24, 1, 1),
+        marks=pytest.mark.skipif(
+            sys.platform == "win32", reason="outside the range of the Windows C runtime, as for PySpark on Windows"
+        ),
+    ),
     ("yyyyMMddHHmmss", "20240105103000", datetime(2024, 1, 5, 10, 30)),
     ("dd MMM yyyy", "05 JAN 2024", datetime(2024, 1, 5)),
     ("dd LLLL yyyy", "05 january 2024", datetime(2024, 1, 5)),
@@ -69,7 +85,15 @@ REJECTED = [
 # answer as in REJECTED, the last DuckDB's.
 ACCEPTED_BY_DUCKDB = [
     ("yyyy-MM-dd HH:mm:ss", "1997-2-28 10:30:00", "upgrade", datetime(1997, 2, 28, 10, 30)),
-    ("yyyy-MM-dd HH:mm:ss", "97-02-28 10:30:00", "upgrade", datetime(97, 2, 28, 10, 30)),
+    pytest.param(
+        "yyyy-MM-dd HH:mm:ss",
+        "97-02-28 10:30:00",
+        "upgrade",
+        datetime(97, 2, 28, 10, 30),
+        marks=pytest.mark.skipif(
+            sys.platform == "win32", reason="outside the range of the Windows C runtime, as for PySpark on Windows"
+        ),
+    ),
     ("yyyy-MM-dd HH:mm:ss", "1997-02-28  10:30:00", "upgrade", datetime(1997, 2, 28, 10, 30)),
     ("yyyy-MM-dd", " 2024-01-05", "upgrade", datetime(2024, 1, 5)),
     ("yyyy-MM-dd", "2024-01-05 ", "upgrade", datetime(2024, 1, 5)),

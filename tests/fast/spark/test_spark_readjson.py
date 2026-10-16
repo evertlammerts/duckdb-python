@@ -29,7 +29,7 @@ class TestSparkReadJson:
 
 def _read(spark, tmp_path, *lines):
     path = tmp_path / "data.json"
-    path.write_text("\n".join(lines) + "\n")
+    path.write_text("\n".join(lines) + "\n", newline="", encoding="utf-8")
     return spark.read.json(path.as_posix())
 
 
@@ -83,7 +83,7 @@ class TestJsonInference:
 
 def _load(spark, tmp_path, schema, *lines):
     path = tmp_path / "data.json"
-    path.write_text("\n".join(lines) + "\n")
+    path.write_text("\n".join(lines) + "\n", newline="", encoding="utf-8")
     return spark.read.load(path.as_posix(), format="json", schema=schema)
 
 
@@ -165,8 +165,13 @@ class TestJsonWithASchema:
         expected = [datetime.datetime(2024, 1, 2, 10), datetime.datetime(2024, 1, 2), None, None, None]
         assert _field(spark, tmp_path, "timestamp", *values) == expected
         # Spark reads an integer as seconds since the epoch.
-        expected = [datetime.datetime.fromtimestamp(1), datetime.datetime.fromtimestamp(-1)]
-        assert _field(spark, tmp_path, "timestamp", "1", "-1") == (expected if USE_ACTUAL_SPARK else [None, None])
+        # A negative epoch second cannot be converted on Windows, so the expectation is built only where it is used.
+        expected = (
+            [datetime.datetime.fromtimestamp(1), datetime.datetime.fromtimestamp(-1)]
+            if USE_ACTUAL_SPARK
+            else [None, None]
+        )
+        assert _field(spark, tmp_path, "timestamp", "1", "-1") == expected
         instant = datetime.datetime(2024, 1, 2, 10, tzinfo=datetime.timezone.utc).astimezone().replace(tzinfo=None)
         assert _field(spark, tmp_path, "timestamp", '"2024-01-02T10:00:00Z"') == [instant]
         rows = _field(spark, tmp_path, "struct<t:timestamp>", '{"t": "2024-01-02 10:00:00"}')
@@ -234,7 +239,7 @@ class TestJsonWithASchema:
 
     def test_json_by_its_extension(self, spark, tmp_path):
         path = tmp_path / "data.json"
-        path.write_text('{"b": 1, "a": "x"}\n')
+        path.write_text('{"b": 1, "a": "x"}\n', newline="", encoding="utf-8")
         if USE_ACTUAL_SPARK:
             # Spark reads a path without a format as parquet.
             with pytest.raises(Exception):  # noqa: B017, PT011
@@ -262,7 +267,7 @@ class TestJsonInferenceOfKeys:
 
     def test_empty_file(self, spark, tmp_path):
         path = tmp_path / "data.json"
-        path.write_text("")
+        path.write_text("", newline="", encoding="utf-8")
         assert spark.read.json(path.as_posix()).columns == []
 
     def test_lines_that_are_not_objects(self, spark, tmp_path):

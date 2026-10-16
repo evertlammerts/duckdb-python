@@ -1,5 +1,6 @@
 import datetime
 import math
+import sys
 from decimal import Decimal
 
 import pytest
@@ -23,7 +24,7 @@ else:
 
 def _read(spark, tmp_path, text, **options):
     path = tmp_path / "data.csv"
-    path.write_text(text)
+    path.write_text(text, newline="", encoding="utf-8")
     return spark.read.csv(path.as_posix(), **options)
 
 
@@ -47,7 +48,7 @@ def _inferred(spark, tmp_path, *texts, **options):
 class TestSparkReadCSV:
     def test_read_csv(self, spark, tmp_path):
         file_path = tmp_path / "basic.csv"
-        file_path.write_text("1,2\n3,4\n5,6\n")
+        file_path.write_text("1,2\n3,4\n5,6\n", newline="", encoding="utf-8")
         df = spark.read.csv(file_path.as_posix())
         res = df.collect()
 
@@ -61,7 +62,7 @@ class TestSparkReadCSV:
 
     def test_read_csv_inferring_types(self, spark, tmp_path):
         file_path = tmp_path / "basic.csv"
-        file_path.write_text("1,2\n3,4\n")
+        file_path.write_text("1,2\n3,4\n", newline="", encoding="utf-8")
         df = spark.read.csv(file_path.as_posix(), inferSchema=True)
         assert df.columns == ["_c0", "_c1"]
         assert sorted(df.collect()) == [Row(_c0=1, _c1=2), Row(_c0=3, _c1=4)]
@@ -248,8 +249,8 @@ class TestDialect:
         assert _read(spark, tmp_path, "x\n" * 1000).count() == 1000
 
     def test_files_of_a_glob(self, spark, tmp_path):
-        (tmp_path / "a.csv").write_text("h1,h2\n1,x\n2,y\n")
-        (tmp_path / "b.csv").write_text("h1,h2\n3,z\n")
+        (tmp_path / "a.csv").write_text("h1,h2\n1,x\n2,y\n", newline="", encoding="utf-8")
+        (tmp_path / "b.csv").write_text("h1,h2\n3,z\n", newline="", encoding="utf-8")
         path = (tmp_path / "*.csv").as_posix()
         assert sorted(_rows(spark.read.csv(path, header=True))) == [("1", "x"), ("2", "y"), ("3", "z")]
         df = spark.read.csv(path, header=True, inferSchema=True)
@@ -384,10 +385,19 @@ class TestTypedValues:
             pytest.skip("Spark 3.5 raises on text its legacy timestamp parser reads differently")
         texts = ["2024-01-02 23:59:60", "2024-01-02T", "1704196800", "x"]
         assert _typed(spark, tmp_path, "timestamp", texts) == [None] * len(texts)
-        # DuckDB reads hour 24 as midnight of the next day, and a year of two digits as it is.
-        values = _typed(spark, tmp_path, "timestamp", ["2024-01-02 24:00:00", "24-01-02"])
-        duckdb_values = [datetime.datetime(2024, 1, 3), datetime.datetime(24, 1, 2)]
-        assert values == ([None, None] if USE_ACTUAL_SPARK else duckdb_values)
+        # DuckDB reads hour 24 as midnight of the next day.
+        values = _typed(spark, tmp_path, "timestamp", ["2024-01-02 24:00:00"])
+        assert values == ([None] if USE_ACTUAL_SPARK else [datetime.datetime(2024, 1, 3)])
+
+    @pytest.mark.skipif(
+        sys.platform == "win32", reason="outside the range of the Windows C runtime, as for PySpark on Windows"
+    )
+    def test_two_digit_year_timestamp(self, spark, tmp_path):
+        if SPARK_3:
+            pytest.skip("Spark 3.5 raises on text its legacy timestamp parser reads differently")
+        # DuckDB reads a year of two digits as it is.
+        values = _typed(spark, tmp_path, "timestamp", ["24-01-02"])
+        assert values == ([None] if USE_ACTUAL_SPARK else [datetime.datetime(24, 1, 2)])
 
     def test_timestamps_without_a_zone(self, spark, tmp_path):
         texts = ["2024-01-02 03:04:05", "2024-01-02T03:04:05"]
@@ -598,8 +608,8 @@ class TestEnforceSchema:
 
     @pytest.mark.parametrize("width", ["a,c", "a,b,c"])
     def test_header_of_each_file_of_a_glob(self, spark, tmp_path, width):
-        (tmp_path / "1.csv").write_text("a,b\n1,2\n")
-        (tmp_path / "2.csv").write_text(f"{width}\n3,4\n")
+        (tmp_path / "1.csv").write_text("a,b\n1,2\n", newline="", encoding="utf-8")
+        (tmp_path / "2.csv").write_text(f"{width}\n3,4\n", newline="", encoding="utf-8")
         path = (tmp_path / "*.csv").as_posix()
         df = spark.read.csv(path, header=True, schema="a int, b int")
         assert sorted(_rows(df)) == [(1, 2), (3, 4)]
@@ -608,8 +618,8 @@ class TestEnforceSchema:
             spark.read.csv(path, header=True, schema="a int, b int", enforceSchema=False).collect()
 
     def test_header_of_files_of_a_glob_that_match(self, spark, tmp_path):
-        (tmp_path / "1.csv").write_text("a,b\n1,2\n")
-        (tmp_path / "2.csv").write_text("A,B\n3,4\n")
+        (tmp_path / "1.csv").write_text("a,b\n1,2\n", newline="", encoding="utf-8")
+        (tmp_path / "2.csv").write_text("A,B\n3,4\n", newline="", encoding="utf-8")
         df = spark.read.csv((tmp_path / "*.csv").as_posix(), header=True, schema="a int, b int", enforceSchema=False)
         assert sorted(_rows(df)) == [(1, 2), (3, 4)]
 
@@ -622,7 +632,7 @@ class TestEnforceSchema:
 class TestLoad:
     def test_csv_by_its_extension(self, spark, tmp_path):
         path = (tmp_path / "data.csv").as_posix()
-        (tmp_path / "data.csv").write_text("1,2\n3,4\n")
+        (tmp_path / "data.csv").write_text("1,2\n3,4\n", newline="", encoding="utf-8")
         if USE_ACTUAL_SPARK:
             # Spark reads a path without a format as parquet.
             with pytest.raises(Exception):  # noqa: B017, PT011
@@ -632,12 +642,12 @@ class TestLoad:
             assert _rows(spark.read.load(path)) == [("1", "2"), ("3", "4")]
 
     def test_header_row_is_data(self, spark, tmp_path):
-        (tmp_path / "data.csv").write_text("x,y\n1,x\n2,y\n")
+        (tmp_path / "data.csv").write_text("x,y\n1,x\n2,y\n", newline="", encoding="utf-8")
         df = spark.read.load((tmp_path / "data.csv").as_posix(), format="csv", schema="x int, y string")
         assert _rows(df) == [(None, "y"), (1, "x"), (2, "y")]
 
     def test_tab_separated(self, spark, tmp_path):
-        (tmp_path / "data.tsv").write_text("a\tb\n1\t2\n")
+        (tmp_path / "data.tsv").write_text("a\tb\n1\t2\n", newline="", encoding="utf-8")
         path = (tmp_path / "data.tsv").as_posix()
         if USE_ACTUAL_SPARK:
             # Spark has no tsv format.
@@ -647,7 +657,7 @@ class TestLoad:
             assert _rows(spark.read.load(path, format="tsv")) == [("a", "b"), ("1", "2")]
 
     def test_options(self, spark, tmp_path):
-        (tmp_path / "data.csv").write_text("a,b\n1,2\n")
+        (tmp_path / "data.csv").write_text("a,b\n1,2\n", newline="", encoding="utf-8")
         path = (tmp_path / "data.csv").as_posix()
         if USE_ACTUAL_SPARK:
             assert _rows(spark.read.load(path, format="csv", header=True)) == [("1", "2")]

@@ -1,6 +1,7 @@
 import datetime
 import decimal
 import math
+import sys
 import time
 from typing import NamedTuple
 
@@ -647,7 +648,7 @@ class TestReaderSchema:
 
     def test_load_with_schema_string(self, spark, tmp_path):
         csv_path = tmp_path / "data.csv"
-        csv_path.write_text("1,x\n2,y\n")
+        csv_path.write_text("1,x\n2,y\n", newline="", encoding="utf-8")
         file_path = csv_path.as_posix()
 
         df = spark.read.load(file_path, format="csv", schema="a int, b string")
@@ -656,7 +657,7 @@ class TestReaderSchema:
 
     def test_csv_with_schema_string(self, spark, tmp_path):
         csv_path = tmp_path / "data.csv"
-        csv_path.write_text("1,x\n2,y\n")
+        csv_path.write_text("1,x\n2,y\n", newline="", encoding="utf-8")
         file_path = csv_path.as_posix()
 
         df = spark.read.csv(file_path, schema="a bigint, b string")
@@ -669,9 +670,9 @@ class TestReaderSchemaMatching:
     def files(self, tmp_path):
         duckdb.sql("select 1 as a, 2 as b").write_parquet((tmp_path / "ab.parquet").as_posix())
         duckdb.sql('select 1 as "Mixed", 2 as "order"').write_parquet((tmp_path / "mixed.parquet").as_posix())
-        (tmp_path / "ab.json").write_text('{"a": 1, "b": 2}\n')
-        (tmp_path / "mixed.json").write_text('{"Mixed": 1, "order": 2}\n')
-        (tmp_path / "ab.csv").write_text("1,2\n")
+        (tmp_path / "ab.json").write_text('{"a": 1, "b": 2}\n', newline="", encoding="utf-8")
+        (tmp_path / "mixed.json").write_text('{"Mixed": 1, "order": 2}\n', newline="", encoding="utf-8")
+        (tmp_path / "ab.csv").write_text("1,2\n", newline="", encoding="utf-8")
         return tmp_path
 
     @pytest.mark.parametrize("fmt", ["parquet", "json"])
@@ -719,22 +720,22 @@ class TestReaderSchemaMatching:
 
     def test_csv_load_reads_the_first_line_as_data(self, spark, tmp_path):
         path = tmp_path / "head.csv"
-        path.write_text("id,name\n1,a\n")
+        path.write_text("id,name\n1,a\n", newline="", encoding="utf-8")
         rows = spark.read.load(path.as_posix(), format="csv").collect()
         assert sorted(tuple(map(str, r)) for r in rows) == [("1", "a"), ("id", "name")]
 
 
 def _written_text(path):
     if path.is_dir():
-        return "".join(part.read_text() for part in sorted(path.glob("*.csv")))
-    return path.read_text()
+        return "".join(part.read_text(encoding="utf-8") for part in sorted(path.glob("*.csv")))
+    return path.read_text(encoding="utf-8")
 
 
 class TestCsvFlags:
     @pytest.fixture
     def head_csv(self, tmp_path):
         path = tmp_path / "head.csv"
-        path.write_text("id,name\n1,a\n")
+        path.write_text("id,name\n1,a\n", newline="", encoding="utf-8")
         return path.as_posix()
 
     @pytest.mark.parametrize("header", ["true", "TRUE", "True", True])
@@ -822,7 +823,13 @@ class TestTimestampRoundTrip:
     @pytest.mark.parametrize(
         "value",
         [
-            datetime.datetime(9999, 12, 31, 12),
+            pytest.param(
+                datetime.datetime(9999, 12, 31, 12),
+                marks=pytest.mark.skipif(
+                    sys.platform == "win32",
+                    reason="outside the range of the Windows C runtime, as for PySpark on Windows",
+                ),
+            ),
             datetime.datetime(1970, 1, 1),
             datetime.datetime(2024, 3, 10, 2, 30),
             datetime.datetime(2024, 11, 3, 1, 30),
@@ -838,11 +845,17 @@ class TestTimestampRoundTrip:
         assert row.t == expected
         assert row.t.fold == expected.fold
 
+    @pytest.mark.skipif(
+        sys.platform == "win32", reason="outside the range of the Windows C runtime, as for PySpark on Windows"
+    )
     def test_aware_timestamp_near_the_end_of_the_calendar(self, spark):
         value = datetime.datetime(9999, 12, 31, 12, tzinfo=datetime.timezone.utc)
         (row,) = spark.createDataFrame([(value,)], "t timestamp").collect()
         assert row.t == value.astimezone().replace(tzinfo=None)
 
+    @pytest.mark.skipif(
+        sys.platform == "win32", reason="outside the range of the Windows C runtime, as for PySpark on Windows"
+    )
     def test_latest_instant(self, spark):
         # The last microsecond of the calendar is a time like any other, not DuckDB's infinity.
         value = datetime.datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=datetime.timezone.utc)
@@ -887,7 +900,7 @@ class TestCsvInference:
     @pytest.mark.parametrize(("name", "text", "spark_types", "module_types"), _CSV_INFERENCE_CASES)
     def test_strings_without_inference(self, spark, tmp_path, name, text, spark_types, module_types):
         path = tmp_path / f"{name}.csv"
-        path.write_text(text)
+        path.write_text(text, newline="", encoding="utf-8")
         df = spark.read.csv(path.as_posix(), header=True)
         lines = [line.split(",") for line in text.splitlines()[1:]]
         assert [t for _, t in df.dtypes] == ["string"] * len(lines[0])
@@ -896,14 +909,16 @@ class TestCsvInference:
     @pytest.mark.parametrize(("name", "text", "spark_types", "module_types"), _CSV_INFERENCE_CASES)
     def test_inferred_types(self, spark, tmp_path, name, text, spark_types, module_types):
         path = tmp_path / f"{name}.csv"
-        path.write_text(text)
+        path.write_text(text, newline="", encoding="utf-8")
         df = spark.read.csv(path.as_posix(), header=True, inferSchema=True)
         expected = module_types if module_types is not None and not USE_ACTUAL_SPARK else spark_types
         assert [t for _, t in df.dtypes] == expected
 
     def test_inferred_values(self, spark, tmp_path):
         path = tmp_path / "values.csv"
-        path.write_text("i,d,day,ts,b,s\n1,1.5,2024-01-02,2024-01-02 03:04:05,true,x\n,,,,,\n")
+        path.write_text(
+            "i,d,day,ts,b,s\n1,1.5,2024-01-02,2024-01-02 03:04:05,true,x\n,,,,,\n", newline="", encoding="utf-8"
+        )
         rows = spark.read.csv(path.as_posix(), header=True, inferSchema=True).collect()
         assert [tuple(r) for r in rows] == [
             (1, 1.5, datetime.date(2024, 1, 2), datetime.datetime(2024, 1, 2, 3, 4, 5), True, "x"),
@@ -912,7 +927,7 @@ class TestCsvInference:
 
     def test_inferred_timestamps_are_local_times(self, spark, tmp_path):
         path = tmp_path / "times.csv"
-        path.write_text("ts\n2024-01-02 03:04:05\n2024-07-01 12:00:00\n")
+        path.write_text("ts\n2024-01-02 03:04:05\n2024-07-01 12:00:00\n", newline="", encoding="utf-8")
         df = spark.read.csv(path.as_posix(), header=True, inferSchema=True)
         assert df.schema == struct_of(("ts", TimestampType()))
         winter, summer = datetime.datetime(2024, 1, 2, 3, 4, 5), datetime.datetime(2024, 7, 1, 12)
