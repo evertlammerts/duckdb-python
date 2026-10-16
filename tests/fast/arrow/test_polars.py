@@ -1,5 +1,6 @@
 import datetime
 import json
+from zoneinfo import ZoneInfo
 
 import pytest
 from packaging.version import parse as parse_version
@@ -264,6 +265,23 @@ class TestPolars:
         valid_filter((pl.col("a") == 100) & (pl.col("b") == 10) & (pl.col("c") == 100))
         valid_filter((pl.col("a") == 100) | (pl.col("b") == 1))
 
+    @pytest.mark.parametrize("data_type", ["FLOAT", "DOUBLE"])
+    def test_polars_lazy_pushdown_non_finite_float(self, data_type, duckdb_cursor):
+        duckdb_cursor.execute(f"CREATE TABLE test_non_finite (a {data_type})")
+        duckdb_cursor.execute("INSERT INTO test_non_finite VALUES (1), ('inf'), ('-inf'), ('nan'), (NULL)")
+        lazy_df = duckdb_cursor.table("test_non_finite").pl(lazy=True)
+        eager_df = lazy_df.collect()
+
+        # polars serializes inf/nan literals as JSON null, so they cannot be pushed down
+        for predicate in (
+            pl.col("a") < float("inf"),
+            pl.col("a") > float("-inf"),
+            pl.col("a") == float("inf"),
+            pl.col("a") >= float("nan"),
+        ):
+            invalid_filter(predicate)
+            pl_testing.assert_frame_equal(lazy_df.filter(predicate).collect(), eager_df.filter(predicate))
+
     def test_polars_lazy_pushdown_bool(self, duckdb_cursor):
         duckdb_cursor.execute(
             """
@@ -437,6 +455,36 @@ class TestPolars:
         assert (
             lazy_df.filter((pl.col("a") == ts_2020) | (pl.col("b") == ts_2008)).select(pl.len()).collect().item() == 2
         )
+
+    @pytest.mark.parametrize("data_type", ["TIMESTAMP_S", "TIMESTAMP_MS", "TIMESTAMP", "TIMESTAMP_NS"])
+    def test_polars_lazy_pushdown_timestamp_units(self, data_type, duckdb_cursor):
+        duckdb_cursor.execute(f"CREATE TABLE test_timestamp_units (a {data_type})")
+        duckdb_cursor.execute(
+            """
+            INSERT INTO test_timestamp_units VALUES
+                ('2008-01-01 00:00:01'), ('2010-01-01 10:00:01'), ('2020-03-01 10:00:01'), (NULL)
+            """
+        )
+        lazy_df = duckdb_cursor.table("test_timestamp_units").pl(lazy=True)
+        ts_2010 = datetime.datetime(2010, 1, 1, 10, 0, 1)
+
+        assert lazy_df.filter(pl.col("a") == ts_2010).select(pl.len()).collect().item() == 1
+        assert lazy_df.filter(pl.col("a") > ts_2010).select(pl.len()).collect().item() == 1
+        assert lazy_df.filter(pl.col("a") >= ts_2010).select(pl.len()).collect().item() == 2
+        assert lazy_df.filter(pl.col("a") < ts_2010).select(pl.len()).collect().item() == 1
+
+    def test_polars_lazy_pushdown_timestamptz(self, duckdb_cursor):
+        duckdb_cursor.execute("SET TimeZone = 'America/New_York'")
+        duckdb_cursor.execute("CREATE TABLE test_timestamptz (a TIMESTAMPTZ)")
+        duckdb_cursor.execute(
+            "INSERT INTO test_timestamptz VALUES ('2024-01-01 10:00:00+00'), ('2024-01-01 14:00:00+00'), (NULL)"
+        )
+        lazy_df = duckdb_cursor.table("test_timestamptz").pl(lazy=True)
+        # 12:00 UTC
+        noon_utc = datetime.datetime(2024, 1, 1, 7, 0, tzinfo=ZoneInfo("America/New_York"))
+
+        assert lazy_df.filter(pl.col("a") < noon_utc).select(pl.len()).collect().item() == 1
+        assert lazy_df.filter(pl.col("a") > noon_utc).select(pl.len()).collect().item() == 1
 
     @pytest.mark.skipif(pl_pre_1_35_0, reason="Polars < 1.36.0 expressions on dates produce casts in predicates")
     def test_polars_predicate_to_expression_post_1_36_0(self):
