@@ -16,6 +16,7 @@
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/main/client_context_wrapper.hpp"
 #include "duckdb/main/prepared_statement.hpp"
+#include "duckdb/main/statement_iterator.hpp"
 #include "duckdb/parser/sql_statement.hpp"
 #include "duckdb/parser/tableref.hpp"
 
@@ -137,10 +138,12 @@ public:
 	ClientContext &Context() const {
 		return *context;
 	}
-	vector<unique_ptr<SQLStatement>> Parse(const string &sql);
 	Prepared Prepare(unique_ptr<SQLStatement> statement);
 	shared_ptr<Result> Submit(unique_ptr<SQLStatement> statement, identifier_map_t<BoundParameterData> &values,
 	                          const Format &format);
+	//! Submit for a caller that already holds the connection's claim
+	shared_ptr<Result> SubmitClaimed(unique_ptr<SQLStatement> statement, identifier_map_t<BoundParameterData> &values,
+	                                 const Format &format);
 	shared_ptr<Result> Submit(Prepared &prepared, identifier_map_t<BoundParameterData> &values, const Format &format);
 	//! A relation that writes is submitted as itself; one that reads as a statement over its query
 	shared_ptr<Result> Submit(const shared_ptr<Relation> &relation, const Format &format);
@@ -150,10 +153,63 @@ public:
 	void Run(unique_ptr<SQLStatement> statement, const InterruptCheck &check);
 	//! Runs a statement to its end and drops its rows, its replacement scans answered from tables and nothing else
 	void Run(unique_ptr<SQLStatement> statement, const ResolvedTables &tables, const InterruptCheck &check);
+	ConnectionClaim Claim();
 
 private:
 	shared_ptr<ClientContext> context;
 	shared_ptr<ConnectionState> state;
+};
+
+//! The statements of one SQL string, run in order as the engine's Query runs them: each is parsed only once the ones
+//! before it have run, and the engine expands it, a PRAGMA for example, when it is submitted
+class StatementGroup {
+public:
+	//! aborts_transaction false only parses, as the engine's ExtractStatements does: a parse error leaves an explicit
+	//! transaction valid
+	StatementGroup(Session session, const string &sql, bool aborts_transaction = true);
+	//! A group of one statement parsed earlier
+	StatementGroup(Session session, unique_ptr<SQLStatement> statement);
+
+	StatementGroup(const StatementGroup &) = delete;
+	StatementGroup &operator=(const StatementGroup &) = delete;
+	StatementGroup(StatementGroup &&) = default;
+
+public:
+	//! The first statement, parsed but not run; null for a group without statements. Only before Next. Inside an
+	//! explicit transaction, an error parsing it aborts the transaction, as in the engine.
+	optional_ptr<const SQLStatement> First();
+	//! The next statement, parsed but not run; null when no statement is left. Errors abort an explicit transaction
+	//! as First's do.
+	unique_ptr<SQLStatement> Next();
+	//! Runs the statement and every one after it but the last, which it returns unrun; null when the text after the
+	//! statements it ran holds no statement
+	unique_ptr<SQLStatement> RunAllButLast(unique_ptr<SQLStatement> statement, const InterruptCheck &check);
+	//! Called once a statement is submitted and before it runs: one known to return rows replaces the kept result,
+	//! which is dropped now so that two results are never held at once
+	void ReleaseIfReplaced(const Result &result);
+	//! The result of the group, given the last statement's: that of the last statement that returns rows, or of the
+	//! last statement when none does
+	shared_ptr<Result> Choose(shared_ptr<Result> last);
+	//! Throws for parameters given to a group whose text after the statements that ran held no statement
+	[[noreturn]] void RefuseParameters();
+
+private:
+	bool HasMore();
+	void Keep(shared_ptr<Result> result);
+	//! Throws an error that ends the group before the engine ran the statement it concerns, as the engine's Query
+	//! reports it. Requires the claim.
+	[[noreturn]] void Fail(ErrorData error);
+
+private:
+	Session session;
+	//! The text the statements came from, which an error's location refers to
+	string query;
+	bool aborts_transaction = true;
+	//! Null for a group of one statement parsed earlier, which is held in upcoming
+	unique_ptr<StatementIterator> iterator;
+	//! Parsed by First, not yet returned by Next
+	unique_ptr<SQLStatement> upcoming;
+	shared_ptr<Result> kept;
 };
 
 } // namespace engine

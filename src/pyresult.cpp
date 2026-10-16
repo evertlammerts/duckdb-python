@@ -669,14 +669,12 @@ void DuckDBPyResult::Complete() {
 }
 
 bool DuckDBPyResult::HasWritesToRun() const {
-	if (!result) {
+	// A result that stopped running, a failed one included, has nothing left to write
+	if (!result || !result->Running()) {
 		return false;
 	}
 	// A statement that expands into several is treated as writing until it ran and its properties are known
-	if (result->MetadataAvailable() && result->Properties().modified_databases.empty()) {
-		return false;
-	}
-	return result->Running();
+	return !result->MetadataAvailable() || !result->Properties().modified_databases.empty();
 }
 
 int64_t DuckDBPyResult::Rowcount() {

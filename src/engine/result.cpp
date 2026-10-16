@@ -160,6 +160,26 @@ void Result::Retain(const InterruptCheck &check) {
 	RetainClaimed(check);
 }
 
+void Result::CloseAfterFailure(std::exception_ptr error) noexcept {
+	{
+		lock_guard<mutex> guard(handle_lock);
+		failure = std::move(error);
+	}
+	// Called under the claim: ending a query can run Python code, such as a file's close, that reenters the
+	// connection, and the claim makes it refuse instead of waiting on the call that holds the connection
+	try {
+		Close();
+	} catch (...) { // NOLINT: the error of the failed call is the one to report
+	}
+}
+
+void Result::ThrowIfFailed() const {
+	lock_guard<mutex> guard(handle_lock);
+	if (failure) {
+		std::rethrow_exception(failure);
+	}
+}
+
 unique_ptr<ConnectionClaim> Result::ClaimWhileRunning() {
 	// Rows already in the client need no engine work, so a fetch of them claims nothing and works anywhere
 	if (state != State::PENDING && state != State::STREAMING) {
@@ -172,8 +192,13 @@ void Result::RetainClaimed(const InterruptCheck &check) {
 	if (state != State::PENDING) {
 		return;
 	}
-	Complete(*handle, check);
-	CaptureMetadata();
+	try {
+		Complete(*handle, check);
+		CaptureMetadata();
+	} catch (...) {
+		CloseAfterFailure(std::current_exception());
+		throw;
+	}
 	state = State::RETAINED;
 }
 
@@ -186,18 +211,24 @@ void Result::Settle(const InterruptCheck &check) {
 		RetainClaimed(check);
 		return;
 	}
-	// Undecided, the engine parks the first unit at the result sink; READY means it waits for that decision
-	auto query_state = Drive(*handle, check, true);
-	if (handle->HasError()) {
-		handle->ThrowError();
-	}
-	if (query_state == QueryResultState::FINISHED) {
-		// A statement that sank no row ends undecided, its empty rows collected
-		state = State::RETAINED;
+	try {
+		// Undecided, the engine parks the first unit at the result sink; READY means it waits for that decision
+		auto query_state = Drive(*handle, check, true);
+		if (handle->HasError()) {
+			handle->ThrowError();
+		}
+		if (query_state == QueryResultState::FINISHED) {
+			// A statement that sank no row ends undecided, its empty rows collected
+			state = State::RETAINED;
+		}
+	} catch (...) {
+		CloseAfterFailure(std::current_exception());
+		throw;
 	}
 }
 
 idx_t Result::RowCount(const InterruptCheck &check) {
+	ThrowIfFailed();
 	ConnectionClaim claim(*connection_state, *client_properties.client_context);
 	RetainClaimed(check);
 	if (state != State::RETAINED) {
@@ -208,6 +239,7 @@ idx_t Result::RowCount(const InterruptCheck &check) {
 
 unique_ptr<DataChunk> Result::FetchChunk(const InterruptCheck &check) {
 	D_ASSERT(!format.IsArrow());
+	ThrowIfFailed();
 	auto claim = ClaimWhileRunning();
 	if (state == State::PENDING) {
 		OpenStream();
@@ -233,6 +265,7 @@ unique_ptr<DataChunk> Result::FetchChunk(const InterruptCheck &check) {
 
 unique_ptr<ArrowArrayWrapper> Result::FetchArray(const InterruptCheck &check) {
 	D_ASSERT(format.IsArrow());
+	ThrowIfFailed();
 	auto claim = ClaimWhileRunning();
 	if (state == State::PENDING) {
 		OpenStream();
@@ -253,6 +286,7 @@ unique_ptr<ArrowArrayWrapper> Result::FetchArray(const InterruptCheck &check) {
 
 unique_ptr<ColumnDataCollection> Result::TakeChunks(const InterruptCheck &check) {
 	D_ASSERT(!format.IsArrow());
+	ThrowIfFailed();
 	ConnectionClaim claim(*connection_state, *client_properties.client_context);
 	if (state == State::PENDING) {
 		RetainClaimed(check);
@@ -279,6 +313,7 @@ unique_ptr<ColumnDataCollection> Result::TakeChunks(const InterruptCheck &check)
 
 vector<unique_ptr<ArrowArrayWrapper>> Result::TakeArrays(const InterruptCheck &check) {
 	D_ASSERT(format.IsArrow());
+	ThrowIfFailed();
 	ConnectionClaim claim(*connection_state, *client_properties.client_context);
 	vector<unique_ptr<ArrowArrayWrapper>> arrays;
 	if (state == State::PENDING) {
@@ -328,6 +363,7 @@ void Result::BuildArrowSchema(const vector<string> &schema_names, ArrowSchema &o
 }
 
 string Result::ToBox(BoxRendererContext &context, const BoxRendererConfig &config) {
+	ThrowIfFailed();
 	if (state != State::RETAINED) {
 		throw InternalException("engine::Result::ToBox on a result that is not retained");
 	}
@@ -335,6 +371,7 @@ string Result::ToBox(BoxRendererContext &context, const BoxRendererConfig &confi
 }
 
 int64_t Result::ChangedRows() {
+	ThrowIfFailed();
 	if (state != State::RETAINED || Properties().return_type != StatementReturnType::CHANGED_ROWS) {
 		return -1;
 	}

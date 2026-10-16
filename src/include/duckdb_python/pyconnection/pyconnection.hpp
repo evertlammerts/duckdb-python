@@ -313,9 +313,9 @@ public:
 
 	std::shared_ptr<DuckDBPyConnection> ExecuteMany(const nb::object &query, nb::object params = nb::list());
 
-	void ExecuteImmediately(vector<unique_ptr<SQLStatement>> statements);
 	engine::Prepared PrepareQuery(unique_ptr<SQLStatement> statement);
-	shared_ptr<engine::Result> ExecuteInternal(engine::Prepared &prep, nb::object params = nb::list());
+	shared_ptr<engine::Result> ExecuteInternal(engine::Prepared &prep, nb::object params,
+	                                           engine::StatementGroup &statements);
 	//! Binds the parameters and submits the statement. The result is returned undriven.
 	shared_ptr<engine::Result> PrepareAndSubmitInternal(unique_ptr<SQLStatement> statement,
 	                                                    nb::object params = nb::list());
@@ -440,7 +440,10 @@ private:
 	ScalarFunction CreateScalarUDF(const string &name, const nb::callable &udf, const nb::object &parameters,
 	                               const nb::object &return_type, bool vectorized, FunctionNullHandling null_handling,
 	                               PythonExceptionHandling exception_handling, bool side_effects);
-	vector<unique_ptr<SQLStatement>> GetStatements(const nb::object &query);
+	engine::StatementGroup GetStatements(const nb::object &query);
+	//! Runs every statement of the group but the last, after making way for them first when supersede, and returns
+	//! the last, unrun; null when none is left. Releases the GIL for the engine work.
+	unique_ptr<SQLStatement> RunAllButLast(engine::StatementGroup &statements, bool supersede);
 
 	static void DetectEnvironment();
 };
