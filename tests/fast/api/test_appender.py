@@ -1606,7 +1606,9 @@ class TestBuffer:
     def test_a_buffer_larger_than_the_memory_limit_spills_and_arrives_whole(self, tmp_path):
         connection = duckdb.connect((tmp_path / "spill.db").as_posix())
         try:
-            connection.execute("SET memory_limit = '16MB'")
+            # The flush itself needs about 10 MiB beyond what it can evict, and more on macOS x86_64, where 16 MB ran
+            # out of memory on CI. 32 MB leaves headroom while staying well below the buffer's 64 MiB.
+            connection.execute("SET memory_limit = '32MB'")
             connection.execute(f"SET temp_directory = '{(tmp_path / 'spill').as_posix()}'")
             connection.execute("CREATE TABLE s (k INTEGER, v VARCHAR)")
             app = connection.appender("s")

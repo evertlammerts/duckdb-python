@@ -41,7 +41,7 @@ class TestMap:
 
     def test_map_function_takes_no_sql_arguments(self, duckdb_cursor):
         # The callable travels through the bind input, never through a value SQL text can forge
-        with pytest.raises(duckdb.BinderException, match="No function matches"):
+        with pytest.raises(duckdb.BinderException, match="requires a subquery as its TABLE parameter"):
             duckdb_cursor.sql("select * from python_map_function(1, 2, 3)")
         with pytest.raises(duckdb.BinderException, match="requires a callable bind input"):
             duckdb_cursor.sql("select * from python_map_function((select 1))")

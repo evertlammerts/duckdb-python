@@ -63,20 +63,34 @@ Result::Result(unique_ptr<QueryResult> submitted, StatementType written_type, Fo
 	if (handle->HasError()) {
 		handle->ThrowError();
 	}
-	names = handle->GetNames();
-	types = handle->GetTypes();
-	properties = handle->GetStatementProperties();
-	completes_before_returning = !StreamsByDefault(written_type, properties);
+	completes_before_returning = !StreamsByDefault(written_type, *handle);
 	client_properties = handle->client_properties;
 	if (!client_properties.client_context) {
 		throw InternalException("engine::Result created without a client context");
 	}
 	connection_state = ConnectionState::Get(*client_properties.client_context);
+	CaptureMetadata();
+}
+
+void Result::CaptureMetadata() {
+	if (metadata_available || !handle->MetadataAvailable()) {
+		return;
+	}
+	names = handle->GetNames();
+	types = handle->GetTypes();
+	properties = handle->GetStatementProperties();
 	if (format.IsArrow()) {
 		auto &schema = handle->FormatState<ArrowFormat>().Schema();
 		if (duckdb_nanoarrow::ArrowSchemaDeepCopy(&schema, &arrow_schema.arrow_schema) != NANOARROW_OK) {
 			throw OutOfMemoryException("Failed to copy the Arrow schema of the query result");
 		}
+	}
+	metadata_available = true;
+}
+
+void Result::RequireMetadata() const {
+	if (!metadata_available) {
+		throw InternalException("engine::Result metadata read before the statement that produces the result was bound");
 	}
 }
 
@@ -159,6 +173,7 @@ void Result::RetainClaimed(const InterruptCheck &check) {
 		return;
 	}
 	Complete(*handle, check);
+	CaptureMetadata();
 	state = State::RETAINED;
 }
 
@@ -247,7 +262,7 @@ unique_ptr<ColumnDataCollection> Result::TakeChunks(const InterruptCheck &check)
 		state = State::DRAINED;
 		return collection;
 	}
-	auto collection = make_uniq<ColumnDataCollection>(Allocator::DefaultAllocator(), types);
+	auto collection = make_uniq<ColumnDataCollection>(Allocator::DefaultAllocator(), Types());
 	if (state == State::RETAINED) {
 		// Fetching copies out of the collection, so only the rows after the fetch cursor remain
 		while (auto chunk = handle->FetchRaw()) {
@@ -297,6 +312,7 @@ void Result::CopyArrowSchema(ArrowSchema &out) const {
 	if (!format.IsArrow()) {
 		throw InternalException("engine::Result::CopyArrowSchema on a result that is not in the Arrow format");
 	}
+	RequireMetadata();
 	out.release = nullptr;
 	if (duckdb_nanoarrow::ArrowSchemaDeepCopy(&arrow_schema.arrow_schema, &out) != NANOARROW_OK) {
 		throw OutOfMemoryException("Failed to copy the Arrow schema of the query result");
@@ -307,7 +323,8 @@ void Result::BuildArrowSchema(const vector<string> &schema_names, ArrowSchema &o
 	auto context = client_properties.client_context;
 	auto properties = client_properties;
 	ConnectionClaim claim(*connection_state, *client_properties.client_context);
-	context->RunFunctionInTransaction([&]() { ArrowConverter::ToArrowSchema(&out, types, schema_names, properties); });
+	context->RunFunctionInTransaction(
+	    [&]() { ArrowConverter::ToArrowSchema(&out, Types(), schema_names, properties); });
 }
 
 string Result::ToBox(BoxRendererContext &context, const BoxRendererConfig &config) {
@@ -318,7 +335,7 @@ string Result::ToBox(BoxRendererContext &context, const BoxRendererConfig &confi
 }
 
 int64_t Result::ChangedRows() {
-	if (properties.return_type != StatementReturnType::CHANGED_ROWS || state != State::RETAINED) {
+	if (state != State::RETAINED || Properties().return_type != StatementReturnType::CHANGED_ROWS) {
 		return -1;
 	}
 	auto &collection = handle->Collection<ChunkFormat>();
