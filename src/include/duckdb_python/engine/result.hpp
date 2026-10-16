@@ -71,14 +71,17 @@ public:
 		return metadata_available;
 	}
 	const vector<Identifier> &Names() const {
+		ThrowIfFailed();
 		RequireMetadata();
 		return names;
 	}
 	const vector<LogicalType> &Types() const {
+		ThrowIfFailed();
 		RequireMetadata();
 		return types;
 	}
 	const StatementProperties &Properties() const {
+		ThrowIfFailed();
 		RequireMetadata();
 		return properties;
 	}
@@ -98,10 +101,12 @@ public:
 		return completes_before_returning;
 	}
 
-	//! Keeps every row: drives the query to its end unless it already ended
+	//! Keeps every row: drives the query to its end unless it already ended. A failure ends the query.
 	void Retain(const InterruptCheck &check);
+	//! Retain for a caller that already holds the connection's claim. A failure ends the query.
+	void RetainClaimed(const InterruptCheck &check);
 	//! Runs the statement until its first unit is ready or it ends, without deciding how its rows are read,
-	//! and throws the error it ended with
+	//! and throws the error it ended with. A failure ends the query.
 	void Settle(const InterruptCheck &check);
 	//! Rows of a retained result. Materializes it first.
 	idx_t RowCount(const InterruptCheck &check);
@@ -128,10 +133,12 @@ public:
 private:
 	enum class State : uint8_t { PENDING, STREAMING, RETAINED, DRAINED, CLOSED };
 
-	//! Retain for a caller that already holds the connection's claim
-	void RetainClaimed(const InterruptCheck &check);
 	void CaptureMetadata();
 	void RequireMetadata() const;
+	//! Ends the query of a call that failed under the claim, and keeps its error for any later use of the result
+	void CloseAfterFailure(std::exception_ptr error) noexcept;
+	//! A result that a failure ended reports that failure instead of reading as empty
+	void ThrowIfFailed() const;
 	//! The connection's claim while the query can still run engine work, otherwise none
 	unique_ptr<ConnectionClaim> ClaimWhileRunning();
 	void OpenStream();
@@ -145,8 +152,10 @@ private:
 	Format format;
 	atomic<State> state;
 	bool retained_fetched = false;
-	//! Guards handle and stream against Close from another thread
+	//! Guards handle, stream and failure against Close from another thread
 	mutable mutex handle_lock;
+	//! The error that ended the query, set when a driving call failed
+	std::exception_ptr failure;
 	//! The state of the connection the query runs on, whose claim every driving call takes
 	shared_ptr<ConnectionState> connection_state;
 	//! Keeps the relation's external dependencies alive while its query runs

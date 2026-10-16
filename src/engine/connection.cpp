@@ -210,19 +210,6 @@ Session::Session(shared_ptr<ClientContext> context_p)
     : context(std::move(context_p)), state(ConnectionState::Get(*context)) {
 }
 
-vector<unique_ptr<SQLStatement>> Session::Parse(const string &sql) {
-	ConnectionClaim claim(*state, *context);
-	// The iterator also runs the preprocessor, without which a PRAGMA cannot be prepared
-	auto iterator = context->IterateStatements(sql);
-	vector<unique_ptr<SQLStatement>> statements;
-	while (iterator.Peek()) {
-		if (auto statement = iterator.GetStatement()) {
-			statements.push_back(std::move(statement));
-		}
-	}
-	return statements;
-}
-
 Prepared Session::Prepare(unique_ptr<SQLStatement> statement) {
 	ConnectionClaim claim(*state, *context);
 	Prepared prepared;
@@ -238,9 +225,18 @@ Prepared Session::Prepare(unique_ptr<SQLStatement> statement) {
 	return prepared;
 }
 
+ConnectionClaim Session::Claim() {
+	return ConnectionClaim(*state, *context);
+}
+
 shared_ptr<Result> Session::Submit(unique_ptr<SQLStatement> statement, identifier_map_t<BoundParameterData> &values,
                                    const Format &format) {
-	ConnectionClaim claim(*state, *context);
+	auto claim = Claim();
+	return SubmitClaimed(std::move(statement), values, format);
+}
+
+shared_ptr<Result> Session::SubmitClaimed(unique_ptr<SQLStatement> statement,
+                                          identifier_map_t<BoundParameterData> &values, const Format &format) {
 	auto written_type = statement->type;
 	auto handle = context->Submit(std::move(statement), values, QueryParameters(format.EngineFormat()));
 	NameRefusal(*state, *handle);
@@ -299,6 +295,116 @@ void Session::Run(unique_ptr<SQLStatement> statement, const ResolvedTables &tabl
 	}
 	NameRefusal(*state, *handle);
 	Complete(*handle, check);
+}
+
+StatementGroup::StatementGroup(Session session_p, const string &sql, bool aborts_transaction_p)
+    : session(std::move(session_p)), query(sql), aborts_transaction(aborts_transaction_p),
+      iterator(make_uniq<StatementIterator>(session.Context().IterateStatements(sql))) {
+}
+
+StatementGroup::StatementGroup(Session session_p, unique_ptr<SQLStatement> statement)
+    : session(std::move(session_p)), query(statement->query), upcoming(std::move(statement)) {
+}
+
+optional_ptr<const SQLStatement> StatementGroup::First() {
+	D_ASSERT(!kept);
+	if (iterator && !upcoming) {
+		auto claim = session.Claim();
+		try {
+			upcoming = iterator->GetStatement();
+		} catch (std::exception &ex) {
+			Fail(ErrorData(ex));
+		}
+	}
+	return upcoming.get();
+}
+
+unique_ptr<SQLStatement> StatementGroup::Next() {
+	if (upcoming || !iterator) {
+		return std::move(upcoming);
+	}
+	auto claim = session.Claim();
+	try {
+		return iterator->GetStatement();
+	} catch (std::exception &ex) {
+		Fail(ErrorData(ex));
+	}
+}
+
+bool StatementGroup::HasMore() {
+	// Never parses, so the next statement is parsed only after this one ran
+	return upcoming || (iterator && iterator->HasMore());
+}
+
+unique_ptr<SQLStatement> StatementGroup::RunAllButLast(unique_ptr<SQLStatement> statement,
+                                                       const InterruptCheck &check) {
+	while (HasMore()) {
+		if (!statement->named_param_map.empty()) {
+			// Parsed first, so a syntax error in the statement after this one wins over the refusal
+			Next();
+			auto claim = session.Claim();
+			Fail(ErrorData(NotImplementedException(
+			    "Prepared parameters are only supported for the last statement, please split your query up into "
+			    "separate 'execute' calls if you want to use prepared parameters")));
+		}
+		{
+			// One claim from submission to the end of the run, so no other call finds the statement pending
+			auto claim = session.Claim();
+			identifier_map_t<BoundParameterData> no_values;
+			auto result = session.SubmitClaimed(std::move(statement), no_values, Format::Chunks());
+			ReleaseIfReplaced(*result);
+			result->RetainClaimed(check);
+			Keep(std::move(result));
+		}
+		statement = Next();
+		if (!statement) {
+			return nullptr;
+		}
+	}
+	return statement;
+}
+
+static bool ReturnsRows(const StatementProperties &properties) {
+	return properties.return_type == StatementReturnType::QUERY_RESULT;
+}
+
+void StatementGroup::ReleaseIfReplaced(const Result &result) {
+	// A statement that expands into several knows whether it returns rows only once it ran
+	if (result.MetadataAvailable() && ReturnsRows(result.Properties())) {
+		kept.reset();
+	}
+}
+
+void StatementGroup::Keep(shared_ptr<Result> result) {
+	if (kept && ReturnsRows(kept->Properties()) && !ReturnsRows(result->Properties())) {
+		return;
+	}
+	kept = std::move(result);
+}
+
+shared_ptr<Result> StatementGroup::Choose(shared_ptr<Result> last) {
+	if (last) {
+		Keep(std::move(last));
+	}
+	return std::move(kept);
+}
+
+void StatementGroup::RefuseParameters() {
+	auto claim = session.Claim();
+	Fail(ErrorData(InvalidInputException("Parameters were given, but the last statement of the query takes none")));
+}
+
+void StatementGroup::Fail(ErrorData error) {
+	auto &context = session.Context();
+	// As in the engine's Query: the error gets the location of its statement in the query, or becomes JSON
+	context.ProcessError(error, query);
+	// Workaround: the engine applies its transaction policy to such an error in ErrorResult, which is private; the
+	// catch block of RunFunctionInTransactionInternal applies the same policy, so the error is rethrown through it.
+	// Only an explicit transaction is aborted, as in the engine's Query; an autocommit one belongs to an open result.
+	if (aborts_transaction && !context.transaction.IsAutoCommit()) {
+		context.RunFunctionInTransaction([&]() { error.Throw(); }, false);
+	}
+	error.Throw();
 }
 
 } // namespace engine
