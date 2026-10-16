@@ -429,7 +429,19 @@ class Connection:
         return Appender(_table_appender(self._engine(), table, names, action, keyed), self._flush_appender)
 
     def query_appender(self, dml: SqlText, columns: _AppenderColumns, *, source: SqlText | None = None) -> Appender:
-        """An appender whose flush runs your statement over the rows it buffers; not available yet."""
+        """An appender whose flush runs your statement over the rows it buffers, read as the table `appender_data`.
+
+        The statement is checked now, without running: one that cannot run raises here.
+
+        Args:
+            dml: One INSERT (also with OR IGNORE, OR REPLACE or ON CONFLICT), UPDATE, DELETE or MERGE INTO statement,
+                without parameters; what a RETURNING clause returns is thrown away. It may leave columns, or the rows,
+                unread. Tables and registered objects it names are looked up at each flush. A WITH at the start of
+                the statement cannot read `appender_data` yet, and may not use that name or `appender_buffer`.
+            columns: Each column's name and its SQL type, in the order a row gives its values; names compare
+                ignoring case. A type DuckDB refuses inside a transaction spoils that transaction.
+            source: Not available yet: it waits for DuckDB, and raises `NotSupportedError`.
+        """
         declared = _read_declared(columns)
         return Appender(_query_appender(self._engine(), dml, declared, source), self._flush_appender)
 

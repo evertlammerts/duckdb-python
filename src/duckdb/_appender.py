@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 from . import _duckdb
-from ._expressions.expr import _as_names, _items, fold_name, name_parts
+from ._expressions.expr import _as_name, _as_names, _as_sql, _items, fold_name, name_parts
 from .exceptions import Error, InterfaceError, NotSupportedError
 
 if TYPE_CHECKING:
@@ -99,10 +99,19 @@ def _read_once(names: object) -> object:
     return names if items is None else tuple(items)
 
 
+class _DeclaredColumns(tuple[tuple[object, object], ...]):
+    """A query appender's columns as read from the caller's mapping: (name, type) pairs, in its order."""
+
+    __slots__ = ()
+
+
 def _read_declared(columns: object) -> object:
-    """A query appender's columns read now, as (name, type) pairs in order, before anything runs; checked later."""
+    """A query appender's columns read now, before anything runs; checked later.
+
+    Anything but a mapping is kept as it is, for the checks to refuse.
+    """
     if isinstance(columns, Mapping):
-        return tuple((name, columns[name]) for name in columns)
+        return _DeclaredColumns((name, columns[name]) for name in columns)
     return columns
 
 
@@ -164,8 +173,44 @@ def _table_appender(
     return engine.appender(parts, names, kind, keyed)
 
 
+def _declared_columns(columns: object) -> list[tuple[str, str]]:
+    """A query appender's columns, read already, as (name, SQL type text) pairs."""
+    if not isinstance(columns, _DeclaredColumns):
+        kind = type(columns).__name__
+        message = f"columns maps each column's name to its SQL type, as a dict or another mapping, not {kind}"
+        raise TypeError(message)
+    if not columns:
+        message = "columns names no column; an appender writes at least one"
+        raise ValueError(message)
+    declared: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for name, type_text in columns:
+        checked = _as_name(name, "column name")
+        if not isinstance(type_text, str):
+            message = f"the type of column {checked} is SQL type text, not {type(type_text).__name__}"
+            raise TypeError(message)
+        folded = fold_name(checked)
+        if folded in seen:
+            message = f"columns names {checked} twice"
+            raise ValueError(message)
+        seen.add(folded)
+        declared.append((checked, type_text))
+    return declared
+
+
 def _query_appender(engine: _duckdb.Connection, dml: object, columns: object, source: object) -> _duckdb.Appender:
-    """The engine's appender for the query form, its arguments checked after the connection and its transaction."""
+    """The engine's appender for the query form, its arguments checked after the connection and its transaction.
+
+    `columns` was read already. The checks here need no connection; those of the statement and the types are the
+    engine's.
+    """
     engine.check_transaction()
-    message = "the query form is not available"
-    raise NotSupportedError(message)
+    sql = _as_sql(dml, "query_appender")
+    declared = _declared_columns(columns)
+    if source is not None:
+        message = (
+            "source= is not available yet: it waits for DuckDB to let the statement's own table expressions read the "
+            "appender's rows; write the query into the statement itself, over appender_data"
+        )
+        raise NotSupportedError(message)
+    return engine.query_appender(sql, declared)

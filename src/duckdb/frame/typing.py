@@ -199,7 +199,7 @@ Reader: `duckdb._appender.Appender.append_rows`.
 _AppenderColumns: TypeAlias = Mapping[NewName, SqlText]
 """The columns a query appender buffers, in order: each name and its SQL type.
 
-Reader: `duckdb._appender._read_declared`.
+Reader: `duckdb._appender._declared_columns`.
 """
 
 _TextValue: TypeAlias = str

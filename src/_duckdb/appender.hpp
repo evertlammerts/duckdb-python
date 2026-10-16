@@ -15,6 +15,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "lifetime.hpp"
@@ -28,7 +29,8 @@ enum class TableAction : std::uint8_t { INSERT_ROWS, UPSERT_ROWS, UPDATE_ROWS, D
 /// The rows an appender holds and the statement its flush runs, all made from its connection. Rows are staged in the
 /// chunk and move into the collection a whole chunk at a time; the statement reads the collection.
 struct AppenderBuffer {
-	AppenderBuffer(cxx::Connection &connection, const std::string &sql, const std::vector<std::string> &names,
+	/// Raises ValueError when the statement's own WITH already defines a name the rows are read by.
+	AppenderBuffer(cxx::Connection &connection, cxx::SqlStatement parsed, const std::vector<std::string> &names,
 	               const std::vector<cxx::LogicalType> &types);
 
 	/// Drop every row and let go of the memory they took.
@@ -91,6 +93,14 @@ public:
 	                                          const std::optional<std::vector<std::string>> &columns,
 	                                          TableAction action, const std::optional<std::vector<std::string>> &key);
 
+	/// An appender whose flush runs `dml`, one INSERT, UPDATE, DELETE or MERGE INTO statement reading the rows as
+	/// appender_data, over these columns, each a name and its SQL type, in order. The caller gives no name twice,
+	/// ignoring case.
+	static std::unique_ptr<Appender> ForQuery(const std::shared_ptr<Owned<cxx::Connection>> &engine,
+	                                          const std::shared_ptr<ConnectionUse> &use, AppenderBuffers &buffers,
+	                                          const std::string &dml,
+	                                          const std::vector<std::pair<std::string, std::string>> &columns);
+
 	/// Buffer one row, one value per column.
 	void AppendRow(nb::tuple values);
 
@@ -125,6 +135,12 @@ public:
 private:
 	class OneCaller;
 	struct Pins;
+
+	/// The appender over `statement`, bound now under the claim, and tracked by the connection.
+	static std::unique_ptr<Appender> Create(const std::shared_ptr<Owned<cxx::Connection>> &engine,
+	                                        const std::shared_ptr<ConnectionUse> &use, AppenderBuffers &buffers,
+	                                        Claimed &claimed, cxx::SqlStatement statement,
+	                                        const std::vector<std::string> &names, std::vector<cxx::LogicalType> types);
 
 	/// The call's own references to the connection and the buffer, or InterfaceError once the connection is closed.
 	Pins Pin();

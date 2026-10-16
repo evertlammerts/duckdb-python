@@ -40,6 +40,7 @@
     <li><a href="#meta">Column names and row counts</a></li>
     <li><a href="#transactions">Transactions</a></li>
     <li><a href="#register">Querying Python data</a></li>
+    <li><a href="#appender">Loading rows fast</a></li>
     <li><a href="#stop">Stopping a query</a></li>
     <li><a href="#errors">Errors</a></li>
     <li><a href="#module">Module attributes and types</a></li>
@@ -487,6 +488,18 @@ cur.execute(<span class="s">"SELECT * FROM kept ORDER BY customer"</span>).fetch
   </ul>
 </section>
 
+<section id="appender">
+  <h2>Loading rows fast</h2>
+  <p>An <strong>appender</strong> collects rows in memory and writes all of them with one statement when you call <code>flush()</code>, which is much faster than an <code>execute</code> per row. It works as on a <code>frame</code> connection, described in <a href="frame.html#appender">Frames &amp; Plans</a>: the actions, your own statement with <code>query_appender</code>, and what happens when something goes wrong.</p>
+  <pre><code>app = con.appender(<span class="s">"orders"</span>)
+app.append_rows([(<span class="s">10</span>, <span class="s">"ivy"</span>, <span class="s">75</span>, <span class="s">"2026-04-05"</span>), (<span class="s">11</span>, <span class="s">"jay"</span>, <span class="s">120</span>, <span class="s">"2026-04-06"</span>)])
+app.flush()
+con.commit()
+cur.execute(<span class="s">"SELECT count(*) FROM orders"</span>).fetchone()    <span class="c"># (9,)</span></code></pre>
+  <p>A flush runs in the connection's transaction, as <code>execute</code> does. In the default mode it opens one if none is open, so <code>commit()</code> saves the rows and <code>rollback()</code> undoes them; with <code>autocommit=True</code> each flush is saved at once. <code>commit()</code> does not flush: rows you appended but did not flush stay in the appender, and are not saved. Making an appender whose column type DuckDB refuses, such as an unknown type name, fails the open transaction as most errors do: call <code>rollback()</code> next.</p>
+  <p>An appender is not a cursor. While a cursor still has rows to fetch, <code>flush()</code> raises <code>OperationalError</code> and keeps its rows, and the cursor's result is left as it was. Fetch the rest, or end it with <code>cur.abort()</code>, then flush again.</p>
+</section>
+
 <section id="stop">
   <h2>Stopping a query</h2>
   <p>Press Ctrl&#8209;C while <code>execute</code> or a fetch is running, and the query stops with <code>KeyboardInterrupt</code>, as anywhere in Python, unless it is calling a Python function of yours: then it fails with <code>InvalidInputError</code>. From another thread, <code>con.interrupt()</code> stops whatever the connection is running. The call that was running then fails with <code>InterruptError</code>. <code>con.interrupt()</code> stops a long query or a long fetch promptly; Ctrl&#8209;C can take much longer to stop some queries, such as the cross join below.</p>
@@ -598,6 +611,8 @@ dbapi.Binary(bytearray(<span class="s">b"\x00\x01"</span>))    <span class="c">#
     <dt>con.register(name, obj)</dt><dd>Let SQL read a Python object as the table <code>name</code>. Registering a name again replaces the object.</dd>
     <dt>con.unregister(name)</dt><dd>Remove a registered name. <code>ProgrammingError</code> if nothing is registered under it.</dd>
     <dt>con.interrupt()</dt><dd>Stop what the connection is running, from another thread. The running call fails with <code>InterruptError</code>.</dd>
+    <dt>con.appender(table, *, columns=None, action="insert", key=None)</dt><dd>An appender that writes rows into <code>table</code> at each <code>flush()</code>, in the connection's transaction. See <a href="frame.html#appender">Frames &amp; Plans</a>.</dd>
+    <dt>con.query_appender(dml, columns, *, source=None)</dt><dd>An appender whose flush runs your statement over the rows, read as <code>appender_data</code>. <code>source</code> is not available yet.</dd>
   </dl>
 
   <h3>Cursor</h3>

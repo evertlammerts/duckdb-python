@@ -185,6 +185,12 @@ class Connection:
         An update or a delete matches rows on `key`, which it needs; a delete buffers `key` and takes no `columns`.
         """
 
+    def query_appender(self, dml: str, columns: Sequence[tuple[str, str]]) -> Appender:
+        """An appender whose flush runs `dml` over these (name, SQL type) columns, read as appender_data.
+
+        No name twice ignoring case: the caller checks that; no columns, or an empty name, raise ValueError.
+        """
+
     def close(self) -> None:
         """Close the connection now, its appenders' buffers first. Idempotent; every other method raises afterwards."""
 

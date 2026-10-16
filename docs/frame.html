@@ -40,6 +40,7 @@
     <li><a href="#dataframes">pandas, polars, numpy and Arrow</a></li>
     <li><a href="#write">Saving results</a></li>
     <li><a href="#python">Querying Python data</a></li>
+    <li><a href="#appender">Loading rows fast</a></li>
     <li><a href="#look">Looking at a plan</a></li>
     <li><a href="#nested">Plans inside plans</a></li>
     <li><a href="#reuse">Reusing plans</a></li>
@@ -850,6 +851,126 @@ table(<span class="s">"once"</span>).count(con)             <span class="c"># ra
   </ul>
 </section>
 
+<section id="appender">
+  <h2>Loading rows fast</h2>
+  <p>When your program makes rows one at a time, in a loop, sending each one with its own <code>INSERT</code> is slow. An <strong>appender</strong> collects the rows in memory instead, and writes all of them with one statement when you call <code>flush()</code>.</p>
+  <pre><code><span class="k">from</span> datetime <span class="k">import</span> datetime
+
+con.run(<span class="s">"CREATE TABLE sensor_log (sensor VARCHAR, taken TIMESTAMP, value DOUBLE)"</span>)
+<span class="k">with</span> con.appender(<span class="s">"sensor_log"</span>) <span class="k">as</span> app:
+    app.append_row(<span class="s">"a1"</span>, datetime(<span class="s">2026</span>, <span class="s">5</span>, <span class="s">1</span>, <span class="s">8</span>, <span class="s">0</span>), <span class="s">20.5</span>)
+    app.append_rows([
+        (<span class="s">"a1"</span>, datetime(<span class="s">2026</span>, <span class="s">5</span>, <span class="s">1</span>, <span class="s">9</span>, <span class="s">0</span>), <span class="s">21.0</span>),
+        (<span class="s">"b7"</span>, datetime(<span class="s">2026</span>, <span class="s">5</span>, <span class="s">1</span>, <span class="s">9</span>, <span class="s">0</span>), <span class="s">18.25</span>),
+    ])
+table(<span class="s">"sensor_log"</span>).count(con)    <span class="c"># 3</span></code></pre>
+  <p><code>append_row</code> takes one value for each column, in the table's order. <code>append_rows</code> takes many rows at once: a list of tuples, or any other iterable of rows, such as a generator. The <code>with</code> block flushes when it ends; without one, call <code>app.flush()</code> yourself. Until the flush, the rows are in no table, and no query sees them, not even on <code>con</code>.</p>
+
+  <h3>Choosing columns</h3>
+  <pre><code>app = con.appender(<span class="s">"sensor_log"</span>, columns=[<span class="s">"sensor"</span>, <span class="s">"value"</span>])
+app.append_row(<span class="s">"c3"</span>, <span class="s">19.5</span>)
+app.flush()
+table(<span class="s">"sensor_log"</span>).filter(col(<span class="s">"sensor"</span>) == <span class="s">"c3"</span>).rows(con)    <span class="c"># [('c3', None, 19.5)]</span></code></pre>
+  <p>With <code>columns=</code>, each row gives values for those columns only, in that order, and the other columns get their default, here NULL. A string is one column name. The table name follows the same rule: a tuple names a table in a schema, as in <code>con.appender(("shop", "stock"))</code>.</p>
+  <p>Each value is converted as a query parameter would be. A value that does not fit its column raises when you append it, and nothing of that row is kept:</p>
+  <pre><code><span class="k">from</span> duckdb <span class="k">import</span> exceptions
+
+<span class="k">try</span>:
+    app.append_row(<span class="s">"c3"</span>, <span class="s">"warm"</span>)
+<span class="k">except</span> exceptions.ConversionError <span class="k">as</span> error:
+    print(error)                     <span class="c"># Conversion Error: Could not convert string 'warm' to DOUBLE</span>
+app.flush()
+table(<span class="s">"sensor_log"</span>).count(con)    <span class="c"># 4: the failed row was never kept</span></code></pre>
+
+  <h3>Updating and deleting</h3>
+  <pre><code>con.run(<span class="s">"CREATE TABLE stock (sku VARCHAR PRIMARY KEY, qty INTEGER)"</span>)
+con.run(<span class="s">"INSERT INTO stock VALUES ('bolt', 10), ('nut', 4)"</span>)
+
+<span class="k">with</span> con.appender(<span class="s">"stock"</span>, action=<span class="s">"upsert"</span>) <span class="k">as</span> app:
+    app.append_rows([(<span class="s">"bolt"</span>, <span class="s">12</span>), (<span class="s">"washer"</span>, <span class="s">30</span>)])
+<span class="k">with</span> con.appender(<span class="s">"stock"</span>, action=<span class="s">"update"</span>, key=<span class="s">"sku"</span>) <span class="k">as</span> app:
+    app.append_row(<span class="s">"nut"</span>, <span class="s">5</span>)
+<span class="k">with</span> con.appender(<span class="s">"stock"</span>, action=<span class="s">"delete"</span>, key=<span class="s">"sku"</span>) <span class="k">as</span> app:
+    app.append_row(<span class="s">"washer"</span>)
+table(<span class="s">"stock"</span>).sort(<span class="s">"sku"</span>).rows(con)    <span class="c"># [('bolt', 12), ('nut', 5)]</span></code></pre>
+  <p><code>action=</code> says what a flush does with each row:</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Action</th><th>What a flush does with each row</th></tr></thead>
+      <tbody>
+        <tr><td><code>"insert"</code></td><td>Adds it. This is the default.</td></tr>
+        <tr><td><code>"upsert"</code></td><td>Adds it, or, when the table already has a row with the same key, replaces that row's values for the columns you give. The table needs exactly one unique key: its primary key, one unique constraint or one unique index.</td></tr>
+        <tr><td><code>"update"</code></td><td>Sets the columns other than <code>key</code> on every row whose key matches.</td></tr>
+        <tr><td><code>"delete"</code></td><td>Removes every row whose key matches. Each row you append holds only the key values, in <code>key</code>'s order.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p><code>key=</code> names the columns that pick the rows, one name or a list; an update and a delete need it, and an insert or an upsert refuses it with <code>ValueError</code>. Keys match as they do in SQL, so a NULL key matches nothing: a row whose key is NULL updates or deletes no row. If one flush holds two rows with the same key, an upsert keeps only one of them, and an update applies only one of them; which one is not fixed.</p>
+
+  <h3>Writing the statement yourself</h3>
+  <pre><code>con.run(<span class="s">"CREATE TABLE price_cents (sku VARCHAR, cents INTEGER)"</span>)
+app = con.query_appender(
+    <span class="s">"INSERT INTO price_cents SELECT sku, round(euros * 100) FROM appender_data"</span>,
+    {<span class="s">"sku"</span>: <span class="s">"VARCHAR"</span>, <span class="s">"euros"</span>: <span class="s">"DOUBLE"</span>},
+)
+app.append_rows([(<span class="s">"bolt"</span>, <span class="s">0.25</span>), (<span class="s">"nut"</span>, <span class="s">0.1</span>)])
+app.flush()
+table(<span class="s">"price_cents"</span>).sort(<span class="s">"sku"</span>).rows(con)    <span class="c"># [('bolt', 25), ('nut', 10)]</span></code></pre>
+  <p><code>con.query_appender(dml, columns)</code> runs <code>dml</code>, your own SQL statement, at each flush. <code>columns</code> is a dict from each column's name to its SQL type, as text, in the order a row gives its values. The statement reads the appended rows as a table called <code>appender_data</code>. It is one <code>INSERT</code> (<code>INSERT OR IGNORE</code>, <code>INSERT OR REPLACE</code> and <code>ON CONFLICT</code> included), <code>UPDATE</code>, <code>DELETE</code> or <code>MERGE INTO</code> statement:</p>
+  <pre><code>restock = con.query_appender(
+    <span class="s">"UPDATE stock SET qty = stock.qty + d.added FROM appender_data d WHERE stock.sku = d.sku"</span>,
+    {<span class="s">"sku"</span>: <span class="s">"VARCHAR"</span>, <span class="s">"added"</span>: <span class="s">"INTEGER"</span>},
+)
+restock.append_rows([(<span class="s">"bolt"</span>, <span class="s">3</span>), (<span class="s">"nut"</span>, <span class="s">1</span>)])
+restock.flush()
+table(<span class="s">"stock"</span>).sort(<span class="s">"sku"</span>).rows(con)    <span class="c"># [('bolt', 15), ('nut', 6)]</span></code></pre>
+  <p>DuckDB checks the statement when you make the appender, without running it, so a missing table or column raises there, with DuckDB's error. The statement may leave some columns, or the rows themselves, unread. A <code>RETURNING</code> clause is allowed, and what it returns is thrown away. These raise <code>ValueError</code>: text that holds no statement or more than one, another kind of statement, a parameter such as <code>?</code> or <code>$name</code>, a <code>WITH</code> at the start of the statement that defines a table called <code>appender_data</code> or <code>appender_buffer</code>, two column names that differ only in case, and the type <code>NULL</code>. A type DuckDB refuses raises DuckDB's error: <code>CatalogError</code> for a name it does not know, and for example <code>ProgrammingError</code> for <code>DECIMAL(40, 2)</code>. The name <code>appender_buffer</code> reads the same rows as <code>appender_data</code>.</p>
+
+  <h3>What a flush does</h3>
+  <pre><code><span class="k">with</span> con.transaction():
+    <span class="k">with</span> con.appender(<span class="s">"stock"</span>, action=<span class="s">"upsert"</span>) <span class="k">as</span> app:
+        app.append_row(<span class="s">"screw"</span>, <span class="s">40</span>)
+    con.run(<span class="s">"DELETE FROM stock WHERE qty &lt; 10"</span>)
+table(<span class="s">"stock"</span>).sort(<span class="s">"sku"</span>).rows(con)    <span class="c"># [('bolt', 15), ('screw', 40)]</span></code></pre>
+  <p>A flush runs one statement over every row appended since the last flush, then empties the appender, which you can go on using. Outside a transaction it commits by itself. Inside one, as here, it becomes part of that transaction, and a rollback undoes it; a later flush does not write those rows again. With no rows, a flush runs nothing. The tables and the registered Python data that a <code>query_appender</code> statement names are looked up at each flush. A plain insert adds the rows in the order you appended them, as long as the <code>preserve_insertion_order</code> setting is on, as it is by default.</p>
+
+  <h3>When something goes wrong</h3>
+  <pre><code>con.run(<span class="s">"CREATE TABLE ids (id INTEGER PRIMARY KEY)"</span>)
+app = con.appender(<span class="s">"ids"</span>)
+app.append_rows([(<span class="s">1</span>,), (<span class="s">1</span>,)])
+<span class="k">try</span>:
+    app.flush()
+<span class="k">except</span> exceptions.ConstraintError:
+    print(<span class="s">"duplicate key"</span>)    <span class="c"># duplicate key</span>
+table(<span class="s">"ids"</span>).count(con)       <span class="c"># 0: the flush failed, so neither row was written</span>
+app.append_row(<span class="s">2</span>)
+app.flush()
+table(<span class="s">"ids"</span>).rows(con)        <span class="c"># [(2,)]: the failed rows were dropped</span></code></pre>
+  <p>A flush that fails raises DuckDB's error and drops its rows, as here. In two cases the rows stay, so you can flush again:</p>
+  <ul>
+    <li>While a query on the same connection still has rows to give, as an <code>iter_rows</code> loop does, a flush raises <code>OperationalError</code>. Finish or close the loop, then flush again.</li>
+    <li><code>con.interrupt()</code> from another thread stops a flush with <code>InterruptError</code>, and Ctrl&#8209;C stops it with <code>KeyboardInterrupt</code>. Flush again: each row is written exactly once, also when Ctrl&#8209;C came after the rows were written.</li>
+  </ul>
+  <p>Inside a transaction, an <code>InterruptError</code> means the rows were not written and the transaction is spoiled: roll back, and the next flush writes the rows outside it. After Ctrl&#8209;C, run another statement first, such as <code>con.run("SELECT 1")</code>. If it raises <code>TransactionError</code>, the rows were not written: roll back, then flush again. If not, the Ctrl&#8209;C came after the rows were written: they are in the transaction, the appender is empty, and committing keeps them. A flush before the rollback raises <code>TransactionError</code> and drops the rows.</p>
+  <p>An exception that leaves a <code>with</code> block drops the rows without writing them, and the exception goes on as usual. <code>clear()</code> drops the rows too. An appender you let go of while it still holds rows drops them with a <code>ResourceWarning</code>, so flush or clear it first. Once its connection is closed, every method of an appender raises <code>InterfaceError</code>.</p>
+
+  <h3>Details</h3>
+  <ul>
+    <li>An appender takes one call at a time. A call from a second thread while one runs, or from a Python function that its own flush is running, raises <code>OperationalError</code> at once instead of waiting. Give each thread its own appender.</li>
+    <li><code>query_appender</code>'s <code>source=</code> argument is not available yet: it waits for a change in DuckDB, and raises <code>NotSupportedError</code>. Write the query into the statement itself, over <code>appender_data</code>.</li>
+    <li>A <code>WITH</code> at the start of your statement cannot read <code>appender_data</code> yet: such a statement raises <code>CatalogError</code> when you make the appender. Read it in the statement's own <code>FROM</code> or in a subquery there, or, in an <code>INSERT</code>, put the <code>WITH</code> after <code>INSERT INTO table</code>, as in <code>INSERT INTO t WITH d AS (FROM appender_data) FROM d</code>. If a table or registered Python data called <code>appender_data</code> exists, such a <code>WITH</code> reads that instead, without an error. A <code>WITH</code> further inside the statement may itself define a table called <code>appender_data</code> or <code>appender_buffer</code>: the statement then reads that table instead of the rows, without an error.</li>
+    <li>A Python function that a query on the same connection is running cannot append a <code>Decimal</code> whose number of digits, in all and after the point, no earlier value in the program had: the call waits for the query, which waits for the function, so neither ever ends. Append such values outside the query.</li>
+    <li>Inside a transaction you opened, a column type DuckDB refuses, such as an unknown name or <code>DECIMAL(40, 2)</code>, spoils the transaction: statements after it raise <code>TransactionError</code> until you roll back. For now, so does a table name that is a view, or that could mean two tables.</li>
+    <li>The rows wait in DuckDB's memory and count against its <code>memory_limit</code> setting, except the last ones you appended: those are held apart, and count only once they make up a full block of 2048 rows, or a flush takes them. So the limit does not bound an appender's memory exactly: one very large value in a block that is not full yet is kept beyond it, without an error. When the rows that count need more memory, DuckDB moves some of them to its temporary directory on disk. With no temporary directory (the <code>temp_directory</code> setting empty), a full block that does not fit under the limit raises <code>OutOfMemoryError</code> and breaks the appender, as below. While its rows fill the memory, other queries that need memory, on any connection to the database, can fail with <code>OutOfMemoryError</code> too, until you flush or clear the appender.</li>
+    <li>If writing into the appender's memory fails part way, for example when the memory runs out, the appender is broken: <code>append_row</code>, <code>append_rows</code> and <code>flush</code> raise <code>InterfaceError</code> until <code>clear()</code>, which drops the rows.</li>
+    <li><code>con.appender()</code> finds the table when you make the appender, as SQL would find the name then, and keeps it. A view raises <code>CatalogError</code>, and a database attached read-only raises <code>InvalidInputError</code>. A <code>query_appender</code> statement into a read-only database fails only at the flush.</li>
+    <li>Columns that DuckDB computes itself (generated columns) are left out, and naming one in <code>columns=</code> raises <code>ValueError</code>.</li>
+    <li>A Ctrl&#8209;C while the flush is running a Python function of yours fails the flush with <code>InvalidInputError</code>, which drops its rows.</li>
+    <li>A <code>MERGE INTO</code> statement in which two appended rows update or delete the same row of the table raises <code>InvalidInputError</code> at the flush. Appended rows that repeat a key but match no row are each handled by <code>WHEN NOT MATCHED</code>, so an insert there adds them all, or raises <code>ConstraintError</code> under a primary key.</li>
+    <li>What a <code>RETURNING</code> clause returns is kept whole in DuckDB's memory until the flush ends, before it is thrown away. Leave the clause out when you do not need it.</li>
+  </ul>
+</section>
+
 <section id="look">
   <h2>Looking at a plan</h2>
   <pre><code>plan = orders.filter(col(<span class="s">"region"</span>) == <span class="s">"emea"</span>).select(<span class="s">"id"</span>, <span class="s">"total"</span>)
@@ -1023,8 +1144,19 @@ pivoted.sort(<span class="s">"customer"</span>).rows(con)
     <dt>con.register(name, obj) / con.unregister(name)</dt><dd>Make the Python data <code>obj</code> readable as the table <code>name</code>, on every connection to the database; or remove it. See <a href="#python">Querying Python data</a>.</dd>
     <dt>con.create_macro(name, parameters, body, *, replace=False, temporary=False)</dt><dd>Store a macro made from an expression or a plan. See <a href="extend.html">Macros &amp; Extensions</a>.</dd>
     <dt>con.create_function(name, function, parameters=None, returns=None, *, null_handling="default", stability="consistent")</dt><dd>Make a Python function callable from SQL. See <a href="udf.html">Python Functions</a>.</dd>
+    <dt>con.appender(table, *, columns=None, action="insert", key=None)</dt><dd>An appender that writes the rows you give it into <code>table</code> at each flush. <code>action</code> is <code>"insert"</code>, <code>"upsert"</code>, <code>"update"</code> or <code>"delete"</code>; an update or a delete picks rows by <code>key</code>. See <a href="#appender">Loading rows fast</a>.</dd>
+    <dt>con.query_appender(dml, columns, *, source=None)</dt><dd>An appender whose flush runs your statement, which reads the rows as <code>appender_data</code>. <code>columns</code> is a dict from name to SQL type. <code>source</code> is not available yet.</dd>
     <dt>con.duplicate()</dt><dd>A second connection to the same database, with its own transaction.</dd>
     <dt>con.close()</dt><dd>Close the connection. A <code>with</code> block closes it for you.</dd>
+  </dl>
+
+  <h3>The appender</h3>
+  <dl class="ref">
+    <dt>app.append_row(*values)</dt><dd>Keep one row, one value per column. A value that does not convert raises, and nothing of the row is kept.</dd>
+    <dt>app.append_rows(rows)</dt><dd>Keep each row of an iterable of rows. The first that fails raises, and the rows before it stay.</dd>
+    <dt>app.flush()</dt><dd>Write every row kept since the last flush with one statement, then empty the appender. With no rows, nothing runs.</dd>
+    <dt>app.clear()</dt><dd>Drop the rows kept since the last flush.</dd>
+    <dt>with con.appender(...) as app:</dt><dd>Flush when the block ends, or drop the rows if an exception leaves it.</dd>
   </dl>
 
   <h3>Building a plan</h3>

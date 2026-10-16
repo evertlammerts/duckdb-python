@@ -213,15 +213,71 @@ bool KeepsRows(int code) {
 	return code == DUCKDB_V2_ERROR_RESOURCE_IN_USE || code == DUCKDB_V2_ERROR_RUNTIME_INTERRUPT;
 }
 
+constexpr const char *kOneStatement = "query_appender takes one INSERT, UPDATE, DELETE or MERGE INTO statement";
+
+/// The one statement `dml` holds; a syntax error keeps DuckDB's class.
+cxx::SqlStatement OnlyStatement(cxx::Connection &live, const std::string &dml) {
+	auto statements = live.ParseSQL(dml);
+	auto statement = statements.Next();
+	if (!statement) {
+		throw nb::value_error((std::string(kOneStatement) + ", and the text holds none").c_str());
+	}
+	if (statements.Next()) {
+		throw nb::value_error((std::string(kOneStatement) + ", and the text holds more than one").c_str());
+	}
+	return statement;
+}
+
+/// Refuse a statement a flush cannot run over the rows: another kind, or one with parameters.
+void RefuseStatement(const cxx::SqlStatement &statement) {
+	using Kind = cxx::StatementType;
+	const auto kind = statement.GetStatementType();
+	if (kind != Kind::INSERT && kind != Kind::UPDATE && kind != Kind::DELETE && kind != Kind::MERGE_INTO) {
+		throw nb::value_error(
+		    (std::string(kOneStatement) + ", and this statement is of kind " + StatementTypeText(kind)).c_str());
+	}
+	if (!statement.GetParameterNames().empty()) {
+		throw nb::value_error(
+		    "the statement has parameters; an appender's statement reads its values from the rows it buffers, so it "
+		    "takes none");
+	}
+}
+
+/// The SQL type each column's text names, resolved through the connection as SQL resolves a type; DuckDB's refusals
+/// keep their classes.
+std::vector<cxx::LogicalType> DeclaredTypes(cxx::Connection &live,
+                                            const std::vector<std::pair<std::string, std::string>> &columns) {
+	std::vector<cxx::LogicalType> types;
+	for (const auto &[name, text] : columns) {
+		auto type = WithoutGil([&] { return live.GetFactory().ParseType(text); });
+		if (type.GetTypeId() == cxx::LogicalTypeId::SQLNULL) {
+			throw nb::value_error(("column " + name +
+			                       " is declared as the NULL type, which holds nothing but NULL; declare a type that "
+			                       "holds values")
+			                          .c_str());
+		}
+		types.push_back(std::move(type));
+	}
+	return types;
+}
+
 } // namespace
 
-AppenderBuffer::AppenderBuffer(cxx::Connection &connection, const std::string &sql,
+AppenderBuffer::AppenderBuffer(cxx::Connection &connection, cxx::SqlStatement parsed,
                                const std::vector<std::string> &names, const std::vector<cxx::LogicalType> &types)
-    : rows(connection.GetFactory(), types), staging(connection.GetFactory(), types),
-      statement(connection.ParseSQL(sql).Next()) {
+    : rows(connection.GetFactory(), types), staging(connection.GetFactory(), types), statement(std::move(parsed)) {
 	capacity = staging.GetCapacity();
-	statement.AddCollection(kDataName, rows, names);
-	statement.AddCollection(kBufferName, rows, names);
+	for (const char *name : {kDataName, kBufferName}) {
+		try {
+			statement.AddCollection(name, rows, names);
+		} catch (const cxx::InvalidInputException &) {
+			// Its only refusal left: the kind is one it takes, every column has a name, and there is one per column.
+			throw nb::value_error((std::string("the statement's own WITH defines ") + name +
+			                       " (ignoring case), the name the appender's rows are read by; give that table "
+			                       "expression another name")
+			                          .c_str());
+		}
+	}
 }
 
 void AppenderBuffer::Reset() {
@@ -338,14 +394,46 @@ std::unique_ptr<Appender> Appender::ForTable(const std::shared_ptr<Owned<cxx::Co
 	                          ? ColumnsToSet(chosen.names, key_names, key.value_or(key_names))
 	                          : std::vector<std::string> {};
 	const auto sql = RenderStatement(action, target, chosen.names, key_names, assigned);
+	auto statement = WithoutGil([&] { return live.ParseSQL(sql).Next(); });
+	return Create(engine, use, buffers, claimed, std::move(statement), chosen.names, std::move(chosen.types));
+}
+
+std::unique_ptr<Appender> Appender::ForQuery(const std::shared_ptr<Owned<cxx::Connection>> &engine,
+                                             const std::shared_ptr<ConnectionUse> &use, AppenderBuffers &buffers,
+                                             const std::string &dml,
+                                             const std::vector<std::pair<std::string, std::string>> &columns) {
+	Claimed claimed(engine->Acquire(kClosed), *use, ConnectionUse::Needs::NOT_RUNNING);
+	auto &live = *claimed.held.engine;
+	// AddCollection refuses these too, and its refusal is reported as a name the statement's WITH already uses.
+	const auto unnamed =
+	    std::any_of(columns.begin(), columns.end(),
+	                [](const std::pair<std::string, std::string> &column) { return column.first.empty(); });
+	if (columns.empty() || unnamed) {
+		throw nb::value_error("query_appender takes at least one column, each with a name");
+	}
+	auto statement = WithoutGil([&] { return OnlyStatement(live, dml); });
+	RefuseStatement(statement);
+	auto types = DeclaredTypes(live, columns);
+	std::vector<std::string> names;
+	for (const auto &column : columns) {
+		names.push_back(column.first);
+	}
+	return Create(engine, use, buffers, claimed, std::move(statement), names, std::move(types));
+}
+
+std::unique_ptr<Appender> Appender::Create(const std::shared_ptr<Owned<cxx::Connection>> &engine,
+                                           const std::shared_ptr<ConnectionUse> &use, AppenderBuffers &buffers,
+                                           Claimed &claimed, cxx::SqlStatement statement,
+                                           const std::vector<std::string> &names, std::vector<cxx::LogicalType> types) {
+	auto &live = *claimed.held.engine;
 	auto made = WithoutGil([&] {
-		AppenderBuffer buffer(live, sql, chosen.names, chosen.types);
+		AppenderBuffer buffer(live, std::move(statement), names, types);
 		live.Bind(buffer.statement);
 		return buffer;
 	});
 	auto buffer = std::make_shared<Owned<AppenderBuffer>>(engine->Module(), claimed.held.database, std::move(made));
 	buffers.Add(buffer);
-	return std::make_unique<Appender>(AppenderConnection {engine, use}, std::move(buffer), std::move(chosen.types));
+	return std::make_unique<Appender>(AppenderConnection {engine, use}, std::move(buffer), std::move(types));
 }
 
 Appender::Pins Appender::Pin() {

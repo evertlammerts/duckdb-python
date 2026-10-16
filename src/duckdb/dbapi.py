@@ -581,7 +581,12 @@ class Connection:
         return Appender(raw, self._flush_appender)
 
     def query_appender(self, dml: SqlText, columns: _AppenderColumns, *, source: SqlText | None = None) -> Appender:
-        """An appender whose flush runs your statement over the rows it buffers; not available yet."""
+        """An appender whose flush runs your statement over the rows it buffers, read as the table `appender_data`.
+
+        `columns` gives each column's name and SQL type, in order. The arguments are as for
+        `duckdb.frame.Connection.query_appender`, and the flush runs in this connection's transaction, as for
+        `appender`.
+        """
         declared = _read_declared(columns)
         engine = self._engine()
         with self._driving():

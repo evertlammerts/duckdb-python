@@ -460,6 +460,12 @@ public:
 		return Appender::ForTable(connection, use, appenders, table, columns, action, key);
 	}
 
+	/// An appender whose flush runs `dml` over these (name, SQL type) columns, read by it as appender_data.
+	std::unique_ptr<Appender> CreateQueryAppender(const std::string &dml,
+	                                              const std::vector<std::pair<std::string, std::string>> &columns) {
+		return Appender::ForQuery(connection, use, appenders, dml, columns);
+	}
+
 	/// Disconnect now rather than at collection; repeatable, and every other method refuses afterwards.
 	void Close() {
 		appenders.ReleaseAll();
@@ -643,6 +649,7 @@ NB_MODULE(_duckdb, m) {
 	    .def("check_transaction", &Connection::CheckTransaction)
 	    .def("appender", &Connection::CreateAppender, nb::arg("table"), nb::arg("columns").none(), nb::arg("action"),
 	         nb::arg("key").none())
+	    .def("query_appender", &Connection::CreateQueryAppender, nb::arg("dml"), nb::arg("columns"))
 	    .def("close", &Connection::Close);
 
 	nb::class_<Appender>(m, "Appender", nb::type_slots(ChildSlots<Appender>()))

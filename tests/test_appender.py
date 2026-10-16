@@ -24,7 +24,6 @@ if TYPE_CHECKING:
 
     from duckdb.frame.typing import PythonValue
 
-NEEDS_QUERY_FORM = pytest.mark.xfail(strict=True, reason="query_appender is not built yet")
 NEEDS_TABLE_LOOKUP_FIX = pytest.mark.xfail(
     strict=True,
     reason="waits for DuckDB to refuse a view or an ambiguous table name without aborting the open transaction "
@@ -93,6 +92,9 @@ def refused(error: type[Exception], match: str | None = None) -> Iterator[None]:
     with pytest.raises(error, match=match) as caught:
         yield
     assert type(caught.value) is error, f"{type(caught.value).__name__}: {caught.value}"
+    # Its traceback holds this frame and the test's, a cycle that would keep the test's appender, and the warning
+    # for its rows, for whichever later test collects garbage.
+    del caught
 
 
 def discard(app: frame.Appender) -> None:
@@ -248,6 +250,19 @@ class ShrinksAfterRead(collections.abc.Mapping[str, str]):
 
     def __len__(self) -> int:
         return len(self.shown)
+
+
+class GivesANameTwice(collections.abc.Mapping[str, str]):
+    """Column k, given twice by its iteration."""
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(["k", "k"])
+
+    def __getitem__(self, name: str) -> str:
+        return "INTEGER"
+
+    def __len__(self) -> int:
+        return 2
 
 
 REFUSED_TABLE_CASES: list[
@@ -811,7 +826,6 @@ class TestTableActions:
         assert table_rows(con, "groups") == ([(1, "new"), (None, "a")] if action == "update" else [(None, "a")])
 
 
-@NEEDS_QUERY_FORM
 class TestCustomColumns:
     def test_columns_declare_the_buffer_in_order(self, con: frame.Connection) -> None:
         con.run("CREATE TABLE products (id INTEGER, sku VARCHAR)")
@@ -911,8 +925,35 @@ class TestCustomColumns:
         app.flush()
         assert table_rows(con, "pair") == [(1, 2)]
 
+    def test_a_name_that_is_not_a_string_is_refused(self, con: frame.Connection) -> None:
+        with refused(TypeError):
+            con.query_appender("INSERT INTO t (k) FROM appender_data", {1: "INTEGER"})  # type: ignore[dict-item]
 
-@NEEDS_QUERY_FORM
+    def test_a_mapping_that_gives_a_name_twice_is_refused(self, con: frame.Connection) -> None:
+        with refused(ValueError, match="twice"):
+            con.query_appender("INSERT INTO t (k) FROM appender_data", GivesANameTwice())
+
+    @pytest.mark.parametrize(
+        ("declared", "error"),
+        [
+            pytest.param("no_such_type", exceptions.CatalogError, id="unknown"),
+            pytest.param("DECIMAL(40, 2)", exceptions.ProgrammingError, id="out_of_range"),
+            pytest.param("INTEGER(", exceptions.InvalidInputError, id="not_a_type"),
+        ],
+    )
+    def test_a_refused_type_name_aborts_the_open_transaction(
+        self, con: frame.Connection, declared: str, error: type[Exception]
+    ) -> None:
+        con.run("BEGIN")
+        con.run("INSERT INTO t VALUES (1, 'a')")
+        with refused(error):
+            con.query_appender("INSERT INTO t (k) FROM appender_data", {"x": declared})
+        with refused(exceptions.TransactionError):
+            con.run("INSERT INTO t VALUES (2, 'b')")
+        con.run("ROLLBACK")
+        assert table_rows(con) == []
+
+
 class TestStatementKinds:
     @pytest.mark.parametrize(
         ("dml", "expected"),
@@ -1004,21 +1045,94 @@ class TestStatementKinds:
             con.query_appender(dml, KV)
 
     @pytest.mark.parametrize(
-        "dml",
+        ("dml", "row", "expected"),
         [
-            pytest.param("INSERT INTO t FROM appender_data RETURNING k", id="insert"),
-            pytest.param("INSERT OR REPLACE INTO t FROM appender_data RETURNING *", id="or_replace"),
-            pytest.param("UPDATE t SET v = d.v FROM appender_data d WHERE t.k = d.k RETURNING t.k", id="update"),
-            pytest.param("DELETE FROM t USING appender_data d WHERE t.k = d.k RETURNING t.k", id="delete"),
+            pytest.param("INSERT INTO t FROM appender_data RETURNING k", (2, "b"), [(1, "old"), (2, "b")], id="insert"),
+            pytest.param(
+                "INSERT OR REPLACE INTO t FROM appender_data RETURNING *", (1, "b"), [(1, "b")], id="or_replace"
+            ),
+            pytest.param(
+                "UPDATE t SET v = d.v FROM appender_data d WHERE t.k = d.k RETURNING t.k",
+                (1, "b"),
+                [(1, "b")],
+                id="update",
+            ),
+            pytest.param(
+                "DELETE FROM t USING appender_data d WHERE t.k = d.k RETURNING t.k", (1, "b"), [], id="delete"
+            ),
             pytest.param(
                 "MERGE INTO t USING appender_data d ON t.k = d.k WHEN MATCHED THEN DELETE RETURNING merge_action",
+                (1, "b"),
+                [],
                 id="merge",
             ),
         ],
     )
-    def test_returning_is_refused_at_creation(self, con: frame.Connection, dml: str) -> None:
-        with refused(REFUSED):
-            con.query_appender(dml, KV)
+    def test_returning_is_allowed_and_what_it_returns_is_thrown_away(
+        self, con: frame.Connection, dml: str, row: tuple[PythonValue, ...], expected: list[tuple[object, ...]]
+    ) -> None:
+        con.run("INSERT INTO t VALUES (1, 'old')")
+        app = con.query_appender(dml, KV)
+        app.append_row(*row)
+        app.flush()
+        assert table_rows(con) == expected
+
+    @pytest.mark.parametrize(
+        ("dml", "expected"),
+        [
+            pytest.param("INSERT INTO t SELECT k AS returning, v FROM appender_data", [(1, "a")], id="alias"),
+            pytest.param(
+                'INSERT INTO t SELECT d.k, d.v AS "returning" FROM appender_data AS d', [(1, "a")], id="quoted_alias"
+            ),
+            pytest.param(
+                "INSERT INTO t SELECT {'returning': d.k}.returning, d.v FROM appender_data d",
+                [(1, "a")],
+                id="struct_field",
+            ),
+            pytest.param(
+                "INSERT INTO t SELECT d.k, d.v FROM (SELECT k, v, k AS returning FROM appender_data) d "
+                "WHERE d.returning > 0",
+                [(1, "a")],
+                id="column_after_a_dot",
+            ),
+            pytest.param("INSERT INTO t SELECT k, 'returning' FROM appender_data", [(1, "returning")], id="string"),
+            pytest.param("INSERT INTO t SELECT k, v FROM appender_data /* RETURNING k */", [(1, "a")], id="comment"),
+            pytest.param(
+                "WITH logged AS (INSERT INTO log VALUES (5) RETURNING n) "
+                "INSERT INTO t SELECT d.k, d.v FROM appender_data d, logged",
+                [(1, "a")],
+                id="table_expression",
+            ),
+        ],
+    )
+    def test_the_word_returning_outside_a_returning_clause_is_allowed(
+        self, con: frame.Connection, dml: str, expected: list[tuple[object, ...]]
+    ) -> None:
+        con.run("CREATE TABLE log (n INTEGER)")
+        app = con.query_appender(dml, KV)
+        app.append_row(1, "a")
+        app.flush()
+        assert table_rows(con) == expected
+
+    @pytest.mark.parametrize(
+        ("each", "body", "logged"),
+        [
+            pytest.param("STATEMENT", "INSERT INTO log SELECT count(*) FROM t", [(2,), (3,)], id="statement"),
+            pytest.param("ROW", "INSERT INTO log SELECT NEW.k", [(1,), (2,), (3,)], id="row"),
+        ],
+    )
+    def test_a_target_with_a_trigger_is_allowed(
+        self, con: frame.Connection, each: str, body: str, logged: list[tuple[object, ...]]
+    ) -> None:
+        con.run("CREATE TABLE log (n INTEGER)")
+        con.run(f"CREATE TRIGGER logged AFTER INSERT ON t FOR EACH {each} {body}")
+        app = con.query_appender("INSERT INTO t FROM appender_data", KV)
+        app.append_rows([(1, "a"), (2, "b")])
+        app.flush()
+        app.append_row(3, "c")
+        app.flush()
+        assert table_rows(con) == [(1, "a"), (2, "b"), (3, "c")]
+        assert table_rows(con, "log") == logged
 
     @pytest.mark.parametrize(
         "dml",
@@ -1040,6 +1154,43 @@ class TestStatementKinds:
     def test_a_cte_of_the_dml_named_like_ours_is_refused_at_creation(self, con: frame.Connection, name: str) -> None:
         dml = f"WITH {name} AS (SELECT 1 AS k, 'x' AS v) INSERT INTO t FROM appender_data"
         with refused(REFUSED):
+            con.query_appender(dml, KV)
+
+    @pytest.mark.parametrize(
+        "dml",
+        [
+            pytest.param(
+                "WITH appender_data AS (SELECT 1 AS k) UPDATE t SET v = 'x' WHERE k IN (FROM appender_data)",
+                id="update",
+            ),
+            pytest.param(
+                "WITH appender_data AS (SELECT 1 AS k) DELETE FROM t WHERE k IN (FROM appender_data)", id="delete"
+            ),
+            pytest.param(
+                "WITH appender_data AS (SELECT 1 AS k) MERGE INTO t USING appender_data d ON t.k = d.k "
+                "WHEN MATCHED THEN DELETE",
+                id="merge",
+            ),
+        ],
+    )
+    def test_a_cte_named_like_ours_is_refused_in_every_statement_kind(self, con: frame.Connection, dml: str) -> None:
+        with refused(REFUSED, match="defines appender_data "):
+            con.query_appender(dml, KV)
+
+    @pytest.mark.parametrize(
+        ("name", "reserved"),
+        [
+            pytest.param("appender_buffer", "appender_buffer", id="buffer"),
+            pytest.param("appender_data", "appender_data", id="data"),
+            pytest.param("APPENDER_BUFFER", "appender_buffer", id="buffer_ignoring_case"),
+            pytest.param("Appender_Data", "appender_data", id="data_ignoring_case"),
+        ],
+    )
+    def test_the_refusal_of_a_cte_named_like_ours_names_it(
+        self, con: frame.Connection, name: str, reserved: str
+    ) -> None:
+        dml = f"WITH {name} AS (SELECT 1 AS k, 'x' AS v) INSERT INTO t FROM appender_data"
+        with refused(REFUSED, match=f"defines {reserved} "):
             con.query_appender(dml, KV)
 
     def test_a_dml_that_never_reads_the_buffer_is_allowed(self, con: frame.Connection) -> None:
@@ -1092,9 +1243,26 @@ BIND_ERRORS = pytest.mark.parametrize(
 )
 
 
+BAD_QUERY_ARGUMENTS = pytest.mark.parametrize(
+    ("arguments", "error"),
+    [
+        pytest.param({"dml": 5, "columns": KV}, TypeError, id="dml_not_text"),
+        pytest.param(
+            {"dml": "INSERT INTO t FROM appender_data", "columns": ["k"]}, TypeError, id="columns_not_a_mapping"
+        ),
+        pytest.param({"dml": "INSERT INTO t FROM appender_data", "columns": {}}, REFUSED, id="no_columns"),
+        pytest.param(
+            {"dml": "INSERT INTO t FROM appender_data", "columns": KV, "source": "FROM appender_buffer"},
+            exceptions.NotSupportedError,
+            id="source",
+        ),
+        pytest.param({"dml": "SELECT 1", "columns": KV}, REFUSED, id="another_kind"),
+    ],
+)
+
+
 class TestCheckedAtCreation:
     @BIND_ERRORS
-    @NEEDS_QUERY_FORM
     def test_a_statement_that_cannot_bind_is_refused_at_creation(
         self, con: frame.Connection, dml: str, error: type[Exception]
     ) -> None:
@@ -1102,7 +1270,6 @@ class TestCheckedAtCreation:
             con.query_appender(dml, KV)
 
     @BIND_ERRORS
-    @NEEDS_QUERY_FORM
     def test_a_refusal_at_creation_leaves_the_open_transaction_usable(
         self, con: frame.Connection, dml: str, error: type[Exception]
     ) -> None:
@@ -1114,11 +1281,89 @@ class TestCheckedAtCreation:
         con.run("COMMIT")
         assert table_rows(con) == [(1, "a"), (2, "b")]
 
-    @NEEDS_QUERY_FORM
     def test_creation_runs_nothing(self, con: frame.Connection) -> None:
         con.run("INSERT INTO t VALUES (1, 'a')")
         con.query_appender("MERGE INTO t USING appender_data d ON t.k = d.k WHEN NOT MATCHED BY SOURCE THEN DELETE", KV)
         assert table_rows(con) == [(1, "a")]
+
+    @BAD_QUERY_ARGUMENTS
+    def test_an_aborted_transaction_is_reported_before_bad_query_arguments(
+        self, con: frame.Connection, arguments: dict[str, Any], error: type[Exception]
+    ) -> None:
+        con.run("BEGIN")
+        with refused(exceptions.InvalidInputError):
+            con.run("SELECT error('boom')")
+        with refused(exceptions.TransactionError):
+            con.query_appender(**arguments)
+        con.run("ROLLBACK")
+        with refused(error):
+            con.query_appender(**arguments)
+
+    @pytest.mark.parametrize(
+        ("dml", "columns"),
+        [
+            pytest.param("SELECT * FROM appender_data", KV, id="another_kind"),
+            pytest.param("INSERT INTO t SELECT k, ? FROM appender_data", KV, id="parameter"),
+            pytest.param("INSERT INTO t (k) FROM appender_data", {"k": "NULL"}, id="null_type"),
+            pytest.param(
+                "WITH appender_data AS (SELECT 1 AS k, 'x' AS v) INSERT INTO t FROM appender_data",
+                KV,
+                id="reserved_name",
+            ),
+        ],
+    )
+    def test_the_appenders_own_refusals_leave_the_open_transaction_usable(
+        self, con: frame.Connection, dml: str, columns: dict[str, str]
+    ) -> None:
+        con.run("BEGIN")
+        con.run("INSERT INTO t VALUES (1, 'a')")
+        with refused(REFUSED):
+            con.query_appender(dml, columns)
+        con.run("INSERT INTO t VALUES (2, 'b')")
+        con.run("COMMIT")
+        assert table_rows(con) == [(1, "a"), (2, "b")]
+
+    @pytest.mark.parametrize(
+        "create",
+        [
+            pytest.param('con.appender("t")', id="table"),
+            pytest.param(f'con.query_appender("INSERT INTO t FROM appender_data", {KV!r})', id="query"),
+        ],
+    )
+    def test_creation_from_a_python_function_inside_a_query_on_its_connection_is_refused(self, create: str) -> None:
+        code, output = run_isolated(
+            f"""
+            from duckdb import exceptions, frame
+            con = frame.connect()
+            con.run("CREATE TABLE t (k INTEGER PRIMARY KEY, v VARCHAR)")
+            def make_appender(x):
+                try:
+                    {create}
+                    print("created", flush=True)
+                except exceptions.Error as error:
+                    print("refused:", type(error).__name__, flush=True)
+                return x
+            con.create_function("make_appender", make_appender, ["BIGINT"], "BIGINT", stability="volatile")
+            print("started", flush=True)
+            print("query:", frame.sql("SELECT make_appender(1)").rows(con))
+            """
+        )
+        assert code == 0, output
+        assert f"refused: {BUSY.__name__}\n" in output
+        assert "query: [(1,)]" in output
+
+    def test_an_invalid_input_error_of_the_bind_keeps_its_class(self, con: frame.Connection) -> None:
+        with refused(exceptions.InvalidInputError):
+            con.query_appender("INSERT INTO t SELECT * FROM query_table([])", KV)
+
+    def test_creation_beside_an_open_result_resolves_a_catalog_type(self, con: frame.Connection) -> None:
+        con.run("CREATE TYPE mood AS ENUM ('happy', 'sad')")
+        rows = open_result(con)
+        app = con.query_appender("INSERT INTO t SELECT k, m::VARCHAR FROM appender_data", {"k": "INTEGER", "m": "mood"})
+        assert list(rows) == REST_OF_OPEN_RESULT
+        app.append_row(1, "happy")
+        app.flush()
+        assert table_rows(con) == [(1, "happy")]
 
     @pytest.mark.parametrize(
         ("dml", "row", "error"),
@@ -1134,7 +1379,6 @@ class TestCheckedAtCreation:
             ),
         ],
     )
-    @NEEDS_QUERY_FORM
     def test_casts_and_constraints_fail_only_at_flush(
         self, con: frame.Connection, dml: str, row: tuple[PythonValue, ...], error: type[Exception]
     ) -> None:
@@ -1144,7 +1388,6 @@ class TestCheckedAtCreation:
         with refused(error):
             app.flush()
 
-    @NEEDS_QUERY_FORM
     def test_a_custom_dml_into_a_read_only_catalog_fails_only_at_flush(
         self, con: frame.Connection, tmp_path: Path
     ) -> None:
@@ -1161,7 +1404,6 @@ class TestCheckedAtCreation:
             pytest.param(
                 lambda c: c.query_appender("INSERT INTO t FROM appender_data", KV),
                 id="custom",
-                marks=NEEDS_QUERY_FORM,
             ),
         ],
     )
@@ -1179,12 +1421,10 @@ class TestCheckedAtCreation:
             pytest.param(
                 lambda c: c.query_appender("INSERT INTO t FROM appender_data", KV),
                 id="query_with_type_names",
-                marks=NEEDS_QUERY_FORM,
             ),
             pytest.param(
                 lambda c: c.query_appender("INSERT INTO t FROM appender_data", {"k": "INTEGER", "v": "mood"}),
                 id="query_with_a_catalog_type_name",
-                marks=NEEDS_QUERY_FORM,
             ),
         ],
     )
@@ -1349,7 +1589,6 @@ class TestAppendingRunsNothing:
         assert table_rows(other) == []
         discard(app)
 
-    @NEEDS_QUERY_FORM
     def test_appending_runs_no_part_of_the_flush_statement(self, con: frame.Connection, produced: list[int]) -> None:
         app = con.query_appender("INSERT INTO t SELECT tally(k), v FROM appender_data", KV)
         app.append_rows([(1, "a"), (2, "b")])
@@ -1463,7 +1702,6 @@ class TestFlush:
         assert table_rows(con) == [(1, "a", 5)]
 
     @pytest.mark.requires("pandas")
-    @NEEDS_QUERY_FORM
     def test_a_registered_frame_named_in_the_dml_is_read_at_the_flush(self, con: frame.Connection) -> None:
         import pandas as pd
 
@@ -1475,7 +1713,6 @@ class TestFlush:
         assert table_rows(con, "priced") == [(1, 10), (2, 20)]
 
     @pytest.mark.requires("pandas")
-    @NEEDS_QUERY_FORM
     def test_an_object_registered_again_before_a_flush_is_the_one_read(self, con: frame.Connection) -> None:
         import pandas as pd
 
@@ -1488,7 +1725,6 @@ class TestFlush:
         assert table_rows(con, "priced") == [(1, -1)]
 
     @pytest.mark.requires("pandas")
-    @NEEDS_QUERY_FORM
     def test_a_registered_frame_serves_every_flush(self, con: frame.Connection) -> None:
         import pandas as pd
 
@@ -1502,7 +1738,6 @@ class TestFlush:
         assert table_rows(con, "priced") == [(1, 10), (2, 20)]
 
     @pytest.mark.requires("pyarrow")
-    @NEEDS_QUERY_FORM
     def test_a_registered_arrow_table_serves_every_flush(self, con: frame.Connection) -> None:
         import pyarrow as pa
 
@@ -1516,7 +1751,6 @@ class TestFlush:
         assert table_rows(con, "priced") == [(1, 10), (2, 20)]
 
     @pytest.mark.requires("pandas")
-    @NEEDS_QUERY_FORM
     def test_a_dropped_table_is_not_replaced_by_a_python_variable_at_flush(self, con: frame.Connection) -> None:
         import pandas as pd
 
@@ -1535,7 +1769,6 @@ class TestFlush:
         assert table_rows(con, "priced") == []
 
     @pytest.mark.requires("pandas")
-    @NEEDS_QUERY_FORM
     def test_a_dropped_table_is_replaced_by_an_object_registered_under_its_name(self, con: frame.Connection) -> None:
         import pandas as pd
 
@@ -1559,7 +1792,6 @@ class TestFlush:
         app.flush()
         assert table_rows(con) == [(1, "a")]
 
-    @NEEDS_QUERY_FORM
     def test_the_dml_can_read_the_buffer_twice(self, con: frame.Connection) -> None:
         con.run("CREATE TABLE log (k INTEGER, v VARCHAR)")
         app = con.query_appender(
@@ -1603,7 +1835,6 @@ class TestFlush:
         app.flush()
         assert table_rows(other, "scratch") == [(1,)]
 
-    @NEEDS_QUERY_FORM
     def test_an_empty_flush_runs_nothing(self, con: frame.Connection) -> None:
         con.run("INSERT INTO t VALUES (1, 'a')")
         app = con.query_appender(
@@ -1628,7 +1859,6 @@ class TestFlush:
             ),
         ],
     )
-    @NEEDS_QUERY_FORM
     def test_a_key_repeated_within_one_upsert_keeps_one_of_its_rows(self, con: frame.Connection, dml: str) -> None:
         con.run("INSERT INTO t VALUES (1, 'old')")
         app = con.query_appender(dml, KV)
@@ -1637,7 +1867,6 @@ class TestFlush:
         one_per_key = [[(1, a), (2, b)] for a in ("first", "second") for b in ("first", "second")]
         assert table_rows(con) in one_per_key
 
-    @NEEDS_QUERY_FORM
     def test_a_key_repeated_within_one_update_from_applies_one_of_its_rows(self, con: frame.Connection) -> None:
         con.run("INSERT INTO t VALUES (1, 'old')")
         app = con.query_appender("UPDATE t SET v = d.v FROM appender_data d WHERE t.k = d.k", KV)
@@ -1645,7 +1874,6 @@ class TestFlush:
         app.flush()
         assert table_rows(con) in ([(1, "first")], [(1, "second")])
 
-    @NEEDS_QUERY_FORM
     def test_a_key_repeated_within_one_merge_raises(self, con: frame.Connection) -> None:
         con.run("INSERT INTO t VALUES (1, 'old')")
         app = con.query_appender(
@@ -1656,6 +1884,17 @@ class TestFlush:
         app.append_rows([(1, "first"), (1, "second")])
         with refused(exceptions.InvalidInputError, match="more than once"):
             app.flush()
+
+    def test_a_key_repeated_within_one_merge_whose_condition_picks_one_row_applies_it(
+        self, con: frame.Connection
+    ) -> None:
+        con.run("INSERT INTO t VALUES (1, 'old')")
+        app = con.query_appender(
+            "MERGE INTO t USING appender_data d ON t.k = d.k WHEN MATCHED AND d.v = 'first' THEN UPDATE SET v = d.v", KV
+        )
+        app.append_rows([(1, "first"), (1, "second")])
+        app.flush()
+        assert table_rows(con) == [(1, "first")]
 
     @pytest.mark.parametrize("action", ["insert", "upsert", "update", "delete"])
     def test_one_appender_applies_each_of_three_flushes_larger_than_a_staging_chunk(
@@ -1746,7 +1985,61 @@ def ctrl_c_trials(tmp_path_factory: pytest.TempPathFactory) -> list[tuple[str, .
     return trials
 
 
-#: A child that cancels an upsert or update flush while the table's CHECK runs on its rows, then retries the flush.
+#: A child that presses Ctrl-C during a flush inside BEGIN, and tells by the next statement whether it wrote the rows.
+CTRL_C_INSIDE_BEGIN = """
+import _thread
+import signal
+import threading
+import time
+from duckdb import exceptions, frame
+# A background job starts with SIGINT ignored, which would turn the simulated Ctrl-C into nothing
+signal.signal(signal.SIGINT, signal.default_int_handler)
+con = frame.connect(threads=4)
+{setup}
+con.run("BEGIN")
+print("started", flush=True)
+try:
+    app.flush()
+    print("flush: returned")
+except KeyboardInterrupt:
+    print("flush: KeyboardInterrupt")
+written = "SELECT count(*) FROM t"
+try:
+    print("next statement:", frame.sql(written).rows(con))
+except exceptions.Error as error:
+    print("next statement:", type(error).__name__)
+    con.run("ROLLBACK")
+    app.flush()
+else:
+    app.flush()
+    con.run("COMMIT")
+print("kept:", frame.sql(written).rows(con.duplicate()))
+"""
+
+CTRL_C_BEFORE_THE_WRITE = """
+calls = []
+con.create_function("record", calls.append, ["BIGINT"], "BIGINT", null_handling="special", stability="volatile")
+con.run("CREATE TABLE t (k INTEGER CHECK (record(k) IS NULL), v VARCHAR)")
+app = con.appender("t")
+app.append_rows((i, "a") for i in range(1000000))
+# The CHECK runs on every row before the write takes effect, so the Ctrl-C lands while it runs
+def press_once_the_check_runs():
+    while len(calls) < 10000:
+        time.sleep(0.001)
+    _thread.interrupt_main()
+threading.Thread(target=press_once_the_check_runs, daemon=True).start()
+"""
+
+CTRL_C_AFTER_THE_WRITE = """
+# A builtin runs no bytecode, and RETURNING runs it once the insert has written its row
+con.create_function("press", _thread.interrupt_main, [], "BIGINT", null_handling="special", stability="volatile")
+con.run("CREATE TABLE t (k INTEGER, v VARCHAR)")
+app = con.query_appender("INSERT INTO t FROM appender_data RETURNING press()", {"k": "INTEGER", "v": "VARCHAR"})
+app.append_row(1, "a")
+"""
+
+
+#: A child that cancels a flush updating the table's rows while its CHECK runs on them, then retries the flush.
 CANCELLED_TABLE_ACTION = """
 import _thread
 import signal
@@ -1761,7 +2054,7 @@ calls = []
 con.create_function("record", calls.append, ["BIGINT"], "BIGINT", null_handling="special", stability="volatile")
 con.run("CREATE TABLE t (k INTEGER PRIMARY KEY, v VARCHAR CHECK (record(length(v)) IS NULL))")
 con.run("INSERT INTO t SELECT range, 'old' FROM range(1000000)")
-app = con.appender("t", action={action!r}, key={key!r})
+app = {create}
 app.append_rows((i, "new") for i in range({first}, {first} + 1000000))
 calls.clear()
 print("started", flush=True)
@@ -1791,14 +2084,16 @@ CANCELLED_TABLE_ACTION_CASES = [
 ]
 
 
-def cancelled_table_action(action: str, key: list[str] | None, first: int, cancel: str) -> str:
+def cancelled_flush(create: str, first: int, cancel: str) -> str:
     # In a child, because a flush the cancel fails to end would otherwise hang the whole suite.
-    code, output = run_isolated(
-        CANCELLED_TABLE_ACTION.format(action=action, key=key, first=first, cancel=cancel), timeout=60
-    )
+    code, output = run_isolated(CANCELLED_TABLE_ACTION.format(create=create, first=first, cancel=cancel), timeout=60)
     assert code == 0, output
     assert "stored: [(1000000, 0)]" in output
     return output
+
+
+def cancelled_table_action(action: str, key: list[str] | None, first: int, cancel: str) -> str:
+    return cancelled_flush(f'con.appender("t", action={action!r}, key={key!r})', first, cancel)
 
 
 class TestFlushFailures:
@@ -1839,11 +2134,9 @@ class TestFlushFailures:
             pytest.param(("app.clear()", "app.flush()"), "rows: []", id="cleared"),
         ],
     )
-    @NEEDS_QUERY_FORM
     def test_an_interrupted_flush_keeps_the_rows(self, settle: tuple[str, ...], expected: str) -> None:
         assert expected in interrupted_flush(after=settle)
 
-    @NEEDS_QUERY_FORM
     def test_an_interrupted_flush_inside_begin_keeps_the_rows_for_after_rollback(self) -> None:
         output = interrupted_flush(
             before=('con.run("BEGIN")', "con.run(\"INSERT INTO t VALUES (5, 'in the transaction')\")"),
@@ -1852,7 +2145,6 @@ class TestFlushFailures:
         )
         assert "rows: [(1, 'a')]" in output
 
-    @NEEDS_QUERY_FORM
     def test_a_retry_before_rollback_drops_the_rows_of_an_interrupted_flush(self) -> None:
         output = interrupted_flush(
             before=('con.run("BEGIN")',),
@@ -1867,6 +2159,26 @@ class TestFlushFailures:
         )
         assert "retry: TransactionError\n" in output
         assert "rows: []" in output
+
+    @pytest.mark.parametrize(
+        ("setup", "expected"),
+        [
+            pytest.param(
+                CTRL_C_BEFORE_THE_WRITE,
+                ("next statement: TransactionError", "kept: [(1000000,)]"),
+                id="before_the_write",
+            ),
+            pytest.param(CTRL_C_AFTER_THE_WRITE, ("next statement: [(1,)]", "kept: [(1,)]"), id="after_the_write"),
+        ],
+    )
+    def test_after_a_ctrl_c_inside_begin_the_next_statement_tells_whether_the_rows_were_written(
+        self, setup: str, expected: tuple[str, ...]
+    ) -> None:
+        code, output = run_isolated(CTRL_C_INSIDE_BEGIN.format(setup=setup), timeout=60)
+        assert code == 0, output
+        assert "flush: KeyboardInterrupt\n" in output
+        for line in expected:
+            assert f"{line}\n" in output
 
     def test_a_ctrl_c_during_a_flush_writes_each_row_exactly_once(self, ctrl_c_trials: list[tuple[str, ...]]) -> None:
         assert [trial for trial in ctrl_c_trials if trial[-1] != "1"] == []
@@ -1945,7 +2257,24 @@ class TestFlushFailures:
         assert "flush: InterruptError\n" in output
         assert f"after the retry: [{applied}]" in output
 
-    @NEEDS_QUERY_FORM
+    @pytest.mark.parametrize(
+        ("cancel", "raised"),
+        [
+            pytest.param("_thread.interrupt_main()", "KeyboardInterrupt", id="ctrl_c"),
+            pytest.param("con.interrupt()", "InterruptError", id="interrupt"),
+        ],
+    )
+    def test_a_cancelled_flush_of_a_statement_with_returning_keeps_the_rows_for_the_retry(
+        self, cancel: str, raised: str
+    ) -> None:
+        create = (
+            'con.query_appender("UPDATE t SET v = d.v FROM appender_data d WHERE t.k = d.k RETURNING t.k", '
+            '{"k": "INTEGER", "v": "VARCHAR"})'
+        )
+        output = cancelled_flush(create, 0, cancel)
+        assert f"flush: {raised}\n" in output
+        assert "after the retry: [(1000000, 1000000)]" in output
+
     def test_a_flush_interrupted_by_ctrl_c_keeps_the_rows(self) -> None:
         code, output = run_isolated(
             f"""
@@ -2228,7 +2557,6 @@ class TestOneCallerAtATime:
             pytest.param(lambda app: app.clear(), id="clear"),
         ],
     )
-    @NEEDS_QUERY_FORM
     def test_another_thread_is_refused_during_a_flush_without_waiting(
         self,
         con: frame.Connection,
@@ -2248,7 +2576,6 @@ class TestOneCallerAtATime:
         assert table_rows(con) == [(1, "a")]
 
     @pytest.mark.parametrize("call", ["app.append_row(9, 'z')", "app.flush()", "app.clear()"])
-    @NEEDS_QUERY_FORM
     def test_a_callback_during_its_flush_is_refused(self, call: str) -> None:
         code, output = run_isolated(
             f"""
@@ -2421,6 +2748,14 @@ class TestClosedConnection:
         con.close()
         with refused(CLOSED):
             call(app)
+
+    @BAD_QUERY_ARGUMENTS
+    def test_a_closed_connection_is_reported_before_bad_query_arguments(
+        self, con: frame.Connection, arguments: dict[str, Any], error: type[Exception]
+    ) -> None:
+        con.close()
+        with refused(CLOSED):
+            con.query_appender(**arguments)
 
     def test_an_empty_flush_raises_once_the_connection_is_closed(self, con: frame.Connection) -> None:
         app = con.appender("t")
@@ -2644,12 +2979,21 @@ class TestDbapiConnection:
         dcon.rollback()
         assert self.rows(dcon) == [(1, "a"), (2, "b")]
 
-    @NEEDS_QUERY_FORM
     def test_a_query_appender(self, dcon: dbapi.Connection) -> None:
         app = dcon.query_appender("INSERT INTO t FROM appender_data", KV)
         app.append_row(1, "a")
         app.flush()
         assert self.rows(dcon) == [(1, "a")]
+
+    def test_a_refused_type_name_fails_the_transaction_the_connection_opened(self, dcon: dbapi.Connection) -> None:
+        dcon.commit()
+        dcon.cursor().execute("INSERT INTO t VALUES (1, 'a')")
+        with refused(exceptions.CatalogError):
+            dcon.query_appender("INSERT INTO t (k) FROM appender_data", {"k": "no_such_type"})
+        with refused(exceptions.TransactionError):
+            dcon.cursor().execute("INSERT INTO t VALUES (2, 'b')")
+        dcon.rollback()
+        assert self.rows(dcon) == []
 
     def test_commit_does_not_flush(self, dcon: dbapi.Connection) -> None:
         app = dcon.appender("t")
