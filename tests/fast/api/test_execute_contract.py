@@ -173,6 +173,7 @@ class TestExecuteSettles:
         assert con.execute("SELECT count(*), sum(i) FROM t").fetchall() == [(ROWS, ROWS * (ROWS - 1) // 2)]
         assert con.execute("SELECT count(*) FROM duckdb_tables() WHERE table_name = 'u'").fetchall() == [(0,)]
 
+    @pytest.mark.timeout(60, method="thread")
     def test_a_copy_that_fails_late_raises_from_execute(self, con, tmp_path):
         late = f"CASE WHEN i = {ROWS - 1} THEN error('boom')::BIGINT ELSE i END"
         with pytest.raises(duckdb.InvalidInputException, match="boom"):
@@ -457,13 +458,37 @@ class TestOpenResultIsExclusive:
 
     @needs_polars
     @needs_pyarrow
-    def test_two_lazy_polars_frames_of_one_connection_cannot_be_joined(self, con):
+    def test_a_lazy_polars_frame_cannot_open_while_a_result_is_open(self, con):
+        con.execute("CREATE TABLE b AS SELECT range::INT AS k FROM range(3)")
+        frame = con.table("b").pl(lazy=True)
+        reader = con.sql(f"SELECT * FROM range({ROWS})").to_arrow_reader(1000)
+        reader.read_next_batch()
+        try:
+            # polars may re-raise the source's error under its own exception types.
+            with pytest.raises(Exception, match=OPEN_RESULT):
+                frame.collect()
+        finally:
+            reader.close()
+        assert frame.collect().height == 3
+
+    @needs_polars
+    @needs_pyarrow
+    def test_joining_two_lazy_polars_frames_of_one_connection_settles(self, con):
         con.execute("CREATE TABLE a AS SELECT range::INT AS k FROM range(5)")
         con.execute("CREATE TABLE b AS SELECT range::INT AS k FROM range(3)")
         joined = con.table("a").pl(lazy=True).join(con.table("b").pl(lazy=True), on="k")
-        # polars re-raises a source's error under its own exception types.
-        with pytest.raises(Exception, match=REFUSED):
-            joined.collect()
+        # Whether polars opens both sources at once depends on its scheduling, so a refusal (either kind, since the
+        # second call may land during engine work) and the joined rows are both correct; the connection must work after.
+        refused = None
+        try:
+            rows = sorted(joined.collect()["k"].to_list())
+        except Exception as error:
+            refused, rows = str(error), None
+        if refused is not None:
+            assert re.search(REFUSED, refused)
+        else:
+            assert rows == [0, 1, 2]
+        assert con.execute("SELECT 42").fetchall() == [(42,)]
 
     @pytest.mark.parametrize(
         "callback",
