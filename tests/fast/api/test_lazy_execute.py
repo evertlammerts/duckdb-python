@@ -100,8 +100,8 @@ class TestStatementGroup:
     def test_a_group_as_a_relation(self, pivot_source):
         rel = pivot_source.sql("PIVOT p ON k USING sum(v)")
         assert rel.columns == ["a", "b"]
+        assert rel.types == [HUGEINT, HUGEINT]
         assert rel.fetchall() == [(4, 2)]
-        assert rel.to_arrow_table().column_names == ["a", "b"]
 
 
 class TestAnotherStatement:

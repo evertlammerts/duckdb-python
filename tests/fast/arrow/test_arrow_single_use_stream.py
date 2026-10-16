@@ -14,6 +14,7 @@ import io
 import json
 import subprocess
 import sys
+import time
 from collections import Counter
 
 import pytest
@@ -227,7 +228,17 @@ def make_reader(request):
 
     yield duckdb_result_reader
     for source in sources:
-        source.close()
+        # The scanner reads ahead on pyarrow's own threads, which can still be pulling a batch from the reader's
+        # connection after the query that scanned it raised, so a refused close is retried for a moment
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                source.close()
+                break
+            except duckdb.ResourceInUseException:
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.001)
 
 
 class Registered:
