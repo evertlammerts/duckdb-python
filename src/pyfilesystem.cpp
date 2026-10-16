@@ -216,7 +216,27 @@ timestamp_t PythonFilesystem::GetLastModifiedTime(FileHandle &handle) {
 	// TODO: this value should be cached on the PythonFileHandle
 	nb::gil_scoped_acquire gil;
 
-	auto last_mod = filesystem.attr("modified")(handle.path);
+	nb::object last_mod;
+	try {
+		last_mod = filesystem.attr("modified")(handle.path);
+	} catch (nb::python_error &error) {
+		// fsspec's default modified() raises NotImplementedError, and DirectFileReader turns a NotImplementedException
+		// from the metadata it reads into NULL for that column.
+		if (!error.matches(PyExc_NotImplementedError)) {
+			throw;
+		}
+		auto message = GetName() + ": modified() is not implemented";
+		// str() of the exception can itself raise, and the error is still a NotImplementedException without its text.
+		try {
+			auto detail = nb::cast<std::string>(nb::str(error.value()));
+			if (!detail.empty()) {
+				message += ": " + detail;
+			}
+		} catch (nb::python_error &) {
+		} catch (nb::cast_error &) {
+		}
+		throw NotImplementedException(message);
+	}
 
 	// datetime.timestamp() returns a float; truncate to int64 seconds (nb::cast<int64_t> would reject a float)
 	return Timestamp::FromEpochSeconds((int64_t)nb::cast<double>(last_mod.attr("timestamp")()));
