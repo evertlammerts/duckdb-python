@@ -338,7 +338,8 @@ Value TransformTupleToStruct(optional_ptr<ClientContext> context, nb::handle ele
 
 // Tries to convert a Python integer that overflows int64/uint64 into a HUGEINT or UHUGEINT Value
 // by decomposing it into upper and lower 64-bit components. Tries HUGEINT first; falls back to
-// UHUGEINT for large positive values. Returns false if the value doesn't fit in 128 bits.
+// UHUGEINT for large positive values. Returns false if the value doesn't fit in 128 bits, and throws
+// nb::python_error only when CPython itself fails (out of memory).
 static bool TryTransformPythonLongToHugeInt(nb::handle ele, const LogicalType &target_type, Value &result) {
 	auto ptr = ele.ptr();
 
@@ -349,9 +350,14 @@ static bool TryTransformPythonLongToHugeInt(nb::handle ele, const LogicalType &t
 		return false;
 	}
 
-	// Extract upper bits by right-shifting by 64
+	// int's own shift, because an int subclass may override __rshift__ and its stored value is what converts
+	static const auto int_rshift = reinterpret_cast<binaryfunc>(PyType_GetSlot(&PyLong_Type, Py_nb_rshift));
+	D_ASSERT(int_rshift);
 	nb::int_ shift_amount(64);
-	nb::object upper_obj = nb::steal<nb::object>(PyNumber_Rshift(ptr, shift_amount.ptr()));
+	auto upper_obj = nb::steal(int_rshift(ptr, shift_amount.ptr()));
+	if (!upper_obj.is_valid()) {
+		throw nb::python_error();
+	}
 
 	// Try signed 128-bit (hugeint) first
 	int overflow;
@@ -386,11 +392,27 @@ static bool TryTransformPythonLongToHugeInt(nb::handle ele, const LogicalType &t
 // Throwing wrapper for contexts that require a result (e.g. prepared statement parameters).
 static Value TransformPythonLongToHugeInt(nb::handle ele, const LogicalType &target_type) {
 	Value result;
-	if (!TryTransformPythonLongToHugeInt(ele, target_type, result)) {
-		throw InvalidInputException("Python integer too large for 128-bit integer type: %s",
-		                            nb::cast<std::string>(nb::str(ele)));
+	if (TryTransformPythonLongToHugeInt(ele, target_type, result)) {
+		return result;
 	}
-	return result;
+	// int's own repr of an exact int copy, because printing a large int calls the value's own bit_length
+	static const auto int_copy = reinterpret_cast<unaryfunc>(PyType_GetSlot(&PyLong_Type, Py_nb_int));
+	static const auto int_repr = reinterpret_cast<reprfunc>(PyType_GetSlot(&PyLong_Type, Py_tp_repr));
+	D_ASSERT(int_copy && int_repr);
+	auto exact = nb::steal(int_copy(ele.ptr()));
+	if (!exact.is_valid()) {
+		throw nb::python_error();
+	}
+	auto digits = nb::steal<nb::str>(int_repr(exact.ptr()));
+	if (!digits.is_valid()) {
+		// A ValueError is Python's limit on the number of digits it prints.
+		if (!PyErr_ExceptionMatches(PyExc_ValueError)) {
+			throw nb::python_error();
+		}
+		PyErr_Clear();
+		throw InvalidInputException("Python integer too large for 128-bit integer type");
+	}
+	throw InvalidInputException("Python integer too large for 128-bit integer type: %s", nb::cast<std::string>(digits));
 }
 
 // Picks the tightest DuckDB integer type (>=INT32) for an int64 value when no target type is specified.
@@ -403,7 +425,8 @@ static Value SniffIntegerValue(int64_t value) {
 
 // Sniffs the tightest DuckDB integer type for a Python integer.
 // Progressively widens: int64 → uint64 → hugeint → uhugeint.
-// Returns SQLNULL if the value doesn't fit in any DuckDB integer type (> 128-bit).
+// Returns SQLNULL if the value doesn't fit in any DuckDB integer type (> 128-bit), and throws nb::python_error only
+// when CPython itself fails (out of memory).
 LogicalType SniffPythonIntegerType(nb::handle ele) {
 	auto ptr = ele.ptr();
 

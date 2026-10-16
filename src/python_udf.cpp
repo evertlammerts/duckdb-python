@@ -21,13 +21,46 @@
 
 namespace duckdb {
 
+//! A lone surrogate has no UTF-8 encoding, so it is escaped the way Python prints it in a traceback.
+static string ToUTF8(const nb::object &text) {
+	if (!text.is_valid()) {
+		throw nb::python_error();
+	}
+	auto encoded = nb::steal<nb::bytes>(PyUnicode_AsEncodedString(text.ptr(), "utf-8", "backslashreplace"));
+	if (!encoded.is_valid()) {
+		throw nb::python_error();
+	}
+	return string(encoded.c_str(), encoded.size());
+}
+
 //! Format a caught Python error as "TypeName: message" (e.g. "AttributeError: error"). nanobind's
 //! python_error::what() returns the full multi-line traceback (interpreter/pytest frames included),
 //! too noisy to embed verbatim in the DuckDB error message.
 static string FormatUDFPythonError(nb::python_error &error) {
-	auto type_name = nb::cast<std::string>(nb::str(nb::object(error.type().attr("__name__"))));
-	auto message = nb::cast<std::string>(nb::str(error.value()));
-	return type_name + ": " + message;
+	auto type_name = ToUTF8(nb::steal(PyType_GetName(reinterpret_cast<PyTypeObject *>(error.type().ptr()))));
+	try {
+		return type_name + ": " + ToUTF8(nb::str(error.value()));
+	} catch (nb::python_error &) {
+		// The message comes from the exception's own __str__, and its failure must not replace the error reported.
+		return type_name;
+	}
+}
+
+//! return_null turns only Exception subclasses other than MemoryError into NULL; everything else reaches the caller as
+//! forward_error would report it.
+static void ThrowUnlessReturnNull(PythonExceptionHandling exception_handling, nb::python_error &error) {
+	switch (exception_handling) {
+	case PythonExceptionHandling::FORWARD_ERROR:
+		break;
+	case PythonExceptionHandling::RETURN_NULL:
+		if (error.matches(PyExc_Exception) && !error.matches(PyExc_MemoryError)) {
+			return;
+		}
+		break;
+	default:
+		throw NotImplementedException("Exception handling type not implemented");
+	}
+	throw InvalidInputException("Python exception occurred while executing the UDF: %s", FormatUDFPythonError(error));
 }
 
 static nb::list ConvertToSingleBatch(vector<LogicalType> &types, vector<string> &names, DataChunk &input,
@@ -232,16 +265,9 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 		bool exception_occurred = false;
 		if (ret == nullptr && PyErr_Occurred()) {
 			exception_occurred = true;
-			if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
-				auto exception = nb::python_error();
-				throw InvalidInputException("Python exception occurred while executing the UDF: %s",
-				                            FormatUDFPythonError(exception));
-			} else if (exception_handling == PythonExceptionHandling::RETURN_NULL) {
-				PyErr_Clear();
-				python_object = nb::module_::import_("pyarrow").attr("nulls")(count);
-			} else {
-				throw NotImplementedException("Exception handling type not implemented");
-			}
+			auto exception = nb::python_error();
+			ThrowUnlessReturnNull(exception_handling, exception);
+			python_object = nb::module_::import_("pyarrow").attr("nulls")(count);
 		} else {
 			python_object = nb::steal<nb::object>(ret);
 		}
@@ -257,8 +283,9 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 			try {
 				python_object = nb::module_::import_("pyarrow").attr("lib").attr("Table").attr("from_arrays")(
 				    single_array, nb::arg("names") = single_name);
-			} catch (nb::python_error &) {
-				throw InvalidInputException("Could not convert the result into an Arrow Table");
+			} catch (nb::python_error &e) {
+				throw InvalidInputException("Could not convert the result into an Arrow Table: %s",
+				                            FormatUDFPythonError(e));
 			}
 		}
 		// Convert the pyarrow result back to a DuckDB datachunk
@@ -358,17 +385,10 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 
 			if (!ret || ret.is_none()) {
 				if (PyErr_Occurred()) {
-					if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
-						auto exception = nb::python_error();
-						throw InvalidInputException("Python exception occurred while executing the UDF: %s",
-						                            FormatUDFPythonError(exception));
-					}
-					if (exception_handling == PythonExceptionHandling::RETURN_NULL) {
-						PyErr_Clear();
-						FlatVector::SetNull(result, row, true);
-						continue;
-					}
-					throw NotImplementedException("Exception handling type not implemented");
+					auto exception = nb::python_error();
+					ThrowUnlessReturnNull(exception_handling, exception);
+					FlatVector::SetNull(result, row, true);
+					continue;
 				}
 				if (default_null_handling) {
 					throw InvalidInputException(NullHandlingError());
