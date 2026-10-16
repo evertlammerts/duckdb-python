@@ -114,8 +114,7 @@ nb::object MakePyArrowScalar(const Value &constant, const string &timezone_confi
 	}
 	case LogicalTypeId::TIMESTAMP_TZ_NS: {
 		nb::handle date_type = import_cache.pyarrow.timestamp();
-		auto converted_value = Timestamp::GetEpochNanoSeconds(timestamp_t(constant.GetValue<int64_t>()));
-		return dataset_scalar(scalar(converted_value, date_type("ns", nb::arg("tz") = timezone_config)));
+		return dataset_scalar(scalar(constant.GetValue<int64_t>(), date_type("ns", nb::arg("tz") = timezone_config)));
 	}
 	case LogicalTypeId::UTINYINT: {
 		nb::handle integer_type = import_cache.pyarrow.uint8();
