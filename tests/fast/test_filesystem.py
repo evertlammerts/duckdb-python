@@ -141,9 +141,14 @@ class TestPythonFilesystem:
             duckdb_cursor.register_filesystem(None)
 
     @pytest.mark.skipif(sys.version_info < (3, 8), reason="ArrowFSWrapper requires python 3.8 or higher")
-    def test_arrow_fs_wrapper(self, tmp_path: Path, duckdb_cursor: DuckDBPyConnection):
+    def test_arrow_fs_wrapper(self, tmp_path: Path, duckdb_cursor: DuckDBPyConnection, monkeypatch: pytest.MonkeyPatch):
         fs = pytest.importorskip("pyarrow.fs")
         from fsspec.implementations.arrow import ArrowFSWrapper
+
+        # fsspec parses local://C:/... with the drive letter as the URL's host and drops it, so pyarrow resolves the
+        # remaining /Users/... against the drive of the working directory. Running from tmp_path makes that the right
+        # drive even when the tests run from a checkout on another drive, like D: on the GitHub Windows runners.
+        monkeypatch.chdir(tmp_path)
 
         local = fs.LocalFileSystem()
         local_fsspec = ArrowFSWrapper(local, skip_instance_cache=True)
