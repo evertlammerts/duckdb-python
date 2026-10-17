@@ -13,7 +13,7 @@ from decimal import Decimal
 from typing import NamedTuple
 
 import pytest
-from _pushdown_helpers import assert_fully_pushed
+from _pushdown_helpers import assert_fully_pushed, assert_nothing_pushed
 
 import duckdb
 
@@ -635,7 +635,10 @@ def test_zoned_timestamp_scanner_and_reader_sources_match_native(
     assert _arrow_rows(duckdb_cursor, predicate) == expected
     # A record batch reader can be scanned once, so the plan check gets a fresh source.
     duckdb_cursor.register("arrow_t", _zoned_source(unit, column_zone, shape, source)[1])
-    assert_fully_pushed(duckdb_cursor, _arrow_query(predicate), len(expected))
+    if source == "record_batch_reader":
+        assert_nothing_pushed(duckdb_cursor, _arrow_query(predicate))
+    else:
+        assert_fully_pushed(duckdb_cursor, _arrow_query(predicate), len(expected))
 
 
 class _SchemaExportOnly:

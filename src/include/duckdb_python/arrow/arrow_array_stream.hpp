@@ -73,7 +73,8 @@ public:
 	PythonTableArrowArrayStreamFactory(nb::object arrow_object_p, const ClientProperties &client_properties_p,
 	                                   PyArrowObjectType arrow_type_p)
 	    : arrow_object(std::move(arrow_object_p)), client_properties(client_properties_p),
-	      cached_arrow_type(arrow_type_p), single_use(IsSingleUse(arrow_object.obj, arrow_type_p)) {
+	      cached_arrow_type(arrow_type_p), single_use(IsSingleUse(arrow_object.obj, arrow_type_p)),
+	      scans_stream_directly(ScansStreamDirectly(arrow_object.obj, arrow_type_p)) {
 		cached_schema.release = nullptr;
 	}
 
@@ -98,6 +99,8 @@ public:
 	const PyArrowObjectType cached_arrow_type;
 	//! A pyarrow RecordBatchReader, which hands out its batches once however many streams it exports
 	const bool single_use;
+	//! DuckDB reads the object's C stream unchanged, so the bind must push neither projection nor filters into it
+	const bool scans_stream_directly;
 
 	//! Cached Arrow table from an unfiltered .collect().to_arrow() on a LazyFrame.
 	//! Avoids re-reading from source and re-converting on repeated scans without filters.
@@ -110,5 +113,6 @@ private:
 	static nb::object ProduceScanner(nb::object &arrow_scanner, nb::handle &arrow_obj_handle,
 	                                 ArrowStreamParameters &parameters, const ClientProperties &client_properties);
 	static bool IsSingleUse(nb::handle arrow_object, PyArrowObjectType type);
+	static bool ScansStreamDirectly(nb::handle arrow_object, PyArrowObjectType type);
 };
 } // namespace duckdb

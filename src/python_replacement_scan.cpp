@@ -55,23 +55,10 @@ static void CreateArrowScan(const string &name, nb::object entry, TableFunctionR
 		auto dependency_item = PythonDependencyItem::Create(stream_messages);
 		external_dependency->AddDependency("replacement_cache", std::move(dependency_item));
 	} else {
-		table_function.bind_info = make_shared_ptr<PythonTableArrowArrayStreamFactory>(entry, client_properties, type);
-
-		if (type == PyArrowObjectType::PyCapsule) {
-			// Disable projection+filter pushdown for bare capsules (single-use, no PyArrow wrapper)
-			table_function.function = make_uniq<FunctionExpression>("arrow_scan_dumb", std::move(children));
-		} else if (type == PyArrowObjectType::PyCapsuleInterface) {
-			// Try to load pyarrow.dataset for pushdown support
-			auto &cache = *DuckDBPyConnection::ImportCache();
-			if (!cache.pyarrow.dataset()) {
-				// No pyarrow.dataset: scan without pushdown, DuckDB handles projection/filter post-scan
-				table_function.function = make_uniq<FunctionExpression>("arrow_scan_dumb", std::move(children));
-			} else {
-				table_function.function = make_uniq<FunctionExpression>("arrow_scan", std::move(children));
-			}
-		} else {
-			table_function.function = make_uniq<FunctionExpression>("arrow_scan", std::move(children));
-		}
+		auto factory = make_shared_ptr<PythonTableArrowArrayStreamFactory>(entry, client_properties, type);
+		auto function_name = factory->scans_stream_directly ? "arrow_scan_dumb" : "arrow_scan";
+		table_function.bind_info = std::move(factory);
+		table_function.function = make_uniq<FunctionExpression>(function_name, std::move(children));
 		external_dependency->AddDependency("replacement_cache", PythonDependencyItem::Create(entry));
 	}
 	table_function.external_dependency = std::move(external_dependency);

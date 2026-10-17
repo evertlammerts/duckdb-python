@@ -204,10 +204,14 @@ def arrow_scan_block(plan: str) -> str | None:
     return "\n".join(result)
 
 
+ARROW_SCAN_FUNCTIONS = ("ARROW_SCAN", "ARROW_SCAN_DUMB")
+
+
 def _find_arrow_scan_nodes(nodes, parent_is_filter=False):
     """Recursively find all Arrow scan nodes in JSON plan tree.
 
-    Returns list of (node, has_filter_ancestor) tuples.
+    An Arrow scan is ARROW_SCAN, which takes pushed projections and filters, or ARROW_SCAN_DUMB, which reads a
+    stream unchanged. Returns list of (node, has_filter_ancestor) tuples.
     """
     result = []
     for node in nodes:
@@ -216,7 +220,7 @@ def _find_arrow_scan_nodes(nodes, parent_is_filter=False):
 
         extra_info = node.get("extra_info", {})
         function = extra_info.get("Function", "")
-        if function == "ARROW_SCAN" or node_name == "ARROW_SCAN":
+        if function in ARROW_SCAN_FUNCTIONS or node_name in ARROW_SCAN_FUNCTIONS:
             result.append((node, parent_is_filter or is_filter))
 
         children = node.get("children", [])
@@ -263,3 +267,32 @@ def assert_fully_pushed(con, query: str, expected_count: int) -> None:
     assert scan["extra_info"].get("Filters"), "filter was not pushed into the Arrow scan"
     assert not has_filter_above, "a FILTER operator stayed above the Arrow scan"
     assert scan["intermediate_rows"] == expected_count, "the Arrow scan emitted rows the pushed filter rejects"
+
+
+def physical_plan(explain_rows):
+    """Return the physical plan from the rows of EXPLAIN (FORMAT JSON), whatever explain_output is set to."""
+    import json
+
+    plans = dict(explain_rows)
+    assert "physical_plan" in plans, f"EXPLAIN returned no physical plan, only {sorted(plans)}"
+    return json.loads(plans["physical_plan"])
+
+
+def assert_plan_pushes_nothing(plan) -> None:
+    """Assert that a physical plan reads its only Arrow scan as a stream that DuckDB consumes unchanged.
+
+    That scan is ARROW_SCAN_DUMB, which takes neither a filter nor a projection; the filter stays in a FILTER
+    operator above it.
+    """
+    scans = _find_arrow_scan_nodes(plan)
+    assert len(scans) == 1
+    scan, has_filter_above = scans[0]
+    assert scan.get("name") == "ARROW_SCAN_DUMB", f"the stream is read by {scan.get('name')}, not ARROW_SCAN_DUMB"
+    assert not scan["extra_info"].get("Filters"), "a filter was pushed into the Arrow scan"
+    assert not scan["extra_info"].get("Projections"), "a projection was pushed into the Arrow scan"
+    assert has_filter_above, "no FILTER operator above the Arrow scan"
+
+
+def assert_nothing_pushed(con, query: str) -> None:
+    """Assert that the physical plan of `query` passes assert_plan_pushes_nothing."""
+    assert_plan_pushes_nothing(physical_plan(con.execute(f"EXPLAIN (FORMAT JSON) {query}").fetchall()))

@@ -12,7 +12,7 @@ import datetime as dt
 import json
 
 import pytest
-from _pushdown_helpers import _find_arrow_scan_nodes
+from _pushdown_helpers import _find_arrow_scan_nodes, assert_nothing_pushed
 
 import duckdb
 
@@ -293,4 +293,7 @@ def test_every_arrow_input(con, unit, zone, factory):
     register_fresh_input()
     native_count = _assert_matches_native(con, predicate)
     register_fresh_input()
-    _assert_pushed(con, predicate, native_count)
+    if factory is _as_record_batch_reader:
+        assert_nothing_pushed(con, f"SELECT x FROM arrow_t WHERE {predicate}")
+    else:
+        _assert_pushed(con, predicate, native_count)

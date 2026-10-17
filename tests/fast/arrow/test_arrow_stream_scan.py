@@ -103,23 +103,23 @@ class TestPyCapsuleInterfaceMultiScan:
         assert sorted(result) == [(1, 10), (2, 20), (3, 30)]
 
 
-class TestPyCapsuleInterfacePushdown:
-    """PyCapsuleInterface objects get projection and filter pushdown via arrow_scan."""
+class TestPyCapsuleInterfaceProjectionAndFilter:
+    """DuckDB applies projection and filters to a PyCapsuleInterface object's stream itself, after the scan."""
 
-    def test_projection_pushdown(self, duckdb_cursor):
-        """Selecting a subset of columns only reads those columns."""
+    def test_projection(self, duckdb_cursor):
+        """Selecting a subset of columns returns only those columns."""
         obj = ArrowStream(pa.table({"a": [1, 2, 3], "b": [10, 20, 30], "c": ["x", "y", "z"]}))  # noqa: F841
         result = duckdb_cursor.sql("SELECT a FROM obj").fetchall()
         assert result == [(1,), (2,), (3,)]
 
-    def test_filter_pushdown(self, duckdb_cursor):
-        """Filters are pushed down to the arrow scanner."""
+    def test_filter(self, duckdb_cursor):
+        """A filter returns only the matching rows."""
         obj = ArrowStream(pa.table({"a": [1, 2, 3, 4, 5], "b": [10, 20, 30, 40, 50]}))  # noqa: F841
         result = duckdb_cursor.sql("SELECT a, b FROM obj WHERE a > 3").fetchall()
         assert sorted(result) == [(4, 40), (5, 50)]
 
-    def test_combined_pushdown(self, duckdb_cursor):
-        """Projection + filter pushdown combined."""
+    def test_projection_and_filter(self, duckdb_cursor):
+        """Projection and filter combined."""
         obj = ArrowStream(pa.table({"a": [1, 2, 3, 4, 5], "b": [10, 20, 30, 40, 50]}))  # noqa: F841
         result = duckdb_cursor.sql("SELECT b FROM obj WHERE a <= 2").fetchall()
         assert sorted(result) == [(10,), (20,)]
@@ -226,11 +226,11 @@ class TestRecordBatchReaderSingleUse:
     """RecordBatchReaders are inherently single-use streams.
 
     RecordBatchReaders represent forward-only streams (e.g., reading from a socket or file). Scanning one more
-    than once is covered in test_arrow_single_use_stream.py; a single scan still gets pushdown.
+    than once is covered in test_arrow_single_use_stream.py; a single scan reads the stream once, unchanged.
     """
 
-    def test_has_pushdown(self, duckdb_cursor):
-        """RecordBatchReader gets projection/filter pushdown (not materialized)."""
+    def test_projection_and_filter_return_rows(self, duckdb_cursor):
+        """A projection and a filter over a reader return the matching rows."""
         reader = pa.RecordBatchReader.from_batches(  # noqa: F841
             pa.schema([("a", pa.int64()), ("b", pa.int64())]),
             [pa.record_batch([pa.array([1, 2, 3]), pa.array([10, 20, 30])], names=["a", "b"])],
@@ -314,11 +314,10 @@ assert result != [(i,) for i in range(5)], "Expected no data due to lock content
 
 
 class TestPyCapsuleInterfaceNoPyarrowDataset:
-    """Tier B fallback: PyCapsuleInterface objects are scannable without pyarrow.dataset.
+    """Arrow streams and Tables are scannable when pyarrow.dataset cannot be imported.
 
-    When pyarrow.dataset is not available, PyCapsuleInterface uses arrow_scan_dumb
-    (no pushdown). DuckDB handles projection/filter post-scan.
-    Run in subprocess to avoid polluting the test process's import state.
+    DuckDB applies projection and filter after the scan. Run in a subprocess to keep the import block out of the
+    test process.
     """
 
     def _run_in_subprocess(self, code):
@@ -335,6 +334,10 @@ class TestPyCapsuleInterfaceNoPyarrowDataset:
     def test_pycapsule_interface_no_pyarrow_dataset(self):
         """PyCapsuleInterface objects can be scanned without pyarrow.dataset."""
         self._run_in_subprocess("""\
+import sys
+
+sys.modules["pyarrow.dataset"] = None
+
 import pyarrow as pa
 import duckdb
 
@@ -354,6 +357,10 @@ assert sorted(result) == [(1, 10), (2, 20), (3, 30)], f"Unexpected: {result}"
     def test_pycapsule_interface_no_pyarrow_dataset_projection(self):
         """DuckDB applies projection post-scan when pyarrow.dataset unavailable."""
         self._run_in_subprocess("""\
+import sys
+
+sys.modules["pyarrow.dataset"] = None
+
 import pyarrow as pa
 import duckdb
 
@@ -370,9 +377,35 @@ result = duckdb.sql("SELECT a FROM obj").fetchall()
 assert result == [(1,), (2,), (3,)], f"Unexpected: {result}"
 """)
 
-    def test_pycapsule_interface_no_pyarrow_dataset_filter(self):
-        """DuckDB applies filter post-scan when pyarrow.dataset unavailable."""
+    def test_tables_no_pyarrow_dataset_projection_and_filter(self):
+        """Without pyarrow.dataset, DuckDB applies projection and filter to a Table, pandas or polars frame."""
+        pytest.importorskip("pandas")
+        pytest.importorskip("polars")
         self._run_in_subprocess("""\
+import sys
+
+sys.modules["pyarrow.dataset"] = None
+
+import pandas as pd
+import polars as pl
+import pyarrow as pa
+import duckdb
+
+arrow_table = pa.table({"a": [1, 2, 3, 4, 5], "b": [10, 20, 30, 40, 50]})
+pandas_frame = arrow_table.to_pandas(types_mapper=pd.ArrowDtype)
+polars_frame = pl.from_arrow(arrow_table)
+for name in ("arrow_table", "pandas_frame", "polars_frame"):
+    result = duckdb.sql(f"SELECT b FROM {name} WHERE a > 3").fetchall()
+    assert sorted(result) == [(40,), (50,)], f"{name}: {result}"
+""")
+
+    def test_pycapsule_interface_no_pyarrow_dataset_filter(self):
+        """Without pyarrow.dataset, DuckDB applies projection and filter to a third party stream and a reader."""
+        self._run_in_subprocess("""\
+import sys
+
+sys.modules["pyarrow.dataset"] = None
+
 import pyarrow as pa
 import duckdb
 
@@ -384,7 +417,10 @@ class MyStream:
     def __arrow_c_schema__(self):
         return self.tbl.schema.__arrow_c_schema__()
 
-obj = MyStream(pa.table({"a": [1, 2, 3, 4, 5], "b": [10, 20, 30, 40, 50]}))
-result = duckdb.sql("SELECT a, b FROM obj WHERE a > 3").fetchall()
-assert sorted(result) == [(4, 40), (5, 50)], f"Unexpected: {result}"
+tbl = pa.table({"a": [1, 2, 3, 4, 5], "b": [10, 20, 30, 40, 50]})
+obj = MyStream(tbl)
+reader = pa.RecordBatchReader.from_batches(tbl.schema, tbl.to_batches())
+for name in ("obj", "reader"):
+    result = duckdb.sql(f"SELECT b FROM {name} WHERE a > 3").fetchall()
+    assert sorted(result) == [(40,), (50,)], f"{name}: {result}"
 """)

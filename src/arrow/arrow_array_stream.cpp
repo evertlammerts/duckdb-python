@@ -30,20 +30,20 @@ string TypeText(nb::object value) {
 	return nb::cast<string>(value);
 }
 
-//! The fallback for a reader whose pyarrow left sys.modules: an extension type's module and name come from tp_name,
-//! while a Python class can forge both through __module__ and __qualname__, so it is never the reader.
-bool IsPyarrowReaderType(PyTypeObject *type) {
+//! An extension type's module and name come from tp_name, while a Python class can forge both through __module__ and
+//! __qualname__, so a Python class is never the pyarrow type itself
+bool IsPyarrowLibType(PyTypeObject *type, const char *type_name) {
 	if (PyType_GetFlags(type) & Py_TPFLAGS_HEAPTYPE) {
 		return false;
 	}
 	auto name = TypeText(nb::steal(PyType_GetName(type)));
 	auto module = TypeText(nb::steal(PyObject_GetAttrString(reinterpret_cast<PyObject *>(type), "__module__")));
-	return name == "RecordBatchReader" && module == "pyarrow.lib";
+	return name == type_name && module == "pyarrow.lib";
 }
 
 //! Walks the bases the type was created with, not __mro__, which a metaclass can replace; each ancestor once, since
 //! a diamond hierarchy repeats them
-bool DerivesFromPyarrowReader(PyTypeObject *type) {
+bool DerivesFromPyarrowType(PyTypeObject *type, const char *type_name) {
 	vector<PyTypeObject *> pending {type};
 	unordered_set<PyTypeObject *> seen;
 	while (!pending.empty()) {
@@ -52,7 +52,7 @@ bool DerivesFromPyarrowReader(PyTypeObject *type) {
 		if (!seen.insert(current).second) {
 			continue;
 		}
-		if (IsPyarrowReaderType(current)) {
+		if (IsPyarrowLibType(current, type_name)) {
 			return true;
 		}
 		auto bases = static_cast<PyObject *>(PyType_GetSlot(current, Py_tp_bases));
@@ -81,7 +81,21 @@ bool PythonTableArrowArrayStreamFactory::IsSingleUse(nb::handle arrow_object, Py
 			       0;
 		}
 	}
-	return DerivesFromPyarrowReader(Py_TYPE(arrow_object.ptr()));
+	return DerivesFromPyarrowType(Py_TYPE(arrow_object.ptr()), "RecordBatchReader");
+}
+
+bool PythonTableArrowArrayStreamFactory::ScansStreamDirectly(nb::handle arrow_object, PyArrowObjectType type) {
+	if (type == PyArrowObjectType::PyCapsule) {
+		return true;
+	}
+	if (type != PyArrowObjectType::PyCapsuleInterface && type != PyArrowObjectType::Table) {
+		return false;
+	}
+	// pyarrow's Scanner reads a stream ahead of the query without bound, so only a Table, in memory already, goes
+	// through it. The cost: DuckDB converts every column of each batch, used or not, which took 33 ms against 3 ms
+	// for a 1M row, 20 string column reader.
+	auto is_table = type == PyArrowObjectType::Table || DerivesFromPyarrowType(Py_TYPE(arrow_object.ptr()), "Table");
+	return !is_table || !DuckDBPyConnection::ImportCache()->pyarrow.dataset();
 }
 
 namespace {
@@ -248,9 +262,7 @@ PythonTableArrowArrayStreamFactory::ProduceStream(ArrowStreamParameters &paramet
 			    "with _export_to_c() so that DuckDB can extract the schema without consuming the stream.");
 		}
 
-		auto &import_cache_check = *DuckDBPyConnection::ImportCache();
-		if (import_cache_check.pyarrow.dataset()) {
-			// Tier A: full pushdown via pyarrow.dataset
+		if (!scans_stream_directly) {
 			// Import as RecordBatchReader, feed through Scanner.from_batches for projection/filter pushdown.
 			auto pyarrow_lib_module = nb::module_::import_("pyarrow").attr("lib");
 			auto import_func = pyarrow_lib_module.attr("RecordBatchReader").attr("_import_from_c");
@@ -267,7 +279,6 @@ PythonTableArrowArrayStreamFactory::ProduceStream(ArrowStreamParameters &paramet
 			export_to_c(reinterpret_cast<uint64_t>(&res->arrow_array_stream));
 			return res;
 		} else {
-			// Tier B: no pyarrow.dataset, return raw stream (no pushdown)
 			// DuckDB applies projection/filter post-scan via arrow_scan_dumb
 			auto res = make_uniq<ArrowArrayStreamWrapper>();
 			res->arrow_array_stream = *stream;
