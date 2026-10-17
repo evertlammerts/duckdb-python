@@ -14,10 +14,9 @@ class ArrowStream:
     """Minimal PyCapsuleInterface wrapper around a PyArrow table.
 
     This represents any third-party library (not Polars, not PyArrow) that
-    implements the Arrow PyCapsule interface. DuckDB's replacement scan
-    handles Polars and PyArrow types explicitly before falling through to
-    PyCapsuleInterface detection via GetArrowType(), so we need a wrapper
-    like this to exercise that code path.
+    implements the Arrow PyCapsule interface. DuckDB recognises Polars and
+    PyArrow objects by their own classes, so we need a wrapper like this to
+    exercise the path for an object that only exports an Arrow C stream.
     """
 
     def __init__(self, tbl) -> None:
@@ -104,7 +103,7 @@ class TestPyCapsuleInterfaceMultiScan:
 
 
 class TestPyCapsuleInterfacePushdown:
-    """PyCapsuleInterface objects get projection and filter pushdown via arrow_scan."""
+    """PyCapsuleInterface objects are read with only the columns a query uses, and filtered correctly."""
 
     def test_projection_pushdown(self, duckdb_cursor):
         """Selecting a subset of columns only reads those columns."""
@@ -113,7 +112,7 @@ class TestPyCapsuleInterfacePushdown:
         assert result == [(1,), (2,), (3,)]
 
     def test_filter_pushdown(self, duckdb_cursor):
-        """Filters are pushed down to the arrow scanner."""
+        """A filter on such an object returns the rows the engine selects."""
         obj = ArrowStream(pa.table({"a": [1, 2, 3, 4, 5], "b": [10, 20, 30, 40, 50]}))  # noqa: F841
         result = duckdb_cursor.sql("SELECT a, b FROM obj WHERE a > 3").fetchall()
         assert sorted(result) == [(4, 40), (5, 50)]
@@ -251,7 +250,7 @@ class TestPyCapsuleConsumed:
         tbl = pa.table({"a": [1]})
         capsule = tbl.__arrow_c_stream__()  # noqa: F841
         duckdb_cursor.sql("SELECT * FROM capsule").fetchall()
-        # Error thrown by GetArrowType() in pyconnection.cpp when it detects the released stream.
+        # The replacement scan refuses the released stream while it classifies the capsule.
         with pytest.raises(duckdb.InvalidInputException, match="The ArrowArrayStream was already released"):
             duckdb_cursor.sql("SELECT * FROM capsule")
 
@@ -316,8 +315,8 @@ assert result != [(i,) for i in range(5)], "Expected no data due to lock content
 class TestPyCapsuleInterfaceNoPyarrowDataset:
     """Tier B fallback: PyCapsuleInterface objects are scannable without pyarrow.dataset.
 
-    When pyarrow.dataset is not available, PyCapsuleInterface uses arrow_scan_dumb
-    (no pushdown). DuckDB handles projection/filter post-scan.
+    When pyarrow.dataset is not available, a PyCapsuleInterface object is still
+    read: DuckDB picks the columns from the full stream and filters above the scan.
     Run in subprocess to avoid polluting the test process's import state.
     """
 

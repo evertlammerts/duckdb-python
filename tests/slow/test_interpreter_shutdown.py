@@ -330,6 +330,52 @@ ORDINARY_SHUTDOWN = [
     ),
     pytest.param(
         """
+        import atexit
+        import duckdb
+        import pyarrow as pa
+
+        tbl = pa.table({"a": [1, 2, 3]})
+
+        def late():
+            print("atexit", duckdb.sql("select sum(a) from tbl").fetchall(), flush=True)
+
+        atexit.register(late)
+        print("body", duckdb.sql("select sum(a) from tbl").fetchall(), flush=True)
+        print("BODY_DONE", flush=True)
+        """,
+        ("body [(6,)]", "atexit [(6,)]"),
+        True,
+        id="atexit_handler_scans_after_a_body_arrow_scan",
+        marks=_needs("pyarrow"),
+    ),
+    pytest.param(
+        """
+        import atexit
+        import duckdb
+        import pyarrow as pa
+
+        # Built here, since building arrays during exit imports pandas, which can no longer start threads.
+        batches = [pa.record_batch([pa.array(range(i * 100, i * 100 + 100))], names=["i"]) for i in range(500)]
+        con = duckdb.connect(config={"threads": 4})
+        kept = []
+
+        def late():
+            reader = pa.RecordBatchReader.from_batches(batches[0].schema, (batch for batch in batches))
+            con.register("r", reader)
+            result = con.execute("SELECT i FROM r")
+            print("atexit", result.fetchone(), flush=True)
+            kept.append((result, reader))
+
+        atexit.register(late)
+        print("BODY_DONE", flush=True)
+        """,
+        ("atexit (0,)",),
+        False,
+        id="atexit_handler_leaves_an_arrow_query_open",
+        marks=_needs("pyarrow"),
+    ),
+    pytest.param(
+        """
         import duckdb
 
         class Finalized:

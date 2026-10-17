@@ -10,20 +10,21 @@
 #include "duckdb/common/arrow/arrow_converter.hpp"
 #include "duckdb/common/arrow/arrow_wrapper.hpp"
 #include "duckdb/common/arrow/arrow_appender.hpp"
-#include "duckdb_python/arrow/arrow_array_stream.hpp"
+#include "duckdb_python/arrow/arrow_importer.hpp"
+#include "duckdb_python/arrow/python_arrow_scan.hpp"
 #include "duckdb/function/table/arrow.hpp"
 #include "duckdb/function/function.hpp"
 #include "duckdb_python/numpy/numpy_scan.hpp"
 #include "duckdb_python/arrow/arrow_export_utils.hpp"
 #include "duckdb/common/types/arrow_aux_data.hpp"
-#include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "duckdb/function/table/arrow/arrow_duck_schema.hpp"
 #include "duckdb_python/python_conversion.hpp"
+#include "duckdb_python/exceptions.hpp"
 
 namespace duckdb {
 
 //! A lone surrogate has no UTF-8 encoding, so it is escaped the way Python prints it in a traceback.
-static string ToUTF8(const nb::object &text) {
+string ToUTF8(const nb::object &text) {
 	if (!text.is_valid()) {
 		throw nb::python_error();
 	}
@@ -37,7 +38,7 @@ static string ToUTF8(const nb::object &text) {
 //! Format a caught Python error as "TypeName: message" (e.g. "AttributeError: error"). nanobind's
 //! python_error::what() returns the full multi-line traceback (interpreter/pytest frames included),
 //! too noisy to embed verbatim in the DuckDB error message.
-static string FormatUDFPythonError(nb::python_error &error) {
+string FormatUDFPythonError(nb::python_error &error) {
 	auto type_name = ToUTF8(nb::steal(PyType_GetName(reinterpret_cast<PyTypeObject *>(error.type().ptr()))));
 	try {
 		return type_name + ": " + ToUTF8(nb::str(error.value()));
@@ -112,60 +113,92 @@ void AreExtensionsRegistered(const LogicalType &arrow_type, const LogicalType &d
 		}
 	}
 }
+//! The stream's text for its last error; a producer may leave get_last_error unset or answer null
+static string LastStreamError(ArrowArrayStream &stream) {
+	const char *text = stream.get_last_error ? stream.get_last_error(&stream) : nullptr;
+	return text ? text : "no error message";
+}
+
 static void ConvertArrowTableToVector(const nb::object &table, Vector &out, ClientContext &context, idx_t count) {
 	DUCKDB_PY_ASSERT_GIL_HELD();
-	// Declared before the GIL release so the factory's last reference drops with the GIL held
-	TableFunctionRef empty;
-	empty.bind_info = make_shared_ptr<PythonTableArrowArrayStreamFactory>(table, context.GetClientProperties(),
-	                                                                      PyArrowObjectType::Table);
+	ArrowArrayStreamWrapper stream;
+	{
+		nb::object capsule;
+		try {
+			capsule = table.attr("__arrow_c_stream__")();
+		} catch (nb::python_error &error) {
+			throw InvalidInputException("exporting the result of the Arrow function failed: %s",
+			                            FormatUDFPythonError(error));
+		}
+		auto &exported = InCapsule<ArrowArrayStream>(capsule, "arrow_array_stream", "the result of the Arrow function");
+		stream.arrow_array_stream = exported;
+		exported.release = nullptr;
+	}
 	nb::gil_scoped_release gil;
 
-	// Get the functions we need
-	auto function = ArrowTableFunction::ArrowScanFunction;
-	auto bind = ArrowTableFunction::ArrowScanBind;
-	auto init_global = ArrowTableFunction::ArrowScanInitGlobal;
-	auto init_local = ArrowTableFunction::ArrowScanInitLocalInternal;
-
-	// Prepare the inputs for the bind
-	vector<Value> children;
-	named_argument_map_t named_params;
-	vector<LogicalType> input_types;
-	vector<Identifier> input_names;
-
-	TableFunction dummy_table_function;
-	dummy_table_function.name = "ConvertArrowTableToVector";
-	BoundTableFunction bound_function(dummy_table_function);
-	TableFunctionBindInput bind_input(children, named_params, input_types, input_names, nullptr, nullptr,
-	                                  bound_function, empty);
-	vector<LogicalType> return_types;
-	vector<Identifier> return_names;
-
-	auto bind_data = bind(context, bind_input, return_types, return_names);
-
+	// Read here rather than through ArrowArrayStreamWrapper::GetSchema, whose text for a table without columns differs.
+	ArrowSchemaWrapper schema;
+	auto &raw = stream.arrow_array_stream;
+	if (raw.get_schema(&raw, &schema.arrow_schema) != 0) {
+		throw InvalidInputException("arrow_scan: get_schema failed(): %s", LastStreamError(raw));
+	}
+	if (!schema.arrow_schema.release) {
+		throw InvalidInputException("arrow_scan: released schema passed");
+	}
+	if (schema.arrow_schema.n_children < 1) {
+		throw InvalidInputException("Provided table/dataframe must have at least one column");
+	}
+	auto arrow_table = make_shared_ptr<ArrowTableSchema>();
+	ArrowTableFunction::PopulateArrowTableSchema(context, *arrow_table, schema.arrow_schema);
+	auto return_types = arrow_table->GetTypes();
 	if (return_types.size() != 1) {
 		throw InvalidInputException(
 		    "The returned table from a pyarrow scalar udf should only contain one column, found %d",
 		    return_types.size());
 	}
-
 	AreExtensionsRegistered(return_types[0], out.GetType());
+	arrow_table->GetColumns().at(0)->ThrowIfInvalid();
 
-	DataChunk result;
-	// Reserve for STANDARD_VECTOR_SIZE instead of count, in case the returned table contains too many tuples
-	result.Initialize(context, return_types, STANDARD_VECTOR_SIZE);
-
-	vector<column_t> column_ids = {0};
-	TableFunctionInitInput input(bind_data.get(), column_ids, vector<idx_t>(), nullptr);
-	auto global_state = init_global(context, input);
-	auto local_state = init_local(context, input, global_state.get());
-
-	TableFunctionInput function_input(bind_data.get(), local_state.get(), global_state.get());
-	function(context, function_input, result);
-	if (result.size() != count) {
-		throw InvalidInputException("Returned pyarrow table should have %d tuples, found %d", count, result.size());
+	ArrowBatchImporter importer(context, arrow_table, {0});
+	// Stays null when one chunk holds every row, which is then cast straight into out.
+	unique_ptr<Vector> gathered;
+	idx_t total = 0;
+	while (true) {
+		ArrowArrayWrapper batch;
+		if (raw.get_next(&raw, &batch.arrow_array) != 0) {
+			throw InvalidInputException("arrow_scan: get_next failed(): %s", LastStreamError(raw));
+		}
+		if (!batch.arrow_array.release) {
+			break;
+		}
+		importer.Append(batch.arrow_array);
+		while (true) {
+			// A fresh chunk each time, since resetting one would rewrite the buffers a cast into out may share.
+			DataChunk chunk;
+			chunk.Initialize(context, return_types, STANDARD_VECTOR_SIZE);
+			if (!importer.Next(chunk)) {
+				break;
+			}
+			const auto rows = chunk.size();
+			if (total + rows <= count) {
+				if (rows == count) {
+					VectorOperations::Cast(context, chunk.data[0], out, count);
+				} else {
+					if (!gathered) {
+						gathered = make_uniq<Vector>(return_types[0], count);
+					}
+					VectorOperations::Copy(chunk.data[0], *gathered, rows, 0, total);
+				}
+			}
+			total += rows;
+		}
 	}
-
-	VectorOperations::Cast(context, result.data[0], out, count);
+	if (total != count) {
+		throw InvalidInputException("Returned pyarrow table should have %d tuples, found %d", count, total);
+	}
+	if (gathered) {
+		VectorOperations::Cast(context, *gathered, out, count);
+	}
 	out.Flatten();
 	out.Verify();
 }

@@ -1,9 +1,10 @@
-"""Timestamp comparison filter pushdown into Arrow scans.
+"""Timestamp comparison filters over Arrow scans.
 
-A filter pushed into an Arrow scan has to keep exactly the rows the same filter keeps on a
-native table holding the same data, for every Arrow timestamp unit, with and without a time
-zone. The Arrow scan does not re-apply a pushed filter, so a constant converted to the wrong
-unit returns wrong rows or raises.
+A filter over an Arrow scan has to keep exactly the rows the same filter keeps on a native table holding the same
+data, for every Arrow timestamp unit, with and without a time zone. A pyarrow Table, a Scanner, a RecordBatchReader
+and the frames converted to a Table refuse filters, so DuckDB applies them above the scan. A pyarrow Dataset and a
+polars LazyFrame take a filter into their own scan, which does not apply it again, so a constant converted to the
+wrong unit there returns wrong rows or raises.
 """
 
 from __future__ import annotations
@@ -12,9 +13,7 @@ import datetime as dt
 import json
 
 import pytest
-from _pushdown_helpers import _find_arrow_scan_nodes
-
-import duckdb
+from _pushdown_helpers import _find_arrow_scan_nodes, assert_kept_above
 
 pa = pytest.importorskip("pyarrow")
 pa_ds = pytest.importorskip("pyarrow.dataset")
@@ -28,23 +27,6 @@ INFINITY_SENTINEL = 2**63 - 1
 
 UNITS = ["s", "ms", "us", "ns"]
 ZONES = {"naive": None, "utc": "UTC", "new_york": "America/New_York"}
-
-IN_LIST_FROM_MICROSECOND_DATETIMES = pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="IN builds its list through PythonObject::FromValue, a microsecond datetime; follow up",
-)
-POLARS_CONSTANT_FROM_MICROSECOND_DATETIME = pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="the polars backend builds its constant through PythonObject::FromValue, a microsecond datetime; follow up",
-)
-POLARS_CONSTANT_IN_SESSION_ZONE = pytest.mark.xfail(
-    strict=True,
-    raises=duckdb.Error,
-    reason="the polars backend's constant carries the session time zone, which polars refuses to compare with another"
-    " zone; follow up",
-)
 
 
 def _column_values(unit):
@@ -70,13 +52,8 @@ def _literals(unit, zone):
     }
 
 
-def _unit_zone_params(zones, marked=None):
-    marked = marked or {}
-    return [
-        pytest.param(unit, zone, id=f"{unit}-{zone_id}", marks=marked.get((unit, zone_id), ()))
-        for unit in UNITS
-        for zone_id, zone in zones.items()
-    ]
+def _unit_zone_params(zones):
+    return [pytest.param(unit, zone, id=f"{unit}-{zone_id}") for unit in UNITS for zone_id, zone in zones.items()]
 
 
 UNIT_ZONES = _unit_zone_params(ZONES)
@@ -123,15 +100,12 @@ INPUTS = {
 }
 
 
-def _input_params(marked):
-    return [
-        pytest.param(
-            unit, zone, factory, id=f"{unit}-{zone_id}-{input_id}", marks=marked.get((unit, zone_id, input_id), ())
-        )
-        for unit in UNITS
-        for zone_id, zone in ZONES.items()
-        for input_id, factory in INPUTS.items()
-    ]
+INPUT_PARAMS = [
+    pytest.param(unit, zone, factory, id=f"{unit}-{zone_id}-{input_id}")
+    for unit in UNITS
+    for zone_id, zone in ZONES.items()
+    for input_id, factory in INPUTS.items()
+]
 
 
 @pytest.fixture
@@ -149,8 +123,10 @@ def _make_tables(con, unit, zone, factory=_as_table):
             "s": pa.StructArray.from_arrays([values], ["p"]),
         }
     )
+    con.register("native_source", table)
+    con.execute("CREATE OR REPLACE TABLE native_t AS SELECT * FROM native_source")
+    con.unregister("native_source")
     con.register("arrow_t", factory(table))
-    con.execute("CREATE OR REPLACE TABLE native_t AS SELECT * FROM arrow_t")
     return lambda: con.register("arrow_t", factory(table))
 
 
@@ -179,29 +155,48 @@ def _assert_pushed(con, predicate, native_count):
     assert _scan_emitted_rows(con, query) == native_count
 
 
+def _assert_kept_above(con, predicate, native_count):
+    assert_kept_above(con, f"SELECT x FROM arrow_t WHERE {predicate}", native_count)
+
+
+# A Table keeps every filter above the scan; a Dataset and a LazyFrame take the ones they evaluate exactly, so for
+# them the rows against native are what is checked.
+FILTER_FACTORIES = [
+    pytest.param(_as_table, id="table"),
+    pytest.param(_as_dataset, id="dataset"),
+    pytest.param(_as_polars_lazyframe, id="lazyframe"),
+]
+
+
+def _assert_rows_and_table_placement(con, factory, predicate):
+    native_count = _assert_matches_native(con, predicate)
+    if factory is _as_table:
+        _assert_kept_above(con, predicate, native_count)
+
+
+@pytest.mark.parametrize("factory", FILTER_FACTORIES)
 @pytest.mark.parametrize("constant", ["epoch", "tick"])
 @pytest.mark.parametrize("op", ["=", "<>", "<", "<=", ">", ">="])
 @pytest.mark.parametrize(("unit", "zone"), UNIT_ZONES)
-def test_comparison(con, unit, zone, op, constant):
-    _make_tables(con, unit, zone)
-    predicate = f"p {op} {_literals(unit, zone)[constant]}"
-    _assert_pushed(con, predicate, _assert_matches_native(con, predicate))
+def test_comparison(con, unit, zone, op, constant, factory):
+    _make_tables(con, unit, zone, factory)
+    _assert_rows_and_table_placement(con, factory, f"p {op} {_literals(unit, zone)[constant]}")
 
 
+@pytest.mark.parametrize("factory", FILTER_FACTORIES)
 @pytest.mark.parametrize(("unit", "zone"), UNIT_ZONES)
-def test_between(con, unit, zone):
-    _make_tables(con, unit, zone)
+def test_between(con, unit, zone, factory):
+    _make_tables(con, unit, zone, factory)
     literals = _literals(unit, zone)
-    predicate = f"p BETWEEN {literals['noon']} AND {literals['tick']}"
-    _assert_pushed(con, predicate, _assert_matches_native(con, predicate))
+    _assert_rows_and_table_placement(con, factory, f"p BETWEEN {literals['noon']} AND {literals['tick']}")
 
 
+@pytest.mark.parametrize("factory", FILTER_FACTORIES)
 @pytest.mark.parametrize("bound", ["'infinity'", "'-infinity'"])
 @pytest.mark.parametrize(("unit", "zone"), UNIT_ZONES)
-def test_infinite_bound(con, unit, zone, bound):
-    _make_tables(con, unit, zone)
-    predicate = f"p < {bound}" if bound == "'infinity'" else f"p > {bound}"
-    _assert_pushed(con, predicate, _assert_matches_native(con, predicate))
+def test_infinite_bound(con, unit, zone, bound, factory):
+    _make_tables(con, unit, zone, factory)
+    _assert_rows_and_table_placement(con, factory, f"p < {bound}" if bound == "'infinity'" else f"p > {bound}")
 
 
 @pytest.mark.parametrize(
@@ -225,27 +220,23 @@ def test_infinity_sentinels_in_the_data(con, op, constant):
     _assert_matches_native(con, f"p {op} {constant}")
 
 
+@pytest.mark.parametrize("factory", FILTER_FACTORIES)
 @pytest.mark.parametrize(("unit", "zone"), UNIT_ZONES)
-def test_struct_field(con, unit, zone):
-    _make_tables(con, unit, zone)
-    predicate = f"s.p = {_literals(unit, zone)['tick']}"
-    _assert_pushed(con, predicate, _assert_matches_native(con, predicate))
+def test_struct_field(con, unit, zone, factory):
+    _make_tables(con, unit, zone, factory)
+    _assert_rows_and_table_placement(con, factory, f"s.p = {_literals(unit, zone)['tick']}")
 
 
+@pytest.mark.parametrize("factory", FILTER_FACTORIES)
 @pytest.mark.parametrize(("unit", "zone"), UNIT_ZONES)
-def test_in_list(con, unit, zone):
-    """The optimizer pushes an IN list as an optional filter and keeps a FILTER above the scan."""
-    _make_tables(con, unit, zone)
+def test_in_list(con, unit, zone, factory):
+    """A Table refuses the IN list, so DuckDB filters it above the scan."""
+    _make_tables(con, unit, zone, factory)
     literals = _literals(unit, zone)
-    predicate = f"p IN ({literals['epoch']}, {literals['noon']})"
-    native_count = _assert_matches_native(con, predicate)
-    assert _scan_emitted_rows(con, f"SELECT x FROM arrow_t WHERE {predicate}") == native_count
+    _assert_rows_and_table_placement(con, factory, f"p IN ({literals['epoch']}, {literals['noon']})")
 
 
-@pytest.mark.parametrize(
-    ("unit", "zone"),
-    _unit_zone_params(ZONES, {("ns", zone_id): IN_LIST_FROM_MICROSECOND_DATETIMES for zone_id in ZONES}),
-)
+@pytest.mark.parametrize(("unit", "zone"), UNIT_ZONES)
 def test_in_list_at_column_precision(con, unit, zone):
     _make_tables(con, unit, zone)
     literals = _literals(unit, zone)
@@ -255,7 +246,7 @@ def test_in_list_at_column_precision(con, unit, zone):
 @pytest.mark.parametrize("predicate", ["p IS NULL", "p IS NOT NULL"])
 @pytest.mark.parametrize(("unit", "zone"), UNIT_ZONES)
 def test_null_check(con, unit, zone, predicate):
-    """The optimizer keeps IS NULL above Arrow scans, see test_is_null_pushes_into_arrow_scan."""
+    """A Table refuses IS NULL as it refuses every filter, so only the rows are checked here."""
     _make_tables(con, unit, zone)
     _assert_matches_native(con, predicate)
 
@@ -267,25 +258,20 @@ def test_python_datetime_parameter(con, unit, zone):
     _assert_matches_native(con, "p = ?", [noon])
 
 
+@pytest.mark.parametrize("factory", FILTER_FACTORIES)
 @pytest.mark.parametrize("op", ["=", "<"])
 @pytest.mark.parametrize(("unit", "zone"), UNIT_WITH_ZONES)
-def test_session_time_zone_differs_from_column(con, unit, zone, op):
+def test_session_time_zone_differs_from_column(con, unit, zone, op, factory):
     con.execute("SET TimeZone = 'Asia/Kathmandu'")
-    _make_tables(con, unit, zone)
-    predicate = f"p {op} {_literals(unit, zone)['tick']}"
-    _assert_pushed(con, predicate, _assert_matches_native(con, predicate))
+    _make_tables(con, unit, zone, factory)
+    _assert_rows_and_table_placement(con, factory, f"p {op} {_literals(unit, zone)['tick']}")
 
 
-@pytest.mark.parametrize(
-    ("unit", "zone", "factory"),
-    _input_params(
-        {
-            ("ns", "naive", "polars_lazyframe"): POLARS_CONSTANT_FROM_MICROSECOND_DATETIME,
-            ("ns", "utc", "polars_lazyframe"): POLARS_CONSTANT_FROM_MICROSECOND_DATETIME,
-            **{(unit, "new_york", "polars_lazyframe"): POLARS_CONSTANT_IN_SESSION_ZONE for unit in UNITS},
-        }
-    ),
-)
+# The sources that take a filter into their own scan; every other input refuses it.
+ACCEPTING_INPUTS = (_as_dataset, _as_polars_lazyframe)
+
+
+@pytest.mark.parametrize(("unit", "zone", "factory"), INPUT_PARAMS)
 def test_every_arrow_input(con, unit, zone, factory):
     """A RecordBatchReader can be read only once, so every scanning query gets a fresh input."""
     register_fresh_input = _make_tables(con, unit, zone, factory)
@@ -293,4 +279,8 @@ def test_every_arrow_input(con, unit, zone, factory):
     register_fresh_input()
     native_count = _assert_matches_native(con, predicate)
     register_fresh_input()
-    _assert_pushed(con, predicate, native_count)
+    # One nanosecond past noon has no exact Python datetime, so no source is offered that constant.
+    if factory in ACCEPTING_INPUTS and unit != "ns":
+        _assert_pushed(con, predicate, native_count)
+    else:
+        _assert_kept_above(con, predicate, native_count)

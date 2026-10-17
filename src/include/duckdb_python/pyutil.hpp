@@ -28,6 +28,20 @@ struct PyUtil {
 		return result != 0;
 	}
 
+	// Whether obj has the attribute. Unlike PyObject_HasAttr, which takes any exception for a missing attribute, only
+	// an AttributeError means missing; any other exception propagates as nb::python_error.
+	static bool HasAttribute(nb::handle obj, const char *name) {
+		auto value = nb::steal(PyObject_GetAttrString(obj.ptr(), name));
+		if (value.is_valid()) {
+			return true;
+		}
+		if (PyErr_ExceptionMatches(PyExc_AttributeError)) {
+			PyErr_Clear();
+			return false;
+		}
+		throw nb::python_error();
+	}
+
 	// Lenient string conversion: str as is, bytes UTF-8 decoded, anything else via str().
 	// nanobind's cast<std::string> rejects bytes/scalars. For identifier/param-key/separator sites.
 	static std::string CastToString(nb::handle obj) {
