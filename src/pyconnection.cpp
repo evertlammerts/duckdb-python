@@ -556,9 +556,15 @@ DuckDBPyConnection::RegisterScalarUDF(const string &name, const nb::callable &ud
                                       const nb::object &return_type_p, PythonUDFType type,
                                       FunctionNullHandling null_handling, PythonExceptionHandling exception_handling,
                                       bool side_effects) {
+	// Refused before any user code or type lookup runs, so neither works on a busy connection or on its open result
+	engine::VerifyNoOpenResult(*con.GetConnection().context);
+	// Converted before the claim, because a type name is parsed on this connection, which refuses while claimed
+	auto scalar_function = CreateScalarUDF(name, udf, parameters_p, return_type_p, type == PythonUDFType::ARROW,
+	                                       null_handling, exception_handling, side_effects);
 	auto &connection = con.GetConnection();
 	auto &context = *connection.context;
-	// Held from the check to the change, so no result can open in between and be ended by it
+	// Held from the check to the change, so no result can open in between and be ended by it, and checked again
+	// because converting runs user code that can open a result
 	engine::ConnectionClaim claim(context);
 	engine::VerifyNoOpenResult(context);
 
@@ -570,8 +576,6 @@ DuckDBPyConnection::RegisterScalarUDF(const string &name, const nb::callable &ud
 		                              "functions with the same name is not supported yet, please remove it first",
 		                              name);
 	}
-	auto scalar_function = CreateScalarUDF(name, udf, parameters_p, return_type_p, type == PythonUDFType::ARROW,
-	                                       null_handling, exception_handling, side_effects);
 	CreateScalarFunctionInfo info(scalar_function);
 
 	context.RegisterFunction(info);
