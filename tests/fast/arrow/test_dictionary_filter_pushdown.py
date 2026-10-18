@@ -14,9 +14,10 @@ from decimal import Decimal
 from typing import NamedTuple
 
 import pytest
-from _pushdown_helpers import assert_fully_pushed, assert_kept_above
+from _pushdown_helpers import assert_fully_pushed, assert_kept_above, assert_query_keeps_filter_above
 
 import duckdb
+from duckdb._sources.to_arrow import dictionary_kernels_exact
 
 pa = pytest.importorskip("pyarrow")
 pc = pytest.importorskip("pyarrow.compute")
@@ -296,6 +297,9 @@ def test_filter_through_a_dataset_matches_native(duckdb_cursor, case, shape, op)
     col = _register_shape(duckdb_cursor, case, shape, _as_dataset)
     predicate = _predicate(case, op, col)
     assert _arrow_rows(duckdb_cursor, predicate) == _rows(duckdb_cursor, "native_t", predicate)
+    # A pyarrow whose kernels read a valid index to a NULL dictionary entry as a value gets no dictionary predicate.
+    if not dictionary_kernels_exact():
+        assert_query_keeps_filter_above(duckdb_cursor, _arrow_query(predicate))
 
 
 @pytest.mark.parametrize(("case", "shape", "op"), UNFILTERABLE_BY_PYARROW)
@@ -595,7 +599,10 @@ def test_dataset_with_an_export_only_schema_matches_native(duckdb_cursor, shape,
     predicate = f"p {ZONED_COMPARISONS[op]} {_micros_literal(GRID_OFFSETS[offset] * UNIT_MICROS['ms'] // 2)}"
     expected = _rows(duckdb_cursor, "native_t", predicate)
     assert _arrow_rows(duckdb_cursor, predicate) == expected
-    assert_fully_pushed(duckdb_cursor, _arrow_query(predicate), len(expected))
+    if shape == "dictionary" and not dictionary_kernels_exact():
+        assert_kept_above(duckdb_cursor, _arrow_query(predicate), len(expected))
+    else:
+        assert_fully_pushed(duckdb_cursor, _arrow_query(predicate), len(expected))
 
 
 # The first stored values whose microsecond form overflows int64; one unit less still fits.

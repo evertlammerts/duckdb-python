@@ -2146,6 +2146,7 @@ def batches():
 def run(threads, entry):
     slow_reader = ds.Scanner.from_batches(batches(), schema=schema).to_reader()
     with duckdb.connect(config={"threads": threads}) as con:
+        con.execute("SET enable_progress_bar = false")
         if entry == "register":
             con.register("slow_reader", slow_reader)
         elif entry == "capsule":
@@ -2175,6 +2176,7 @@ data = ("a,b\\n" + "".join(f"{i},x{i}\\n" for i in range(300_000))).encode()
 for threads in (1, 4):
     reader = csv.open_csv(io.BytesIO(data), read_options=csv.ReadOptions(block_size=65_536))
     with duckdb.connect(config={"threads": threads}) as con:
+        con.execute("SET enable_progress_bar = false")
         con.register("csv_reader", reader)
         print(threads, con.execute("SELECT count(*), sum(a) FROM csv_reader").fetchall(), flush=True)
 """

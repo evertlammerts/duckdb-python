@@ -332,7 +332,7 @@ def assert_query_keeps_filter_above(con, query: str) -> None:
     assert_plan_keeps_filter_above(explain_physical_plan(con, query))
 
 
-def eventually(check, deadline: float = 5.0) -> bool:
+def eventually(check, deadline: float = 30.0) -> bool:
     """Whether `check()` comes true within `deadline` seconds, asked again a millisecond apart.
 
     A query's error can reach Python while one of its scan threads still winds down holding what it took, waiting

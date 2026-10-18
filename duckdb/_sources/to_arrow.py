@@ -46,6 +46,9 @@ _UNITS = {name: unit for unit, name in _NAIVE_TIMESTAMPS.items()}
 
 _PER_SECOND = {"s": 1, "ms": 1_000, "us": 1_000_000}
 
+# pyarrow before 26 compares, matches and NULL tests a valid dictionary index pointing at a NULL entry as a value.
+DICTIONARY_KERNELS_FIXED_IN = 26
+
 
 def to_arrow(node: Node, schema: pa.Schema) -> pc.Expression:
     """`node` over `schema`, the schema the source declares, or `Untranslatable` where pyarrow would differ."""
@@ -100,7 +103,7 @@ def nan_may_satisfy(node: Node, schema: pa.Schema) -> bool:
             case Unary(op="NOT", operand=operand):
                 pending.append((operand, True))
             case Binary(left=Col(parts=parts)) | In(operand=Col(parts=parts)) | Postfix(operand=Col(parts=parts)) if (
-                pa.types.is_floating(_column(schema, parts)[1])
+                pa.types.is_floating(_resolve(schema, parts)[1])
             ):
                 if negated or (isinstance(current, Binary) and current.op in (">", ">=", "!=")):
                     return True
@@ -163,6 +166,21 @@ def _engine_type(kind: pa.DataType) -> str | None:
 
 def _column(schema: pa.Schema, parts: tuple[str, ...]) -> tuple[pc.Expression, Any]:
     """The field expression for `parts` and its value type; a constant is checked against the type where it is used."""
+    field, kind, encoded = _resolve(schema, parts)
+    if encoded and not dictionary_kernels_exact():
+        raise Untranslatable(parts)
+    return field, kind
+
+
+def dictionary_kernels_exact() -> bool:
+    """Whether the installed pyarrow evaluates comparisons, membership and NULL tests on a dictionary column exactly."""
+    import pyarrow
+
+    return int(pyarrow.__version__.split(".", 1)[0]) >= DICTIONARY_KERNELS_FIXED_IN
+
+
+def _resolve(schema: pa.Schema, parts: tuple[str, ...]) -> tuple[pc.Expression, Any, bool]:
+    """The field expression for `parts`, its value type, and whether the column is dictionary encoded."""
     import pyarrow as pa
     import pyarrow.compute as pc
 
@@ -178,12 +196,13 @@ def _column(schema: pa.Schema, parts: tuple[str, ...]) -> tuple[pc.Expression, A
         if child < 0:
             raise Untranslatable(parts)
         kind = kind.field(child).type
-    if pa.types.is_dictionary(kind):
+    encoded = pa.types.is_dictionary(kind)
+    if encoded:
         kind = kind.value_type
     # A union has no validity of its own, so whether its row is NULL is not plainly the engine's answer.
     if pa.types.is_union(kind):
         raise Untranslatable(kind)
-    return pc.field(*parts), kind
+    return pc.field(*parts), kind, encoded
 
 
 def _scalar(constant: Lit, kind: pa.DataType) -> pa.Scalar:

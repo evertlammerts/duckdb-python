@@ -58,6 +58,8 @@ COLUMNS = {
 @pytest.fixture
 def con() -> duckdb.DuckDBPyConnection:
     connection = duckdb.connect()
+    # A zoned constant renders in the session time zone, so the pinned texts need one zone on every runner.
+    connection.execute("SET TimeZone = 'UTC'")
     yield connection
     connection.close()
 

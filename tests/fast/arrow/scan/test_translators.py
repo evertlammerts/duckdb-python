@@ -14,6 +14,7 @@ import uuid
 
 import pytest
 
+from duckdb._sources import to_arrow as to_arrow_module
 from duckdb._sources.nodes import Binary, Col, In, Lit, Postfix, Unary, Untranslatable, fragment
 
 pa = pytest.importorskip("pyarrow")
@@ -27,6 +28,11 @@ BASE = 1714564800
 HALF = BASE * 1_000_000 + 500_000
 # Deeper than Python's recursion limit, as a left folded OR of that many predicates reaches.
 DEEP = 1500
+DICTIONARY_KERNELS = pytest.mark.skipif(
+    int(pa.__version__.split(".", 1)[0]) < to_arrow_module.DICTIONARY_KERNELS_FIXED_IN,
+    reason="pyarrow before 26 reads a valid index that points at a NULL dictionary entry as a value",
+)
+ENCODED = [pytest.param(False, id="plain"), pytest.param(True, id="dictionary", marks=DICTIONARY_KERNELS)]
 
 
 def col(*parts):
@@ -336,6 +342,26 @@ class TestPolarsCategories:
         refused_by_polars(self.frame(pl, "categorical").schema, isin("c", "INTEGER", 1))
 
 
+class TestDictionaryKernels:
+    """A Dataset takes a predicate on a dictionary column only where pyarrow evaluates it exactly."""
+
+    @pytest.mark.parametrize(("fixed_in", "accepted"), [(0, True), (10_000, False)], ids=["fixed", "defective"])
+    def test_the_dataset_source_follows_the_pyarrow_version(self, monkeypatch, fixed_in, accepted):
+        from duckdb._sources import adapt
+
+        monkeypatch.setattr(to_arrow_module, "DICTIONARY_KERNELS_FIXED_IN", fixed_in)
+        table = pa.table({"id": [0, 1, 2], "d": pa.array(["a", "b", "a"]).dictionary_encode(), "n": [1, 2, 3]})
+        source = adapt(ds.dataset(table))
+        assert source.accepts(cmp("=", "d", "a", "VARCHAR")) is accepted
+        assert source.accepts(null("d")) is accepted
+        assert source.accepts(isin("d", "VARCHAR", "b")) is accepted
+        assert source.accepts(cmp(">", "n", 1, "BIGINT")) is True
+        if accepted:
+            stream, _ = source.stream(None, (cmp("=", "d", "a", "VARCHAR"),))
+            reader = pa.RecordBatchReader._import_from_c_capsule(stream)
+            assert reader.read_all().column("id").to_pylist() == [0, 2]
+
+
 class TestArrowIntegers:
     @pytest.mark.parametrize(("arrow_name", "engine_name", "low", "high"), INTEGERS)
     def test_extremes(self, arrow_name, engine_name, low, high):
@@ -368,7 +394,7 @@ class TestArrowIntegers:
 
 class TestArrowFloats:
     @pytest.mark.parametrize(("kind", "type_text"), [(pa.float64(), "DOUBLE"), (pa.float32(), "FLOAT")])
-    @pytest.mark.parametrize("encoded", [False, True], ids=["plain", "dictionary"])
+    @pytest.mark.parametrize("encoded", ENCODED)
     @pytest.mark.parametrize(("op", "value", "expected"), FLOAT_CASES)
     def test_comparisons_order_nan_last_and_equate_zeros(self, kind, type_text, encoded, op, value, expected):
         array = dictionary(FLOAT_VALUES, kind) if encoded else pa.array(FLOAT_VALUES, kind)
@@ -376,7 +402,7 @@ class TestArrowFloats:
         assert arrow_ids(table, cmp(op, "c", value, type_text)) == expected
 
     @pytest.mark.parametrize(("kind", "type_text"), [(pa.float64(), "DOUBLE"), (pa.float32(), "FLOAT")])
-    @pytest.mark.parametrize("encoded", [False, True], ids=["plain", "dictionary"])
+    @pytest.mark.parametrize("encoded", ENCODED)
     @pytest.mark.parametrize(("node", "expected"), FLOAT_IN_CASES)
     def test_membership_equates_zeros(self, kind, type_text, encoded, node, expected):
         array = dictionary(FLOAT_VALUES, kind) if encoded else pa.array(FLOAT_VALUES, kind)
@@ -409,7 +435,7 @@ class TestArrowStrings:
     VALUES = ("a", "b", None, "c", None, "it's")
 
     @pytest.mark.parametrize("kind", [pa.string(), pa.large_string()])
-    @pytest.mark.parametrize("encoded", [False, True], ids=["plain", "dictionary"])
+    @pytest.mark.parametrize("encoded", ENCODED)
     def test_comparisons_membership_and_nulls(self, kind, encoded):
         array = dictionary(self.VALUES, kind) if encoded else pa.array(self.VALUES, kind)
         table = pa.table({"id": list(range(len(self.VALUES))), "c": array})
@@ -429,7 +455,7 @@ class TestArrowBlobs:
     VALUES = (b"aa", b"bb", None)
 
     @pytest.mark.parametrize("kind", [pa.binary(), pa.large_binary(), pa.binary(2)])
-    @pytest.mark.parametrize("encoded", [False, True], ids=["plain", "dictionary"])
+    @pytest.mark.parametrize("encoded", ENCODED)
     def test_comparisons_and_membership(self, kind, encoded):
         array = dictionary(self.VALUES, kind) if encoded else pa.array(self.VALUES, kind)
         table = pa.table({"id": list(range(len(self.VALUES))), "c": array})
@@ -500,7 +526,7 @@ class TestArrowTemporal:
 
     @pytest.mark.parametrize("zone", [NEW_YORK, "UTC", "+05:30"])
     @pytest.mark.parametrize("unit", ["s", "ms", "us"])
-    @pytest.mark.parametrize("encoded", [False, True], ids=["plain", "dictionary"])
+    @pytest.mark.parametrize("encoded", ENCODED)
     def test_a_zoned_constant_keeps_its_microseconds(self, zone, unit, encoded):
         per_second = {"s": 1, "ms": 1_000, "us": 1_000_000}[unit]
         counts = [BASE * per_second, (BASE + 1) * per_second, None]
@@ -528,7 +554,7 @@ class TestArrowTemporal:
 class TestArrowDecimals:
     VALUES = (D("1.25"), D("2.50"), None)
 
-    @pytest.mark.parametrize("encoded", [False, True], ids=["plain", "dictionary"])
+    @pytest.mark.parametrize("encoded", ENCODED)
     @pytest.mark.parametrize(("precision", "scale"), [(10, 2), (30, 2), (38, 10)])
     def test_comparisons_and_membership(self, encoded, precision, scale):
         kind = pa.decimal128(precision, scale)
@@ -653,6 +679,7 @@ class TestArrowSchemaGate:
     def test_a_column_pyarrow_cannot_filter_refuses_a_predicate_on_another(self, kind):
         refused_by_arrow(pa.schema([("n", pa.int64()), ("other", kind)]), cmp(">", "n", 1, "BIGINT"))
 
+    @DICTIONARY_KERNELS
     def test_a_dictionary_column_of_its_own_keeps_the_predicate(self):
         table = pa.table({"id": [0, 1], "d": pa.array(["a", "b"]).dictionary_encode()})
         assert arrow_ids(table, cmp(">", "id", 0, "BIGINT")) == [1]
@@ -685,7 +712,9 @@ NULLNESS_ONLY_ARROW = [
     pytest.param(pa.array([1, None], pa.duration("us")), id="duration"),
     pytest.param(pa.array([pa.MonthDayNano([1, 2, 3]), None], pa.month_day_nano_interval()), id="interval"),
     pytest.param(
-        pa.DictionaryArray.from_arrays(pa.array([0, None], pa.int32()), pa.array([[1]])), id="dictionary-of-lists"
+        pa.DictionaryArray.from_arrays(pa.array([0, None], pa.int32()), pa.array([[1]])),
+        id="dictionary-of-lists",
+        marks=DICTIONARY_KERNELS,
     ),
 ]
 
