@@ -4,7 +4,6 @@
 #include "duckdb_python/python_objects.hpp"
 #include "duckdb_python/numpy/numpy_type.hpp"
 
-#include "duckdb_python/arrow/arrow_array_stream.hpp"
 #include "duckdb_python/arrow/arrow_export_utils.hpp"
 #include "duckdb/common/arrow/arrow.hpp"
 #include "duckdb/common/arrow/arrow_wrapper.hpp"

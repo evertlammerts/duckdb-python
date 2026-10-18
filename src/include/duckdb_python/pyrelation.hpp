@@ -10,7 +10,7 @@
 
 #include "duckdb_python/nb/casters.hpp"
 #include "duckdb.hpp"
-#include "duckdb_python/arrow/arrow_array_stream.hpp"
+#include "duckdb_python/arrow/arrow_export_utils.hpp"
 #include "duckdb_python/numpy/numpy_type.hpp"
 #include "duckdb_python/pyresult.hpp"
 #include "duckdb_python/nb/conversions/render_mode_enum.hpp"

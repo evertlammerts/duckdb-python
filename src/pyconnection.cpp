@@ -20,9 +20,9 @@
 #include "duckdb/parser/statement/select_statement.hpp"
 #include "duckdb/parser/statement/transaction_statement.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
-#include "duckdb_python/arrow/arrow_array_stream.hpp"
 #include "duckdb_python/map.hpp"
 #include "duckdb_python/pandas/pandas_scan.hpp"
+#include "duckdb_python/arrow/python_arrow_scan.hpp"
 #include "duckdb_python/pyrelation.hpp"
 #include "duckdb_python/pystatement.hpp"
 #include "duckdb_python/pyresult.hpp"
@@ -56,6 +56,9 @@ struct DuckDBPyModuleState {
 	std::shared_ptr<PythonImportCache> import_cache;
 	//! The single-use Arrow readers that have handed out their stream, by identity and held weakly
 	unique_ptr<PyObjectHolder> consumed_arrow_readers;
+	//! Held rather than imported on use, since an import fails once the package has left sys.modules
+	unique_ptr<PyObjectHolder> arrow_sources_adapt;
+	unique_ptr<PyObjectHolder> arrow_sources_nodes;
 	PythonEnvironmentType environment = PythonEnvironmentType::NORMAL;
 	std::string formatted_python_version;
 };
@@ -337,6 +340,8 @@ static void InitializeConnectionMethods(nb::class_<DuckDBPyConnection> &m) {
 	m.def("register", &DuckDBPyConnection::RegisterPythonObject,
 	      "Register the passed Python Object value for querying with a view", nb::arg("view_name"),
 	      nb::arg("python_object"));
+	m.def("_register_arrow_source", &DuckDBPyConnection::RegisterArrowSource,
+	      "Register a source from duckdb._sources for querying with a view", nb::arg("view_name"), nb::arg("source"));
 	m.def("unregister", &DuckDBPyConnection::UnregisterPythonObject, "Unregister the view name", nb::arg("view_name"));
 	m.def("table", &DuckDBPyConnection::Table, "Create a relation object for the named table", nb::arg("table_name"));
 	m.def("view", &DuckDBPyConnection::View, "Create a relation object for the named view", nb::arg("view_name"));
@@ -997,6 +1002,19 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::RegisterPythonObject(con
 	engine::VerifyNoOpenResult(client);
 	auto object = PythonReplacementScan::ReplacementObject(python_object, name, client);
 	auto view_rel = make_shared_ptr<ViewRelation>(connection.context, std::move(object), name);
+	bool replace = registered_objects.count(name);
+	view_rel->CreateView(Identifier(name), replace, true);
+	registered_objects.insert(name);
+	return shared_from_this();
+}
+
+std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::RegisterArrowSource(const string &name,
+                                                                            const nb::object &source) {
+	auto &connection = con.GetConnection();
+	auto &client = *connection.context;
+	engine::ConnectionClaim claim(client);
+	engine::VerifyNoOpenResult(client);
+	auto view_rel = make_shared_ptr<ViewRelation>(connection.context, CreatePythonArrowScanRef(source, name), name);
 	bool replace = registered_objects.count(name);
 	view_rel->CreateView(Identifier(name), replace, true);
 	registered_objects.insert(name);
@@ -2053,12 +2071,19 @@ std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::FromParquet(const nb::obje
 std::unique_ptr<DuckDBPyRelation> DuckDBPyConnection::FromArrow(nb::object &arrow_object) {
 	auto &connection = con.GetConnection();
 	string name = "arrow_object_" + StringUtil::GenerateRandomName();
-	if (!IsAcceptedArrowObject(arrow_object)) {
-		// nb::object wrap: nb::str() of a bare .attr() accessor is an ambiguous overload on MSVC.
-		auto py_object_type = nb::cast<std::string>(nb::str(nb::object((arrow_object).type().attr("__name__"))));
-		throw InvalidInputException("Python Object Type %s is not an accepted Arrow Object.", py_object_type);
+	unique_ptr<TableRef> tableref;
+	{
+		// Classifying and adapting the object runs its own Python, which must not close or use this connection.
+		engine::ConnectionClaim claim(*connection.context);
+		if (PythonReplacementScan::ClassifyArrowObject(arrow_object, name, ArrowSourceKind::NAMELESS) ==
+		    ArrowObjectKind::NONE) {
+			// nb::object wrap: nb::str() of a bare .attr() accessor is an ambiguous overload on MSVC.
+			auto py_object_type = nb::cast<std::string>(nb::str(nb::object((arrow_object).type().attr("__name__"))));
+			throw InvalidInputException("Python Object Type %s is not an accepted Arrow Object.", py_object_type);
+		}
+		tableref = PythonReplacementScan::ReplacementObject(arrow_object, name, *connection.context,
+		                                                    ArrowSourceKind::NAMELESS);
 	}
-	auto tableref = PythonReplacementScan::ReplacementObject(arrow_object, name, *connection.context, true);
 	D_ASSERT(tableref);
 	auto rel = make_shared_ptr<ViewRelation>(connection.context, std::move(tableref), name);
 	return CreateRelation(std::move(rel));
@@ -2492,6 +2517,7 @@ void InstantiateNewInstance(DuckDB &db) {
 
 	system_catalog.CreateFunction(transaction, map_info);
 	system_catalog.CreateFunction(transaction, scan_info);
+	RegisterPythonArrowScan(db_instance);
 }
 
 static std::shared_ptr<DuckDBPyConnection> FetchOrCreateInstance(const string &database_path, DBConfig &config) {
@@ -2615,6 +2641,38 @@ nb::object DuckDBPyConnection::ConsumedArrowReaders() {
 	return readers->obj;
 }
 
+void DuckDBPyConnection::SetArrowSources(const nb::object &sources) {
+	auto adapt = sources.attr("adapt");
+	auto nodes = sources.attr("nodes");
+	auto &state = GetModuleState();
+	state.arrow_sources_adapt = make_uniq<PyObjectHolder>(std::move(adapt));
+	state.arrow_sources_nodes = make_uniq<PyObjectHolder>(std::move(nodes));
+}
+
+static nb::object ArrowSourcesPart(const unique_ptr<PyObjectHolder> &part) {
+	if (!part) {
+		// A program can outlive Cleanup; the package is then taken from sys.modules again, never imported anew.
+		auto modules = nb::borrow<nb::dict>(PyImport_GetModuleDict());
+		auto sources = PyDict_GetItemString(modules.ptr(), "duckdb._sources");
+		if (sources) {
+			DuckDBPyConnection::SetArrowSources(nb::borrow(sources));
+		}
+	}
+	if (!part) {
+		throw InvalidInputException(
+		    "Python Arrow objects cannot be scanned: the duckdb package did not set up duckdb._sources");
+	}
+	return part->obj;
+}
+
+nb::object DuckDBPyConnection::ArrowSourcesAdapt() {
+	return ArrowSourcesPart(GetModuleState().arrow_sources_adapt);
+}
+
+nb::object DuckDBPyConnection::ArrowSourcesNodes() {
+	return ArrowSourcesPart(GetModuleState().arrow_sources_nodes);
+}
+
 ModifiedMemoryFileSystem &DuckDBPyConnection::GetObjectFileSystem() {
 	if (!internal_object_filesystem) {
 		D_ASSERT(!FileSystemIsRegistered("DUCKDB_INTERNAL_OBJECTSTORE"));
@@ -2653,6 +2711,8 @@ void DuckDBPyConnection::Cleanup() {
 	GetModuleState().default_connection.Release();
 	GetModuleState().import_cache.reset();
 	GetModuleState().consumed_arrow_readers.reset();
+	GetModuleState().arrow_sources_adapt.reset();
+	GetModuleState().arrow_sources_nodes.reset();
 }
 
 bool DuckDBPyConnection::IsPandasDataframe(const nb::object &object) {
@@ -2711,49 +2771,6 @@ NumpyObjectType DuckDBPyConnection::IsAcceptedNumpyObject(const nb::object &obje
 		return NumpyObjectType::LIST;
 	}
 	return NumpyObjectType::INVALID;
-}
-
-PyArrowObjectType DuckDBPyConnection::GetArrowType(const nb::handle &obj) {
-	DUCKDB_PY_ASSERT_GIL_HELD();
-
-	if (nb::isinstance<nb::capsule>(obj)) {
-		auto capsule = nb::borrow<nb::capsule>(obj);
-		if (string(capsule.name()) != "arrow_array_stream") {
-			throw InvalidInputException("Expected a 'arrow_array_stream' PyCapsule, got: %s", string(capsule.name()));
-		}
-		auto stream = reinterpret_cast<ArrowArrayStream *>(capsule.data("arrow_array_stream"));
-		if (!stream->release) {
-			throw InvalidInputException("The ArrowArrayStream was already released");
-		}
-		return PyArrowObjectType::PyCapsule;
-	}
-
-	if (ModuleIsLoaded<PyarrowCacheItem>()) {
-		auto import_cache_ = ImportCache();
-		// MessageReader requires nanoarrow, separate scan function
-		if (duckdb::PyUtil::IsInstance(obj, import_cache_->pyarrow.ipc.MessageReader())) {
-			return PyArrowObjectType::MessageReader;
-		}
-
-		if (ModuleIsLoaded<PyarrowDatasetCacheItem>()) {
-			// Scanner/Dataset don't have __arrow_c_stream__, need dedicated handling
-			if (duckdb::PyUtil::IsInstance(obj, import_cache_->pyarrow.dataset.Scanner())) {
-				return PyArrowObjectType::Scanner;
-			} else if (duckdb::PyUtil::IsInstance(obj, import_cache_->pyarrow.dataset.Dataset())) {
-				return PyArrowObjectType::Dataset;
-			}
-		}
-	}
-
-	if (nb::hasattr(obj, "__arrow_c_stream__")) {
-		return PyArrowObjectType::PyCapsuleInterface;
-	}
-
-	return PyArrowObjectType::Invalid;
-}
-
-bool DuckDBPyConnection::IsAcceptedArrowObject(const nb::object &object) {
-	return DuckDBPyConnection::GetArrowType(object) != PyArrowObjectType::Invalid;
 }
 
 } // namespace duckdb

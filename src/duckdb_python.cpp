@@ -19,6 +19,8 @@
 #include "duckdb_python/nb/conversions/python_csv_line_terminator_enum.hpp"
 #include "duckdb/common/enums/statement_type.hpp"
 #include "duckdb/common/adbc/adbc-init.hpp"
+#include "duckdb_python/arrow/predicate_translation.hpp"
+#include "duckdb_python/arrow/python_arrow_scan.hpp"
 
 #ifndef DUCKDB_PYTHON_LIB_NAME
 #define DUCKDB_PYTHON_LIB_NAME _duckdb
@@ -1136,6 +1138,9 @@ NB_MODULE(DUCKDB_PYTHON_LIB_NAME, m) { // NOLINT
 	      "Tokenizes a SQL string, returning a list of (position, type) tuples that can be "
 	      "used for e.g., syntax highlighting",
 	      nb::arg("query"));
+	m.def("_set_arrow_sources", &DuckDBPyConnection::SetArrowSources, nb::arg("sources"));
+	m.def("_translate_predicate", &TranslatePredicateForTesting, nb::arg("connection"), nb::arg("predicate"),
+	      nb::arg("columns").none() = nb::none(), nb::arg("schema").none() = nb::none(), nb::arg("select") = "*");
 	nb::enum_<PySQLTokenType>(m, "token_type")
 	    .value("identifier", PySQLTokenType::PY_SQL_TOKEN_IDENTIFIER)
 	    .value("numeric_const", PySQLTokenType::PY_SQL_TOKEN_NUMERIC_CONSTANT)
@@ -1151,6 +1156,7 @@ NB_MODULE(DUCKDB_PYTHON_LIB_NAME, m) { // NOLINT
 	static char clean_default_connection_sentinel;
 	m.attr("_clean_default_connection") =
 	    nb::capsule(&clean_default_connection_sentinel, [](void *) noexcept { DuckDBPyConnection::Cleanup(); });
+	WatchInterpreterExit();
 }
 
 } // namespace duckdb

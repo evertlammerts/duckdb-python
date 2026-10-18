@@ -2,7 +2,6 @@
 #include "duckdb_python/engine/connection.hpp"
 #include "duckdb/main/db_instance_cache.hpp"
 #include "duckdb_python/nb/casters.hpp"
-#include "duckdb/main/client_properties.hpp"
 #include "duckdb_python/numpy/numpy_type.hpp"
 #include "duckdb_python/numpy/numpy_array.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
@@ -10,7 +9,10 @@
 #include "duckdb_python/dataframe.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/parser/expression/function_expression.hpp"
+#include "duckdb/common/arrow/arrow.hpp"
 #include "duckdb/common/typedefs.hpp"
+#include "duckdb_python/arrow/python_arrow_scan.hpp"
+#include "duckdb_python/exceptions.hpp"
 #include "duckdb_python/pandas/pandas_scan.hpp"
 #include "duckdb/parser/tableref/subqueryref.hpp"
 #include "duckdb_python/pyrelation.hpp"
@@ -19,62 +21,106 @@
 
 namespace duckdb {
 
-static void CreateArrowScan(const string &name, nb::object entry, TableFunctionRef &table_function,
-                            vector<unique_ptr<ParsedExpression>> &children, ClientProperties &client_properties,
-                            PyArrowObjectType type, DatabaseInstance &db) {
-	shared_ptr<ExternalDependency> external_dependency = make_shared_ptr<ExternalDependency>();
-	if (type == PyArrowObjectType::MessageReader) {
-		if (!db.ExtensionIsLoaded("nanoarrow")) {
-			throw MissingExtensionException(
-			    "The nanoarrow community extension is needed to read the Arrow IPC protocol. \n You can install it "
-			    "with \"INSTALL nanoarrow FROM community;\". \n Then you can load it with \"LOAD nanoarrow;\"");
+//! Whether `entry` has `attribute`; an attribute that raises anything but AttributeError is reported
+static bool HasAttribute(const nb::handle &entry, const char *attribute, const string &name, ArrowSourceKind kind) {
+	try {
+		return PyUtil::HasAttribute(entry, attribute);
+	} catch (nb::python_error &error) {
+		throw InvalidInputException("reading %s as Arrow data failed: %s", Subject(name, kind, "object"),
+		                            FormatUDFPythonError(error));
+	}
+}
+
+ArrowObjectKind PythonReplacementScan::ClassifyArrowObject(const nb::handle &entry, const string &name,
+                                                           ArrowSourceKind kind) {
+	DUCKDB_PY_ASSERT_GIL_HELD();
+	if (nb::isinstance<nb::capsule>(entry)) {
+		auto capsule = nb::borrow<nb::capsule>(entry);
+		auto capsule_name = capsule.name();
+		if (!capsule_name || string(capsule_name) != "arrow_array_stream") {
+			throw InvalidInputException("Expected a 'arrow_array_stream' PyCapsule, got: %s",
+			                            capsule_name ? capsule_name : "");
 		}
-		vector<Value> values;
-		nb::list stream_messages;
-		while (true) {
-			try {
-				nb::object message = entry.attr("read_next_message")();
-				if (message.is_none()) {
-					break;
-				}
-				stream_messages.append(message.attr("serialize")());
-				const auto buffer_address =
-				    nb::cast<int64_t>(stream_messages[stream_messages.size() - 1].attr("address"));
-				const auto buffer_size = nb::cast<uint32_t>(stream_messages[stream_messages.size() - 1].attr("size"));
-				child_list_t<Value> buffer_values;
-				buffer_values.push_back({"ptr", Value::POINTER(buffer_address)});
-				buffer_values.push_back({"size", Value::UBIGINT(buffer_size)});
-				values.push_back(Value::STRUCT(buffer_values));
-			} catch (const nb::python_error &e) {
+		auto stream = reinterpret_cast<ArrowArrayStream *>(capsule.data(capsule_name));
+		if (!stream->release) {
+			throw InvalidInputException("The ArrowArrayStream was already released");
+		}
+		return ArrowObjectKind::SOURCE;
+	}
+	if (PolarsDataFrame::IsDataFrame(entry) || PolarsDataFrame::IsLazyFrame(entry)) {
+		return ArrowObjectKind::SOURCE;
+	}
+	if (ModuleIsLoaded<PyarrowCacheItem>()) {
+		auto &cache = *DuckDBPyConnection::ImportCache();
+		if (duckdb::PyUtil::IsInstance(entry, cache.pyarrow.ipc.MessageReader())) {
+			return ArrowObjectKind::MESSAGE_READER;
+		}
+		// A Dataset or Scanner exports no stream of its own, so it is recognised by its class.
+		if (ModuleIsLoaded<PyarrowDatasetCacheItem>() &&
+		    (duckdb::PyUtil::IsInstance(entry, cache.pyarrow.dataset.Scanner()) ||
+		     duckdb::PyUtil::IsInstance(entry, cache.pyarrow.dataset.Dataset()))) {
+			return ArrowObjectKind::SOURCE;
+		}
+	}
+	if (HasAttribute(entry, "__arrow_c_stream__", name, kind) || HasAttribute(entry, "__arrow_c_array__", name, kind)) {
+		return ArrowObjectKind::SOURCE;
+	}
+	return ArrowObjectKind::NONE;
+}
+
+//! Whether the object is a dict, a list or a numpy array, the containers pandas_scan reads as columns
+static bool IsNumpyContainer(const nb::handle &entry) {
+	if (PyDict_Check(entry.ptr()) || PyList_Check(entry.ptr())) {
+		return true;
+	}
+	return ModuleIsLoaded<NumpyCacheItem>() &&
+	       duckdb::PyUtil::IsInstance(entry, DuckDBPyConnection::ImportCache()->numpy.ndarray());
+}
+
+static unique_ptr<TableRef> CreateArrowScan(const nb::handle &entry, const string &name, ArrowSourceKind kind) {
+	nb::object source;
+	try {
+		source = DuckDBPyConnection::ArrowSourcesAdapt()(entry);
+	} catch (nb::python_error &error) {
+		throw InvalidInputException("reading %s as Arrow data failed: %s", Subject(name, kind, "object"),
+		                            FormatUDFPythonError(error));
+	}
+	return CreatePythonArrowScanRef(std::move(source), name, kind);
+}
+
+static unique_ptr<TableRef> CreateMessageReaderScan(const nb::object &entry, DatabaseInstance &db) {
+	if (!db.ExtensionIsLoaded("nanoarrow")) {
+		throw MissingExtensionException(
+		    "The nanoarrow community extension is needed to read the Arrow IPC protocol. \n You can install it "
+		    "with \"INSTALL nanoarrow FROM community;\". \n Then you can load it with \"LOAD nanoarrow;\"");
+	}
+	vector<Value> values;
+	nb::list stream_messages;
+	while (true) {
+		try {
+			nb::object message = entry.attr("read_next_message")();
+			if (message.is_none()) {
 				break;
 			}
+			stream_messages.append(message.attr("serialize")());
+			const auto buffer_address = nb::cast<int64_t>(stream_messages[stream_messages.size() - 1].attr("address"));
+			const auto buffer_size = nb::cast<uint32_t>(stream_messages[stream_messages.size() - 1].attr("size"));
+			child_list_t<Value> buffer_values;
+			buffer_values.push_back({"ptr", Value::POINTER(buffer_address)});
+			buffer_values.push_back({"size", Value::UBIGINT(buffer_size)});
+			values.push_back(Value::STRUCT(buffer_values));
+		} catch (const nb::python_error &e) {
+			break;
 		}
-		auto list_value = Value::LIST(values);
-		children.push_back(ConstantExpression::FromValue(list_value));
-		table_function.function = make_uniq<FunctionExpression>("scan_arrow_ipc", std::move(children));
-		auto dependency_item = PythonDependencyItem::Create(stream_messages);
-		external_dependency->AddDependency("replacement_cache", std::move(dependency_item));
-	} else {
-		table_function.bind_info = make_shared_ptr<PythonTableArrowArrayStreamFactory>(entry, client_properties, type);
-
-		if (type == PyArrowObjectType::PyCapsule) {
-			// Disable projection+filter pushdown for bare capsules (single-use, no PyArrow wrapper)
-			table_function.function = make_uniq<FunctionExpression>("arrow_scan_dumb", std::move(children));
-		} else if (type == PyArrowObjectType::PyCapsuleInterface) {
-			// Try to load pyarrow.dataset for pushdown support
-			auto &cache = *DuckDBPyConnection::ImportCache();
-			if (!cache.pyarrow.dataset()) {
-				// No pyarrow.dataset: scan without pushdown, DuckDB handles projection/filter post-scan
-				table_function.function = make_uniq<FunctionExpression>("arrow_scan_dumb", std::move(children));
-			} else {
-				table_function.function = make_uniq<FunctionExpression>("arrow_scan", std::move(children));
-			}
-		} else {
-			table_function.function = make_uniq<FunctionExpression>("arrow_scan", std::move(children));
-		}
-		external_dependency->AddDependency("replacement_cache", PythonDependencyItem::Create(entry));
 	}
-	table_function.external_dependency = std::move(external_dependency);
+	auto table_function = make_uniq<TableFunctionRef>();
+	vector<unique_ptr<ParsedExpression>> children;
+	children.push_back(ConstantExpression::FromValue(Value::LIST(values)));
+	table_function->function = make_uniq<FunctionExpression>("scan_arrow_ipc", std::move(children));
+	auto external_dependency = make_shared_ptr<ExternalDependency>();
+	external_dependency->AddDependency("replacement_cache", PythonDependencyItem::Create(stream_messages));
+	table_function->external_dependency = std::move(external_dependency);
+	return std::move(table_function);
 }
 
 static void ThrowScanFailureError(const nb::object &entry, const string &name, const string &location = "") {
@@ -94,8 +140,8 @@ static void ThrowScanFailureError(const nb::object &entry, const string &name, c
 }
 
 unique_ptr<TableRef> PythonReplacementScan::ReplacementObject(const nb::object &entry, const string &name,
-                                                              ClientContext &context, bool relation) {
-	auto replacement = TryReplacementObject(entry, name, context, relation);
+                                                              ClientContext &context, ArrowSourceKind kind) {
+	auto replacement = TryReplacementObject(entry, name, context, kind);
 	if (!replacement) {
 		ThrowScanFailureError(entry, name);
 	}
@@ -103,17 +149,13 @@ unique_ptr<TableRef> PythonReplacementScan::ReplacementObject(const nb::object &
 }
 
 unique_ptr<TableRef> PythonReplacementScan::TryReplacementObject(const nb::object &entry, const string &name,
-                                                                 ClientContext &context, bool relation) {
-	auto client_properties = context.GetClientProperties();
+                                                                 ClientContext &context, ArrowSourceKind kind) {
 	auto table_function = make_uniq<TableFunctionRef>();
 	vector<unique_ptr<ParsedExpression>> children;
 	NumpyObjectType numpytype;
-	PyArrowObjectType arrow_type;
 	if (DuckDBPyConnection::IsPandasDataframe(entry)) {
 		if (PandasDataFrame::IsPyArrowBacked(entry)) {
-			auto table = PandasDataFrame::ToArrowTable(entry);
-			CreateArrowScan(name, table, *table_function, children, client_properties, PyArrowObjectType::Table,
-			                *context.db);
+			return CreateArrowScan(PandasDataFrame::ToArrowTable(entry), name, kind);
 		} else {
 			string name = "df_" + StringUtil::GenerateRandomName();
 			auto new_df = PandasScanFunction::PandasReplaceCopiedNames(entry);
@@ -122,6 +164,7 @@ unique_ptr<TableRef> PythonReplacementScan::TryReplacementObject(const nb::objec
 			auto dependency = make_uniq<ExternalDependency>();
 			dependency->AddDependency("replacement_cache", PythonDependencyItem::Create(entry));
 			table_function->external_dependency = std::move(dependency);
+			return std::move(table_function);
 		}
 	} else if (DuckDBPyRelation::IsRelation(entry)) {
 		auto pyrel = nb::cast<DuckDBPyRelation *>(entry);
@@ -142,20 +185,23 @@ unique_ptr<TableRef> PythonReplacementScan::TryReplacementObject(const nb::objec
 		dependency->AddDependency("replacement_cache", RelationDependencyItem::Create(pyrel->GetSharedRelation()));
 		subquery->external_dependency = std::move(dependency);
 		return std::move(subquery);
-	} else if (PolarsDataFrame::IsDataFrame(entry)) {
-		// Polars DataFrames always go through one-time .to_arrow() materialization.
-		// Polars's __arrow_c_stream__() serializes from its internal layout on every call,
-		// which is expensive for repeated scans. The .to_arrow() path converts once.
-		auto arrow_dataset = entry.attr("to_arrow")();
-		CreateArrowScan(name, arrow_dataset, *table_function, children, client_properties, PyArrowObjectType::Table,
-		                *context.db);
-	} else if (PolarsDataFrame::IsLazyFrame(entry)) {
-		CreateArrowScan(name, entry, *table_function, children, client_properties, PyArrowObjectType::PolarsLazyFrame,
-		                *context.db);
-	} else if ((arrow_type = DuckDBPyConnection::GetArrowType(entry)) != PyArrowObjectType::Invalid &&
-	           !(arrow_type == PyArrowObjectType::MessageReader && !relation)) {
-		CreateArrowScan(name, entry, *table_function, children, client_properties, arrow_type, *context.db);
-	} else if (DuckDBPyConnection::IsAcceptedNumpyObject(entry) != NumpyObjectType::INVALID) {
+	}
+	// A dict, list or numpy array is read by pandas_scan without asking for Arrow exports, whose probe would report an
+	// attribute lookup that a dict subclass answers with KeyError.
+	if (!IsNumpyContainer(entry)) {
+		switch (ClassifyArrowObject(entry, name, kind)) {
+		case ArrowObjectKind::SOURCE:
+			return CreateArrowScan(entry, name, kind);
+		case ArrowObjectKind::MESSAGE_READER:
+			if (kind == ArrowSourceKind::NAMELESS) {
+				return CreateMessageReaderScan(entry, *context.db);
+			}
+			return nullptr;
+		case ArrowObjectKind::NONE:
+			break;
+		}
+	}
+	if (DuckDBPyConnection::IsAcceptedNumpyObject(entry) != NumpyObjectType::INVALID) {
 		numpytype = DuckDBPyConnection::IsAcceptedNumpyObject(entry);
 		string np_name = "np_" + StringUtil::GenerateRandomName();
 		nb::dict data; // we will convert all the supported format to dict{"key": np.array(value)}.
@@ -217,7 +263,7 @@ static unique_ptr<TableRef> TryReplacement(nb::dict &dict, const string &name, C
 		return nullptr;
 	}
 
-	auto result = PythonReplacementScan::TryReplacementObject(entry, name, context);
+	auto result = PythonReplacementScan::TryReplacementObject(entry, name, context, ArrowSourceKind::VARIABLE);
 	if (!result) {
 		std::string location = nb::cast<std::string>(current_frame.attr("f_code").attr("co_filename"));
 		location += ":";
@@ -253,6 +299,8 @@ static unique_ptr<TableRef> ReplaceInternal(ClientContext &context, const string
 	auto scan_all_frames = result.GetValue<bool>();
 
 	nb::gil_scoped_acquire acquire;
+	// The objects looked at run Python of their own, such as a property, which must not use this query's connection.
+	engine::CallbackScope callback(context);
 	nb::object current_frame;
 	try {
 		current_frame = nb::module_::import_("inspect").attr("currentframe")();

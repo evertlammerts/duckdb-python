@@ -1,4 +1,6 @@
 import gc
+import subprocess
+import sys
 import weakref
 from pathlib import Path
 
@@ -171,3 +173,51 @@ class TestArrowScanFactoryOwnership:
 
         assert rel.fetchall() == [(15,)]
         assert rel.fetchall() == [(15,)]
+
+
+SOURCE_CLOSING_ITS_CONNECTION = """
+import sys
+
+import duckdb
+import pyarrow as pa
+
+con = duckdb.connect()
+table = pa.table({"a": [1, 2]})
+
+
+class Source:
+    @property
+    def schema(self):
+        con.close()
+        return table.schema
+
+    def __arrow_c_stream__(self):
+        return table.__arrow_c_stream__()
+
+
+try:
+    if sys.argv[1] == "from_arrow":
+        con.from_arrow(Source()).fetchall()
+    elif sys.argv[1] == "register":
+        con.register("src", Source())
+    else:
+        src = Source()
+        con.sql("SELECT * FROM src").fetchall()
+except duckdb.Error as error:
+    print("refused", "cannot use" in str(error) or "busy" in str(error), flush=True)
+print("still open", con.sql("SELECT 42").fetchall(), flush=True)
+"""
+
+
+@pytest.mark.parametrize("entry_point", ["from_arrow", "register", "variable"])
+def test_a_source_closing_its_connection_while_adapted_is_refused(entry_point):
+    completed = subprocess.run(
+        [sys.executable, "-c", SOURCE_CLOSING_ITS_CONNECTION, entry_point],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr[-2000:]
+    assert "refused True" in completed.stdout.splitlines(), completed.stdout
+    assert "still open [(42,)]" in completed.stdout.splitlines(), completed.stdout

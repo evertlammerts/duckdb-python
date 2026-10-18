@@ -9,6 +9,7 @@ Note:
 - Future versions may move them into submodules with deprecation warnings.
 """
 
+import _duckdb
 from _duckdb import (
     Appender,
     BinderException,
@@ -158,6 +159,7 @@ from _duckdb import (
     write_csv,
 )
 
+from duckdb import _sources
 from duckdb._dbapi_type_object import (
     BINARY,
     DATETIME,
@@ -207,6 +209,8 @@ from duckdb.value.constant import (
     UUIDValue,
     Value,
 )
+
+_duckdb._set_arrow_sources(_sources)
 
 __all__: list[str] = [
     "Appender",

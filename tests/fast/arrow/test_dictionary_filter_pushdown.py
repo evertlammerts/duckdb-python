@@ -1,9 +1,10 @@
-"""Filter pushdown on dictionary encoded Arrow columns.
+"""Filters on dictionary encoded Arrow columns.
 
-The Arrow scan never applies a pushed filter again, so a filter pushed on a dictionary encoded column must
-compare the dictionary's values, never its integer indices. Every case compares the rows against a native
-DuckDB table holding the same data. Where pyarrow cannot evaluate a pushed filter, the query must fail with
-an error that leaves the connection usable.
+A filter on a dictionary encoded column must compare the dictionary's values, never its integer indices. Every
+case compares the rows against a native DuckDB table holding the same data. A pyarrow Table, a Scanner and a
+RecordBatchReader refuse filters, so DuckDB applies them above a scan that picks the columns the query reads. A
+pyarrow Dataset takes the filters it can evaluate exactly into its own scan, so the cases pyarrow can evaluate also
+run through a Dataset over the same table.
 """
 
 from __future__ import annotations
@@ -13,9 +14,10 @@ from decimal import Decimal
 from typing import NamedTuple
 
 import pytest
-from _pushdown_helpers import assert_fully_pushed
+from _pushdown_helpers import assert_fully_pushed, assert_kept_above, assert_query_keeps_filter_above
 
 import duckdb
+from duckdb._sources.to_arrow import dictionary_kernels_exact
 
 pa = pytest.importorskip("pyarrow")
 pc = pytest.importorskip("pyarrow.compute")
@@ -36,9 +38,6 @@ class DictCase(NamedTuple):
     literals: tuple  # SQL literals for low, mid, high
     session_zone: str | None = None
     value_field: str | None = None
-    # "pushed": the engine pushes the comparison into the scan before and after it judges a dictionary by its
-    # value type. "either": that change moves the comparison above the scan, so the plan is not asserted.
-    plan: str = "pushed"
 
 
 def _tstz(year, month, day):
@@ -95,7 +94,7 @@ TYPED_SCALARS = [
         ("'aaaa'::BLOB", "'bbbb'::BLOB", "'cccc'::BLOB"),
     ),
     DictCase("decimal128_30_2", pa.decimal128(30, 2), DECIMALS, _decimal_literals(30, 2)),
-    DictCase("decimal128_10_2", pa.decimal128(10, 2), DECIMALS, _decimal_literals(10, 2), plan="either"),
+    DictCase("decimal128_10_2", pa.decimal128(10, 2), DECIMALS, _decimal_literals(10, 2)),
     DictCase("timestamptz_utc", pa.timestamp("us", tz="UTC"), TSTZ_VALUES, TSTZ_LITERALS, session_zone="UTC"),
     DictCase(
         "timestamptz_new_york",
@@ -132,7 +131,7 @@ ZONE_MISMATCH = [
     ),
 ]
 
-# pyarrow cannot reference a field inside a dictionary of structs.
+# pyarrow cannot reference a field inside a dictionary of structs, which DuckDB filters itself.
 STRUCT_DICTIONARIES = [
     DictCase("struct_of_int", STRUCT_TYPE, STRUCT_VALUES, ("1", "2", "3"), value_field="i"),
     DictCase("struct_of_string", STRUCT_TYPE, STRUCT_VALUES, ("'a'", "'b'", "'c'"), value_field="s"),
@@ -179,28 +178,35 @@ def _dictionary(case):
     return pa.DictionaryArray.from_arrays(pa.array(INDICES, pa.int8()), dictionary)
 
 
-def _register(con, case, column, column_name):
+def _register(con, case, column, column_name, wrap=None):
     if case.session_zone:
         con.execute(f"SET TimeZone = '{case.session_zone}'")
-    con.register("arrow_t", pa.table({"x": ROWS, column_name: column}))
+    table = pa.table({"x": ROWS, column_name: column})
+    con.register("arrow_t", table)
     con.execute("CREATE TABLE native_t AS SELECT * FROM arrow_t")
+    if wrap is not None:
+        con.register("arrow_t", wrap(table))
 
 
-def _register_shape(con, case, shape):
+def _as_dataset(table):
+    return pytest.importorskip("pyarrow.dataset").dataset(table)
+
+
+def _register_shape(con, case, shape, wrap=None):
     dictionary = _dictionary(case)
     if shape == "bare":
-        _register(con, case, dictionary, "d")
+        _register(con, case, dictionary, "d", wrap)
         col = "d"
     elif shape == "in_struct":
-        _register(con, case, pa.StructArray.from_arrays([dictionary], ["d"]), "s")
+        _register(con, case, pa.StructArray.from_arrays([dictionary], ["d"]), "s", wrap)
         col = "s.d"
     elif shape == "in_null_struct":
         mask = pa.array(NULL_STRUCT_ROWS)
-        _register(con, case, pa.StructArray.from_arrays([dictionary], ["d"], mask=mask), "s")
+        _register(con, case, pa.StructArray.from_arrays([dictionary], ["d"], mask=mask), "s", wrap)
         col = "s.d"
     else:
         inner = pa.StructArray.from_arrays([dictionary], ["d"])
-        _register(con, case, pa.StructArray.from_arrays([inner], ["t"]), "s")
+        _register(con, case, pa.StructArray.from_arrays([inner], ["t"]), "s", wrap)
         col = "s.t.d"
     return f"{col}.{case.value_field}" if case.value_field else col
 
@@ -226,29 +232,6 @@ def _arrow_rows(con, predicate):
         pytest.fail(f"the Arrow query invalidated the database: {error}")
 
 
-def assert_expected_outcome(con, predicate, outcome, error_text):
-    """Assert one of three outcomes for the Arrow query.
-
-    "rows": the native rows. "error": an error that leaves the connection usable and whose message contains
-    error_text. "either": one of the two, for cases the planned engine pushdown gate change moves from error to rows.
-    """
-    expected = _rows(con, "native_t", predicate)
-    failure = None
-    try:
-        got = _rows(con, "arrow_t", predicate)
-    except duckdb.Error as error:
-        if isinstance(error, INVALIDATING):
-            raise
-        failure = error
-    if failure is None:
-        assert outcome != "error", f"expected an error containing {error_text!r}, got rows {got}"
-        assert got == expected
-        return
-    assert outcome != "rows", f"expected the native rows, got {failure}"
-    assert error_text in str(failure)
-    assert con.execute("SELECT 42").fetchall() == [(42,)]
-
-
 def _params(cases, ops, marks_for, shapes=SHAPES):
     params = []
     for case in cases:
@@ -256,18 +239,6 @@ def _params(cases, ops, marks_for, shapes=SHAPES):
             for op in ops:
                 marks = marks_for(case, op)
                 params.append(pytest.param(case, shape, op, marks=marks, id=f"{case.id}-{shape}-{op}"))
-    return params
-
-
-def _outcome_params(cases, ops, outcome_for, marks=()):
-    params = []
-    for case in cases:
-        for shape in SHAPES:
-            for op in ops:
-                outcome, error_text = outcome_for(case, shape, op)
-                params.append(
-                    pytest.param(case, shape, op, outcome, error_text, marks=list(marks), id=f"{case.id}-{shape}-{op}")
-                )
     return params
 
 
@@ -297,47 +268,6 @@ MATCHES_NATIVE = [
     *_params(NESTING_CASES, ["eq", "is_null"], _no_marks, shapes=NESTED_SHAPES),
 ]
 
-# pyarrow's message for a comparison and for an IN list on each dictionary.
-NO_KERNEL_TEXT = {
-    "decimal32": (
-        "has no kernel matching input types (decimal32(5, 2), decimal32(5, 2))",
-        "'is_in' has no kernel matching input types (decimal32(5, 2))",
-    ),
-    "decimal64": (
-        "has no kernel matching input types (decimal64(15, 2), decimal64(15, 2))",
-        "'is_in' has no kernel matching input types (decimal64(15, 2))",
-    ),
-    "binary_view": (
-        "Unsupported cast from dictionary<values=binary_view",
-        "'is_in' has no kernel matching input types (binary_view)",
-    ),
-    "string_view": (
-        "has no kernel matching input types (string_view, string)",
-        "'is_in' has no kernel matching input types (string_view)",
-    ),
-}
-LIST_IN_TEXT = "'is_in' has no kernel matching input types (list<item: int64>)"
-# pyarrow cannot reference a field through a dictionary, so these stay out of R1 while the engine pushes them.
-STRUCT_FIELD_TEXT = "No match for FieldRef.Nested"
-
-
-def _no_kernel_outcome(case, shape, op):
-    comparison_text, in_text = NO_KERNEL_TEXT[case.id]
-    if op in COMPARISONS:
-        return "either", comparison_text
-    if op == "in" and shape == "bare":
-        return "either", in_text
-    return "rows", None
-
-
-def _struct_dictionary_outcome(case, shape, op):
-    return ("error", STRUCT_FIELD_TEXT) if op in COMPARISONS else ("rows", None)
-
-
-def _list_dictionary_outcome(case, shape, op):
-    return ("either", LIST_IN_TEXT) if op == "in" and shape == "bare" else ("rows", None)
-
-
 # The engine leaves the struct children of a dictionary's NULL sentinel slot uninitialized, so scanning a dictionary
 # of structs with a NULL index reads garbage and crashes the process on dirty memory (Windows x86_64 in CI, any
 # platform with DUCKDB_JE_MALLOC_CONF=junk:true). A crash cannot be an xfail; skipped until the engine fix is pinned.
@@ -345,15 +275,11 @@ STRUCT_SENTINEL = pytest.mark.skip(
     reason="engine: the NULL sentinel of a dictionary of structs has uninitialized children"
 )
 
-EXPECTED_OUTCOMES = [
-    *_outcome_params(NO_PYARROW_KERNEL, ALL_OPS, _no_kernel_outcome),
-    *_outcome_params(
-        STRUCT_DICTIONARIES,
-        ["eq", "lt", "between", "in", "is_null"],
-        _struct_dictionary_outcome,
-        marks=[STRUCT_SENTINEL],
-    ),
-    *_outcome_params(LIST_DICTIONARIES, ["eq", "in", "is_null"], _list_dictionary_outcome),
+# pyarrow has no kernel for these comparisons, IN lists or field references, which DuckDB evaluates itself.
+UNFILTERABLE_BY_PYARROW = [
+    *_params(NO_PYARROW_KERNEL, ALL_OPS, _no_marks),
+    *_params(STRUCT_DICTIONARIES, ["eq", "lt", "between", "in", "is_null"], lambda case, op: [STRUCT_SENTINEL]),
+    *_params(LIST_DICTIONARIES, ["eq", "in", "is_null"], _no_marks),
 ]
 
 
@@ -363,21 +289,28 @@ def test_filter_matches_native(duckdb_cursor, case, shape, op):
     predicate = _predicate(case, op, col)
     expected = _rows(duckdb_cursor, "native_t", predicate)
     assert _arrow_rows(duckdb_cursor, predicate) == expected
-    if case.plan == "pushed" and (op in COMPARISONS or op in NAN_COMPARISONS):
-        assert_fully_pushed(duckdb_cursor, _arrow_query(predicate), len(expected))
+    assert_kept_above(duckdb_cursor, _arrow_query(predicate), len(expected))
 
 
-@pytest.mark.parametrize(("case", "shape", "op", "outcome", "error_text"), EXPECTED_OUTCOMES)
-def test_filter_gives_expected_outcome(duckdb_cursor, case, shape, op, outcome, error_text):
+@pytest.mark.parametrize(("case", "shape", "op"), MATCHES_NATIVE)
+def test_filter_through_a_dataset_matches_native(duckdb_cursor, case, shape, op):
+    col = _register_shape(duckdb_cursor, case, shape, _as_dataset)
+    predicate = _predicate(case, op, col)
+    assert _arrow_rows(duckdb_cursor, predicate) == _rows(duckdb_cursor, "native_t", predicate)
+    # A pyarrow whose kernels read a valid index to a NULL dictionary entry as a value gets no dictionary predicate.
+    if not dictionary_kernels_exact():
+        assert_query_keeps_filter_above(duckdb_cursor, _arrow_query(predicate))
+
+
+@pytest.mark.parametrize(("case", "shape", "op"), UNFILTERABLE_BY_PYARROW)
+def test_filter_pyarrow_cannot_evaluate_matches_native(duckdb_cursor, case, shape, op):
     col = _register_shape(duckdb_cursor, case, shape)
-    assert_expected_outcome(duckdb_cursor, _predicate(case, op, col), outcome, error_text)
+    predicate = _predicate(case, op, col)
+    assert _arrow_rows(duckdb_cursor, predicate) == _rows(duckdb_cursor, "native_t", predicate)
 
 
-RUN_END_REFUSAL_TEXT = 'Cannot push down a filter on run end encoded column "r"'
-# The client refuses a run end encoded column; the engine change that stops pushdown on such columns turns these into
-# native rows, and the engine's own tests pin the string types its gate fails on.
 RUN_END_ENCODED = [
-    pytest.param(case, op, "either", RUN_END_REFUSAL_TEXT, id=f"{case.id}-{op}")
+    pytest.param(case, op, id=f"{case.id}-{op}")
     for case in [
         _case(TYPED_SCALARS, "decimal128_30_2"),
         _case(TYPED_SCALARS, "timestamptz_utc"),
@@ -387,22 +320,24 @@ RUN_END_ENCODED = [
 ]
 
 
-@pytest.mark.parametrize(("case", "op", "outcome", "error_text"), RUN_END_ENCODED)
-def test_run_end_encoded_filter_gives_expected_outcome(duckdb_cursor, case, op, outcome, error_text):
+@pytest.mark.parametrize(("case", "op"), RUN_END_ENCODED)
+def test_run_end_encoded_filter_matches_native(duckdb_cursor, case, op):
     plain = pa.array([None if i is None else [*case.values, None][i] for i in INDICES], case.value_type)
     _register(duckdb_cursor, case, pc.run_end_encode(plain), "r")
-    assert_expected_outcome(duckdb_cursor, _predicate(case, op, "r"), outcome, error_text)
+    predicate = _predicate(case, op, "r")
+    assert _arrow_rows(duckdb_cursor, predicate) == _rows(duckdb_cursor, "native_t", predicate)
 
 
 @pytest.mark.parametrize("path", ["s.r", "s.t.r"])
-def test_nested_run_end_encoded_column_is_refused_recoverably(duckdb_cursor, path):
+def test_nested_run_end_encoded_filter_matches_native(duckdb_cursor, path):
     column = pc.run_end_encode(pa.array([Decimal("1.25"), Decimal("2.50"), None], pa.decimal128(30, 2)))
     for name in reversed(path.split(".")[1:]):
         column = pa.StructArray.from_arrays([column], [name])
     duckdb_cursor.register("arrow_t", pa.table({"x": [1, 2, 3], "s": column}))
-    with pytest.raises(duckdb.NotImplementedException, match=f'run end encoded column "{path}"'):
-        _rows(duckdb_cursor, "arrow_t", f"{path} > 2.00::DECIMAL(30,2)")
-    assert duckdb_cursor.execute("SELECT 42").fetchall() == [(42,)]
+    duckdb_cursor.execute("CREATE TABLE native_t AS SELECT * FROM arrow_t")
+    predicate = f"{path} > 2.00::DECIMAL(30,2)"
+    assert _rows(duckdb_cursor, "native_t", predicate) == [(2,)]
+    assert _arrow_rows(duckdb_cursor, predicate) == [(2,)]
 
 
 FLOAT_CHUNK_PREDICATES = {
@@ -430,7 +365,7 @@ def test_float_dictionary_chunks_with_different_dictionaries_match_native(duckdb
     predicate = f"d {FLOAT_CHUNK_PREDICATES[op].format(type=sql_type)}"
     expected = _rows(duckdb_cursor, "native_t", predicate)
     assert _arrow_rows(duckdb_cursor, predicate) == expected
-    assert_fully_pushed(duckdb_cursor, _arrow_query(predicate), len(expected))
+    assert_kept_above(duckdb_cursor, _arrow_query(predicate), len(expected))
 
 
 UNIT_MICROS = {"s": 1_000_000, "ms": 1_000, "us": 1}
@@ -471,7 +406,7 @@ def test_zoned_timestamp_comparison_matches_native(duckdb_cursor, unit, column_z
         predicate = f"{col} {ZONED_COMPARISONS[op]} {_micros_literal(constant)}"
     expected = _rows(duckdb_cursor, "native_t", predicate)
     assert _arrow_rows(duckdb_cursor, predicate) == expected
-    assert_fully_pushed(duckdb_cursor, _arrow_query(predicate), len(expected))
+    assert_kept_above(duckdb_cursor, _arrow_query(predicate), len(expected))
 
 
 INFINITE_BOUNDS = {
@@ -494,17 +429,13 @@ def test_zoned_timestamp_between_infinities_matches_native(
     predicate = f"{col} BETWEEN {low} AND {high}"
     expected = _rows(duckdb_cursor, "native_t", predicate)
     assert _arrow_rows(duckdb_cursor, predicate) == expected
-    assert_fully_pushed(duckdb_cursor, _arrow_query(predicate), len(expected))
+    assert_kept_above(duckdb_cursor, _arrow_query(predicate), len(expected))
 
 
 INFINITE_IN_LISTS = {
     "infinities": "'-infinity'::TIMESTAMPTZ, 'infinity'::TIMESTAMPTZ",
     "infinity_and_epoch": f"'infinity'::TIMESTAMPTZ, {EPOCH_LITERAL}",
 }
-INFINITE_IN_REASON = (
-    "client IsIn: PythonObject::FromValue turns an infinite TIMESTAMPTZ into a zoneless datetime, "
-    "which pyarrow refuses for a zoned column"
-)
 INFINITE_IN_CASES = [
     pytest.param(
         unit,
@@ -512,8 +443,6 @@ INFINITE_IN_CASES = [
         session_zone,
         shape,
         values,
-        # The engine keeps an IN list on a struct field above the scan, so only bare and plain columns reach pyarrow.
-        marks=[] if shape == "in_struct" else _xfail(INFINITE_IN_REASON, duckdb.Error),
         id=f"{unit}-{column_zone}-{session_zone}-{shape}-{values}",
     )
     for unit in UNIT_MICROS
@@ -556,7 +485,7 @@ def test_zoned_timestamp_two_structs_deep_matches_native(duckdb_cursor, shape, o
     predicate = f"s.t.d {ZONED_COMPARISONS[op]} {_micros_literal(step // 2)}"
     expected = _rows(duckdb_cursor, "native_t", predicate)
     assert _arrow_rows(duckdb_cursor, predicate) == expected
-    assert_fully_pushed(duckdb_cursor, _arrow_query(predicate), len(expected))
+    assert_kept_above(duckdb_cursor, _arrow_query(predicate), len(expected))
 
 
 @pytest.mark.parametrize(
@@ -582,7 +511,7 @@ def test_zoned_timestamp_beside_decoy_siblings_matches_native(duckdb_cursor, sha
     predicate = f"s.t.d {ZONED_COMPARISONS[op]} TIMESTAMPTZ {constant}"
     assert _rows(duckdb_cursor, "native_t", predicate) == expected
     assert _arrow_rows(duckdb_cursor, predicate) == expected
-    assert_fully_pushed(duckdb_cursor, _arrow_query(predicate), len(expected))
+    assert_kept_above(duckdb_cursor, _arrow_query(predicate), len(expected))
 
 
 @pytest.mark.parametrize("op", ["eq", "lt", "between"])
@@ -600,7 +529,7 @@ def test_fixed_offset_zone_comparison_matches_native(duckdb_cursor, unit, column
         predicate = f"{col} {ZONED_COMPARISONS[op]} {_micros_literal(constant)}"
     expected = _rows(duckdb_cursor, "native_t", predicate)
     assert _arrow_rows(duckdb_cursor, predicate) == expected
-    assert_fully_pushed(duckdb_cursor, _arrow_query(predicate), len(expected))
+    assert_kept_above(duckdb_cursor, _arrow_query(predicate), len(expected))
 
 
 def _zoned_source(unit, column_zone, shape, source):
@@ -635,7 +564,7 @@ def test_zoned_timestamp_scanner_and_reader_sources_match_native(
     assert _arrow_rows(duckdb_cursor, predicate) == expected
     # A record batch reader can be scanned once, so the plan check gets a fresh source.
     duckdb_cursor.register("arrow_t", _zoned_source(unit, column_zone, shape, source)[1])
-    assert_fully_pushed(duckdb_cursor, _arrow_query(predicate), len(expected))
+    assert_kept_above(duckdb_cursor, _arrow_query(predicate), len(expected))
 
 
 class _SchemaExportOnly:
@@ -670,7 +599,10 @@ def test_dataset_with_an_export_only_schema_matches_native(duckdb_cursor, shape,
     predicate = f"p {ZONED_COMPARISONS[op]} {_micros_literal(GRID_OFFSETS[offset] * UNIT_MICROS['ms'] // 2)}"
     expected = _rows(duckdb_cursor, "native_t", predicate)
     assert _arrow_rows(duckdb_cursor, predicate) == expected
-    assert_fully_pushed(duckdb_cursor, _arrow_query(predicate), len(expected))
+    if shape == "dictionary" and not dictionary_kernels_exact():
+        assert_kept_above(duckdb_cursor, _arrow_query(predicate), len(expected))
+    else:
+        assert_fully_pushed(duckdb_cursor, _arrow_query(predicate), len(expected))
 
 
 # The first stored values whose microsecond form overflows int64; one unit less still fits.
@@ -701,13 +633,10 @@ def test_zoned_timestamp_beyond_the_microsecond_limit(duckdb_cursor, unit, shape
     first = FIRST_OVERFLOWING[unit]
     _register_raw_zoned(duckdb_cursor, unit, [first - 1, first], shape)
     predicate = f"p {ZONED_COMPARISONS[op]} {EPOCH_LITERAL}"
-    if op in ("ne", "gt", "ge"):
-        # pyarrow keeps the overflowing row, and the scan cannot convert it to a DuckDB TIMESTAMPTZ.
-        with pytest.raises(duckdb.ConversionException, match="Could not convert TimestampTZ to Microsecond"):
-            _rows(duckdb_cursor, "arrow_t", predicate)
-        assert duckdb_cursor.execute("SELECT 42").fetchall() == [(42,)]
-    else:
-        assert _arrow_rows(duckdb_cursor, predicate) == []
+    # The scan converts every row before DuckDB filters, and the overflowing row has no DuckDB TIMESTAMPTZ.
+    with pytest.raises(duckdb.ConversionException, match="Could not convert TimestampTZ to Microsecond"):
+        _rows(duckdb_cursor, "arrow_t", predicate)
+    assert duckdb_cursor.execute("SELECT 42").fetchall() == [(42,)]
 
 
 @pytest.mark.parametrize("op", ["gt", "eq", "between"])

@@ -7,7 +7,6 @@
 //===----------------------------------------------------------------------===//
 
 #pragma once
-#include "duckdb_python/arrow/arrow_array_stream.hpp"
 #include "duckdb.hpp"
 #include "duckdb_python/nb/casters.hpp"
 #include "duckdb_python/import_cache/python_import_cache.hpp"
@@ -274,6 +273,12 @@ public:
 	static void SetDefaultConnection(std::shared_ptr<DuckDBPyConnection> conn);
 	static PythonImportCache *ImportCache();
 	static nb::object ConsumedArrowReaders();
+	//! Keeps adapt and the nodes module of the duckdb._sources package the package passes in as it imports
+	static void SetArrowSources(const nb::object &sources);
+	//! duckdb._sources.adapt; call with the GIL held
+	static nb::object ArrowSourcesAdapt();
+	//! The duckdb._sources.nodes module; call with the GIL held
+	static nb::object ArrowSourcesNodes();
 	static bool IsInteractive();
 
 	std::unique_ptr<DuckDBPyRelation> ReadCSV(const nb::object &name, nb::kwargs &kwargs);
@@ -336,6 +341,7 @@ public:
 	                                                      const std::optional<string> &source);
 
 	std::shared_ptr<DuckDBPyConnection> RegisterPythonObject(const string &name, const nb::object &python_object);
+	std::shared_ptr<DuckDBPyConnection> RegisterArrowSource(const string &name, const nb::object &source);
 
 	void InstallExtension(const string &extension, bool force_install = false,
 	                      const nb::object &repository = nb::none(), const nb::object &repository_url = nb::none(),
@@ -431,8 +437,6 @@ public:
 	void DisableProfiling();
 
 	static bool IsPandasDataframe(const nb::object &object);
-	static PyArrowObjectType GetArrowType(const nb::handle &obj);
-	static bool IsAcceptedArrowObject(const nb::object &object);
 	static NumpyObjectType IsAcceptedNumpyObject(const nb::object &object);
 
 	//! Abandons a blocking engine call when Python has a pending signal. Takes the GIL.

@@ -1,20 +1,26 @@
-"""NaN comparison filter pushdown with NULL handling.
+"""NaN comparison filters with NULL handling.
 
 DuckDB treats NaN as the greatest float value and a comparison with NULL
-returns NULL (which drops the row). The filter pushdown must match this
-behavior exactly.
+returns NULL (which drops the row). Every Arrow scan must match this
+behavior exactly. A NaN constant is never offered to a source, so DuckDB
+applies a filter holding one above the scan; a pyarrow Table, and the pandas
+and polars frames converted to one, refuse every filter.
 """
 
 from __future__ import annotations
 
 import json
 import math
+import re
 import struct
 
 import pytest
 from _pushdown_helpers import (
+    ARROW_SCAN_FUNCTIONS,
     _find_arrow_scan_nodes,
     arrow_scan_block,
+    assert_query_keeps_filter_above,
+    scan_of,
     to_arrow_dataset,
     to_arrow_table,
     to_polars_dataframe,
@@ -41,7 +47,7 @@ def build_minus_nan():
 
 
 def to_arrow_via_pandas_arrowdtype(rel):
-    """Pandas with ArrowDtype keeps NaN and NULL distinct, reaches ARROW_SCAN."""
+    """Pandas with ArrowDtype keeps NaN and NULL distinct and reaches the Arrow scan."""
     return rel.to_arrow_table().to_pandas(types_mapper=pd.ArrowDtype)
 
 
@@ -96,6 +102,10 @@ ALL_FACTORIES = [
     ),
     pytest.param(to_arrow_table_dict_encoded, id="dict"),
 ]
+
+
+# The factories whose source takes the filters it can evaluate exactly into its own scan.
+ACCEPTING_FACTORIES = (to_arrow_dataset, to_polars_lazyframe)
 
 
 def _make_factory_params_with_xfail(xfail_on_dict):
@@ -185,32 +195,35 @@ def normalize_result(rows):
     )
 
 
+def _filters_text(filters):
+    """The Filters of a scan as one text without identifier quotes, so `"b" < 2` reads as `b < 2`."""
+    return (str(filters) if not isinstance(filters, str) else filters).replace('"', "")
+
+
 def assert_filter_pushed_to_scan(con, query: str, expected_filter: str):
-    """Verify filter is in an ARROW_SCAN's Filters and no FILTER operator is above it."""
+    """Verify filter is in an Arrow scan's Filters and no FILTER operator is above it."""
     result = con.execute(f"EXPLAIN (FORMAT JSON) {query}").fetchone()
     plan = json.loads(result[1])
 
     scans = _find_arrow_scan_nodes(plan)
-    assert len(scans) > 0, "No ARROW_SCAN in plan"
+    assert len(scans) > 0, "No Arrow scan in plan"
 
     found = False
     for node, has_filter_ancestor in scans:
         filters = node.get("extra_info", {}).get("Filters")
-        if filters:
-            filters_str = str(filters) if not isinstance(filters, str) else filters
-            if expected_filter in filters_str:
-                assert not has_filter_ancestor, "FILTER operator above ARROW_SCAN in plan"
-                found = True
-                break
+        if filters and expected_filter in _filters_text(filters):
+            assert not has_filter_ancestor, "FILTER operator above the Arrow scan in plan"
+            found = True
+            break
 
-    assert found, f"Expected filter '{expected_filter}' not found in any ARROW_SCAN"
+    assert found, f"Expected filter '{expected_filter}' not found in any Arrow scan"
 
 
 def _find_arrow_scan_in_analyzed_plan(nodes):
     """Find Arrow scan node in analyzed plan's operator tree."""
     for node in nodes:
         extra_info = node.get("extra_info", {})
-        if extra_info.get("Function") == "ARROW_SCAN":
+        if extra_info.get("Function") in ARROW_SCAN_FUNCTIONS:
             return node
         children = node.get("children", [])
         if children:
@@ -229,7 +242,7 @@ def assert_in_filter_pushed(con, query: str, predicate: str):
 
     operator_list = plan.get("operator", [])
     node = _find_arrow_scan_in_analyzed_plan(operator_list)
-    assert node is not None, "No ARROW_SCAN in EXPLAIN ANALYZE plan"
+    assert node is not None, "No Arrow scan in EXPLAIN ANALYZE plan"
 
     emitted_rows = node.get("intermediate_rows", 0)
 
@@ -247,7 +260,7 @@ def assert_in_filter_not_pushed(con, query: str):
 
     operator_list = plan.get("operator", [])
     node = _find_arrow_scan_in_analyzed_plan(operator_list)
-    assert node is not None, "No ARROW_SCAN in EXPLAIN ANALYZE plan"
+    assert node is not None, "No Arrow scan in EXPLAIN ANALYZE plan"
 
     emitted_rows = node.get("intermediate_rows", 0)
 
@@ -318,7 +331,7 @@ class TestNaNWithNullRows:
         self._make_tables(coltype, VALUES_WITH_NULL, factory)
         predicate = f"b <= 'nan'::{coltype}"
         assert_matches_native(self.con, predicate)
-        assert_filter_pushed_to_scan(self.con, f"SELECT b FROM arrow_t WHERE {predicate}", f"b <= 'nan'::{coltype}")
+        assert_query_keeps_filter_above(self.con, f"SELECT b FROM arrow_t WHERE {predicate}")
 
     @pytest.mark.parametrize("factory", ALL_FACTORIES)
     @pytest.mark.parametrize("coltype", ["DOUBLE", "FLOAT"])
@@ -326,14 +339,14 @@ class TestNaNWithNullRows:
         self._make_tables(coltype, VALUES_WITH_NULL, factory)
         predicate = f"b <= 'nan'::{coltype} IS NOT DISTINCT FROM true"
         assert_matches_native(self.con, predicate)
-        assert_filter_pushed_to_scan(self.con, f"SELECT b FROM arrow_t WHERE {predicate}", f"b <= 'nan'::{coltype}")
+        assert_query_keeps_filter_above(self.con, f"SELECT b FROM arrow_t WHERE {predicate}")
 
     @pytest.mark.parametrize("factory", ALL_FACTORIES)
     def test_le_nan_double_col_float_const(self, factory):
         self._make_tables("DOUBLE", [1.0, float("nan"), None], factory)
         predicate = "b <= 'nan'::FLOAT"
         assert_matches_native(self.con, predicate)
-        assert_filter_pushed_to_scan(self.con, f"SELECT b FROM arrow_t WHERE {predicate}", "b <= 'nan'::DOUBLE")
+        assert_query_keeps_filter_above(self.con, f"SELECT b FROM arrow_t WHERE {predicate}")
 
     @pytest.mark.parametrize("factory", ALL_FACTORIES)
     def test_le_nan_float_col_double_const(self, factory):
@@ -365,36 +378,38 @@ class TestNaNWithNullRows:
     @pytest.mark.parametrize("factory", ALL_FACTORIES)
     @pytest.mark.parametrize("coltype", ["DOUBLE", "FLOAT"])
     def test_in_list_with_nan(self, coltype, factory):
-        """IN list with NaN: pyarrow drops it, polars pushes it (polars backend handles NaN correctly)."""
+        """IN list with NaN: no source is offered it, so the scan emits every row."""
         # Create large table with 2000 rows, only 3 matching.
         self._make_large_tables(coltype, 2000, {100: float("nan"), 200: 1.0}, factory)
         predicate = f"b IN ('nan'::{coltype}, 1.0)"
         assert_matches_native(self.con, predicate)
-        # Polars LazyFrame uses polars backend (pushes), everything else uses pyarrow backend (drops).
-        if factory.__name__ == "to_polars_lazyframe":
+        assert_in_filter_not_pushed(self.con, f"SELECT b FROM arrow_t WHERE {predicate}")
+
+    @pytest.mark.parametrize("factory", ALL_FACTORIES)
+    @pytest.mark.parametrize("coltype", ["DOUBLE", "FLOAT"])
+    def test_in_list_with_zero(self, coltype, factory):
+        """IN list with zero: a Dataset and a LazyFrame take it into their scan, a Table refuses it."""
+        # Create large table with 2000 rows, only 4 matching.
+        self._make_large_tables(coltype, 2000, {100: 0.0, 200: 1.0}, factory)
+        predicate = f"b IN (0.0::{coltype}, 1.0)"
+        assert_matches_native(self.con, predicate)
+        if factory in ACCEPTING_FACTORIES:
             assert_in_filter_pushed(self.con, f"SELECT b FROM arrow_t WHERE {predicate}", predicate)
         else:
             assert_in_filter_not_pushed(self.con, f"SELECT b FROM arrow_t WHERE {predicate}")
 
     @pytest.mark.parametrize("factory", ALL_FACTORIES)
     @pytest.mark.parametrize("coltype", ["DOUBLE", "FLOAT"])
-    def test_in_list_with_zero(self, coltype, factory):
-        """IN list with zero: pushed (both backends handle zero correctly)."""
-        # Create large table with 2000 rows, only 4 matching.
-        self._make_large_tables(coltype, 2000, {100: 0.0, 200: 1.0}, factory)
-        predicate = f"b IN (0.0::{coltype}, 1.0)"
-        assert_matches_native(self.con, predicate)
-        assert_in_filter_pushed(self.con, f"SELECT b FROM arrow_t WHERE {predicate}", predicate)
-
-    @pytest.mark.parametrize("factory", ALL_FACTORIES)
-    @pytest.mark.parametrize("coltype", ["DOUBLE", "FLOAT"])
     def test_in_list_without_nan_or_zero(self, coltype, factory):
-        """IN list without NaN or zero: pushed."""
+        """IN list without NaN or zero: a Dataset and a LazyFrame take it into their scan, a Table refuses it."""
         # Create large table with 2000 rows, only 6 matching.
         self._make_large_tables(coltype, 2000, {100: 1.0, 200: 2.0, 300: 3.0}, factory)
         predicate = f"b IN (1.0::{coltype}, 2.0, 3.0)"
         assert_matches_native(self.con, predicate)
-        assert_in_filter_pushed(self.con, f"SELECT b FROM arrow_t WHERE {predicate}", predicate)
+        if factory in ACCEPTING_FACTORIES:
+            assert_in_filter_pushed(self.con, f"SELECT b FROM arrow_t WHERE {predicate}", predicate)
+        else:
+            assert_in_filter_not_pushed(self.con, f"SELECT b FROM arrow_t WHERE {predicate}")
 
     @pytest.mark.parametrize("factory", ALL_FACTORIES)
     @pytest.mark.parametrize("coltype", ["DOUBLE", "FLOAT"])
@@ -441,41 +456,36 @@ class TestNaNWithNullRows:
     @pytest.mark.parametrize("factory", ALL_FACTORIES)
     @pytest.mark.parametrize("coltype", ["DOUBLE", "FLOAT"])
     def test_in_list_with_nan_over_minus_nan(self, coltype, factory):
-        """IN list with NaN constant over -nan data: pyarrow drops it, polars pushes it."""
+        """IN list with NaN constant over -nan data: no source is offered it, so the scan emits every row."""
         minus_nan = build_minus_nan()
         # Few of the 2000 rows match, so whether the IN list reached the scan shows in its emitted row count.
         self._make_large_tables(coltype, 2000, {100: minus_nan, 200: 1.0}, factory)
         predicate = f"b IN ('nan'::{coltype}, 1.0)"
         assert_matches_native(self.con, predicate)
-        # Polars LazyFrame uses polars backend (pushes), everything else uses pyarrow backend (drops).
-        if factory.__name__ == "to_polars_lazyframe":
-            assert_in_filter_pushed(self.con, f"SELECT b FROM arrow_t WHERE {predicate}", predicate)
-        else:
-            assert_in_filter_not_pushed(self.con, f"SELECT b FROM arrow_t WHERE {predicate}")
+        assert_in_filter_not_pushed(self.con, f"SELECT b FROM arrow_t WHERE {predicate}")
 
     @pytest.mark.parametrize("factory", ALL_FACTORIES)
     @pytest.mark.parametrize("coltype", ["DOUBLE", "FLOAT"])
     def test_in_list_with_zero_over_minus_zero(self, coltype, factory):
-        """IN list with 0.0 constant over -0.0 data: pushed (both backends handle zero correctly)."""
+        """IN list with 0.0 constant over -0.0 data: a Dataset and a LazyFrame take it, a Table refuses it."""
         # Few of the 2000 rows match, so whether the IN list reached the scan shows in its emitted row count.
         self._make_large_tables(coltype, 2000, {100: -0.0, 200: 1.0}, factory)
         predicate = f"b IN (0.0::{coltype}, 1.0)"
         assert_matches_native(self.con, predicate)
-        assert_in_filter_pushed(self.con, f"SELECT b FROM arrow_t WHERE {predicate}", predicate)
+        if factory in ACCEPTING_FACTORIES:
+            assert_in_filter_pushed(self.con, f"SELECT b FROM arrow_t WHERE {predicate}", predicate)
+        else:
+            assert_in_filter_not_pushed(self.con, f"SELECT b FROM arrow_t WHERE {predicate}")
 
     @pytest.mark.parametrize("factory", ALL_FACTORIES)
     @pytest.mark.parametrize("coltype", ["DOUBLE", "FLOAT"])
     def test_in_list_only_nan_and_zero(self, coltype, factory):
-        """IN list with only NaN and zero: pyarrow drops it, polars pushes it."""
+        """IN list with only NaN and zero: no source is offered it, so the scan emits every row."""
         # Few of the 2000 rows match, so whether the IN list reached the scan shows in its emitted row count.
         self._make_large_tables(coltype, 2000, {100: float("nan"), 200: 0.0}, factory)
         predicate = f"b IN ('nan'::{coltype}, 0.0)"
         assert_matches_native(self.con, predicate)
-        # Polars LazyFrame uses polars backend (pushes), everything else uses pyarrow backend (drops).
-        if factory.__name__ == "to_polars_lazyframe":
-            assert_in_filter_pushed(self.con, f"SELECT b FROM arrow_t WHERE {predicate}", predicate)
-        else:
-            assert_in_filter_not_pushed(self.con, f"SELECT b FROM arrow_t WHERE {predicate}")
+        assert_in_filter_not_pushed(self.con, f"SELECT b FROM arrow_t WHERE {predicate}")
 
     @pytest.mark.parametrize(
         ("coltype", "op", "const", "factory"),
@@ -526,11 +536,15 @@ class TestNaNWithNullRows:
 
     @pytest.mark.parametrize("factory", ALL_FACTORIES)
     def test_filter_not_pushed_negative_check(self, factory):
-        """Negative test: assert_filter_pushed_to_scan correctly rejects a non-pushed filter."""
+        """Negative test: assert_filter_pushed_to_scan correctly rejects a filter that is not fully pushed.
+
+        A Dataset or LazyFrame takes b <= 1.0 and leaves abs(b) = 1 above its scan; a Table takes neither.
+        """
         self._make_tables("DOUBLE", [1.0, float("nan"), None], factory)
-        predicate = "b <= 'nan'::DOUBLE AND abs(b) = 1"
-        with pytest.raises(AssertionError, match="FILTER operator above ARROW_SCAN"):
-            assert_filter_pushed_to_scan(self.con, f"SELECT b FROM arrow_t WHERE {predicate}", "b <= 'nan'::DOUBLE")
+        predicate = "b <= 1.0 AND abs(b) = 1"
+        refusal = "FILTER operator above the Arrow scan" if factory in ACCEPTING_FACTORIES else "not found"
+        with pytest.raises(AssertionError, match=refusal):
+            assert_filter_pushed_to_scan(self.con, f"SELECT b FROM arrow_t WHERE {predicate}", "b <= 1.0")
 
     @pytest.mark.parametrize("factory", ALL_FACTORIES)
     def test_helper_handles_wide_projection(self, factory):
@@ -557,8 +571,13 @@ class TestNaNWithNullRows:
         query = "SELECT a.* FROM wide_arrow_t a CROSS JOIN range(1) t WHERE b < 2"
         plan = self.con.execute(f"EXPLAIN {query}").fetchone()[1]
         block = arrow_scan_block(plan)
-        assert block is not None, "arrow_scan_block failed to extract ARROW_SCAN box"
-        assert "Filters: b < 2.0" in block or "Filters: b<2" in block, f"Filters line not in block: {block}"
+        assert block is not None, "arrow_scan_block failed to extract the Arrow scan box"
+        flat = re.sub(r'[│"()\s]+', " ", block)
+        if factory in ACCEPTING_FACTORIES:
+            assert "Filters: b < 2" in flat, f"Filters line not in block: {block}"
+        else:
+            assert "Filters:" not in block, f"a Table took a filter into its scan: {block}"
+            assert "Projections:" in block, f"Projections line not in block: {block}"
 
     @pytest.mark.parametrize("factory", ALL_FACTORIES)
     def test_helper_excludes_neighbor_box_filters(self, factory):
@@ -572,13 +591,14 @@ class TestNaNWithNullRows:
             result = self.con.execute(f"EXPLAIN (FORMAT JSON) {query}").fetchone()
             plan = json.loads(result[1])
             scans = _find_arrow_scan_nodes(plan)
-            assert len(scans) > 0, "No ARROW_SCAN found"
+            assert len(scans) > 0, "No Arrow scan found"
 
             for node, _ in scans:
                 filters = node.get("extra_info", {}).get("Filters")
                 if filters:
-                    filters_str = str(filters) if not isinstance(filters, str) else filters
-                    assert "i <" not in filters_str, f"Native table filter incorrectly on Arrow scan: {filters}"
+                    assert not re.search(r"\bi\b", _filters_text(filters)), (
+                        f"Native table filter incorrectly on Arrow scan: {filters}"
+                    )
         finally:
             self.con.execute("RESET disabled_optimizers")
 
@@ -591,40 +611,30 @@ class TestNaNWithNullRows:
             self.con.execute("CREATE OR REPLACE TABLE n AS SELECT i FROM range(10) t(i)")
             query = "SELECT n.i, a.b FROM n CROSS JOIN arrow_t a WHERE n.i < 2 AND b <= 'nan'::DOUBLE"
 
-            result = self.con.execute(f"EXPLAIN (FORMAT JSON) {query}").fetchone()
-            plan = json.loads(result[1])
-            scans = _find_arrow_scan_nodes(plan)
-            assert len(scans) > 0, "No Arrow scan found"
-
-            arrow_scan_found = False
-            for node, _ in scans:
-                filters = node.get("extra_info", {}).get("Filters")
-                if filters:
-                    filters_str = str(filters) if not isinstance(filters, str) else filters
-                    if "b <=" in filters_str or "b<=" in filters_str:
-                        arrow_scan_found = True
-                        assert "i <" not in filters_str, f"Native table filter incorrectly on Arrow scan: {filters}"
-
-            assert arrow_scan_found, "Arrow scan with b <= 'nan' filter not found"
+            # The NaN constant is never offered, so the Arrow scan has no filter and a FILTER above it applies it.
+            assert_query_keeps_filter_above(self.con, query)
             assert_matches_native(self.con, "b <= 'nan'::DOUBLE")
         finally:
             self.con.execute("RESET disabled_optimizers")
 
     @pytest.mark.parametrize("factory", ALL_FACTORIES)
     def test_scan_beside_a_range_function(self, factory):
-        """CROSS JOIN with range function: filter pushed to scan with no FILTER ancestor."""
+        """CROSS JOIN with range function: the Arrow scan is found and the NaN filter stays above it."""
         self._make_tables("DOUBLE", [1.0, float("nan"), None], factory)
         query = "SELECT a.* FROM arrow_t a CROSS JOIN range(1) WHERE b <= 'nan'::DOUBLE"
 
-        # The filter should be pushed and no FILTER ancestor should exist
-        assert_filter_pushed_to_scan(self.con, query, "b <= 'nan'::DOUBLE")
+        # The NaN constant is never offered, so a FILTER above the scan applies it.
+        assert_query_keeps_filter_above(self.con, query)
 
         # Verify results match native
         assert_matches_native(self.con, "b <= 'nan'::DOUBLE")
 
 
 def test_helpers_read_several_pushed_filters(duckdb_cursor):
-    duckdb_cursor.register("several", pa.table({"x": [1, 2, 3], "y": [1, 2, 3]}))
+    # A Dataset takes the filters it can evaluate into its scan, where a Table refuses them.
+    duckdb_cursor.register(
+        "several", to_arrow_dataset(duckdb_cursor.sql("SELECT range AS x, range AS y FROM range(1, 4)"))
+    )
     query = "SELECT * FROM several WHERE x > 1 AND y < 3"
     assert was_pushed(duckdb_cursor, query)
     assert_filter_pushed_to_scan(duckdb_cursor, query, "x > 1")
@@ -634,7 +644,47 @@ def test_helpers_read_several_pushed_filters(duckdb_cursor):
 def test_helpers_find_the_filtered_scan_of_two_arrow_scans(duckdb_cursor):
     duckdb_cursor.execute("SET disabled_optimizers = 'join_order,build_side_probe_side'")
     duckdb_cursor.register("first_arrow", pa.table({"x": [1, 2, 3]}))
-    duckdb_cursor.register("second_arrow", pa.table({"y": [1, 2, 3]}))
+    duckdb_cursor.register("second_arrow", to_arrow_dataset(duckdb_cursor.sql("SELECT * FROM range(1, 4) t(y)")))
     query = "SELECT * FROM first_arrow CROSS JOIN second_arrow WHERE y < 2"
     assert was_pushed(duckdb_cursor, query)
     assert_filter_pushed_to_scan(duckdb_cursor, query, "y < 2")
+
+
+# NaN satisfies these, as the greatest value, and a Dataset's row group statistics leave NaN out, so pruning by them
+# would drop NaN rows: they stay above the scan.
+NAN_MAY_SATISFY = ["f > 1.5", "f >= 2.0", "f <> 2.0", "NOT (f = 1.0)", "f = 1.0 OR f > 2.0", "f NOT IN (1.0)"]
+NAN_CANNOT_SATISFY = ["f = 2.0", "f < 2.0", "f <= 2.0", "f IN (1.0, 3.0)", "f IS NULL", "f IS NOT NULL"]
+
+
+@pytest.mark.parametrize("sql_type", ["DOUBLE", "FLOAT"])
+class TestDatasetWithNaNInRowGroups:
+    """A parquet Dataset whose row groups of two hold NaN, numbers and NULL gives the engine's rows for every filter."""
+
+    @pytest.fixture(autouse=True)
+    def _dataset(self, duckdb_cursor, tmp_path, sql_type):
+        pq = pytest.importorskip("pyarrow.parquet")
+        ds = pytest.importorskip("pyarrow.dataset")
+        float_type = pa.float64() if sql_type == "DOUBLE" else pa.float32()
+        table = pa.table({"x": [1, 2, 3, 4, 5], "f": pa.array([float("nan"), 1.0, 2.0, 3.0, None], float_type)})
+        pq.write_table(table, tmp_path / "floats.parquet", row_group_size=2)
+        duckdb_cursor.register("native_source", table)
+        duckdb_cursor.execute("CREATE TABLE native_t AS SELECT * FROM native_source")
+        duckdb_cursor.unregister("native_source")
+        duckdb_cursor.register("arrow_t", ds.dataset(tmp_path / "floats.parquet"))
+        self.con = duckdb_cursor
+
+    def _assert_rows_match_native(self, predicate):
+        expected = self.con.execute(f"SELECT x FROM native_t WHERE {predicate} ORDER BY x").fetchall()
+        assert self.con.execute(f"SELECT x FROM arrow_t WHERE {predicate} ORDER BY x").fetchall() == expected
+
+    @pytest.mark.parametrize("predicate", NAN_MAY_SATISFY)
+    def test_a_filter_nan_may_satisfy_stays_above_the_scan(self, predicate):
+        self._assert_rows_match_native(predicate)
+        assert_query_keeps_filter_above(self.con, f"SELECT x FROM arrow_t WHERE {predicate}")
+
+    @pytest.mark.parametrize("predicate", NAN_CANNOT_SATISFY)
+    def test_a_filter_nan_cannot_satisfy_is_taken_by_the_scan(self, predicate):
+        self._assert_rows_match_native(predicate)
+        scan, filter_above = scan_of(self.con, f"SELECT x FROM arrow_t WHERE {predicate}")
+        assert scan["extra_info"].get("Filters"), predicate
+        assert not filter_above, predicate

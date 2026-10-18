@@ -279,7 +279,7 @@ def entry_point(request):
 
 
 def arrow_scans(plan):
-    return plan.count("ARROW_SCAN")
+    return plan.count("PYTHON_ARROW_SCAN")
 
 
 class ReusableIPCStream:
