@@ -596,7 +596,7 @@ class TestSparkFunctionsNumeric:
             ),
             (np.array([np.inf]), "ARRAY(CAST('Infinity' AS DOUBLE))", "array(Infinity)", DoubleType(), [np.inf]),
             (np.array([1.5], dtype=np.float32), "ARRAY(CAST('1.5' AS FLOAT))", "array(1.5)", FloatType(), [1.5]),
-            (np.array([5, -3]), "ARRAY(5L, -3L)", "array(5, -3)", LongType(), [5, -3]),
+            (np.array([5, -3], dtype=np.int64), "ARRAY(5L, -3L)", "array(5, -3)", LongType(), [5, -3]),
             (np.array([5], dtype=np.int32), "ARRAY(5)", "array(5)", IntegerType(), [5]),
             (np.array([5], dtype=np.int16), "ARRAY(5S)", "array(5)", ShortType(), [5]),
             (np.array([False, True]), "ARRAY(false, true)", "array(false, true)", BooleanType(), [False, True]),
