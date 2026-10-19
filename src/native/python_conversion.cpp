@@ -2,7 +2,7 @@
 #include "duckdb_python/nb/casters.hpp"
 #include "duckdb_python/pytype.hpp"
 
-#include "duckdb_python/pyrelation.hpp"
+#include "duckdb_python/pyresult.hpp"
 #include "duckdb_python/pyconnection/pyconnection.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"

@@ -11,7 +11,7 @@
 #include "duckdb_python/nb/casters.hpp"
 #include "duckdb_python/import_cache/python_import_cache.hpp"
 #include "duckdb_python/numpy/numpy_type.hpp"
-#include "duckdb_python/pyrelation.hpp"
+#include "duckdb_python/pyresult.hpp"
 #include "duckdb_python/pyappender.hpp"
 #include "duckdb_python/engine/connection.hpp"
 #include "duckdb_python/pytype.hpp"
@@ -30,7 +30,12 @@ struct BoundParameterData;
 
 enum class PythonEnvironmentType { NORMAL, INTERACTIVE, JUPYTER };
 
-struct DuckDBPyRelation;
+class SourceHandle;
+class SourceIdentity;
+
+//! Parameter values as execute() binds them: a list to ?, $1 and so on, a dict to $name
+identifier_map_t<BoundParameterData> TransformPreparedParameters(ClientContext &context, const nb::object &params,
+                                                                 optional_ptr<PreparedStatement> prep = {});
 
 struct DefaultConnectionHolder {
 public:
@@ -140,6 +145,20 @@ public:
 	bool ConnectionIsClosed() const {
 		return connection == nullptr;
 	}
+	//! The client state of the open connection
+	engine::ConnectionState &GetState() {
+		if (!connection || !state) {
+			ThrowConnectionException();
+		}
+		return *state;
+	}
+	//! The sources of the open connection's database, which every connection of it shares
+	engine::SourceRegistry &GetSources() {
+		if (!connection || !sources) {
+			ThrowConnectionException();
+		}
+		return *sources;
+	}
 
 	const Connection &GetConnection() const {
 		ThrowIfBusy();
@@ -178,7 +197,33 @@ public:
 	}
 	void SetConnection(unique_ptr<Connection> con) {
 		state = con ? engine::ConnectionState::Get(*con->context) : nullptr;
+		// Held, so reading the catalog version costs an atomic load and no lookup
+		sources = con ? engine::SourceRegistry::Get(*con->context) : nullptr;
 		connection = std::move(con);
+	}
+	//! What the guard owned, taken out in one step with the GIL held, so a call reading the guard under the GIL sees
+	//! either all of it or a closed connection; the caller destroys it, which can take long, without the GIL
+	struct Released {
+		unique_ptr<Connection> connection;
+		shared_ptr<engine::ConnectionState> state;
+		shared_ptr<engine::SourceRegistry> sources;
+		shared_ptr<DuckDB> database;
+
+		//! The connection first, then the database it reads, as the guard's setters always did
+		void Destroy() {
+			connection.reset();
+			state.reset();
+			sources.reset();
+			database.reset();
+		}
+	};
+	Released Release() {
+		Released released;
+		released.connection = std::move(connection);
+		released.state = std::move(state);
+		released.sources = std::move(sources);
+		released.database = std::move(database);
+		return released;
 	}
 	void SetResult(std::unique_ptr<DbapiResult> res) {
 		result = std::move(res);
@@ -196,6 +241,7 @@ private:
 	shared_ptr<DuckDB> database;
 	unique_ptr<Connection> connection;
 	shared_ptr<engine::ConnectionState> state;
+	shared_ptr<engine::SourceRegistry> sources;
 	std::unique_ptr<DbapiResult> result;
 };
 
@@ -250,7 +296,21 @@ public:
 	//! MemoryFileSystem used to temporarily store file-like objects for reading
 	std::shared_ptr<ModifiedMemoryFileSystem> internal_object_filesystem;
 	case_insensitive_map_t<unique_ptr<ExternalDependency>> registered_functions;
-	case_insensitive_set_t registered_objects;
+	//! The names register() succeeded with on this connection, bounded oldest out. Only a hint: unregister() of a
+	//! name it holds refuses beside an open DB-API result, and of one it does not hold, such as a view renamed in SQL,
+	//! asks the catalog when the connection is free and is a no-op beside an open result
+	case_insensitive_set_t ever_registered;
+	std::deque<string> ever_registered_order;
+	static constexpr idx_t EVER_REGISTERED_MEMORY = 4096;
+	void RememberRegistered(const string &name);
+	//! Registry entries the connection keeps alive for a view by its name, until unregister() or a replacement
+	case_insensitive_map_t<vector<std::shared_ptr<SourceHandle>>> owned_sources;
+	//! The sources this connection registered, by the identity of the Python object each was registered for
+	std::shared_ptr<SourceIdentity> source_identity;
+	//! Drops what the two members above own, with the GIL held
+	void ReleaseOwnedSources();
+	//! The temporary view register() makes over a source, which owns the source's table reference in the catalog
+	void RegisterSourceView(const string &name, const SourceHandle &source);
 
 public:
 	explicit DuckDBPyConnection() {
@@ -281,25 +341,7 @@ public:
 	static nb::object ArrowSourcesNodes();
 	static bool IsInteractive();
 
-	std::unique_ptr<DuckDBPyRelation> ReadCSV(const nb::object &name, nb::kwargs &kwargs);
-
 	nb::list ExtractStatements(const string &query);
-
-	std::unique_ptr<DuckDBPyRelation> ReadJSON(
-	    const nb::object &name, const Optional<nb::object> &columns = nb::none(),
-	    const Optional<nb::object> &sample_size = nb::none(), const Optional<nb::object> &maximum_depth = nb::none(),
-	    const Optional<nb::str> &records = nb::none(), const Optional<nb::str> &format = nb::none(),
-	    const Optional<nb::object> &date_format = nb::none(), const Optional<nb::object> &timestamp_format = nb::none(),
-	    const Optional<nb::object> &compression = nb::none(),
-	    const Optional<nb::object> &maximum_object_size = nb::none(),
-	    const Optional<nb::object> &ignore_errors = nb::none(),
-	    const Optional<nb::object> &convert_strings_to_integers = nb::none(),
-	    const Optional<nb::object> &field_appearance_threshold = nb::none(),
-	    const Optional<nb::object> &map_inference_threshold = nb::none(),
-	    const Optional<nb::object> &maximum_sample_files = nb::none(),
-	    const Optional<nb::object> &filename = nb::none(), const Optional<nb::object> &hive_partitioning = nb::none(),
-	    const Optional<nb::object> &union_by_name = nb::none(), const Optional<nb::object> &hive_types = nb::none(),
-	    const Optional<nb::object> &hive_types_autocast = nb::none());
 
 	std::unique_ptr<DuckDBPyType> MapType(const DuckDBPyType &key_type, const DuckDBPyType &value_type);
 	std::unique_ptr<DuckDBPyType> StructType(const nb::object &fields);
@@ -349,24 +391,9 @@ public:
 
 	void LoadExtension(const string &extension);
 
-	std::unique_ptr<DuckDBPyRelation> RunQuery(const nb::object &query, string alias = "",
-	                                           nb::object params = nb::list());
-
-	std::unique_ptr<DuckDBPyRelation> Table(const string &tname);
-
-	std::unique_ptr<DuckDBPyRelation> Values(const nb::args &params);
-
-	std::unique_ptr<DuckDBPyRelation> View(const string &vname);
-
-	std::unique_ptr<DuckDBPyRelation> TableFunction(const string &fname, nb::object params = nb::list());
-
-	std::unique_ptr<DuckDBPyRelation> FromDF(const PandasDataFrame &value);
-
-	std::unique_ptr<DuckDBPyRelation> FromParquet(const nb::object &path_or_buffer, bool binary_as_string,
-	                                              bool file_row_number, bool filename, bool hive_partitioning,
-	                                              bool union_by_name, const nb::object &compression = nb::none());
-
-	std::unique_ptr<DuckDBPyRelation> FromArrow(nb::object &arrow_object);
+	//! Runs every statement of the query but the last, as RunQuery does, and returns (the kept rows result or None,
+	//! the last statement's text or None, its parsed type in lower case or None)
+	nb::tuple PrepareScript(const nb::object &query, const nb::object &params);
 
 	unordered_set<string> GetTableNames(const string &query, bool qualified);
 
@@ -443,7 +470,6 @@ public:
 	static void CheckSignals();
 
 private:
-	std::unique_ptr<DuckDBPyRelation> CreateRelation(shared_ptr<Relation> rel);
 	PathLike GetPathLike(const nb::object &object);
 	ScalarFunction CreateScalarUDF(const string &name, const nb::callable &udf, const nb::object &parameters,
 	                               const nb::object &return_type, bool vectorized, FunctionNullHandling null_handling,

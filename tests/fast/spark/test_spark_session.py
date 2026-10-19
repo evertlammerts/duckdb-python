@@ -179,3 +179,41 @@ class TestStatementWithoutResult:
                 getattr(other, operation)(df).collect()
             with pytest.raises(expected):
                 getattr(df, operation)(other).collect()
+
+
+class TestFrameWithoutColumns:
+    # A DataFrame without columns, reached by selecting none as well as by a statement that returns none.
+    @pytest.fixture
+    def table_name(self, spark):
+        name = f"no_columns_{uuid.uuid4().hex}"
+        yield name
+        spark.sql(f"DROP TABLE IF EXISTS {name}")
+
+    @pytest.fixture(params=["varargs", "list", "statement"])
+    def empty(self, spark, table_name, request):
+        if request.param == "statement":
+            return spark.sql(f"CREATE TABLE {table_name} (a INT)" + TestStatementWithoutResult.TABLE_SOURCE)
+        df = spark.createDataFrame([(1, 2)], ["a", "b"])
+        return df.select() if request.param == "varargs" else df.select([])
+
+    @pytest.mark.parametrize("select", [lambda df: df.select(), lambda df: df.select([])], ids=["varargs", "list"])
+    def test_select_of_no_columns(self, spark, select):
+        empty = select(spark.createDataFrame([(1, 2)], ["a", "b"]))
+        assert empty.columns == []
+        assert empty.dtypes == []
+        assert empty.schema == StructType([])
+
+    @pytest.mark.parametrize("first", [True, False])
+    def test_union_by_name_refuses_it(self, spark, empty, first):
+        expected = AnalysisException if USE_ACTUAL_SPARK else PySparkNotImplementedError
+        other = spark.createDataFrame([(1,)], ["a"])
+        with pytest.raises(expected):
+            (empty.unionByName(other) if first else other.unionByName(empty)).collect()
+
+    @pytest.mark.skipif(USE_ACTUAL_SPARK, reason="Spark fills the missing columns of a DataFrame without columns")
+    @pytest.mark.parametrize("first", [True, False])
+    def test_union_by_name_allowing_missing_columns_refuses_it(self, spark, empty, first):
+        other = spark.createDataFrame([(1,)], ["a"])
+        left, right = (empty, other) if first else (other, empty)
+        with pytest.raises(PySparkNotImplementedError):
+            left.unionByName(right, allowMissingColumns=True).collect()

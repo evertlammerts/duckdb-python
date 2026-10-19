@@ -20,7 +20,6 @@
 #include <functional>
 
 namespace duckdb {
-class Relation;
 
 namespace engine {
 
@@ -59,7 +58,7 @@ class ConnectionClaim;
 class Result {
 public:
 	//! written_type is the submitted statement's own type, since the handle of a prepared execution reports EXECUTE
-	Result(unique_ptr<QueryResult> submitted, StatementType written_type, Format format, shared_ptr<Relation> relation);
+	Result(unique_ptr<QueryResult> submitted, StatementType written_type, Format format);
 	~Result();
 
 	Result(const Result &) = delete;
@@ -101,6 +100,11 @@ public:
 		return completes_before_returning;
 	}
 
+	//! The context the query ran on, which the result only borrows: a closed connection leaves it gone, and every
+	//! call that needs it refuses instead of reading freed memory. A streaming result keeps it through its handle.
+	shared_ptr<ClientContext> TryGetContext() const;
+	//! The database whose buffers hold the rows, null once it is gone. Weak for the same reason as the context.
+	shared_ptr<DatabaseInstance> TryGetDatabase() const;
 	//! Keeps every row: drives the query to its end unless it already ended. A failure ends the query.
 	void Retain(const InterruptCheck &check);
 	//! Retain for a caller that already holds the connection's claim. A failure ends the query.
@@ -108,6 +112,8 @@ public:
 	//! Runs the statement until its first unit is ready or it ends, without deciding how its rows are read,
 	//! and throws the error it ended with. A failure ends the query.
 	void Settle(const InterruptCheck &check);
+	//! Settle for a caller that already holds the connection's claim. A failure ends the query.
+	void SettleClaimed(const InterruptCheck &check);
 	//! Rows of a retained result. Materializes it first.
 	idx_t RowCount(const InterruptCheck &check);
 	//! The next chunk, not flattened; null at the end. Opens a stream unless the result is retained.
@@ -158,8 +164,9 @@ private:
 	std::exception_ptr failure;
 	//! The state of the connection the query runs on, whose claim every driving call takes
 	shared_ptr<ConnectionState> connection_state;
-	//! Keeps the relation's external dependencies alive while its query runs
-	shared_ptr<Relation> relation;
+	//! Weak, so a result never keeps a connection's database alive, and never reads a context that is gone
+	weak_ptr<ClientContext> context_owner;
+	weak_ptr<DatabaseInstance> database_owner;
 	vector<Identifier> names;
 	vector<LogicalType> types;
 	StatementProperties properties;

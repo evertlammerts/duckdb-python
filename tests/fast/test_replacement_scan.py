@@ -489,6 +489,8 @@ class TestReplacementScan:
         assert res == [(1,), (2,), (3,)]
 
     def test_replacement_of_cross_connection_relation(self):
+        # Each connection holds its own in-memory database, so reading rel1 on con2 is refused rather
+        # than answered from con2's own table of the same name.
         con1 = duckdb.connect(":memory:")
         con2 = duckdb.connect(":memory:")
         con1.query("create table integers(i int)")
@@ -496,16 +498,10 @@ class TestReplacementScan:
         con1.query("insert into integers values (42)")
         con2.query("insert into integers values ('xxx')")
         rel1 = con1.query("select * from integers")
-        with pytest.raises(
-            duckdb.InvalidInputException,
-            match=r"The object was created by another Connection and can therefore not be used by this Connection.",
-        ):
+        with pytest.raises(duckdb.InvalidInputException, match=r"(?s)in-memory database.*another database"):
             con2.query("from rel1")
 
         del con1
 
-        with pytest.raises(
-            duckdb.InvalidInputException,
-            match=r"The object was created by another Connection and can therefore not be used by this Connection.",
-        ):
+        with pytest.raises(duckdb.InvalidInputException, match=r"(?s)in-memory database.*another database"):
             con2.query("from rel1")

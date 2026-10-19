@@ -8,6 +8,11 @@ def closed():
     return pytest.raises(duckdb.ConnectionException, match="Connection already closed")
 
 
+def closed_relation():
+    # Changed: a relation method reports the engine's text for a closed connection.
+    return pytest.raises(duckdb.ConnectionException, match="Connection has already been closed")
+
+
 def no_result_set():
     return pytest.raises(duckdb.InvalidInputException, match="No open result set")
 
@@ -101,34 +106,34 @@ class TestRuntimeError:
         with closed():
             conn.register("bla", df_in)
 
-        with closed():
+        with closed_relation():
             conn.from_query("select 1")
 
-        with closed():
+        with closed_relation():
             conn.table("bla")
 
-        with closed():
+        with closed_relation():
             conn.table("bla")
 
-        with closed():
+        with closed_relation():
             conn.view("bla")
 
-        with closed():
+        with closed_relation():
             conn.values("bla")
 
-        with closed():
+        with closed_relation():
             conn.table_function("bla")
 
-        with closed():
+        with closed_relation():
             conn.from_df(df_in)
 
-        with closed():
+        with closed_relation():
             conn.from_csv_auto("bla")
 
-        with closed():
+        with closed_relation():
             conn.from_parquet("bla")
 
-        with closed():
+        with closed_relation():
             conn.from_arrow("bla")
 
     def test_missing_result_from_conn_exceptions(self):

@@ -117,11 +117,9 @@ class TestRAPIQuery:
         res = duckdb_cursor.query("describe select 42::INT AS column_name").fetchall()
         assert res[0][0] == "column_name"
 
-        res = duckdb_cursor.query("create or replace table tbl_non_select_result(i integer)")
-        assert res is None
+        duckdb_cursor.query("create or replace table tbl_non_select_result(i integer)")
 
-        res = duckdb_cursor.query("insert into tbl_non_select_result values (42)")
-        assert res is None
+        duckdb_cursor.query("insert into tbl_non_select_result values (42)")
 
         res = duckdb_cursor.query("insert into tbl_non_select_result values (84) returning *").fetchall()
         assert res == [(84,)]
@@ -135,8 +133,30 @@ class TestRAPIQuery:
         res = duckdb_cursor.query("show tables").fetchall()
         assert len(res) > 0
 
-        res = duckdb_cursor.query("drop table tbl_non_select_result")
-        assert res is None
+        duckdb_cursor.query("drop table tbl_non_select_result")
+
+    def test_query_non_select_returns_what_the_statement_returned(self, duckdb_cursor):
+        res = duckdb_cursor.query("create table tbl_returns(i integer)")
+        assert (res.columns, res.fetchall()) == (["Count"], [])
+
+        res = duckdb_cursor.query("insert into tbl_returns values (42), (84)")
+        assert (res.columns, res.fetchall()) == (["Count"], [(2,)])
+        assert res.fetchall() == [(2,)]
+        assert duckdb_cursor.execute("select count(*) from tbl_returns").fetchall() == [(2,)]
+
+        res = duckdb_cursor.query("drop table tbl_returns")
+        assert (res.columns, res.fetchall()) == (["Success"], [])
+
+    @pytest.mark.parametrize(
+        "sql", ["select * from relation", "create table tbl_from_relation as select * from relation"]
+    )
+    def test_query_leaves_no_view(self, duckdb_cursor, sql):
+        rel = duckdb_cursor.query("select [1,2,3,4] as l")
+        rel.query("relation", sql)
+        views = duckdb_cursor.execute("select view_name from duckdb_views() where not internal").fetchall()
+        assert views == []
+        with pytest.raises(duckdb.CatalogException):
+            duckdb_cursor.query("select * from relation")
 
     def test_replacement_scan_recursion(self, duckdb_cursor):
         depth_limit = 1000

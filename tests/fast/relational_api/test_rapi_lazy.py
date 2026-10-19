@@ -109,8 +109,8 @@ class TestMaterialize:
         assert materialized.types == rel.types
 
 
-class TestSqlThatRunsOnce:
-    """A SELECT with params, and any other statement, runs at the call; its relation reads the rows back."""
+class TestSqlWithParamsIsLazy:
+    """A SELECT with params runs at every read with its values bound, like a relation without params."""
 
     @pytest.mark.parametrize(
         ("query", "params"),
@@ -119,27 +119,37 @@ class TestSqlThatRunsOnce:
             pytest.param("SELECT nextval('s') AS v, $p AS p", {"p": 1}, id="named"),
         ],
     )
-    def test_a_select_with_params_runs_at_the_call_and_never_again(self, con, query, params):
+    def test_a_select_with_params_runs_at_every_read(self, con, query, params):
         rel = con.sql(query, params=params)
+        assert rel.columns == ["v", "p"]
+        con.execute("SELECT nextval('s')").fetchall()
         assert currval(con) == 1
-        assert rel.fetchall() == [(1, 1)]
-        assert rel.fetchall() == [(1, 1)]
-        assert rel.filter("p = 1").fetchall() == [(1, 1)]
-        assert currval(con) == 1
+        assert rel.fetchall() == [(2, 1)]
+        assert rel.fetchall() == [(3, 1)]
+        assert rel.filter("p = 1").fetchall() == [(4, 1)]
 
-    def test_it_reads_the_rows_of_the_call_not_the_table_now(self, con):
+    def test_it_reads_the_table_at_the_read(self, con):
         con.execute("CREATE TABLE t AS SELECT range AS i FROM range(5)")
         rel = con.sql("SELECT i FROM t WHERE i < ? ORDER BY i", params=[3])
-        con.execute("DROP TABLE t")
-        assert rel.fetchall() == [(0,), (1,), (2,)]
+        con.execute("DELETE FROM t WHERE i = 1")
+        assert rel.fetchall() == [(0,), (2,)]
 
-    def test_an_error_raises_at_the_call(self, con):
+    def test_an_error_raises_at_the_read(self, con):
+        rel = con.sql("SELECT error(?)", params=["boom"])
         with pytest.raises(duckdb.InvalidInputException, match="boom"):
-            con.sql("SELECT error(?)", params=["boom"])
+            rel.fetchall()
 
-    def test_a_statement_without_rows_runs_and_returns_none(self, con):
+
+class TestSqlThatRunsOnce:
+    """A statement other than a SELECT runs at the call; its relation reads what the statement returned."""
+
+    def test_a_statement_without_rows_runs_and_returns_its_count(self, con):
         con.execute("CREATE TABLE log (v BIGINT)")
-        assert con.sql("INSERT INTO log VALUES (?)", params=[5]) is None
+        rel = con.sql("INSERT INTO log VALUES (?)", params=[5])
+        assert con.execute("SELECT * FROM log").fetchall() == [(5,)]
+        assert rel.columns == ["Count"]
+        assert rel.fetchall() == [(1,)]
+        assert rel.fetchall() == [(1,)]
         assert con.execute("SELECT * FROM log").fetchall() == [(5,)]
 
     def test_a_statement_other_than_select_runs_once_without_params_too(self, con):

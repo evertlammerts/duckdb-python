@@ -493,10 +493,12 @@ class TestTheGroupResult:
         assert con.rowcount == rowcount
         assert con.fetchall() == rows
 
-    def test_sql_without_rows_returns_no_relation(self, con):
+    def test_sql_without_rows_returns_a_relation_over_the_last_result(self, con):
         con.execute("CREATE TABLE src (i INT)")
-        assert con.sql("INSERT INTO src VALUES (1), (2); CREATE TABLE t (i INT)") is None
+        rel = con.sql("INSERT INTO src VALUES (1), (2); CREATE TABLE t (i INT)")
         assert tables(con) == ["src", "t"]
+        assert (rel.columns, rel.fetchall()) == (["Count"], [])
+        assert con.execute("SELECT count(*) FROM src").fetchall() == [(2,)]
 
     def test_an_import_returns_nothing_of_the_statements_it_expands_to(self, con, tmp_path):
         export = (tmp_path / "export").as_posix()

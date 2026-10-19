@@ -15,7 +15,10 @@
 #include "duckdb_python/exceptions.hpp"
 #include "duckdb_python/pandas/pandas_scan.hpp"
 #include "duckdb/parser/tableref/subqueryref.hpp"
-#include "duckdb_python/pyrelation.hpp"
+#include "duckdb/main/config.hpp"
+#include "duckdb/main/database.hpp"
+#include "duckdb/parser/parser.hpp"
+#include "duckdb/parser/statement/select_statement.hpp"
 #include "duckdb_python/python_dependency.hpp"
 #include <duckdb/main/settings.hpp>
 
@@ -139,6 +142,79 @@ static void ThrowScanFailureError(const nb::object &entry, const string &name, c
 	throw InvalidInputException(error);
 }
 
+static bool IsPythonRelation(const nb::handle &object) {
+	// A relation can exist only once its module ran, so the module is looked up, never imported
+	auto module = PyDict_GetItemString(PyImport_GetModuleDict(), "duckdb._relation");
+	if (!module) {
+		return false;
+	}
+	auto relation_class = nb::getattr(nb::handle(module), "DuckDBPyRelation", nb::none());
+	if (relation_class.is_none()) {
+		return false;
+	}
+	auto is_relation = PyObject_IsInstance(object.ptr(), relation_class.ptr());
+	if (is_relation < 0) {
+		throw nb::python_error();
+	}
+	return is_relation == 1;
+}
+
+//! How a database names itself in an error: its file, or that it has none
+static string DatabaseSubject(DatabaseInstance &database) {
+	auto &path = DBConfig::GetConfig(database).options.database_path;
+	if (path.empty() || DBConfig::IsInMemoryDatabase(path.c_str())) {
+		return "an in-memory database";
+	}
+	return StringUtil::Format("the database \"%s\"", path);
+}
+
+//! The database of the connection a relation holds, null when it has none to read on any more
+static shared_ptr<DatabaseInstance> RelationDatabase(const nb::object &relation) {
+	auto owner = nb::getattr(relation, "_con", nb::none());
+	if (!nb::isinstance<DuckDBPyConnection>(owner)) {
+		return nullptr;
+	}
+	auto &connection = nb::cast<DuckDBPyConnection &>(owner);
+	if (connection.con.ConnectionIsClosed()) {
+		return nullptr;
+	}
+	// The relation is read inside a query of some connection, so this one counts as busy and must not be refused
+	return connection.con.GetConnectionWhileBusy().context->db;
+}
+
+static unique_ptr<TableRef> PythonRelationRef(ClientContext &context, const nb::object &relation, const string &name) {
+	// A relation is text plus sources of one database: its names, and the registry its sources live in, mean
+	// nothing in another one
+	auto database = RelationDatabase(relation);
+	if (!database) {
+		throw InvalidInputException("Python Object \"%s\" of type \"DuckDBPyRelation\" not suitable for replacement "
+		                            "scan.\nThe connection the relation was built on is closed, so it cannot be read.",
+		                            name);
+	}
+	if (database.get() != context.db.get()) {
+		throw InvalidInputException("Python Object \"%s\" of type \"DuckDBPyRelation\" not suitable for replacement "
+		                            "scan.\nThe relation reads %s and cannot be read on a connection to another "
+		                            "database.",
+		                            name, DatabaseSubject(*database));
+	}
+	// The rendering with the values written in: a registry entry has no way to bind a relation's parameters
+	auto sql = nb::cast<std::string>(relation.attr("_registry_text")());
+	Parser parser(context);
+	parser.ParseQuery(sql);
+	if (parser.statements.size() != 1 || parser.statements[0]->type != StatementType::SELECT_STATEMENT) {
+		throw InvalidInputException("Expected exactly one SELECT statement, found %llu statements",
+		                            parser.statements.size());
+	}
+	auto subquery =
+	    make_uniq<SubqueryRef>(unique_ptr_cast<SQLStatement, SelectStatement>(std::move(parser.statements[0])));
+	// The handles of every source the text reads, its inputs' included, and not the relation: the relation owns its
+	// connection, which can own this entry
+	auto dependency = make_shared_ptr<ExternalDependency>();
+	dependency->AddDependency("replacement_cache", PythonDependencyItem::Create(relation.attr("_sources")()));
+	subquery->external_dependency = std::move(dependency);
+	return std::move(subquery);
+}
+
 unique_ptr<TableRef> PythonReplacementScan::ReplacementObject(const nb::object &entry, const string &name,
                                                               ClientContext &context, ArrowSourceKind kind) {
 	auto replacement = TryReplacementObject(entry, name, context, kind);
@@ -166,25 +242,8 @@ unique_ptr<TableRef> PythonReplacementScan::TryReplacementObject(const nb::objec
 			table_function->external_dependency = std::move(dependency);
 			return std::move(table_function);
 		}
-	} else if (DuckDBPyRelation::IsRelation(entry)) {
-		auto pyrel = nb::cast<DuckDBPyRelation *>(entry);
-		if (!pyrel->CanBeRegisteredBy(context)) {
-			throw InvalidInputException(
-			    "Python Object \"%s\" of type \"DuckDBPyRelation\" not suitable for replacement scan.\nThe object was "
-			    "created by another Connection and can therefore not be used by this Connection.",
-			    name);
-		}
-		// create a subquery from the underlying relation object
-		auto select = make_uniq<SelectStatement>();
-		select->node = pyrel->GetRel().GetQueryNode();
-		auto subquery = make_uniq<SubqueryRef>(std::move(select));
-		auto dependency = make_uniq<ExternalDependency>();
-		// The native relation carries the Python data the scan reads. Owning the wrapper instead would
-		// own its connection, and an open result holding that closes a cycle the garbage
-		// collector cannot see: connection to result to wrapper to connection.
-		dependency->AddDependency("replacement_cache", RelationDependencyItem::Create(pyrel->GetSharedRelation()));
-		subquery->external_dependency = std::move(dependency);
-		return std::move(subquery);
+	} else if (IsPythonRelation(entry)) {
+		return PythonRelationRef(context, entry, name);
 	}
 	// A dict, list or numpy array is read by pandas_scan without asking for Arrow exports, whose probe would report an
 	// attribute lookup that a dict subclass answers with KeyError.
@@ -284,6 +343,19 @@ static nb::dict FrameDictToDict(const nb::object &frame_dict) {
 	return materialized;
 }
 
+static bool IsPackageFrame(const nb::object &frame) {
+	auto globals = frame.attr("f_globals");
+	if (!PyDict_Check(globals.ptr())) {
+		return false;
+	}
+	auto module_name = PyDict_GetItemString(globals.ptr(), "__name__");
+	if (!module_name || !PyUnicode_Check(module_name)) {
+		return false;
+	}
+	auto name = nb::cast<std::string>(nb::handle(module_name));
+	return name == "duckdb" || StringUtil::StartsWith(name, "duckdb.");
+}
+
 static unique_ptr<TableRef> ReplaceInternal(ClientContext &context, const string &table_name) {
 	Value result;
 	auto lookup_result = context.TryGetCurrentSetting("python_enable_replacements", result);
@@ -311,10 +383,27 @@ static unique_ptr<TableRef> ReplaceInternal(ClientContext &context, const string
 
 	bool has_locals = false;
 	bool has_globals = false;
-	do {
-		if (nb::none().is(current_frame)) {
+	bool searched_a_frame = false;
+	while (!nb::none().is(current_frame)) {
+		// The package's own frames, the relation layer's for one, stand between the user's code and the query
+		bool package_frame;
+		try {
+			package_frame = IsPackageFrame(current_frame);
+		} catch (nb::python_error &e) {
+			return nullptr;
+		}
+		if (package_frame) {
+			try {
+				current_frame = current_frame.attr("f_back");
+			} catch (nb::python_error &e) {
+				return nullptr;
+			}
+			continue;
+		}
+		if (searched_a_frame && !(scan_all_frames && (has_locals || has_globals))) {
 			break;
 		}
+		searched_a_frame = true;
 
 		nb::object local_dict_p;
 		try {
@@ -352,19 +441,30 @@ static unique_ptr<TableRef> ReplaceInternal(ClientContext &context, const string
 		} catch (nb::python_error &e) {
 			return nullptr;
 		}
-	} while (scan_all_frames && (has_locals || has_globals));
+	}
 	return nullptr;
 }
 
 unique_ptr<TableRef> PythonReplacementScan::Replace(ClientContext &context, ReplacementScanInput &input,
                                                     optional_ptr<ReplacementScanData> data) {
 	auto &table_name = input.table_name;
+	// Ahead of the settings: a registered source is an object the client handed over, as from_df and register
+	// always were, not a lookup of Python variables
+	if (engine::SourceRegistry::IsSourceName(table_name)) {
+		auto registry = engine::SourceRegistry::Get(context);
+		if (auto registered = registry->Lookup(table_name)) {
+			return registered;
+		}
+		// The generated name is ours and says nothing to a reader, so the error names what is missing instead
+		registry->ThrowIfReleased(table_name);
+		return nullptr;
+	}
+	auto state = engine::ConnectionState::Get(context);
 	auto &config = DBConfig::GetConfig(context);
 	if (!Settings::Get<EnableExternalAccessSetting>(config)) {
 		return nullptr;
 	}
 
-	auto state = engine::ConnectionState::Get(context);
 	if (auto resolved = state->RecallResolved(table_name)) {
 		return resolved;
 	}

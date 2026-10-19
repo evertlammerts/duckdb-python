@@ -82,7 +82,8 @@ FLAT_TYPES = [
 def assert_column_objects_equal(col1: Column, col2: Column):
     assert type(col1) is type(col2)
     if not USE_ACTUAL_SPARK:
-        assert col1.expr == col2.expr
+        # An expression has no truth value, so the comparison is on the SQL text.
+        assert str(col1.expr) == str(col2.expr)
 
 
 class TestDataFrame:
@@ -410,7 +411,10 @@ class TestDataFrame:
         data = [(56, "Carol"), (20, "Alice")]
         df = spark.createDataFrame(data, ["age", "name"])
 
-        assert_column_objects_equal(df["age"], col("age"))
+        assert_column_objects_equal(df["age"], df.age)
+        if not USE_ACTUAL_SPARK:
+            assert str(df["age"].expr).endswith('."age"')
+            assert str(col("age").expr) == '"age"'
 
     def test_getitem_dataframe(self, spark):
         data = [(56, "Ben", "Street1"), (20, "Tom", "Street2")]
@@ -425,7 +429,9 @@ class TestDataFrame:
         data = [(56, "Ben", "Street1"), (20, "Tom", "Street2")]
         df = spark.createDataFrame(data, ["age", "name", "address"])
 
-        assert_column_objects_equal(df.age, col("age"))
+        assert_column_objects_equal(df.age, df["age"])
+        if not USE_ACTUAL_SPARK:
+            assert str(df.age.expr).endswith('."age"')
 
     def test_head_first(self, spark):
         data = [(56, "Carol"), (20, "Alice"), (3, "Dave"), (3, "Anna"), (1, "Ben")]

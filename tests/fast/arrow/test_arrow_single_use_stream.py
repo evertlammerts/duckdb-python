@@ -417,6 +417,15 @@ class TestSingleUseReaderScannedOnce:
         src = make_reader()  # noqa: F841
         assert len(duckdb_cursor.sql("SELECT * FROM src a JOIN src b USING (id)").fetchall()) == SELF_JOIN_ROWS
 
+    def test_union_all_of_a_relation_reads_the_reader_once(self, duckdb_cursor, make_reader):
+        # A relation turns the object it scans into one common table expression, so both sides read that.
+        rel = duckdb_cursor.from_arrow(make_reader())
+        union = rel.union(rel)
+        plan = union.explain()
+        assert arrow_scans(plan) == 1
+        assert plan.count("CTE Scan") == 2
+        assert Counter(union.fetchall()) == ROWS + ROWS
+
     def test_materialized_relation_is_reusable(self, duckdb_cursor, make_reader):
         rel = duckdb_cursor.from_arrow(make_reader()).materialize()
         assert Counter(rel.fetchall()) == ROWS
@@ -429,11 +438,6 @@ class TestSingleUseReaderScannedTwice:
         scan = ENTRY_POINTS[entry](duckdb_cursor, make_reader())
         with pytest.raises(duckdb.InvalidInputException, match=CONSUMED):
             scan.run("SELECT id FROM src UNION ALL SELECT id + 1 FROM src")
-
-    def test_union_all_of_a_relation_raises(self, duckdb_cursor, make_reader):
-        rel = duckdb_cursor.from_arrow(make_reader())
-        with pytest.raises(duckdb.InvalidInputException, match=CONSUMED):
-            rel.union(rel).fetchall()
 
     @pytest.mark.parametrize("entry", ["register", "replacement"])
     def test_self_join_raises(self, duckdb_cursor, make_reader, entry):

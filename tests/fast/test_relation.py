@@ -317,7 +317,7 @@ class TestRelation:
         conn = duckdb.connect()
         conn.execute("CREATE TABLE test (i INTEGER)")
         rel = conn.table("test")
-        with pytest.raises(TypeError, match="incompatible function arguments"):
+        with pytest.raises(TypeError, match="missing 1 required positional argument: 'sql_query'"):
             rel.query("select j from test")
 
     def test_df_proj(self):
@@ -629,16 +629,19 @@ class TestRelation:
     def test_persistent_view_over_python_object(self, tmp_path, make_relation):
         # A persistent view is written to the database file, and a scan over a Python object has no
         # representation there, so the catalog change must be refused rather than stored dangling.
+        # It is refused at the call, so inside a transaction nothing waits for the commit.
         con = duckdb.connect(str(tmp_path / "db.duckdb"))
         rel = make_relation(con)
-        with pytest.raises(duckdb.TransactionException, match="Cannot serialize a table function"):
+        with pytest.raises(duckdb.InvalidInputException, match="database file"):
             rel.create_view("vw")
         assert con.sql("select view_name from duckdb_views() where not internal").fetchall() == []
 
         con.execute("begin")
-        rel.create_view("vw")
-        with pytest.raises(duckdb.TransactionException, match="Cannot serialize a table function"):
-            con.execute("commit")
+        with pytest.raises(duckdb.InvalidInputException, match="database file"):
+            rel.create_view("vw")
+        # The refusal executed nothing, so the transaction is still usable.
+        assert con.execute("select 1").fetchall() == [(1,)]
+        con.execute("rollback")
         assert con.sql("select view_name from duckdb_views() where not internal").fetchall() == []
 
         # Temporary views never reach the file, so they keep working on the same database

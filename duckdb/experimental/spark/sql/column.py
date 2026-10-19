@@ -56,6 +56,11 @@ _NUMPY_LITERAL_TYPES = {
 }
 
 
+def _name_key(name: str) -> str:
+    """The key a name is compared under: Spark folds case letter by letter, so "straße" and "STRASSE" differ."""
+    return name.lower()
+
+
 class _Ref:
     """A column reference inside a Spark column name, which leaves out a qualifier; see _unqualified."""
 
@@ -76,7 +81,7 @@ def _unqualified(parts: tuple[str, ...], columns: Collection[str], references: C
     and the next part are a qualified reference, which Spark resolves before a struct field of a column.
     """
     if len(parts) > 1 and (
-        parts[0].casefold() not in columns or str(ColumnExpression(*parts[:2])).casefold() in references
+        _name_key(parts[0]) not in columns or _name_key(str(ColumnExpression(*parts[:2]))) in references
     ):
         return parts[1:]
     return parts
@@ -137,8 +142,7 @@ def _ref_name(name: str) -> Name | None:
 
 def _bare_column(name: str) -> Expression:
     """A reference to the column ``name`` without a qualifier, whatever characters the name holds."""
-    # A single argument is read as a DuckDB qualified name, so quoting keeps a dot or a double quote in the name.
-    return ColumnExpression('"' + name.replace('"', '""') + '"')
+    return ColumnExpression(name)
 
 
 def _struct_extract(expr: Expression, name: str) -> Expression:
@@ -684,7 +688,7 @@ class Column:
         ``references`` holds the renderings of the qualified references to the columns, folded to lower case. None
         when DuckDB already gives it Spark's name, or when Spark's name is not known.
         """
-        stored = {c.casefold(): c for c in columns}
+        stored = {_name_key(c): c for c in columns}
         if isinstance(self._output, _Ref):
             parts = _unqualified(self._output.parts, stored.keys(), references)
             if len(parts) == 1:
@@ -698,7 +702,7 @@ class Column:
             # Aliasing a reference that does not resolve would turn DuckDB's "not found" error into a confusing
             # one about a select list alias referencing itself.
             name = reference.parts[-1]
-            return name if stored.get(name.casefold(), name) != name else None
+            return name if stored.get(_name_key(name), name) != name else None
         return _render(self._name, stored.keys(), references)
 
     # arithmetic operators

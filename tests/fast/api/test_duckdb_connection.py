@@ -144,7 +144,8 @@ class TestDuckDBConnection:
         ):
             duckdb.query(statements)
 
-        with pytest.raises(duckdb.BinderException, match="This type of statement can't be prepared!"):
+        # A relation binds its text at the call, so a marker without a value is refused there
+        with pytest.raises(duckdb.InvalidInputException, match=r"(?i)parameter"):
             duckdb.query(statements[0])
 
         assert duckdb.query(statements[1]).fetchall() == [(21,)]

@@ -1,8 +1,9 @@
 #include "duckdb_python/engine/connection.hpp"
 
-#include "duckdb/main/relation.hpp"
 #include "duckdb/main/statement_iterator.hpp"
 #include "duckdb/main/valid_checker.hpp"
+#include "duckdb/parser/expression/function_expression.hpp"
+#include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
 #include "duckdb/transaction/meta_transaction.hpp"
 
@@ -113,6 +114,104 @@ unique_ptr<TableRef> ConnectionState::RecallResolved(const string &name) {
 	return entry->second->Copy();
 }
 
+static constexpr const char *SOURCE_NAME_PREFIX = "__duckdb_source_";
+
+shared_ptr<SourceRegistry> SourceRegistry::Get(ClientContext &context) {
+	return ObjectCache::GetObjectCache(context).GetOrCreate<SourceRegistry>(ObjectType());
+}
+
+string SourceRegistry::NextName() {
+	static const string process_token = StringUtil::GenerateRandomName(12);
+	static atomic<idx_t> count {0};
+	return SOURCE_NAME_PREFIX + process_token + "_" + std::to_string(++count);
+}
+
+bool SourceRegistry::IsSourceName(const string &name) {
+	return StringUtil::StartsWith(name, SOURCE_NAME_PREFIX);
+}
+
+void SourceRegistry::Register(const string &name, unique_ptr<TableRef> table, const string &subject) {
+	lock_guard<mutex> guard(lock);
+	if (sources.find(name) != sources.end()) {
+		throw InternalException("Source name \"%s\" registered twice", name);
+	}
+	sources[name] = Entry {std::move(table), subject};
+}
+
+//! The kind of object a registry entry reads, in the words an error shows a user
+static string SourceKind(const TableRef &table) {
+	switch (table.type) {
+	case TableReferenceType::SUBQUERY:
+		return "a relation";
+	case TableReferenceType::COLUMN_DATA:
+		return "a materialized result";
+	case TableReferenceType::TABLE_FUNCTION: {
+		auto &function = table.Cast<TableFunctionRef>().function;
+		if (function && function->GetExpressionType() == ExpressionType::FUNCTION) {
+			auto &name = function->Cast<FunctionExpression>().FunctionName().GetIdentifierName();
+			if (name == "pandas_scan") {
+				return "a pandas DataFrame or NumPy array";
+			}
+			if (name == "python_arrow_scan" || name == "scan_arrow_ipc") {
+				return "an Arrow object";
+			}
+			if (name == "python_map_function") {
+				return "a map() result";
+			}
+		}
+		return "a Python object";
+	}
+	default:
+		return "a Python object";
+	}
+}
+
+unique_ptr<TableRef> SourceRegistry::Unregister(const string &name) {
+	lock_guard<mutex> guard(lock);
+	auto entry = sources.find(name);
+	if (entry == sources.end()) {
+		return nullptr;
+	}
+	auto table = std::move(entry->second.table);
+	if (released.emplace(name, Released {SourceKind(*table), entry->second.subject}).second) {
+		released_order.push_back(name);
+		if (released_order.size() > RELEASED_MEMORY) {
+			released.erase(released_order.front());
+			released_order.pop_front();
+		}
+	}
+	sources.erase(entry);
+	return table;
+}
+
+unique_ptr<TableRef> SourceRegistry::Lookup(const string &name) {
+	lock_guard<mutex> guard(lock);
+	auto entry = sources.find(name);
+	if (entry == sources.end()) {
+		return nullptr;
+	}
+	return entry->second.table->Copy();
+}
+
+void SourceRegistry::ThrowIfReleased(const string &name) {
+	Released gone;
+	{
+		lock_guard<mutex> guard(lock);
+		auto entry = released.find(name);
+		if (entry == released.end()) {
+			return;
+		}
+		gone = entry->second;
+	}
+	auto what = gone.subject.empty()
+	                ? StringUtil::Format("%s that was released", gone.kind)
+	                : StringUtil::Format("%s registered as \"%s\", which was released", gone.kind, gone.subject);
+	throw InvalidInputException(
+	    "This query reads %s. A Python object stays in its database's registry only while the relation or view that "
+	    "registered it is alive; keep that alive, or register the object again.",
+	    what);
+}
+
 namespace {
 
 class ResolvingGuard {
@@ -149,23 +248,6 @@ private:
 };
 
 } // namespace
-
-ClaimingContextWrapper::ClaimingContextWrapper(shared_ptr<ClientContextWrapper> inner_p)
-    : ClientContextWrapper(inner_p->TryGetContext()), inner(std::move(inner_p)) {
-}
-
-void ClaimingContextWrapper::TryBindRelation(Relation &relation, vector<ColumnDefinition> &columns) {
-	auto context = GetContext();
-	ConnectionClaim claim(*context);
-	inner->TryBindRelation(relation, columns);
-}
-
-void ClaimingContextWrapper::Install(Relation &relation) {
-	if (!relation.context || dynamic_cast<ClaimingContextWrapper *>(relation.context.get())) {
-		return;
-	}
-	relation.context = make_shared_ptr<ClaimingContextWrapper>(relation.context);
-}
 
 void ConnectionState::SetDbapiResult(const shared_ptr<Result> &result) {
 	lock_guard<mutex> guard(lock);
@@ -207,7 +289,7 @@ static void NameRefusal(ConnectionState &state, QueryResult &handle) {
 }
 
 Session::Session(shared_ptr<ClientContext> context_p)
-    : context(std::move(context_p)), state(ConnectionState::Get(*context)) {
+    : context(std::move(context_p)), state(ConnectionState::Get(*context)), registry(SourceRegistry::Get(*context)) {
 }
 
 Prepared Session::Prepare(unique_ptr<SQLStatement> statement) {
@@ -238,37 +320,23 @@ shared_ptr<Result> Session::Submit(unique_ptr<SQLStatement> statement, identifie
 shared_ptr<Result> Session::SubmitClaimed(unique_ptr<SQLStatement> statement,
                                           identifier_map_t<BoundParameterData> &values, const Format &format) {
 	auto written_type = statement->type;
+	registry->CountStatement(written_type);
 	auto handle = context->Submit(std::move(statement), values, QueryParameters(format.EngineFormat()));
 	NameRefusal(*state, *handle);
-	return make_shared_ptr<Result>(std::move(handle), written_type, format, nullptr);
+	return make_shared_ptr<Result>(std::move(handle), written_type, format);
 }
 
 shared_ptr<Result> Session::Submit(Prepared &prepared, identifier_map_t<BoundParameterData> &values,
                                    const Format &format) {
 	ConnectionClaim claim(*state, *context);
+	registry->CountStatement(prepared.statement->GetStatementType());
 	unique_ptr<QueryResult> handle;
 	{
 		PinGuard guard(*state, prepared.tables);
 		handle = prepared.statement->Submit(values, QueryParameters(format.EngineFormat()));
 	}
 	NameRefusal(*state, *handle);
-	return make_shared_ptr<Result>(std::move(handle), prepared.statement->GetStatementType(), format, nullptr);
-}
-
-shared_ptr<Result> Session::Submit(const shared_ptr<Relation> &relation, const Format &format) {
-	ConnectionClaim claim(*state, *context);
-	QueryParameters parameters(format.EngineFormat());
-	if (!relation->IsReadOnly()) {
-		auto handle = context->Submit(relation, parameters);
-		NameRefusal(*state, *handle);
-		return make_shared_ptr<Result>(std::move(handle), StatementType::RELATION_STATEMENT, format, relation);
-	}
-	auto select = make_uniq<SelectStatement>();
-	select->node = relation->GetQueryNode();
-	select->query = relation->GetQuery();
-	auto handle = context->Submit(std::move(select), parameters);
-	NameRefusal(*state, *handle);
-	return make_shared_ptr<Result>(std::move(handle), StatementType::SELECT_STATEMENT, format, relation);
+	return make_shared_ptr<Result>(std::move(handle), prepared.statement->GetStatementType(), format);
 }
 
 StatementSignature Session::Bind(unique_ptr<SQLStatement> statement, ResolvedTables &tables) {
@@ -281,6 +349,11 @@ StatementSignature Session::Bind(unique_ptr<SQLStatement> statement, ResolvedTab
 
 void Session::Run(unique_ptr<SQLStatement> statement, const InterruptCheck &check) {
 	ConnectionClaim claim(*state, *context);
+	RunClaimed(std::move(statement), check);
+}
+
+void Session::RunClaimed(unique_ptr<SQLStatement> statement, const InterruptCheck &check) {
+	registry->CountStatement(statement->type);
 	auto handle = context->Submit(std::move(statement), QueryParameters());
 	NameRefusal(*state, *handle);
 	Complete(*handle, check);
@@ -288,6 +361,7 @@ void Session::Run(unique_ptr<SQLStatement> statement, const InterruptCheck &chec
 
 void Session::Run(unique_ptr<SQLStatement> statement, const ResolvedTables &tables, const InterruptCheck &check) {
 	ConnectionClaim claim(*state, *context);
+	registry->CountStatement(statement->type);
 	unique_ptr<QueryResult> handle;
 	{
 		PinGuard guard(*state, tables, true);

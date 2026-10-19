@@ -13,27 +13,19 @@ import _duckdb
 from _duckdb import (
     Appender,
     BinderException,
-    CaseExpression,
     CatalogException,
-    CoalesceOperator,
-    ColumnExpression,
     ConnectionException,
-    ConstantExpression,
     ConstraintException,
     ConversionException,
     CSVLineTerminator,
     DatabaseError,
     DataError,
-    DefaultExpression,
     DependencyException,
     DuckDBPyConnection,
-    DuckDBPyRelation,
     Error,
     ExpectedResultType,
     ExplainType,
-    Expression,
     FatalException,
-    FunctionExpression,
     HTTPException,
     IntegrityError,
     InternalError,
@@ -42,7 +34,6 @@ from _duckdb import (
     InvalidInputException,
     InvalidTypeException,
     IOException,
-    LambdaExpression,
     NotImplementedException,
     NotSupportedError,
     OperationalError,
@@ -56,8 +47,6 @@ from _duckdb import (
     ResourceInUseException,
     SequenceException,
     SerializationException,
-    SQLExpression,
-    StarExpression,
     Statement,
     StatementType,
     SyntaxException,
@@ -71,13 +60,10 @@ from _duckdb import (
     __standard_vector_size__,
     _clean_default_connection,
     abort,
-    aggregate,
-    alias,
     apilevel,
     append,
     appender,
     array_type,
-    arrow,
     begin,
     checkpoint,
     close,
@@ -89,9 +75,7 @@ from _duckdb import (
     decimal_type,
     default_connection,
     description,
-    df,
     disable_profiling,
-    distinct,
     dtype,
     duplicate,
     enable_profiling,
@@ -107,31 +91,17 @@ from _duckdb import (
     fetchnumpy,
     fetchone,
     filesystem_is_registered,
-    filter,
-    from_arrow,
-    from_csv_auto,
-    from_df,
-    from_parquet,
-    from_query,
     get_profiling_information,
     get_table_names,
     install_extension,
     interrupt,
-    limit,
     list_filesystems,
     list_type,
     load_extension,
     map_type,
-    order,
     paramstyle,
-    project,
-    query,
     query_appender,
-    query_df,
     query_progress,
-    read_csv,
-    read_json,
-    read_parquet,
     register,
     register_filesystem,
     remove_function,
@@ -139,12 +109,9 @@ from _duckdb import (
     row_type,
     rowcount,
     set_default_connection,
-    sql,
     sqltype,
     string_type,
     struct_type,
-    table,
-    table_function,
     tf,
     threadsafety,
     token_type,
@@ -154,12 +121,9 @@ from _duckdb import (
     union_type,
     unregister,
     unregister_filesystem,
-    values,
-    view,
-    write_csv,
 )
 
-from duckdb import _sources
+from duckdb import _relation, _sources
 from duckdb._dbapi_type_object import (
     BINARY,
     DATETIME,
@@ -168,6 +132,35 @@ from duckdb._dbapi_type_object import (
     STRING,
     DBAPITypeObject,
 )
+from duckdb._expression import (
+    CaseExpression,
+    CoalesceOperator,
+    ColumnExpression,
+    ConstantExpression,
+    DefaultExpression,
+    Expression,
+    FunctionExpression,
+    LambdaExpression,
+    SQLExpression,
+    StarExpression,
+    coalesce,
+    col,
+    count_all,
+    dense_rank,
+    first_value,
+    fn,
+    lag,
+    last_value,
+    lead,
+    lit,
+    ntile,
+    rank,
+    row_number,
+    sql_expr,
+    star,
+    when,
+)
+from duckdb._relation import DuckDBPyRelation
 from duckdb._version import (
     __duckdb_version__,
     __version__,
@@ -211,6 +204,36 @@ from duckdb.value.constant import (
 )
 
 _duckdb._set_arrow_sources(_sources)
+
+for _name, _method in _relation.CONNECTION_METHODS.items():
+    setattr(DuckDBPyConnection, _name, _method)
+del _name, _method
+
+sql = _relation.module_sql
+query = _relation.module_sql
+from_query = _relation.module_sql
+table = _relation.module_table
+view = _relation.module_view
+values = _relation.module_values
+table_function = _relation.module_table_function
+read_csv = _relation.module_read_csv
+from_csv_auto = _relation.module_read_csv
+read_json = _relation.module_read_json
+read_parquet = _relation.module_read_parquet
+from_parquet = _relation.module_read_parquet
+from_df = _relation.module_from_df
+from_arrow = _relation.module_from_arrow
+df = _relation.module_df
+arrow = _relation.module_arrow
+project = _relation.module_project
+distinct = _relation.module_distinct
+write_csv = _relation.module_write_csv
+aggregate = _relation.module_aggregate
+alias = _relation.module_alias
+filter = _relation.module_filter
+limit = _relation.module_limit
+order = _relation.module_order
+query_df = _relation.module_query_df
 
 __all__: list[str] = [
     "Appender",
@@ -318,13 +341,17 @@ __all__: list[str] = [
     "build_info",
     "checkpoint",
     "close",
+    "coalesce",
+    "col",
     "commit",
     "complete",
     "connect",
+    "count_all",
     "create_function",
     "cursor",
     "decimal_type",
     "default_connection",
+    "dense_rank",
     "description",
     "df",
     "disable_profiling",
@@ -345,6 +372,8 @@ __all__: list[str] = [
     "fetchone",
     "filesystem_is_registered",
     "filter",
+    "first_value",
+    "fn",
     "from_arrow",
     "from_csv_auto",
     "from_df",
@@ -354,11 +383,16 @@ __all__: list[str] = [
     "get_table_names",
     "install_extension",
     "interrupt",
+    "lag",
+    "last_value",
+    "lead",
     "limit",
     "list_filesystems",
     "list_type",
+    "lit",
     "load_extension",
     "map_type",
+    "ntile",
     "order",
     "paramstyle",
     "project",
@@ -366,6 +400,7 @@ __all__: list[str] = [
     "query_appender",
     "query_df",
     "query_progress",
+    "rank",
     "read_csv",
     "read_json",
     "read_parquet",
@@ -373,11 +408,14 @@ __all__: list[str] = [
     "register_filesystem",
     "remove_function",
     "rollback",
+    "row_number",
     "row_type",
     "rowcount",
     "set_default_connection",
     "sql",
+    "sql_expr",
     "sqltype",
+    "star",
     "string_type",
     "struct_type",
     "table",
@@ -393,5 +431,6 @@ __all__: list[str] = [
     "unregister_filesystem",
     "values",
     "view",
+    "when",
     "write_csv",
 ]

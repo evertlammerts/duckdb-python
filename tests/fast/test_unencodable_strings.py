@@ -152,10 +152,27 @@ def refusal(escaped_char, position):
     return re.escape(f"cannot encode str as UTF-8, surrogate '{escaped_char}' at position {position}")
 
 
-@pytest.mark.parametrize("convert", CONVERSIONS)
-def test_surrogate_is_refused(convert):
+# A value converted as a Python value, which is every reader option, every parameter and every frame column, reports
+# the offset inside the string itself. A value rendered into SQL text reports the offset inside that text, so a
+# constant expression counts the opening quote of its literal and SQL text given to a verb counts the words before it.
+# A CSV quotechar and a file path reach the message only since the conversion stopped escaping as std::bad_cast.
+WRITTEN_AS_A_LITERAL = {constant_expression}
+
+
+def conversion_cases():
+    cases = []
+    for convert in CONVERSIONS:
+        if convert in WRITTEN_AS_A_LITERAL:
+            cases.append(pytest.param(convert, 1, id=convert.__name__))
+        else:
+            cases.append(pytest.param(convert, 0, id=convert.__name__))
+    return cases
+
+
+@pytest.mark.parametrize(("convert", "position"), conversion_cases())
+def test_surrogate_is_refused(convert, position):
     con = duckdb.connect()
-    with pytest.raises(duckdb.InvalidInputException, match=refusal("\\ud800", 0)):
+    with pytest.raises(duckdb.InvalidInputException, match=refusal("\\ud800", position)):
         convert(con, "\ud800")
     assert con.execute("SELECT 42").fetchone() == (42,)
 
@@ -167,6 +184,22 @@ def test_csv_option_with_surrogate_is_refused(option, tmp_path):
     con = duckdb.connect()
     with pytest.raises(duckdb.InvalidInputException, match=refusal("\\ud800", 0)):
         option(con, str(path), "\ud800")
+    assert con.execute("SELECT 42").fetchone() == (42,)
+
+
+def test_csv_quotechar_with_surrogate_is_refused(tmp_path):
+    path = tmp_path / "in.csv"
+    path.write_text("a,b\n1,NA\n")
+    con = duckdb.connect()
+    with pytest.raises(duckdb.InvalidInputException, match=refusal("\\ud800", 0)):
+        con.read_csv(str(path), quotechar="\ud800")
+    assert con.execute("SELECT 42").fetchone() == (42,)
+
+
+def test_csv_path_with_surrogate_is_refused():
+    con = duckdb.connect()
+    with pytest.raises(duckdb.InvalidInputException, match=refusal("\\ud800", 0)):
+        con.read_csv("\ud800")
     assert con.execute("SELECT 42").fetchone() == (42,)
 
 
