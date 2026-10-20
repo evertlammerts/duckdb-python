@@ -16,10 +16,6 @@ import pandas as pd
 CHILD_TIMEOUT = 60
 
 
-def _xfail(reason, raises=AssertionError):
-    return pytest.mark.xfail(strict=True, reason=reason, raises=raises)
-
-
 def _array(dtype, cells):
     if dtype is object:
         # Filled cell by cell so that list, dict and array cells stay single objects.
@@ -371,7 +367,6 @@ def _fetchnumpy_child(literal, read):
     return child.returncode, [json.loads(outcome) for outcome in outcomes], child.stdout + child.stderr
 
 
-ROUND_TRIP_CRASHES = "reading back a fetchnumpy object column with NULLs dereferences its empty slots"
 OBJECT_RESULTS = {
     "VARCHAR": "'a'",
     "TIME": "TIME '01:02:03'",
@@ -420,14 +415,12 @@ def test_fetchnumpy_result_reads_back(literal):
 
 
 @pytest.mark.timeout(CHILD_TIMEOUT * 2)
-@_xfail(ROUND_TRIP_CRASHES)
 @pytest.mark.parametrize("literal", OBJECT_ROUND_TRIPS)
 def test_fetchnumpy_object_data_without_its_mask_reads_null(literal):
     returncode, outcomes, output = _fetchnumpy_child(literal, "data")
     assert (returncode, outcomes) == (0, [True]), output
 
 
-@_xfail("fetchnumpy leaves the slots of NULL objects empty")
 @pytest.mark.parametrize("literal", OBJECT_ROUND_TRIPS)
 def test_fetchnumpy_null_object_slot_holds_none(duckdb_cursor, literal):
     column = duckdb_cursor.sql(f"SELECT x FROM (VALUES ({literal}), (NULL)) t(x)").fetchnumpy()["x"]
