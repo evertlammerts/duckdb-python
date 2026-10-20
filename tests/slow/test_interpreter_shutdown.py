@@ -506,6 +506,202 @@ ORDINARY_SHUTDOWN = [
         id="threads_finishing_during_shutdown",
         marks=_needs("pyarrow"),
     ),
+    pytest.param(
+        """
+        import duckdb
+        import numpy as np
+        import pandas as pd
+
+        column = pd.concat(
+            [
+                pd.Series([f"v{i}" for i in range(3000)], dtype="string[pyarrow]"),
+                pd.Series([None, "x"] * 2000, dtype="string[pyarrow]"),
+            ],
+            ignore_index=True,
+        )
+        assert column.array._pa_array.num_chunks == 2
+        frame = pd.DataFrame({"s": column, "i": np.arange(len(column), dtype=np.int64)})
+        con = duckdb.connect()
+        con.register("f", frame)
+        rel = con.sql("SELECT s, i FROM f")
+        result = con.execute("SELECT s FROM f")
+        assert result.fetchmany(10) == [(f"v{i}",) for i in range(10)]
+        default_rel = duckdb.sql("SELECT s FROM frame")
+        print("BODY_DONE", flush=True)
+        """,
+        (),
+        True,
+        id="two_chunk_str_frame_with_open_results_at_exit",
+        marks=[_needs("pyarrow"), _needs("pandas")],
+    ),
+    pytest.param(
+        """
+        import signal
+        import duckdb
+        import numpy as np
+        import pandas as pd
+
+        column = pd.concat(
+            [
+                pd.Series([f"v{i}" for i in range(300000)], dtype="string[pyarrow]"),
+                pd.Series([None, "x"] * 150000, dtype="string[pyarrow]"),
+            ],
+            ignore_index=True,
+        )
+        assert column.array._pa_array.num_chunks == 2
+        frame = pd.DataFrame({"s": column, "i": np.arange(len(column), dtype=np.int64)})
+        con = duckdb.connect()
+        con.register("f", frame)
+        rel = con.sql("SELECT s, i FROM f")
+        result = con.execute("SELECT s FROM f")
+        assert result.fetchmany(10) == [(f"v{i}",) for i in range(10)]
+        # The alarm ends a process that hangs at exit well before the subprocess timeout.
+        if hasattr(signal, "alarm"):
+            signal.alarm(20)
+        print("BODY_DONE", flush=True)
+        """,
+        (),
+        True,
+        id="two_chunk_str_frame_with_a_running_scan_at_exit",
+        marks=[
+            _needs("pyarrow"),
+            _needs("pandas"),
+            pytest.mark.xfail(strict=False, reason="exit can hang while a scan that takes the GIL is running"),
+        ],
+    ),
+    pytest.param(
+        """
+        import signal
+        import duckdb
+        import numpy as np
+        import pandas as pd
+        import pyarrow as pa
+
+        chunks = [pa.array([f"v{i}" for i in range(start, start + 50)]) for start in range(0, 600000, 50)]
+        column = pd.Series(pd.arrays.ArrowStringArray(pa.chunked_array(chunks)))
+        assert column.dtype == "string[pyarrow]"
+        assert column.array._pa_array.num_chunks == 12000
+        frame = pd.DataFrame({"s": column, "i": np.arange(len(column), dtype=np.int64)})
+        con = duckdb.connect()
+        con.register("f", frame)
+        rel = con.sql("SELECT s, i FROM f")
+        result = con.execute("SELECT s FROM f")
+        assert result.fetchmany(10) == [(f"v{i}",) for i in range(10)]
+        # The alarm ends a process that hangs at exit well before the subprocess timeout.
+        if hasattr(signal, "alarm"):
+            signal.alarm(20)
+        print("BODY_DONE", flush=True)
+        """,
+        (),
+        True,
+        id="short_chunk_str_frame_with_a_running_scan_at_exit",
+        marks=[
+            _needs("pandas"),
+            _needs("pyarrow"),
+            pytest.mark.xfail(strict=False, reason="exit can hang while a scan that takes the GIL is running"),
+        ],
+    ),
+    pytest.param(
+        """
+        import duckdb
+        import numpy as np
+        import pyarrow as pa
+        import pyarrow.compute as pc
+
+        numbers = pa.array(np.arange(1_000_003, dtype=np.int64))
+        tbl = pa.table({"a": numbers, "s": pc.cast(numbers, pa.string())})
+        assert tbl.column("a").num_chunks == 1
+        assert tbl.column("s").num_chunks == 1
+        con = duckdb.connect(config={"threads": 4})
+        con.register("t", tbl)
+        rel = con.sql("SELECT a, s FROM t")
+        result = con.execute("SELECT a, s FROM t")
+        assert result.fetchmany(10) == [(i, str(i)) for i in range(10)]
+        print("BODY_DONE", flush=True)
+        """,
+        (),
+        True,
+        id="one_chunk_arrow_table_with_open_results_at_exit",
+        marks=_needs("pyarrow"),
+    ),
+    pytest.param(
+        """
+        import threading
+        import time
+        import duckdb
+        import numpy as np
+        import pyarrow as pa
+        import pyarrow.compute as pc
+
+        numbers = pa.array(np.arange(1_000_003, dtype=np.int64))
+        tbl = pa.table({"a": numbers, "s": pc.cast(numbers, pa.string())})
+        assert tbl.column("a").num_chunks == 1
+        con = duckdb.connect(config={"threads": 4})
+
+        def work():
+            cursor = con.cursor()
+            while True:
+                cursor.execute("select count(s), min(a), max(s) from tbl").fetchall()
+
+        for _ in range(4):
+            threading.Thread(target=work, daemon=True).start()
+        time.sleep(0.5)
+        print("BODY_DONE", flush=True)
+        """,
+        (),
+        False,
+        id="daemon_threads_scanning_one_chunk_arrow_table_at_exit",
+        marks=[
+            _needs("pyarrow"),
+            pytest.mark.skipif(
+                sys.version_info < (3, 13),
+                reason="before 3.13 a daemon thread woken after finalization unwinds through duckdb and aborts",
+            ),
+        ],
+    ),
+    *[
+        pytest.param(
+            """
+            import threading
+            import time
+            import duckdb
+            import numpy as np
+            import pandas as pd
+
+            frame = pd.DataFrame({"a": COLUMN})
+            con = duckdb.connect()
+
+            def work():
+                cursor = con.cursor()
+                while True:
+                    cursor.execute("select count(a), min(a) from frame").fetchall()
+
+            for _ in range(4):
+                threading.Thread(target=work, daemon=True).start()
+            time.sleep(0.5)
+            print("BODY_DONE", flush=True)
+            """.replace("COLUMN", column),
+            (),
+            False,
+            id=f"daemon_threads_scanning_{kind}_frame_at_exit",
+            marks=[
+                *needs,
+                pytest.mark.skipif(
+                    sys.version_info < (3, 13),
+                    reason="before 3.13 a daemon thread woken after finalization unwinds through duckdb and aborts",
+                ),
+            ],
+        )
+        for kind, column, needs in (
+            ("numeric", "np.arange(200000, dtype=np.int64)", [_needs("pandas")]),
+            ("object", 'pd.Series([f"v{i % 100}" for i in range(200000)], dtype=object)', [_needs("pandas")]),
+            (
+                "pyarrow_str",
+                'pd.Series([f"v{i % 100}" for i in range(200000)], dtype="string[pyarrow]")',
+                [_needs("pandas"), _needs("pyarrow")],
+            ),
+        )
+    ],
 ]
 
 

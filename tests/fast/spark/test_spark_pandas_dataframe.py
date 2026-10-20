@@ -1,7 +1,10 @@
 import datetime
 import math
+from decimal import Decimal
 
 import pytest
+
+import duckdb
 
 _ = pytest.importorskip("duckdb.experimental.spark")
 pd = pytest.importorskip("pandas")
@@ -243,3 +246,249 @@ class TestPandasValueTypes:
     def test_values_that_fit(self, spark):
         assert spark.createDataFrame(pd.DataFrame({"a": [1, 2]}), "a bigint").collect() == [Row(a=1), Row(a=2)]
         assert spark.createDataFrame(pd.DataFrame({"a": [1.5]}), "a double").collect() == [Row(a=1.5)]
+
+
+ROWS = 3000
+NAIVE = datetime.datetime(2024, 5, 7, 7, 8, 9)
+AWARE = NAIVE.replace(tzinfo=datetime.timezone(datetime.timedelta(hours=2)))
+
+
+def _outside_the_sample(sampled, odd):
+    # The analyzer reads every third row of 3000, so the last row is never sampled.
+    values = [sampled] * ROWS
+    values[-1] = odd
+    return pd.Series(values, dtype=object)
+
+
+class _Point:
+    def __init__(self, x) -> None:
+        self.x = x
+
+
+_typed_from_the_sample = pytest.mark.xfail(
+    not USE_ACTUAL_SPARK, strict=True, reason="the object column is typed from its sample before the schema applies"
+)
+_not_turned_into_dicts = pytest.mark.xfail(
+    not USE_ACTUAL_SPARK,
+    strict=True,
+    reason="lists, tuples and objects in a struct field are not turned into dicts in field order before the scan",
+)
+_not_turned_into_text = pytest.mark.xfail(
+    not USE_ACTUAL_SPARK, strict=True, reason="values in a string field are not turned into text before the scan"
+)
+
+
+class TestPandasObjectColumnsWithASchema:
+    @pytest.mark.parametrize(
+        ("column", "schema", "expected_first", "expected_last"),
+        [
+            pytest.param(
+                _outside_the_sample(datetime.date(2024, 5, 6), NAIVE),
+                "a date",
+                datetime.date(2024, 5, 6),
+                datetime.date(2024, 5, 7),
+                id="datetime_into_date",
+            ),
+            pytest.param(
+                _outside_the_sample(datetime.date(2024, 5, 6), pd.Timestamp(NAIVE)),
+                "a date",
+                datetime.date(2024, 5, 6),
+                datetime.date(2024, 5, 7),
+                id="pandas_timestamp_into_date",
+            ),
+            pytest.param(
+                _outside_the_sample(NAIVE, datetime.date(2024, 5, 6)),
+                "a date",
+                datetime.date(2024, 5, 7),
+                datetime.date(2024, 5, 6),
+                id="date_among_datetimes_into_date",
+            ),
+            pytest.param(
+                _outside_the_sample(Decimal("1.5"), Decimal("1.25")),
+                "a decimal(10,2)",
+                Decimal("1.50"),
+                Decimal("1.25"),
+                id="wider_decimal_into_decimal",
+                marks=_typed_from_the_sample,
+            ),
+            pytest.param(
+                _outside_the_sample(1, "x"),
+                "a string",
+                "1",
+                "x",
+                id="str_among_ints_into_string",
+                marks=_typed_from_the_sample,
+            ),
+            pytest.param(
+                _outside_the_sample(1, 2**40),
+                "a bigint",
+                1,
+                2**40,
+                id="large_int_into_bigint",
+                marks=_typed_from_the_sample,
+            ),
+            pytest.param(
+                _outside_the_sample(b"ab", bytearray(b"cd")),
+                "a binary",
+                b"ab",
+                b"cd",
+                id="bytearray_into_binary",
+            ),
+            pytest.param(
+                _outside_the_sample("a", b"ab"), "a string", "a", "b'ab'", id="bytes_into_string_reads_as_its_text"
+            ),
+            pytest.param(
+                pd.Series([b"ab", b"cd"], dtype=object),
+                "a string",
+                "b'ab'",
+                "b'cd'",
+                id="fully_sampled_bytes_into_string_read_as_their_text",
+                marks=_not_turned_into_text,
+            ),
+            pytest.param(_outside_the_sample([1, 2], (3, 4)), "a array<int>", [1, 2], [3, 4], id="tuple_into_array"),
+        ],
+    )
+    def test_object_value_outside_the_sample_with_a_schema(self, spark, column, schema, expected_first, expected_last):
+        df = spark.createDataFrame(pd.DataFrame({"a": column}), schema)
+        rows = df.collect()
+        assert (rows[0].a, rows[-1].a) == (expected_first, expected_last)
+
+    @pytest.mark.parametrize(
+        ("column", "schema", "expected_first", "expected_last"),
+        [
+            pytest.param(
+                _outside_the_sample({"x": 1}, (2,)), "a struct<x:int>", Row(x=1), Row(x=2), id="tuple_among_dicts"
+            ),
+            pytest.param(
+                _outside_the_sample({"x": 1}, Row(x=2)), "a struct<x:int>", Row(x=1), Row(x=2), id="row_among_dicts"
+            ),
+            pytest.param(
+                _outside_the_sample({"x": 1}, [2]),
+                "a struct<x:int>",
+                Row(x=1),
+                Row(x=2),
+                id="list_among_dicts",
+                marks=_not_turned_into_dicts,
+            ),
+            pytest.param(
+                _outside_the_sample({"x": 1}, _Point(2)),
+                "a struct<x:int>",
+                Row(x=1),
+                Row(x=2),
+                id="object_among_dicts",
+                marks=_not_turned_into_dicts,
+            ),
+            pytest.param(
+                pd.Series([(1,), (2,)], dtype=object),
+                "a struct<x:int>",
+                Row(x=1),
+                Row(x=2),
+                id="tuples_only",
+                marks=_not_turned_into_dicts,
+            ),
+            pytest.param(
+                _outside_the_sample([{"x": 1}], [(2,)]),
+                "a array<struct<x:int>>",
+                [Row(x=1)],
+                [Row(x=2)],
+                id="tuple_element_of_an_array",
+            ),
+            pytest.param(
+                _outside_the_sample({"k": {"x": 1}}, {"k": (2,)}),
+                "a map<string,struct<x:int>>",
+                {"k": Row(x=1)},
+                {"k": Row(x=2)},
+                id="tuple_value_of_a_map",
+            ),
+            pytest.param(
+                _outside_the_sample({"s": {"x": 1}}, {"s": (2,)}),
+                "a struct<s:struct<x:int>>",
+                Row(s=Row(x=1)),
+                Row(s=Row(x=2)),
+                id="tuple_field_of_a_struct",
+            ),
+            pytest.param(
+                pd.Series([{"s": (1,)}, {"s": (2,)}], dtype=object),
+                "a struct<s:struct<x:int>>",
+                Row(s=Row(x=1)),
+                Row(s=Row(x=2)),
+                id="tuple_fields_only",
+                marks=_not_turned_into_dicts,
+            ),
+            pytest.param(
+                _outside_the_sample({"y": 2, "x": 1}, (3, 4)),
+                "a struct<x:int,y:int>",
+                Row(x=1, y=2),
+                Row(x=3, y=4),
+                id="tuple_among_dicts_of_another_key_order",
+                marks=_not_turned_into_dicts,
+            ),
+        ],
+    )
+    def test_struct_field_takes_each_value_the_schema_check_accepts(
+        self, spark, column, schema, expected_first, expected_last
+    ):
+        df = spark.createDataFrame(pd.DataFrame({"a": column}), schema)
+        rows = df.collect()
+        assert (rows[0].a, rows[-1].a) == (expected_first, expected_last)
+
+    def test_struct_values_of_the_frame_stay_as_given(self, spark):
+        frame = pd.DataFrame({"a": _outside_the_sample({"y": 2, "x": 1}, (3, 4))})
+        # repr keeps the key order, which dict equality ignores.
+        given = repr(list(frame["a"]))
+        spark.createDataFrame(frame, "a struct<x:int,y:int>").collect()
+        assert repr(list(frame["a"])) == given
+
+    @pytest.mark.skipif(USE_ACTUAL_SPARK, reason="sets the session time zone through the DuckDB connection")
+    @pytest.mark.xfail(strict=True, reason="an aware datetime outside a naive sample keeps its wall time")
+    def test_aware_datetime_outside_the_sample_of_a_timestamp_field(self, spark):
+        spark.conn.execute("SET TimeZone = 'UTC'")
+        df = spark.createDataFrame(pd.DataFrame({"t": _outside_the_sample(NAIVE, AWARE)}), "t timestamp")
+        rows = df.collect()
+        assert (rows[0].t, rows[-1].t) == (_local(NAIVE.replace(tzinfo=datetime.timezone.utc)), _local(AWARE))
+
+    @pytest.mark.skipif(USE_ACTUAL_SPARK, reason="sets the session time zone through the DuckDB connection")
+    @pytest.mark.parametrize(
+        "column",
+        [
+            pytest.param(_outside_the_sample(NAIVE, AWARE), id="outside_a_naive_sample"),
+            pytest.param(
+                pd.Series([AWARE, AWARE], dtype=object),
+                id="only_aware_values",
+                marks=pytest.mark.xfail(
+                    strict=True, reason="an aware datetime in a timestamp_ntz field reads in the session time zone"
+                ),
+            ),
+        ],
+    )
+    def test_aware_datetime_in_a_timestamp_ntz_field_keeps_its_wall_time(self, spark, column):
+        spark.conn.execute("SET TimeZone = 'UTC'")
+        df = spark.createDataFrame(pd.DataFrame({"t": column}), "t timestamp_ntz")
+        rows = df.collect()
+        assert (rows[0].t, rows[-1].t) == (NAIVE, NAIVE)
+
+
+@pytest.mark.skipif(USE_ACTUAL_SPARK, reason="Spark refuses to merge the inferred types with PySparkTypeError")
+class TestPandasObjectColumnsWithoutASchema:
+    @pytest.mark.parametrize(
+        ("column", "match"),
+        [
+            pytest.param(_outside_the_sample(1, 2.5), r"(?s)(?=.*\bfloat\b)(?=.*\b2999\b)", id="float_among_ints"),
+            pytest.param(
+                _outside_the_sample(datetime.date(2024, 5, 6), NAIVE),
+                r"(?s)(?=.*\bdatetime\b)(?=.*\b2999\b)",
+                id="datetime_among_dates",
+            ),
+        ],
+    )
+    @pytest.mark.xfail(strict=True, reason="a value outside the sample is converted into the sampled type")
+    def test_object_value_outside_the_sample_that_does_not_fit_raises(self, spark, column, match):
+        df = spark.createDataFrame(pd.DataFrame({"a": column}))
+        with pytest.raises(duckdb.InvalidInputException, match=match):
+            df.collect()
+
+    def test_midnight_datetime_outside_the_sample_of_dates_reads_as_its_date(self, spark):
+        column = _outside_the_sample(datetime.date(2024, 5, 6), datetime.datetime(2024, 5, 7))
+        df = spark.createDataFrame(pd.DataFrame({"a": column}))
+        rows = df.collect()
+        assert (rows[0].a, rows[-1].a) == (datetime.date(2024, 5, 6), datetime.date(2024, 5, 7))
