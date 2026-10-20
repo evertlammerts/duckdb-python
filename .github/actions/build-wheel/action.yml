@@ -137,14 +137,6 @@ runs:
         CIBW_TEST_COMMAND: >
           uv run -v pytest --confcutdir=. --rootdir . -c {project}/pyproject.toml ${{ inputs.testsuite == 'fast' && './tests/fast' || './tests' }}
 
-    # macOS builds on the host into build/shared (a pyproject override), so the compile database is checked here.
-    # The manylinux build runs in a container whose files never reach the host; its check runs inside, in front of
-    # the repair command in pyproject.toml. Windows builds with MSVC and without LTO, so there is nothing to check.
-    - name: Verify the code generation flags
-      if: ${{ inputs.cibw-system == 'macosx' }}
-      shell: bash
-      run: python3 scripts/check_compile_commands.py build/shared/compile_commands.json --lto thin
-
     # The stable ABI wheel must import nothing outside the stable ABI, which compiling with Py_LIMITED_API does
     # not prove for symbols pulled in by inline functions or dependencies.
     - name: Audit the stable ABI wheel

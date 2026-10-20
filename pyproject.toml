@@ -117,12 +117,12 @@ if.env.CIBUILDWHEEL_BUILD_IDENTIFIER = true
 build-dir = "build/shared"
 build.tool-args = ["-v"]
 
-# Override: wheels built on Linux and macOS link with ThinLTO. Linux gets clang and lld from the before-build step and
-# CC/CXX from the environment table under [tool.cibuildwheel.linux]; macOS is Apple clang already. Windows builds
-# with MSVC, which DuckDB's LTO support leaves out, so it gets no define and stays native.
+# Override: the Linux wheels link with ThinLTO, the platforms DuckDB's own release does it for. clang and lld come
+# from the before-build step and CC/CXX from the environment table under [tool.cibuildwheel.linux]. macOS and
+# Windows get no define and stay native, like DuckDB's release.
 [[tool.scikit-build.overrides]]
 if.env.CIBUILDWHEEL_BUILD_IDENTIFIER = true
-if.platform-system = "^(linux|darwin)"
+if.platform-system = "^linux$"
 inherit.cmake.define = "append"
 cmake.define.DUCKDB_PY_LTO = "thin"
 
@@ -536,7 +536,7 @@ before-build = [
 # replaces this table and carries the same two variables; this copy serves a local cibuildwheel run.
 environment = { CC = "clang", CXX = "clang++" }
 # The build runs in a container that keeps its files, so the compile database is checked there, in front of the
-# default repair command. macOS builds on the host and the build-wheel action checks it after the build.
+# default repair command.
 repair-wheel-command = [
   'python {project}/scripts/check_compile_commands.py {project}/build/shared/compile_commands.json --lto thin --compiler clang',
   'auditwheel repair -w {dest_dir} {wheel}',
