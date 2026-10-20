@@ -51,6 +51,16 @@ def arrow_multibatch() -> pa.Table:
 
 
 @pytest.fixture(scope="module")
+def arrow_one_chunk() -> pa.Table:
+    return pa.table(
+        {
+            "a": pa.array(np.arange(N_SCAN), type=pa.int64()),
+            "b": pa.array(np.arange(N_SCAN, dtype="float64") * 1.5, type=pa.float64()),
+        }
+    )
+
+
+@pytest.fixture(scope="module")
 def pandas_frame() -> pd.DataFrame:
     return pd.DataFrame({"a": np.arange(N_SCAN), "b": np.arange(N_SCAN, dtype="float64") * 1.5})
 
@@ -64,6 +74,19 @@ def test_scan_arrow_parallel(benchmark: BenchmarkFixture, arrow_multibatch: pa.T
     con = duckdb.connect(config={"threads": threads})
     try:
         con.register("t", arrow_multibatch)
+        q = f"SELECT sum({HEAVY}) FROM t"
+        con.execute(q).fetchall()  # warm
+        benchmark(lambda: con.execute(q).fetchall())
+    finally:
+        con.close()
+
+
+@pytest.mark.parametrize("threads", THREADS)
+def test_scan_arrow_one_chunk_parallel(benchmark: BenchmarkFixture, arrow_one_chunk: pa.Table, threads: int) -> None:
+    # the speedup over threads shows whether the scan splits a single batch into ranges (see GOTCHA)
+    con = duckdb.connect(config={"threads": threads})
+    try:
+        con.register("t", arrow_one_chunk)
         q = f"SELECT sum({HEAVY}) FROM t"
         con.execute(q).fetchall()  # warm
         benchmark(lambda: con.execute(q).fetchall())
