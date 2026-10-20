@@ -80,8 +80,11 @@ runs:
         # macos and windows the build runs on the host, so plain job env works.
         # Every override has to ride along on that single CIBW_ENVIRONMENT line,
         # or it never reaches the build inside the container.
+        # The manylinux image compiles with gcc unless told otherwise; the wheels
+        # build with the clang that before-build installs, like the engine's own
+        # Linux release.
         if [[ "${{ inputs.cibw-system }}" == "manylinux" ]]; then
-          echo "CIBW_ENVIRONMENT=CCACHE_DIR=/host${{ github.workspace }}/.ccache${overrides}" >> $GITHUB_ENV
+          echo "CIBW_ENVIRONMENT=CCACHE_DIR=/host${{ github.workspace }}/.ccache CC=clang CXX=clang++${overrides}" >> $GITHUB_ENV
         else
           for override in ${overrides}; do
             echo "${override}" >> $GITHUB_ENV

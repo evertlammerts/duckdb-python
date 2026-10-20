@@ -102,6 +102,9 @@ BUILD_EXTENSIONS = "core_functions;json;parquet;icu"
 # Empty means all of BUILD_EXTENSIONS. Always passed so a stale CMake cache
 # value never survives an override being dropped.
 LINK_EXTENSIONS = ""
+# Link time optimization mode for the engine, the bindings and the module link:
+# thin, full, or empty for none. Always passed for the same reason.
+DUCKDB_PY_LTO = ""
 
 [tool.duckdb_packaging]
 # The version this branch releases next. A release forces exactly this version, a
@@ -113,6 +116,15 @@ release_version = "2.0.0"
 if.env.CIBUILDWHEEL_BUILD_IDENTIFIER = true
 build-dir = "build/shared"
 build.tool-args = ["-v"]
+
+# Override: the Linux wheels link with ThinLTO, the platforms DuckDB's own release does it for. clang and lld come
+# from the before-build step and CC/CXX from the environment table under [tool.cibuildwheel.linux]. macOS and
+# Windows get no define and stay native, like DuckDB's release.
+[[tool.scikit-build.overrides]]
+if.env.CIBUILDWHEEL_BUILD_IDENTIFIER = true
+if.platform-system = "^linux$"
+inherit.cmake.define = "append"
+cmake.define.DUCKDB_PY_LTO = "thin"
 
 # Override: if COVERAGE is set then:
 # - we create a RelWithDebInfo build
@@ -518,7 +530,16 @@ build-frontend = { name = "build[uv]", args = ["--env-dir", "/tmp/duckdb-build-e
 before-build = [
   'pip install -U "build>=1.6.0"',
   'rm -rf /tmp/duckdb-build-env',
-  'yum install -y ccache',
+  'yum install -y ccache clang lld',
+]
+# The wheels build with clang, like the engine's own Linux release. In CI the build-wheel action's CIBW_ENVIRONMENT
+# replaces this table and carries the same two variables; this copy serves a local cibuildwheel run.
+environment = { CC = "clang", CXX = "clang++" }
+# The build runs in a container that keeps its files, so the compile database is checked there, in front of the
+# default repair command.
+repair-wheel-command = [
+  'python {project}/scripts/check_compile_commands.py {project}/build/shared/compile_commands.json --lto thin --compiler clang',
+  'auditwheel repair -w {dest_dir} {wheel}',
 ]
 
 [tool.cibuildwheel.macos]
