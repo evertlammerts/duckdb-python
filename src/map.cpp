@@ -119,10 +119,10 @@ unique_ptr<FunctionData> BindExplicitSchema(unique_ptr<MapFunctionData> function
 
 	types.reserve(column_count);
 	names.reserve(column_count);
+	nb::list labels;
 	for (auto item : schema) { // nanobind dict iteration yields std::pair<handle,handle> by value
-		auto name = item.first;
+		labels.append(item.first);
 		auto type_p = item.second;
-		names.emplace_back(nb::cast<std::string>(nb::str(name)));
 		// TryConvert applies the same implicit conversions a DuckDBPyType parameter would (DuckDBPyType instance,
 		// a type string, or a Python type object), and reports a clear error instead of a raw cast failure.
 		std::unique_ptr<DuckDBPyType> type;
@@ -132,6 +132,9 @@ unique_ptr<FunctionData> BindExplicitSchema(unique_ptr<MapFunctionData> function
 			                            actual_type);
 		}
 		types.push_back(type->Type());
+	}
+	for (auto &name : ColumnNamesFromLabels(labels)) {
+		names.emplace_back(name);
 	}
 
 	function_data->out_names = names;
@@ -157,7 +160,7 @@ static unique_ptr<FunctionData> BindMap(ClientContext &context, shared_ptr<MapFu
 		return BindExplicitSchema(std::move(data_uptr), explicit_schema, return_types, names);
 	}
 	NumpyResultConversion conversion(data.in_types, 0, context.GetClientProperties());
-	auto df = FunctionCall(conversion, data.in_names, function);
+	auto df = PandasScanFunction::PandasWithBoundNames(FunctionCall(conversion, data.in_names, function));
 	vector<PandasColumnBindData> pandas_bind_data; // unused
 	Pandas::Bind(context, df, pandas_bind_data, return_types, names);
 
@@ -201,13 +204,14 @@ static OperatorResultType ExecuteMap(ExecutionContext &context, TableFunctionInp
 	NumpyResultConversion conversion(data.in_types, input.size(), context.client.GetClientProperties());
 	conversion.Append(input);
 
-	auto df = FunctionCall(conversion, data.in_names, data.info->function.obj.ptr());
+	auto df = PandasScanFunction::PandasWithBoundNames(
+	    FunctionCall(conversion, data.in_names, data.info->function.obj.ptr()));
 
 	vector<PandasColumnBindData> pandas_bind_data;
 	vector<LogicalType> pandas_return_types;
 	vector<Identifier> pandas_names;
 
-	Pandas::Bind(context.client, df, pandas_bind_data, pandas_return_types, pandas_names);
+	auto row_count = Pandas::Bind(context.client, df, pandas_bind_data, pandas_return_types, pandas_names);
 	if (pandas_return_types.size() != output.ColumnCount()) {
 		throw InvalidInputException("Expected %llu columns from UDF, got %llu", output.ColumnCount(),
 		                            pandas_return_types.size());
@@ -222,10 +226,6 @@ static OperatorResultType ExecuteMap(ExecutionContext &context, TableFunctionInp
 		                            StringUtil::Join(data.out_names, ", "), StringUtil::Join(pandas_names, ", "));
 	}
 
-	auto df_columns = nb::list(nb::object(df.attr("columns")));
-	auto get_fun = df.attr("__getitem__");
-
-	idx_t row_count = nb::len(get_fun(df_columns[0]));
 	if (row_count > STANDARD_VECTOR_SIZE) {
 		throw InvalidInputException("UDF returned more than %llu rows, which is not allowed.", STANDARD_VECTOR_SIZE);
 	}

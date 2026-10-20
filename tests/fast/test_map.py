@@ -297,23 +297,12 @@ def _rows_of(labels):
     return [tuple(i * (k + 1) for k in range(len(labels))) for i in range(3)]
 
 
-NOT_RENAMED = "map does not give the returned labels str() and the deduplication that from_df applies"
-
 COLUMN_NAME_CASES = [
-    pytest.param(["a", "a"], ["a", "a_1"], id="duplicate", marks=pytest.mark.xfail(strict=True, reason=NOT_RENAMED)),
-    pytest.param(
-        ["a", "a_1", "a"],
-        ["a", "a_1", "a_2"],
-        id="duplicate_next_to_its_suffix",
-        marks=pytest.mark.xfail(strict=True, reason=NOT_RENAMED),
-    ),
-    pytest.param(
-        ["a", "A"], ["a", "A_1"], id="duplicate_up_to_case", marks=pytest.mark.xfail(strict=True, reason=NOT_RENAMED)
-    ),
-    pytest.param(
-        [1, "1"], ["1", "1_1"], id="int_and_its_text", marks=pytest.mark.xfail(strict=True, reason=NOT_RENAMED)
-    ),
-    pytest.param([b"k"], ["b'k'"], id="bytes", marks=pytest.mark.xfail(strict=True, reason=NOT_RENAMED)),
+    pytest.param(["a", "a"], ["a", "a_1"], id="duplicate"),
+    pytest.param(["a", "a_1", "a"], ["a", "a_1", "a_2"], id="duplicate_next_to_its_suffix"),
+    pytest.param(["a", "A"], ["a", "A_1"], id="duplicate_up_to_case"),
+    pytest.param([1, "1"], ["1", "1_1"], id="int_and_its_text"),
+    pytest.param([b"k"], ["b'k'"], id="bytes"),
     pytest.param([1], ["1"], id="int"),
     pytest.param([("a", "b")], ["('a', 'b')"], id="tuple"),
 ]
@@ -339,9 +328,6 @@ def test_map_result_column_names_equal_those_of_from_df(duckdb_cursor, labels):
     _assert_connection_answers(duckdb_cursor)
 
 
-KEYS_NOT_DEDUPLICATED = "explicit schema keys are not deduplicated"
-
-
 @pytest.mark.parametrize(
     ("labels", "schema_names", "names"),
     [
@@ -350,28 +336,24 @@ KEYS_NOT_DEDUPLICATED = "explicit schema keys are not deduplicated"
             ["a", "a_1"],
             ["a", "a_1"],
             id="duplicate_labels_under_their_new_names",
-            marks=pytest.mark.xfail(strict=True, reason=NOT_RENAMED),
         ),
         pytest.param(
             [b"k"],
             [b"k"],
             ["b'k'"],
             id="bytes_key_and_bytes_label",
-            marks=pytest.mark.xfail(strict=True, reason=NOT_RENAMED),
         ),
         pytest.param(
             ["a", "A"],
             ["a", "A"],
             ["a", "A_1"],
             id="keys_duplicate_up_to_case",
-            marks=pytest.mark.xfail(strict=True, reason=KEYS_NOT_DEDUPLICATED),
         ),
         pytest.param(
             [1, "1"],
             [1, "1"],
             ["1", "1_1"],
             id="keys_duplicate_after_str",
-            marks=pytest.mark.xfail(strict=True, reason=KEYS_NOT_DEDUPLICATED),
         ),
     ],
 )
@@ -384,7 +366,6 @@ def test_map_explicit_schema_names_are_str_of_keys_deduplicated(duckdb_cursor, l
     _assert_connection_answers(duckdb_cursor)
 
 
-@pytest.mark.xfail(strict=True, reason="a bytes label reaches the name check decoded, so it matches a str key")
 def test_map_explicit_schema_str_key_does_not_match_a_bytes_label(duckdb_cursor):
     mapped = duckdb_cursor.sql("select range::BIGINT as x from range(3)").map(
         _labelled(b"k"), schema={"k": duckdb.sqltypes.BIGINT}
@@ -583,7 +564,6 @@ print("outcome " + json.dumps(outcome))
 RESIZED_CHILD_TIMEOUT = 60
 
 
-@pytest.mark.xfail(strict=True, reason="map does not compare the length of df[name] with the frame's row count")
 @pytest.mark.timeout(2 * RESIZED_CHILD_TIMEOUT)
 @pytest.mark.parametrize("explicit_schema", [False, True], ids=["inferred", "explicit_schema"])
 @pytest.mark.parametrize(

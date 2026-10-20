@@ -10,8 +10,8 @@
 
 namespace duckdb {
 
-void NumpyBind::Bind(ClientContext &context, nb::handle df, vector<PandasColumnBindData> &bind_columns,
-                     vector<LogicalType> &return_types, vector<Identifier> &names) {
+idx_t NumpyBind::Bind(ClientContext &context, nb::handle df, vector<PandasColumnBindData> &bind_columns,
+                      vector<LogicalType> &return_types, vector<Identifier> &names) {
 	// The scan, which runs without the GIL, only recognizes pandas.NaT and pandas.NA once the import cache holds them
 	auto &import_cache = *DuckDBPyConnection::ImportCache();
 	if (PandasIsImported(import_cache)) {
@@ -19,30 +19,38 @@ void NumpyBind::Bind(ClientContext &context, nb::handle df, vector<PandasColumnB
 		(void)import_cache.pandas.NA();
 	}
 
-	auto df_columns = nb::list(df.attr("keys")());
-	auto df_types = nb::list();
-	for (auto item : nb::cast<nb::dict>(df)) {
-		if (nb::cast<std::string>(nb::str(nb::object(item.second.attr("dtype").attr("char")))) == "U") {
-			df_types.attr("append")(nb::str("string"));
-			continue;
-		}
-		df_types.attr("append")(nb::str(nb::object(item.second.attr("dtype"))));
-	}
-	auto get_fun = df.attr("__getitem__");
-	if (nb::len(df_columns) == 0 || nb::len(df_types) == 0 || nb::len(df_columns) != nb::len(df_types)) {
+	auto keys = nb::list(df.attr("keys")());
+	if (nb::len(keys) == 0) {
 		throw InvalidInputException("Need a DataFrame with at least one column");
 	}
-	for (idx_t col_idx = 0; col_idx < nb::len(df_columns); col_idx++) {
+	auto column_names = ColumnNamesFromLabels(keys);
+	auto get_fun = df.attr("__getitem__");
+	idx_t row_count = 0;
+	string counted_from;
+	for (idx_t col_idx = 0; col_idx < nb::len(keys); col_idx++) {
 		LogicalType duckdb_col_type;
 		PandasColumnBindData bind_data;
+		bind_data.name = column_names[col_idx];
+		names.emplace_back(bind_data.name);
 
-		names.emplace_back(nb::cast<std::string>(df_columns[col_idx]));
-		bind_data.numpy_type = ConvertNumpyType(df_types[col_idx]);
+		auto column = get_fun(keys[col_idx]);
+		// Checked before any conversion, because numpy below 2 flattens the codes np.unique returns.
+		if (col_idx == 0) {
+			row_count = ColumnArrayRows(bind_data.name, column);
+			counted_from = StringUtil::Format("'%s'", bind_data.name);
+		} else {
+			CheckColumnArray(bind_data.name, column, row_count, counted_from);
+		}
+		auto dtype = column.attr("dtype");
+		if (nb::cast<std::string>(nb::str(nb::object(dtype.attr("char")))) == "U") {
+			bind_data.numpy_type = ConvertNumpyType(nb::str("string"));
+		} else {
+			bind_data.numpy_type = ConvertNumpyType(dtype);
+		}
 
-		auto column = get_fun(df_columns[col_idx]);
-
+		nb::object data;
 		if (bind_data.numpy_type.type == NumpyNullableType::FLOAT_16) {
-			bind_data.pandas_col = std::make_unique<PandasNumpyColumn>(NumpyArray(column.attr("astype")("float32")));
+			data = column.attr("astype")("float32");
 			bind_data.numpy_type.type = NumpyNullableType::FLOAT_32;
 			duckdb_col_type = NumpyToLogicalType(bind_data.numpy_type);
 		} else if (bind_data.numpy_type.type == NumpyNullableType::STRING) {
@@ -62,17 +70,18 @@ void NumpyBind::Bind(ClientContext &context, nb::handle df, vector<PandasColumnB
 				enum_entries_ptr[i] = StringVector::AddStringOrBlob(enum_entries_vec, enum_entries[i]);
 			}
 			duckdb_col_type = LogicalType::ENUM(enum_entries_vec, size);
-			auto pandas_col = uniq.attr("__getitem__")(1);
-			bind_data.internal_categorical_type = nb::cast<std::string>(nb::str(nb::object(pandas_col.attr("dtype"))));
-			bind_data.pandas_col = std::make_unique<PandasNumpyColumn>(NumpyArray(pandas_col));
+			data = uniq.attr("__getitem__")(1);
+			bind_data.internal_categorical_type = nb::cast<std::string>(nb::str(nb::object(data.attr("dtype"))));
 		} else {
-			bind_data.pandas_col = std::make_unique<PandasNumpyColumn>(NumpyArray(column));
+			data = column;
 			duckdb_col_type = NumpyToLogicalType(bind_data.numpy_type);
 		}
 
+		bind_data.pandas_col = std::make_unique<PandasNumpyColumn>(NumpyArray(std::move(data)));
+
 		if (bind_data.numpy_type.type == NumpyNullableType::OBJECT) {
 			PandasAnalyzer analyzer(context);
-			if (analyzer.Analyze(get_fun(df_columns[col_idx]))) {
+			if (analyzer.Analyze(column)) {
 				duckdb_col_type = analyzer.AnalyzedType();
 			}
 		}
@@ -80,6 +89,7 @@ void NumpyBind::Bind(ClientContext &context, nb::handle df, vector<PandasColumnB
 		return_types.push_back(duckdb_col_type);
 		bind_columns.push_back(std::move(bind_data));
 	}
+	return row_count;
 }
 
 } // namespace duckdb

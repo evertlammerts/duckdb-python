@@ -97,15 +97,12 @@ unique_ptr<FunctionData> PandasScanFunction::PandasScanBind(ClientContext &conte
 
 	vector<PandasColumnBindData> pandas_bind_data;
 
-	auto is_py_dict = nb::isinstance<nb::dict>(df);
-	if (is_py_dict) {
-		NumpyBind::Bind(context, df, pandas_bind_data, return_types, names);
+	idx_t row_count;
+	if (nb::isinstance<nb::dict>(df)) {
+		row_count = NumpyBind::Bind(context, df, pandas_bind_data, return_types, names);
 	} else {
-		Pandas::Bind(context, df, pandas_bind_data, return_types, names);
+		row_count = Pandas::Bind(context, df, pandas_bind_data, return_types, names);
 	}
-	auto df_columns = nb::list(df.attr("keys")());
-	auto get_fun = df.attr("__getitem__");
-	idx_t row_count = nb::len(get_fun(df_columns[0]));
 	return make_uniq<PandasScanFunctionData>(std::move(info), row_count, std::move(pandas_bind_data), return_types);
 }
 
@@ -209,26 +206,30 @@ unique_ptr<NodeStatistics> PandasScanFunction::PandasScanCardinality(ClientConte
 	return make_uniq<NodeStatistics>(data.row_count, data.row_count);
 }
 
-nb::object PandasScanFunction::PandasReplaceCopiedNames(const nb::object &original_df) {
-	nb::object copy_df = original_df.attr("copy")(false);
-	auto df_columns = nb::list(nb::object(original_df.attr("columns")));
-	vector<string> columns;
-	for (const auto &str : df_columns) {
-		columns.push_back(nb::cast<std::string>(nb::str(str)));
-	}
-	QueryResult::DeduplicateColumns(columns);
-
-	// nanobind nb::list has no pre-sized ctor; pre-fill with None so the indexed assignment below works
+static nb::object CopyWithColumnNames(const nb::object &df, const vector<string> &names) {
+	nb::object copy_df = df.attr("copy")(false);
 	nb::list new_columns;
-	for (idx_t i = 0; i < columns.size(); i++) {
-		new_columns.append(nb::none());
-	}
-	for (idx_t i = 0; i < columns.size(); i++) {
-		new_columns[i] = std::move(columns[i]);
+	for (auto &name : names) {
+		new_columns.append(nb::str(name.c_str(), name.size()));
 	}
 	copy_df.attr("columns") = std::move(new_columns);
-	columns.clear();
 	return copy_df;
+}
+
+nb::object PandasScanFunction::PandasReplaceCopiedNames(const nb::object &original_df) {
+	return CopyWithColumnNames(original_df, ColumnNamesFromLabels(original_df.attr("columns")));
+}
+
+nb::object PandasScanFunction::PandasWithBoundNames(const nb::object &df) {
+	auto labels = nb::list(nb::object(df.attr("columns")));
+	auto names = ColumnNamesFromLabels(labels);
+	for (idx_t col_idx = 0; col_idx < names.size(); col_idx++) {
+		nb::handle label = labels[col_idx];
+		if (!nb::isinstance<nb::str>(label) || nb::cast<std::string>(label) != names[col_idx]) {
+			return CopyWithColumnNames(df, names);
+		}
+	}
+	return df;
 }
 
 void PandasScanFunction::PandasSerialize(Serializer &serializer, const optional_ptr<FunctionData> bind_data,

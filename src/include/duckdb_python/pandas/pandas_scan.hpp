@@ -58,6 +58,9 @@ public:
 
 	// Helper function that transform pandas df names to make them work with our binder
 	static nb::object PandasReplaceCopiedNames(const nb::object &original_df);
+	//! The frame itself when every label is already a str equal to its column name (str() of the label, deduplicated),
+	//! else a shallow copy carrying those names
+	static nb::object PandasWithBoundNames(const nb::object &df);
 
 	static void PandasBackendScanSwitch(ClientContext &context, PandasColumnBindData &bind_data, idx_t count,
 	                                    idx_t offset, Vector &out);

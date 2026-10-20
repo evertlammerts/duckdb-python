@@ -301,7 +301,6 @@ def _dict_with_array_answer(answer):
     return AnsweringDict({"a": np.arange(4, dtype="int64"), "b": np.arange(4, dtype="int64")})
 
 
-@pytest.mark.xfail(strict=True, reason="a frame column's type is taken from df.dtypes, not from what df[name] gives")
 @pytest.mark.parametrize("path", PATHS)
 def test_frame_subclass_type_follows_its_column(duckdb_cursor, path):
     answer = np.array([1.5, 2.5, 3.5, 4.5], dtype="float64")
@@ -310,7 +309,6 @@ def test_frame_subclass_type_follows_its_column(duckdb_cursor, path):
     assert _execute(duckdb_cursor, source, path, "SELECT typeof(b), b FROM {source}").fetchall() == expected
 
 
-@pytest.mark.xfail(strict=True, reason="a dict column's type comes from the stored value, not from what d[key] gives")
 @pytest.mark.parametrize("path", PATHS)
 def test_dict_subclass_type_follows_its_array(duckdb_cursor, path):
     answer = np.array([1.5, 2.5, 3.5, 4.5], dtype="float64")
@@ -354,7 +352,6 @@ def _counting_dict(reads):
     )
 
 
-@pytest.mark.xfail(strict=True, reason="bind reads column 0 again for the row count and dict object columns twice")
 @pytest.mark.parametrize("path", PATHS)
 @pytest.mark.parametrize("make_source", [_counting_frame, _counting_dict], ids=["frame", "dict"])
 def test_each_column_is_read_once_per_query(duckdb_cursor, path, make_source):
@@ -394,7 +391,6 @@ _KEPT_THEN_CHANGED = '{"kept": np.arange(50, dtype="int64"), "changed": np.arang
 _CHANGED_THEN_KEPT = '{"changed": np.arange(50, dtype="int64"), "kept": np.arange(50, dtype="int64")}'
 
 
-@pytest.mark.xfail(strict=True, reason="bind does not compare a dict array's length with the bound row count")
 @pytest.mark.parametrize(
     ("replacement", "rows", "query"),
     [
@@ -424,7 +420,6 @@ def test_registered_dict_with_unequal_lengths_is_refused(replacement, rows, quer
     assert _refusal(_run_child(body), expected["words"]) == expected
 
 
-@pytest.mark.xfail(strict=True, reason="bind takes the row count from the first array and cuts the others to it")
 def test_registered_dict_with_its_first_array_shrunk_is_refused():
     body = _changed_registered_dict(
         _CHANGED_THEN_KEPT,
@@ -438,7 +433,6 @@ def test_registered_dict_with_its_first_array_shrunk_is_refused():
     assert {column: _count_after(message, column) for column in ("kept", "changed")} == {"kept": "50", "changed": "3"}
 
 
-@pytest.mark.xfail(strict=True, reason="bind accepts a two dimensional array in a dict column slot")
 @pytest.mark.parametrize(
     "replacement",
     ['np.arange(100, dtype="int64").reshape(50, 2)', 'np.arange(50, dtype="int64").reshape(50, 1)'],
@@ -543,7 +537,6 @@ report(run)
 RESIZED_LENGTHS = [pytest.param(3, id="shorter"), pytest.param(60, id="longer")]
 
 
-@pytest.mark.xfail(strict=True, reason="bind does not compare the length of df[name] with the bound row count")
 @pytest.mark.parametrize("path", PATHS)
 @pytest.mark.parametrize("length", RESIZED_LENGTHS)
 def test_frame_subclass_with_a_column_of_another_length_is_refused(path, length):
@@ -552,7 +545,6 @@ def test_frame_subclass_with_a_column_of_another_length_is_refused(path, length)
     assert _refusal(_run_child(body), expected["words"]) == expected
 
 
-@pytest.mark.xfail(strict=True, reason="bind does not compare the length of d[key] with the bound row count")
 @pytest.mark.parametrize("path", PATHS)
 @pytest.mark.parametrize("length", RESIZED_LENGTHS)
 def test_dict_subclass_with_an_array_of_another_length_is_refused(path, length):
@@ -564,7 +556,6 @@ def test_dict_subclass_with_an_array_of_another_length_is_refused(path, length):
 RESIZED_MASK_LENGTHS = [pytest.param(2, id="shorter"), pytest.param(60, id="longer")]
 
 
-@pytest.mark.xfail(strict=True, reason="bind does not compare a nullable column's mask length with its row count")
 @pytest.mark.parametrize("path", PATHS)
 @pytest.mark.parametrize("length", RESIZED_MASK_LENGTHS)
 def test_nullable_column_with_a_mask_of_another_length_is_refused(path, length):
@@ -583,7 +574,6 @@ def test_masked_array_with_a_mask_of_another_length_is_refused(path, length):
 
 
 @_NEEDS_PYARROW
-@pytest.mark.xfail(strict=True, reason="bind does not compare an Arrow backed df[name]'s length with the row count")
 @pytest.mark.parametrize("path", PATHS)
 @pytest.mark.parametrize(
     ("bound_rows", "chunks"),
@@ -605,7 +595,140 @@ def test_frame_subclass_with_an_arrow_string_column_of_another_length_is_refused
     assert _refusal(_run_child(body), expected["words"]) == expected
 
 
-@pytest.mark.xfail(strict=True, reason="dict keys that repeat ignoring case are refused as duplicate column names")
+_CONVERTED_SERIES = {
+    "string_categorical": 'pd.Series(pd.Categorical([f"v{index % 3}" for index in range(LENGTH)]))',
+    "int_categorical": 'pd.Series(pd.Categorical(np.arange(LENGTH, dtype="int64") % 3))',
+    "float16": 'pd.Series(np.arange(LENGTH, dtype="float16"))',
+    "tz_datetime": 'pd.Series(pd.date_range("2020-01-01", periods=LENGTH, freq="h", tz="Europe/Amsterdam"))',
+}
+
+_CONVERTED_FRAME_COLUMN = """
+class ResizedFrame(pd.DataFrame):
+    @property
+    def _constructor(self):
+        return ResizedFrame
+
+    def __getitem__(self, key):
+        if isinstance(key, str) and key == "resized":
+            return COLUMN
+        return super().__getitem__(key)
+
+
+def make_source():
+    return ResizedFrame({"kept": np.arange(50, dtype="int64"), "resized": np.arange(50, dtype="int64")})
+"""
+
+
+@pytest.mark.parametrize("path", PATHS)
+@pytest.mark.parametrize("length", RESIZED_LENGTHS)
+@pytest.mark.parametrize("column", list(_CONVERTED_SERIES))
+def test_frame_subclass_with_a_converted_column_of_another_length_is_refused(path, length, column):
+    body = (
+        _CONVERTED_FRAME_COLUMN.replace("COLUMN", _CONVERTED_SERIES[column]).replace("LENGTH", str(length))
+        + _QUERY_THROUGH_PATH[path]
+    )
+    expected = _length_refusal("resized", length, 50)
+    assert _refusal(_run_child(body), expected["words"]) == expected
+
+
+_RESIZED_DATA_FRAME = """
+def make_source():
+    column = pd.array(np.arange(50, dtype="int64"), dtype="Int64")
+    frame = pd.DataFrame({"kept": np.arange(50, dtype="int64"), "resized": column}, copy=False)
+    column._data = np.arange(LENGTH, dtype="int64")
+    return frame
+"""
+
+
+@pytest.mark.parametrize("path", PATHS)
+@pytest.mark.parametrize("length", RESIZED_LENGTHS)
+def test_nullable_column_with_data_of_another_length_is_refused(path, length):
+    body = _RESIZED_DATA_FRAME.replace("LENGTH", str(length)) + _QUERY_THROUGH_PATH[path]
+    expected = _length_refusal("resized", length, 50)
+    assert _refusal(_run_child(body), expected["words"]) == expected
+
+
+_CONVERTED_ARRAYS = {
+    "float16": 'np.arange(LENGTH, dtype="float16")',
+    "unicode": 'np.array([f"v{index}" for index in range(LENGTH)])',
+}
+
+_CONVERTED_DICT_ARRAY = """
+class ResizedDict(dict):
+    def __getitem__(self, key):
+        if key == "resized":
+            return ARRAY
+        return super().__getitem__(key)
+
+
+def make_source():
+    arrays = {"kept": np.arange(50, dtype="int64"), "resized": np.arange(50, dtype="int64")}
+    return ResizedDict({key: arrays[key] for key in ORDER})
+"""
+
+
+@pytest.mark.parametrize("path", PATHS)
+@pytest.mark.parametrize("length", RESIZED_LENGTHS)
+@pytest.mark.parametrize("order", [["kept", "resized"], ["resized", "kept"]], ids=["resized_last", "resized_first"])
+@pytest.mark.parametrize("array", list(_CONVERTED_ARRAYS))
+def test_dict_subclass_with_a_converted_array_of_another_length_is_refused(path, length, order, array):
+    body = (
+        _CONVERTED_DICT_ARRAY.replace("ARRAY", _CONVERTED_ARRAYS[array])
+        .replace("LENGTH", str(length))
+        .replace("ORDER", repr(order))
+        + _QUERY_THROUGH_PATH[path]
+    )
+    expected = _length_refusal("resized", length, 50)
+    assert _refusal(_run_child(body), expected["words"]) == expected
+
+
+_NOT_AN_ARRAY = """
+class ListShape:
+    shape = [50]
+    dtype = np.dtype("int64")
+
+
+class ArrayLike:
+    def __init__(self):
+        self._array = np.arange(50, dtype="int64")
+        self.shape = self._array.shape
+        self.dtype = self._array.dtype
+        self.strides = self._array.strides
+
+
+class NotAnArrayDict(dict):
+    def __getitem__(self, key):
+        if key == "resized":
+            return SLOT
+        return super().__getitem__(key)
+
+
+def make_source():
+    arrays = {"kept": np.arange(50, dtype="int64"), "resized": np.arange(50, dtype="int64")}
+    return NotAnArrayDict({key: arrays[key] for key in ORDER})
+"""
+
+
+@pytest.mark.parametrize("path", PATHS)
+@pytest.mark.parametrize("order", [["kept", "resized"], ["resized", "kept"]], ids=["resized_last", "resized_first"])
+@pytest.mark.parametrize(
+    "slot",
+    ["ListShape()", "ArrayLike()", 'pd.Series(np.arange(50, dtype="int64"))'],
+    ids=["list_shape", "array_like", "series"],
+)
+def test_dict_subclass_with_a_slot_that_is_not_an_ndarray_is_refused(path, order, slot):
+    body = _NOT_AN_ARRAY.replace("SLOT", slot).replace("ORDER", repr(order)) + _QUERY_THROUGH_PATH[path]
+    expected = {"error": "InvalidInputException", "words": {"resized", "ndarray"}}
+    assert _refusal(_run_child(body), expected["words"]) == expected
+
+
+@pytest.mark.parametrize("replacement", ['np.array([["a"]] * 50)', 'np.array([["a", "b"]] * 50)'], ids=["50x1", "50x2"])
+def test_registered_dict_with_a_two_dimensional_unicode_array_is_refused(replacement):
+    body = _changed_registered_dict(_KEPT_THEN_CHANGED, replacement, "SELECT changed FROM registered_source")
+    expected = {"error": "InvalidInputException", "words": {"changed"}}
+    assert _refusal(_run_child(body), expected["words"]) == expected
+
+
 def test_length_refusal_names_the_bound_column_name():
     body = """
 def run():
@@ -646,7 +769,6 @@ def test_frame_column_names_are_str_of_labels_deduplicated(duckdb_cursor, path, 
     assert list(source.columns) == labels
 
 
-@pytest.mark.xfail(strict=True, reason="a dict key that is not a str fails to convert, and repeated names are refused")
 @pytest.mark.parametrize("path", PATHS)
 @pytest.mark.parametrize(("labels", "names"), COLUMN_LABELS)
 def test_dict_column_names_are_str_of_keys_deduplicated(duckdb_cursor, path, labels, names):
