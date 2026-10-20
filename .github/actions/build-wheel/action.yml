@@ -80,8 +80,11 @@ runs:
         # macos and windows the build runs on the host, so plain job env works.
         # Every override has to ride along on that single CIBW_ENVIRONMENT line,
         # or it never reaches the build inside the container.
+        # The manylinux image compiles with gcc unless told otherwise; the wheels
+        # build with the clang that before-build installs, like the engine's own
+        # Linux release.
         if [[ "${{ inputs.cibw-system }}" == "manylinux" ]]; then
-          echo "CIBW_ENVIRONMENT=CCACHE_DIR=/host${{ github.workspace }}/.ccache${overrides}" >> $GITHUB_ENV
+          echo "CIBW_ENVIRONMENT=CCACHE_DIR=/host${{ github.workspace }}/.ccache CC=clang CXX=clang++${overrides}" >> $GITHUB_ENV
         else
           for override in ${overrides}; do
             echo "${override}" >> $GITHUB_ENV
@@ -133,6 +136,14 @@ runs:
           uv pip install -r pylock.toml
         CIBW_TEST_COMMAND: >
           uv run -v pytest --confcutdir=. --rootdir . -c {project}/pyproject.toml ${{ inputs.testsuite == 'fast' && './tests/fast' || './tests' }}
+
+    # macOS builds on the host into build/shared (a pyproject override), so the compile database is checked here.
+    # The manylinux build runs in a container whose files never reach the host; its check runs inside, in front of
+    # the repair command in pyproject.toml. Windows builds with MSVC and without LTO, so there is nothing to check.
+    - name: Verify the code generation flags
+      if: ${{ inputs.cibw-system == 'macosx' }}
+      shell: bash
+      run: python3 scripts/check_compile_commands.py build/shared/compile_commands.json --lto thin
 
     # The stable ABI wheel must import nothing outside the stable ABI, which compiling with Py_LIMITED_API does
     # not prove for symbols pulled in by inline functions or dependencies.
