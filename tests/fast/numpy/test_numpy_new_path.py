@@ -2,6 +2,7 @@
 Therefore, we only test the new codes and exec paths.
 """  # noqa: D205
 
+import os
 import subprocess
 import sys
 import textwrap
@@ -172,8 +173,10 @@ def test_mask_of_a_column_that_imports_numpy_ma_when_read():
         print(duckdb.connect().execute("SELECT * FROM source").fetchall())
         """
     )
+    # An editable install that rebuilds on import otherwise prints its cmake command into the child's stdout.
+    quiet = {**os.environ, "SKBUILD_EDITABLE_VERBOSE": "0"}
     child = subprocess.run(
-        [sys.executable, "-I", "-c", script], capture_output=True, text=True, timeout=120, check=False
+        [sys.executable, "-I", "-c", script], capture_output=True, text=True, timeout=120, check=False, env=quiet
     )
     assert child.returncode == 0, child.stderr
     assert child.stdout.strip() == "[(1, 1), (2, None), (3, 3)]"

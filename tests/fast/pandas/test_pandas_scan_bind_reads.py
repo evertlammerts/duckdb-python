@@ -105,6 +105,8 @@ def _count_after(message, column):
 
 _TZ_TIMES = pd.date_range("2020-01-01 00:00:00.123456", periods=6, freq="h", tz="Europe/Amsterdam")
 _NAIVE_TIMES = pd.date_range("2020-01-01", periods=6, freq="D")
+# pandas 3 builds these in microseconds and pandas 2 in nanoseconds.
+_NAIVE_TIMESTAMP = {"us": "TIMESTAMP", "ns": "TIMESTAMP_NS"}[np.datetime_data(_NAIVE_TIMES.dtype)[0]]
 _DECIMALS = [decimal.Decimal(text) if text else None for text in ["1.25", None, "3.50", "4.75", None, "6.25"]]
 _TEXT = ["a", None, "c", "d", "e", "f"]
 
@@ -170,7 +172,7 @@ FRAME_COLUMNS = {
     ),
     "datetime_naive": ColumnCase(
         lambda: pd.Series(_NAIVE_TIMES),
-        "TIMESTAMP",
+        _NAIVE_TIMESTAMP,
         [timestamp.to_pydatetime() for timestamp in _NAIVE_TIMES],
     ),
     "timedelta": ColumnCase(

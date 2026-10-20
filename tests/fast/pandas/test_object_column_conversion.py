@@ -1,6 +1,7 @@
 import datetime
 import enum
 import json
+import os
 import re
 import subprocess
 import sys
@@ -27,6 +28,11 @@ JAN_FIRST = datetime.datetime(2024, 1, 1)
 
 def not_yet(reason):
     return pytest.mark.xfail(strict=True, reason=reason)
+
+
+def quiet_child_env():
+    # An editable install that rebuilds on import otherwise prints its cmake command into the child's stdout.
+    return {**os.environ, "SKBUILD_EDITABLE_VERBOSE": "0"}
 
 
 MISMATCH_NOT_RAISED = "a value outside the sample that the bound type cannot hold exactly is still cast into it"
@@ -1145,6 +1151,7 @@ def test_value_element_with_a_type_name_on_the_default_connection_raises(query):
             text=True,
             timeout=TYPE_NAME_CHILD_TIMEOUT,
             check=False,
+            env=quiet_child_env(),
         )
     except subprocess.TimeoutExpired as hang:
         pytest.fail(f"the child did not finish within {TYPE_NAME_CHILD_TIMEOUT} seconds: {hang.stderr!r}")
@@ -1215,6 +1222,7 @@ def test_value_element_with_a_type_name_while_another_thread_binds_on_the_defaul
             text=True,
             timeout=CROSS_THREAD_CHILD_TIMEOUT,
             check=False,
+            env=quiet_child_env(),
         )
     except subprocess.TimeoutExpired as hang:
         pytest.fail(f"the child did not finish within {CROSS_THREAD_CHILD_TIMEOUT} seconds: {hang.stderr!r}")
@@ -1273,6 +1281,7 @@ def test_value_elements_with_a_type_name_while_another_thread_replaces_them():
         text=True,
         timeout=TYPE_NAME_CHILD_TIMEOUT,
         check=False,
+        env=quiet_child_env(),
     )
     assert child.returncode == 0, child.stderr[-2000:]
     assert child.stdout.splitlines() == ["[(1496,)]"] * 20
