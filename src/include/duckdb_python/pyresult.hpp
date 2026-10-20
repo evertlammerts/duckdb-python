@@ -8,7 +8,9 @@
 
 #pragma once
 
+#include "duckdb/common/atomic.hpp"
 #include "duckdb_python/numpy/numpy_result_conversion.hpp"
+#include "duckdb_python/arrow/arrow_export_utils.hpp"
 #include "duckdb.hpp"
 #include "duckdb_python/engine/connection.hpp"
 #include "duckdb_python/nb/casters.hpp"
@@ -29,6 +31,28 @@ public:
 	const shared_ptr<engine::Result> &EngineResult() const {
 		return result;
 	}
+	//! Pins the result for one call of the relational surface and refuses a second call that overlaps it, as the
+	//! connection refuses a second call of its own. The DB-API surface is serialised by the connection lock instead.
+	class Use {
+	public:
+		explicit Use(DuckDBPyResult &result);
+		~Use();
+
+		Use(const Use &) = delete;
+		Use &operator=(const Use &) = delete;
+
+		engine::Result &operator*() const {
+			return *pinned;
+		}
+		engine::Result *operator->() const {
+			return pinned.get();
+		}
+
+	private:
+		DuckDBPyResult &result;
+		//! Held for the call, so a close from another call cannot free the result under this one
+		shared_ptr<engine::Result> pinned;
+	};
 	Optional<nb::tuple> Fetchone();
 
 	nb::list Fetchmany(idx_t size);
@@ -96,6 +120,8 @@ private:
 
 private:
 	shared_ptr<engine::Result> result;
+	//! Set while a call of the relational surface runs on this result
+	atomic<bool> in_use {false};
 	int64_t rowcount_override = -1;
 	idx_t chunk_offset = 0;
 	unique_ptr<DataChunk> current_chunk;

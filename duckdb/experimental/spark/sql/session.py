@@ -138,6 +138,17 @@ def _verify_pandas_values(data: "PandasDataFrame", schema: StructType) -> None:
             verify(None)
 
 
+# The engine's return types of a statement that returns no result set of its own: a command, or a changed row count.
+_NO_RESULT_TYPES = frozenset({"nothing", "changed_rows"})
+
+
+def _returned_no_result(relation: duckdb.DuckDBPyRelation) -> bool:
+    """Whether ``relation`` is what a statement that returns no result set left, rather than rows of its own."""
+    # The return type the engine gave the statement, not the shape of what came back: RETURNING can name a column
+    # Count, and a real result set of one BIGINT column called Count is rows like any other.
+    return relation._return_type in _NO_RESULT_TYPES
+
+
 class SparkSession:  # noqa: D101
     def __init__(self, context: SparkContext) -> None:  # noqa: D107
         self.conn = context.connection
@@ -275,6 +286,9 @@ class SparkSession:  # noqa: D101
         if kwargs:
             raise NotImplementedError
         relation = self.conn.sql(sqlQuery)
+        # Spark gives a statement without a result a DataFrame without columns, not the engine's count or flag.
+        if relation is not None and _returned_no_result(relation):
+            relation = None
         return DataFrame(relation, self)
 
     def stop(self) -> None:  # noqa: D102

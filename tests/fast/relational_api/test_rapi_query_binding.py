@@ -8,12 +8,12 @@ import pytest
 
 import duckdb
 
-LATE_BINDING = "limitation: a user CTE named like the relation keeps late binding"
-
 
 def reuse_name(con, name):
-    """Point the temporary view called name at a different relation, the way a second query() call does."""
+    """Put a different relation under name, through a later query() call and through a temporary view."""
     con.sql("select 999 as a, 'x' as s").query(name, "select 42")
+    escaped = name.replace('"', '""')
+    con.execute(f"create or replace temp view \"{escaped}\" as select 999 as a, 'x' as s")
 
 
 class TestQueryBindsItsNameOnce:
@@ -44,6 +44,7 @@ class TestQueryBindsItsNameOnce:
     def test_view_dropped_after_query(self):
         con = duckdb.connect()
         first = con.sql("select 1 as a").query("v", "select a from v")
+        reuse_name(con, "v")
         con.execute("drop view v")
         assert first.fetchall() == [(1,)]
 
@@ -67,7 +68,6 @@ class TestQueryBindsItsNameOnce:
         reuse_name(con, name)
         assert rel.fetchall() == expected
 
-    @pytest.mark.xfail(strict=True, raises=AssertionError, reason=LATE_BINDING)
     def test_user_cte_with_the_same_name_reads_the_source(self):
         con = duckdb.connect()
         rel = con.sql("select 1 as a").query("v", "with v as (select a + 1 as a from v) select a from v")
@@ -84,6 +84,25 @@ class TestQueryBindsItsNameOnce:
         rel = con.sql("select 1 as a").query("v", "pragma \"show\"('v')")
         reuse_name(con, "v")
         assert rel.fetchall() == [("a", "INTEGER", "YES", None, None, None)]
+
+    def test_pragma_show_describes_the_relation_over_a_catalog_view_of_the_name(self):
+        # Inside the call the name is the relation, so it shadows a view of that name.
+        con = duckdb.connect()
+        con.execute("create temp view v as select 'x' as s")
+        rel = con.sql("select 1 as a").query("v", "pragma \"show\"('v')")
+        assert rel.fetchall() == [("a", "INTEGER", "YES", None, None, None)]
+        assert con.execute("select name from pragma_table_info('v')").fetchall() == [("s",)]
+
+    def test_a_misspelled_column_inside_a_transaction_names_the_column(self):
+        # Only the missing name of the query itself falls back to running; any other error comes as it came,
+        # and the transaction stays usable since nothing executed.
+        con = duckdb.connect()
+        con.execute("begin")
+        rel = con.sql("select 1 as a")
+        with pytest.raises(duckdb.BinderException, match="missing"):
+            rel.query("v", "select missing from v")
+        assert con.execute("select 1").fetchall() == [(1,)]
+        con.execute("rollback")
 
     def test_pragma_show_describes_its_argument(self):
         con = duckdb.connect()
@@ -115,18 +134,36 @@ class TestQueryBindsItsNameOnce:
         "sql", ["select column_name from pragma_show('v')", "select name from pragma_table_info('v')"]
     )
     def test_catalog_table_functions_read_the_view(self, sql):
+        # The statement runs at the call, so it lists the relation's own column, not the later view's two.
         con = duckdb.connect()
         rel = con.sql("select 1 as a").query("v", sql)
         reuse_name(con, "v")
+        assert rel.fetchall() == [("a",)]
+
+    @pytest.mark.parametrize(
+        "sql", ["select column_name from pragma_show('v')", "select name from pragma_table_info('v')"]
+    )
+    def test_catalog_table_functions_list_every_column_of_the_relation(self, sql):
+        con = duckdb.connect()
+        rel = con.sql("select 1 as a, 'x' as s").query("v", sql)
         assert rel.fetchall() == [("a",), ("s",)]
 
 
 class TestUserCteWithTheSourceName:
     def test_duplicate_column_names(self):
+        # The text defines v itself, so query() wraps it and the engine's names over the wrapper are a and a_1.
         pytest.importorskip("pyarrow")
         con = duckdb.connect()
         rel = con.sql("select 1 as a").query("v", "with v as (select a + 1 as a from v) select a, a from v")
-        assert rel.to_arrow_table().column_names == ["a", "a"]
+        assert rel.columns == ["a", "a_1"]
+        assert rel.to_arrow_table().column_names == ["a", "a_1"]
+        assert rel.fetchall() == [(2, 2)]
+
+    def test_duplicate_column_names_without_its_own_with_list(self):
+        # Without a WITH list of its own the text is the top level, so both names stay.
+        con = duckdb.connect()
+        rel = con.sql("select 1 as a").query("v", "select a + 1 as a, a + 1 as a from v")
+        assert rel.columns == ["a", "a"]
         assert rel.fetchall() == [(2, 2)]
 
     @pytest.mark.parametrize(
@@ -140,8 +177,10 @@ class TestUserCteWithTheSourceName:
         con = duckdb.connect()
         con.execute("create table t(a int)")
         rel = con.sql("select 1 as a").query("v", sql)
+        assert con.execute("select count(*) from t").fetchall() == [(1,)]
         assert rel.fetchall() == [(1,)]
-        assert con.sql("from t").fetchall() == [(1,)]
+        assert rel.fetchall() == [(1,)]
+        assert con.execute("select a from t").fetchall() == [(1,)]
 
     def test_order_by_and_limit(self):
         con = duckdb.connect()
@@ -150,14 +189,12 @@ class TestUserCteWithTheSourceName:
         )
         assert rel.fetchall() == [(5,), (4,), (3,)]
 
-    @pytest.mark.xfail(strict=True, raises=AssertionError, reason=LATE_BINDING)
     def test_sql_query_round_trip(self):
         con = duckdb.connect()
         rel = con.sql("select 1 as a").query("v", "with v as (select a + 1 as a from v) select a from v")
         reuse_name(con, "v")
         assert con.sql(rel.sql_query()).fetchall() == [(2,)]
 
-    @pytest.mark.xfail(strict=True, raises=AssertionError, reason=LATE_BINDING)
     def test_earlier_sibling_reads_the_source(self):
         con = duckdb.connect()
         rel = con.sql("select 1 as a").query(
@@ -182,7 +219,6 @@ class TestUserCteWithTheSourceName:
         rel = con.sql("select * from t").query("v", "with t as (select 2 as a), v as (select * from v) select * from v")
         assert rel.fetchall() == [(1,)]
 
-    @pytest.mark.xfail(strict=True, raises=AssertionError, reason=LATE_BINDING)
     def test_user_ctes_do_not_capture_the_source_tables_after_reuse(self):
         con = duckdb.connect()
         con.execute("create table t as select 1 as a")
@@ -313,8 +349,10 @@ class TestQueryKeepsItsShape:
         rel = con.sql("select 1 as a").query(
             "v", "with x as (insert into t select a from v returning a) select * from x"
         )
+        assert con.execute("select count(*) from t").fetchall() == [(1,)]
         assert rel.fetchall() == [(1,)]
-        assert con.sql("from t").fetchall() == [(1,)]
+        assert rel.fetchall() == [(1,)]
+        assert con.execute("select a from t").fetchall() == [(1,)]
 
     def test_source_is_not_materialized(self):
         con = duckdb.connect()
@@ -323,15 +361,17 @@ class TestQueryKeepsItsShape:
         assert rel.fetchall() == [(False,)]
 
 
-class TestQueryStillCreatesTheView:
-    def test_view_is_temporary_and_readable(self):
+class TestQueryCreatesNoView:
+    def test_no_view_is_left(self):
         con = duckdb.connect()
         con.sql("select 1 as a").query("v", "select a from v")
-        assert con.sql("select temporary from duckdb_views() where view_name = 'v'").fetchall() == [(True,)]
-        assert con.sql("select a from v").fetchall() == [(1,)]
+        assert con.sql("select view_name from duckdb_views() where view_name = 'v'").fetchall() == []
+        with pytest.raises(duckdb.CatalogException):
+            con.sql("select a from v")
 
-    def test_view_follows_the_latest_query(self):
+    def test_a_view_with_the_same_name_is_left_alone(self):
         con = duckdb.connect()
-        con.sql("select 1 as a").query("v", "select a from v")
-        con.sql("select 999 as a").query("v", "select a from v")
+        con.execute("create temp view v as select 999 as a")
+        rel = con.sql("select 1 as a").query("v", "select a from v")
+        assert rel.fetchall() == [(1,)]
         assert con.sql("select a from v").fetchall() == [(999,)]

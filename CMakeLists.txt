@@ -139,8 +139,6 @@ nanobind_add_module(
   $<TARGET_OBJECTS:python_numpy>
   $<TARGET_OBJECTS:python_pandas>
   $<TARGET_OBJECTS:python_connection>
-  $<TARGET_OBJECTS:python_expression>
-  $<TARGET_OBJECTS:python_relation>
   $<TARGET_OBJECTS:python_type>)
 # add _duckdb_dependencies
 target_link_libraries(_duckdb PRIVATE _duckdb_dependencies)

@@ -5,7 +5,7 @@
 #include "duckdb/common/arrow/nanoarrow/nanoarrow.hpp"
 #include "duckdb/common/enums/query_result_state.hpp"
 #include "duckdb/main/client_context.hpp"
-#include "duckdb/main/relation.hpp"
+#include "duckdb/main/database.hpp"
 
 namespace duckdb {
 namespace engine {
@@ -53,10 +53,8 @@ void Complete(QueryResult &result, const InterruptCheck &check) {
 	}
 }
 
-Result::Result(unique_ptr<QueryResult> submitted, StatementType written_type, Format format_p,
-               shared_ptr<Relation> relation_p)
-    : handle(std::move(submitted)), format(std::move(format_p)), state(State::PENDING),
-      relation(std::move(relation_p)) {
+Result::Result(unique_ptr<QueryResult> submitted, StatementType written_type, Format format_p)
+    : handle(std::move(submitted)), format(std::move(format_p)), state(State::PENDING) {
 	if (!handle) {
 		throw InternalException("engine::Result created without a query result");
 	}
@@ -69,6 +67,8 @@ Result::Result(unique_ptr<QueryResult> submitted, StatementType written_type, Fo
 		throw InternalException("engine::Result created without a client context");
 	}
 	connection_state = ConnectionState::Get(*client_properties.client_context);
+	context_owner = client_properties.client_context->shared_from_this();
+	database_owner = client_properties.client_context->db;
 	CaptureMetadata();
 }
 
@@ -155,8 +155,20 @@ unique_ptr<typename FORMAT::T> Result::FetchStreamUnit(const InterruptCheck &che
 	}
 }
 
+shared_ptr<DatabaseInstance> Result::TryGetDatabase() const {
+	return database_owner.lock();
+}
+
+shared_ptr<ClientContext> Result::TryGetContext() const {
+	auto context = context_owner.lock();
+	if (!context) {
+		throw ConnectionException("Connection has already been closed");
+	}
+	return context;
+}
+
 void Result::Retain(const InterruptCheck &check) {
-	ConnectionClaim claim(*connection_state, *client_properties.client_context);
+	auto claim = ClaimWhileRunning();
 	RetainClaimed(check);
 }
 
@@ -185,7 +197,7 @@ unique_ptr<ConnectionClaim> Result::ClaimWhileRunning() {
 	if (state != State::PENDING && state != State::STREAMING) {
 		return nullptr;
 	}
-	return make_uniq<ConnectionClaim>(*connection_state, *client_properties.client_context);
+	return make_uniq<ConnectionClaim>(*connection_state, *TryGetContext());
 }
 
 void Result::RetainClaimed(const InterruptCheck &check) {
@@ -203,7 +215,11 @@ void Result::RetainClaimed(const InterruptCheck &check) {
 }
 
 void Result::Settle(const InterruptCheck &check) {
-	ConnectionClaim claim(*connection_state, *client_properties.client_context);
+	auto claim = ClaimWhileRunning();
+	SettleClaimed(check);
+}
+
+void Result::SettleClaimed(const InterruptCheck &check) {
 	if (state != State::PENDING) {
 		return;
 	}
@@ -229,7 +245,7 @@ void Result::Settle(const InterruptCheck &check) {
 
 idx_t Result::RowCount(const InterruptCheck &check) {
 	ThrowIfFailed();
-	ConnectionClaim claim(*connection_state, *client_properties.client_context);
+	auto claim = ClaimWhileRunning();
 	RetainClaimed(check);
 	if (state != State::RETAINED) {
 		throw InternalException("engine::Result::RowCount on a result that is not retained");
@@ -287,7 +303,8 @@ unique_ptr<ArrowArrayWrapper> Result::FetchArray(const InterruptCheck &check) {
 unique_ptr<ColumnDataCollection> Result::TakeChunks(const InterruptCheck &check) {
 	D_ASSERT(!format.IsArrow());
 	ThrowIfFailed();
-	ConnectionClaim claim(*connection_state, *client_properties.client_context);
+	// Claimed only while the query can still run engine work: rows already in the client need no connection
+	auto claim = ClaimWhileRunning();
 	if (state == State::PENDING) {
 		RetainClaimed(check);
 	}
@@ -314,7 +331,8 @@ unique_ptr<ColumnDataCollection> Result::TakeChunks(const InterruptCheck &check)
 vector<unique_ptr<ArrowArrayWrapper>> Result::TakeArrays(const InterruptCheck &check) {
 	D_ASSERT(format.IsArrow());
 	ThrowIfFailed();
-	ConnectionClaim claim(*connection_state, *client_properties.client_context);
+	// Claimed only while the query can still run engine work, as in TakeChunks
+	auto claim = ClaimWhileRunning();
 	vector<unique_ptr<ArrowArrayWrapper>> arrays;
 	if (state == State::PENDING) {
 		RetainClaimed(check);
@@ -355,9 +373,9 @@ void Result::CopyArrowSchema(ArrowSchema &out) const {
 }
 
 void Result::BuildArrowSchema(const vector<string> &schema_names, ArrowSchema &out) const {
-	auto context = client_properties.client_context;
+	auto context = TryGetContext();
 	auto properties = client_properties;
-	ConnectionClaim claim(*connection_state, *client_properties.client_context);
+	ConnectionClaim claim(*connection_state, *context);
 	context->RunFunctionInTransaction(
 	    [&]() { ArrowConverter::ToArrowSchema(&out, Types(), schema_names, properties); });
 }

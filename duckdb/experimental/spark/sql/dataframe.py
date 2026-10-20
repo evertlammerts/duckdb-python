@@ -45,6 +45,7 @@ from .column import (
     _column_reference,
     _convert,
     _java_float_string,
+    _name_key,
     _name_parts,
     _named_expr,
     _qualified_star,
@@ -262,11 +263,6 @@ _JOIN_TYPES = {
 }
 
 
-def _name_key(name: str) -> str:
-    # Spark compares names ignoring case letter by letter, so unlike casefold "straße" and "STRASSE" differ.
-    return name.lower()
-
-
 def _join_type(how: str) -> str:
     join_type = _JOIN_TYPES.get(how.lower().replace("_", ""))
     if join_type is None:
@@ -360,8 +356,8 @@ def _check_references(
                 continue
             if isinstance(ref, _BoundRef):
                 qualified, name = ref.reference, ref.parts[0]
-            elif len(ref.parts) > 1 and ref.parts[0].casefold() in bindings:
-                qualified, name = str(ColumnExpression(*ref.parts[:2])).casefold(), ref.parts[1]
+            elif len(ref.parts) > 1 and _name_key(ref.parts[0]) in bindings:
+                qualified, name = _name_key(str(ColumnExpression(*ref.parts[:2]))), ref.parts[1]
             else:
                 column_expr(ref.parts[0])
                 continue
@@ -436,7 +432,7 @@ class _JoinInputs(NamedTuple):
     def column_references(self) -> list[set[str]]:
         """For each column of the joined relation, the renderings of the qualified references that name it."""
         left, right = self.left._join_input_references(), self.right._join_input_references()
-        return self._output_columns(left, right, lambda name: {str(self.column_expr(name)).casefold()})
+        return self._output_columns(left, right, lambda name: {_name_key(str(self.column_expr(name)))})
 
     def _output_columns(self, left: list[_T], right: list[_T], join_key: Callable[[str], _T]) -> list[_T]:
         """The items of the joined relation's columns, given one per input column and ``join_key`` for each key."""
@@ -1198,7 +1194,8 @@ class DataFrame:  # noqa: D101
             return DataFrame(_aggregate(self, [], cols), self.session)
         columns, references = self.columns, self._qualified_references()
         projections = [_named_expr(x, columns, references) for x in cols]
-        rel = self.relation.select(*projections)
+        # Spark selects no columns at all; DuckDB has no relation without columns, so drop() takes the same path.
+        rel = self.relation.select(*projections) if projections else None
         return self._derive(rel)
 
     def _selected_columns(self, col: "ColumnOrName") -> list[Column]:
@@ -1212,11 +1209,11 @@ class DataFrame:  # noqa: D101
             parts = _name_parts(col)
         if len(parts) < 2 or parts[-1] != "*":
             return [col] if isinstance(col, Column) else [Column(self._scope_column_expr(col), _ref_name(col))]
-        columns = self._relation_columns(parts[0].casefold()) if len(parts) == 2 else None
+        columns = self._relation_columns(_name_key(parts[0])) if len(parts) == 2 else None
         if columns is not None:
             return [Column(expr.alias(name)) for expr, name in columns]
         # A struct column, whose fields DuckDB names as Spark does; a repeated name raises, unless it is a qualifier.
-        if parts[0].casefold() not in self._check_bindings():
+        if _name_key(parts[0]) not in self._check_bindings():
             self._name_column_expr(parts[0])
         return [Column(_qualified_star(parts[:-1]))]
 
@@ -1224,7 +1221,7 @@ class DataFrame:  # noqa: D101
         """The columns and names of the relation called ``binding`` in this DataFrame's scope, if there is one."""
         if self._join_inputs is not None:
             return self._join_inputs.relation_columns(binding, 0)
-        if binding != self.relation.alias.casefold():
+        if binding != _name_key(self.relation.alias):
             return None
         return list(zip(self._column_exprs(), self.columns, strict=True))
 
@@ -1437,7 +1434,7 @@ class DataFrame:  # noqa: D101
     def _binding_names(self) -> frozenset[str]:
         if self._exposes_join_inputs():
             return self._join_inputs.binding_names()
-        return frozenset({self.relation.alias.casefold()})
+        return frozenset({_name_key(self.relation.alias)})
 
     def _disjoint_join_inputs(self, other: "DataFrame") -> tuple["DataFrame", "DataFrame"]:
         left, right = self._as_join_input(), other._as_join_input()
@@ -1482,7 +1479,7 @@ class DataFrame:  # noqa: D101
         if self._join_inputs is not None:
             expr = self._join_inputs.column_expr(name)
             # DuckDB reads a name neither input has as a qualified name or a struct field, as Spark does.
-            return ColumnExpression(name) if expr is None else expr
+            return _column_reference(name) if expr is None else expr
         self._check_name(name)
         return ColumnExpression(self.relation.alias, name)
 
@@ -1563,14 +1560,14 @@ class DataFrame:  # noqa: D101
     def _join_input_relation_columns(self, binding: str, offset: int) -> list[tuple[Expression, str]] | None:
         if self._exposes_join_inputs():
             return self._join_inputs.relation_columns(binding, offset)
-        if binding != self.relation.alias.casefold():
+        if binding != _name_key(self.relation.alias):
             return None
         return list(zip(self._join_input_column_exprs(offset), self.columns, strict=True))
 
     def _join_input_references(self) -> list[set[str]]:
         if self._exposes_join_inputs():
             return self._join_inputs.column_references()
-        return [{str(ColumnExpression(self.relation.alias, name)).casefold()} for name in self.columns]
+        return [{_name_key(str(ColumnExpression(self.relation.alias, name)))} for name in self.columns]
 
     def _set_operand(self) -> duckdb.DuckDBPyRelation:
         if isinstance(self.relation, _NoColumnsRelation):
@@ -1708,7 +1705,7 @@ class DataFrame:  # noqa: D101
         if self._join_inputs is not None:
             own = self._join_inputs.column_references()
         else:
-            own = [{str(ColumnExpression(self.relation.alias, name)).casefold()} for name in self.columns]
+            own = [{_name_key(str(ColumnExpression(self.relation.alias, name)))} for name in self.columns]
         if self._inherited_references is None:
             return own
         return [a | b for a, b in zip(own, self._inherited_references, strict=True)]
@@ -1725,12 +1722,12 @@ class DataFrame:  # noqa: D101
         if self._join_inputs is not None or self._inherited_references is None or not isinstance(col, Column):
             return col
         if _is_qualified_reference(col):
-            rendered, name = str(col.expr).casefold(), None
+            rendered, name = _name_key(str(col.expr)), None
         else:
             ref = _aliased_reference(col)
             if ref is None:
                 return col
-            rendered = ref.reference if isinstance(ref, _BoundRef) else str(ColumnExpression(*ref.parts)).casefold()
+            rendered = ref.reference if isinstance(ref, _BoundRef) else _name_key(str(ColumnExpression(*ref.parts)))
             name = col._output
         positions = [i for i, references in enumerate(self._inherited_references) if rendered in references]
         if len(positions) != 1:
@@ -1743,7 +1740,7 @@ class DataFrame:  # noqa: D101
         if not _is_reference(col):
             return []
         if _is_qualified_reference(col):
-            rendered = str(col.expr).casefold()
+            rendered = _name_key(str(col.expr))
             return [i for i, reference in enumerate(references) if rendered in reference]
         parts = col._name[0].parts
         positions = [i for i, name in enumerate(names) if name == _name_key(parts[0])]
@@ -1852,7 +1849,7 @@ class DataFrame:  # noqa: D101
 
     def _bound_column(self, name: str) -> Column:
         expr = self._column_expr(name)
-        return Column(expr, (_BoundRef((name,), str(expr).casefold()),))
+        return Column(expr, (_BoundRef((name,), _name_key(str(expr))),))
 
     @overload
     def groupBy(self, *cols: "ColumnOrName") -> "GroupedData": ...
@@ -2427,7 +2424,7 @@ def _is_qualified_reference(col: Column) -> bool:
     if not _is_reference(col):
         return False
     parts = col._name[0].parts
-    return len(parts) > 1 or str(col.expr).casefold() != str(_bare_column(parts[0])).casefold()
+    return len(parts) > 1 or _name_key(str(col.expr)) != _name_key(str(_bare_column(parts[0])))
 
 
 def _ordinal(index: int) -> str:

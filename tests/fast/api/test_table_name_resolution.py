@@ -86,7 +86,6 @@ SEARCH_PATH_ON_ATTACHED_SCHEMA = [
 
 frame_var = pd.DataFrame({"k": ["frame_var"]})
 
-ENGINE_FIX = pytest.mark.xfail(strict=True, reason="needs the engine fix for TableInfo on a view")
 TABLE = "TABLE_RELATION"
 QUERY = "QUERY_RELATION"
 
@@ -97,36 +96,36 @@ def case(case_id, setup, name, *expected, sql=None, outside=None, inside=None):
 
 READS = [
     case("table", BASE, "t", "t", TABLE),
-    case("view", BASE, "v", "v", QUERY, inside=ENGINE_FIX),
+    case("view", BASE, "v", "v", QUERY),
     case("table_on_the_search_path", SEARCH_PATH_ON_SCHEMA, "t", "s.t", TABLE),
     case("main_table", BASE, "main.t", "t", TABLE),
-    case("main_view", BASE, "main.v", "v", QUERY, inside=ENGINE_FIX),
+    case("main_view", BASE, "main.v", "v", QUERY),
     case("schema_table", BASE, "s.t", "s.t", TABLE),
-    case("schema_view", BASE, "s.v", "s.v", QUERY, inside=ENGINE_FIX),
-    case("schema_view_other_case", BASE, "S.V", "s.v", QUERY, inside=ENGINE_FIX),
+    case("schema_view", BASE, "s.v", "s.v", QUERY),
+    case("schema_view_other_case", BASE, "S.V", "s.v", QUERY),
     case("catalog_schema_table", BASE, "memory.main.t", "t", TABLE),
-    case("catalog_schema_view", BASE, "memory.main.v", "v", QUERY, inside=ENGINE_FIX),
+    case("catalog_schema_view", BASE, "memory.main.v", "v", QUERY),
     case("catalog_table", BASE, "memory.t", "t", TABLE),
-    case("catalog_view", BASE, "memory.v", "v", QUERY, inside=ENGINE_FIX),
+    case("catalog_view", BASE, "memory.v", "v", QUERY),
     case("attached_table", BASE, "other.ot", "other.ot", TABLE),
-    case("attached_view", BASE, "other.ov", "other.ov", QUERY, inside=ENGINE_FIX),
-    case("attached_schema_view", BASE, "other.main.ov", "other.ov", QUERY, inside=ENGINE_FIX),
+    case("attached_view", BASE, "other.ov", "other.ov", QUERY),
+    case("attached_schema_view", BASE, "other.main.ov", "other.ov", QUERY),
     case("quoted_schema_table", BASE, '"s"."t"', "s.t", TABLE),
-    case("quoted_schema_view", BASE, '"s"."v"', "s.v", QUERY, inside=ENGINE_FIX),
-    case("quoted_schema_unquoted_view", BASE, '"s".v', "s.v", QUERY, inside=ENGINE_FIX),
+    case("quoted_schema_view", BASE, '"s"."v"', "s.v", QUERY),
+    case("quoted_schema_unquoted_view", BASE, '"s".v', "s.v", QUERY),
     case("quoted_dotted_table", BASE, '"a.b"', "table a.b", TABLE),
     case("dotted_table_name", BASE, "a.b", "table a.b", QUERY, sql='"a.b"'),
-    case("temp_view", BASE, "tv", "temp.tv", QUERY, inside=ENGINE_FIX),
-    case("temp_catalog_view", BASE, "temp.tv", "temp.tv", QUERY, inside=ENGINE_FIX),
-    case("temp_catalog_schema_view", BASE, "temp.main.tv", "temp.tv", QUERY, inside=ENGINE_FIX),
-    case("temp_view_shadows_table", BASE, "shadow", "temp view shadow", QUERY, inside=ENGINE_FIX),
-    case("main_name_finds_temp_view_first", BASE, "main.shadow", "temp view shadow", QUERY, inside=ENGINE_FIX),
+    case("temp_view", BASE, "tv", "temp.tv", QUERY),
+    case("temp_catalog_view", BASE, "temp.tv", "temp.tv", QUERY),
+    case("temp_catalog_schema_view", BASE, "temp.main.tv", "temp.tv", QUERY),
+    case("temp_view_shadows_table", BASE, "shadow", "temp view shadow", QUERY),
+    case("main_name_finds_temp_view_first", BASE, "main.shadow", "temp view shadow", QUERY),
     case("catalog_name_skips_temp_view", BASE, "memory.shadow", "main table shadow", TABLE),
-    case("temp_catalog_shadowing_view", BASE, "temp.shadow", "temp view shadow", QUERY, inside=ENGINE_FIX),
+    case("temp_catalog_shadowing_view", BASE, "temp.shadow", "temp view shadow", QUERY),
     case("dataframe_variable", BASE, "frame_var", "frame_var", QUERY),
-    case("registered_frame", BASE, "r", "registered r", QUERY, inside=ENGINE_FIX),
-    case("temp_registered_frame", BASE, "temp.r", "registered r", QUERY, inside=ENGINE_FIX),
-    case("quoted_dotted_registered_frame", BASE, '"s.r"', "registered s.r", QUERY, inside=ENGINE_FIX),
+    case("registered_frame", BASE, "r", "registered r", QUERY),
+    case("temp_registered_frame", BASE, "temp.r", "registered r", QUERY),
+    case("quoted_dotted_registered_frame", BASE, '"s.r"', "registered s.r", QUERY),
     case("dotted_frame_without_schema", DOTTED_FRAME_WITHOUT_SCHEMA, "s.r", "registered s.r", QUERY, sql='"s.r"'),
     case(
         "schema_view_wins_over_dotted_frame",
@@ -134,7 +133,6 @@ READS = [
         "s.r",
         "schema view s.r",
         QUERY,
-        inside=ENGINE_FIX,
     ),
     case(
         "database_view_wins_over_dotted_frame",
@@ -142,7 +140,6 @@ READS = [
         "s.v",
         "database view s.v",
         QUERY,
-        inside=ENGINE_FIX,
     ),
     case(
         "database_table_on_the_search_path",
@@ -150,8 +147,6 @@ READS = [
         "other.t",
         2,
         TABLE,
-        outside=ENGINE_FIX,
-        inside=ENGINE_FIX,
     ),
     case(
         "database_view_on_the_search_path_beside_a_main_table",
@@ -159,8 +154,6 @@ READS = [
         "other.v",
         2,
         QUERY,
-        outside=ENGINE_FIX,
-        inside=ENGINE_FIX,
     ),
     case(
         "database_view_on_the_search_path_beside_a_main_view",
@@ -168,15 +161,18 @@ READS = [
         "other.w",
         2,
         QUERY,
-        inside=ENGINE_FIX,
     ),
     case("nested_view", NESTED, "memory.p.child.v", "p.child.v", QUERY),
-    case("nested_table", NESTED, "memory.p.child.t", "p.child.t", QUERY),
+    case("nested_table", NESTED, "memory.p.child.t", "p.child.t", TABLE),
     case("nested_view_without_catalog", NESTED, "p.child.v", "p.child.v", QUERY),
-    case("nested_table_without_catalog", NESTED, "p.child.t", "p.child.t", QUERY),
+    case("nested_table_without_catalog", NESTED, "p.child.t", "p.child.t", TABLE),
     case("nested_view_beside_top_level_schema", NESTED_BESIDE_TOP_LEVEL_SCHEMA, "memory.p.child.v", "p.child.v", QUERY),
     case(
-        "nested_table_beside_top_level_schema", NESTED_BESIDE_TOP_LEVEL_SCHEMA, "memory.p.child.t", "p.child.t", QUERY
+        "nested_table_beside_top_level_schema",
+        NESTED_BESIDE_TOP_LEVEL_SCHEMA,
+        "memory.p.child.t",
+        "p.child.t",
+        TABLE,
     ),
 ]
 
@@ -184,8 +180,8 @@ FAILURES = [
     case("missing", BASE, "missing", duckdb.CatalogException),
     case("missing_in_schema", BASE, "s.missing", duckdb.CatalogException),
     case("neither_schema_nor_database", BASE, "nosuch.v", duckdb.CatalogException, sql='"nosuch.v"'),
-    case("ambiguous_view", AMBIGUOUS, "s.v", duckdb.BinderException, inside=ENGINE_FIX),
-    case("ambiguous_table", AMBIGUOUS, "s.t", duckdb.BinderException, outside=ENGINE_FIX, inside=ENGINE_FIX),
+    case("ambiguous_view", AMBIGUOUS, "s.v", duckdb.BinderException),
+    case("ambiguous_table", AMBIGUOUS, "s.t", duckdb.BinderException),
     # A schema wins over a frame registered with the whole dotted name, as in SQL.
     case("dotted_frame_beside_schema", BASE, "s.r", duckdb.CatalogException),
 ]

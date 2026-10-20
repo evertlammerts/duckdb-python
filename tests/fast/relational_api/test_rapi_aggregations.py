@@ -69,7 +69,7 @@ class TestRAPIAggregations:
         result = [
             (r[0], round(r[1], 2)) for r in table.avg("v", groups="id", projected_columns="id").order("id").fetchall()
         ]
-        expected = [(1, 1.33), (2, 10.5), (3, 2)]
+        assert result == [(1, 1.33), (2, 10.5), (3, 2.0)]
 
     def test_bit_and(self, table):
         result = table.bit_and("v").fetchall()
@@ -227,7 +227,8 @@ class TestRAPIAggregations:
         expected = [([1, 1, 2, 10, 11, -1, 5, None],)]
         assert len(result) == len(expected)
         assert all(r == e for r, e in zip(result, expected, strict=False))
-        result = table.list("v", groups="id order by t asc", projected_columns="id").order("id").fetchall()
+        # The ORDER BY never applied; a groups text holds only a GROUP BY list.
+        result = table.list("v", groups="id", projected_columns="id").order("id").fetchall()
         expected = [(1, [1, 1, 2]), (2, [10, 11]), (3, [-1, 5, None])]
         assert len(result) == len(expected)
         assert all(r == e for r, e in zip(result, expected, strict=False))
@@ -267,9 +268,8 @@ class TestRAPIAggregations:
         expected = [("h/e/l/l/o/,/wor/ld",)]
         assert len(result) == len(expected)
         assert all(r == e for r, e in zip(result, expected, strict=False))
-        result = (
-            table.string_agg("s", sep="/", groups="id order by t asc", projected_columns="id").order("id").fetchall()
-        )
+        # The ORDER BY never applied; a groups text holds only a GROUP BY list.
+        result = table.string_agg("s", sep="/", groups="id", projected_columns="id").order("id").fetchall()
         expected = [(1, "h/e/l"), (2, "l/o"), (3, ",/wor/ld")]
         assert len(result) == len(expected)
         assert all(r == e for r, e in zip(result, expected, strict=False))
@@ -402,7 +402,14 @@ class TestRAPIAggregations:
         assert all(r == e for r, e in zip(result, expected, strict=False))
 
     def test_describe(self, table):
-        assert table.describe().fetchall() is not None
+        described = table.describe()
+        assert described.columns == ["aggr", "id", "v", "t", "f", "s"]
+        rows = {row[0]: row for row in described.fetchall()}
+        assert list(rows) == ["count", "mean", "stddev", "min", "max", "median"]
+        assert rows["count"][1] == 8.0
+        assert rows["count"][2] == 7.0
+        assert (rows["min"][2], rows["max"][2]) == (-1.0, 11.0)
+        assert rows["median"][1] == 2.0
 
 
 class TestRAPIAggregationsColumnEscaping:

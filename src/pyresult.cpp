@@ -1,4 +1,4 @@
-#include "duckdb_python/pyrelation.hpp"
+#include "duckdb_python/pyresult.hpp"
 #include "duckdb_python/pyconnection/pyconnection.hpp"
 #include "duckdb_python/pyresult.hpp"
 #include "duckdb_python/python_objects.hpp"
@@ -35,6 +35,23 @@ DuckDBPyResult::~DuckDBPyResult() {
 		Close();
 	} catch (...) { // NOLINT
 	}
+}
+
+DuckDBPyResult::Use::Use(DuckDBPyResult &result_p) : result(result_p) {
+	if (result.in_use.exchange(true)) {
+		throw ResourceInUseException(
+		    "result is busy with another call; it refuses instead of waiting, so read one result from one thread at "
+		    "a time");
+	}
+	if (!result.result) {
+		result.in_use = false;
+		throw InvalidInputException("The result is closed");
+	}
+	pinned = result.result;
+}
+
+DuckDBPyResult::Use::~Use() {
+	result.in_use = false;
 }
 
 const vector<Identifier> &DuckDBPyResult::ResultNames() const {

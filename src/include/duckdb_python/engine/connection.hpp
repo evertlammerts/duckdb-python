@@ -19,11 +19,12 @@
 #include "duckdb/main/statement_iterator.hpp"
 #include "duckdb/parser/sql_statement.hpp"
 #include "duckdb/parser/tableref.hpp"
+#include "duckdb/storage/object_cache.hpp"
 
+#include <deque>
 #include <thread>
 
 namespace duckdb {
-class Relation;
 
 namespace engine {
 
@@ -88,6 +89,72 @@ private:
 	std::thread::id pinned_thread;
 };
 
+//! Tables the client registered under generated names, shared by every connection of a database. The client's
+//! replacement scan answers these names before any other lookup.
+class SourceRegistry : public ObjectCacheEntry {
+public:
+	static shared_ptr<SourceRegistry> Get(ClientContext &context);
+	//! Unique in the process, so a name never reaches another database's sources or a user's table
+	static string NextName();
+	//! Whether the name has the form NextName gives, which every registry name has
+	static bool IsSourceName(const string &name);
+
+	static string ObjectType() {
+		return "python_source_registry";
+	}
+	string GetObjectType() override {
+		return ObjectType();
+	}
+	optional_idx GetEstimatedCacheMemory() const override {
+		return optional_idx();
+	}
+
+public:
+	//! How many statements that can change what a name binds to the client has run on this database, so a schema
+	//! read earlier can be re-read when it changed. Lock free: the counter is read before every bind.
+	idx_t CatalogVersion() const {
+		return catalog_version;
+	}
+	//! Counts a statement the client submitted, unless it only reads
+	void CountStatement(StatementType type) {
+		if (type != StatementType::SELECT_STATEMENT) {
+			++catalog_version;
+		}
+	}
+	//! Counts a change the client made without a statement of its own, a view it registered for a Python object
+	void CountChange() {
+		++catalog_version;
+	}
+
+	//! subject is the name the object was registered under, a view's or a variable's, or empty for none
+	void Register(const string &name, unique_ptr<TableRef> table, const string &subject = string());
+	//! The removed table is returned for the caller to destroy outside the lock, since it can own Python objects
+	unique_ptr<TableRef> Unregister(const string &name);
+	unique_ptr<TableRef> Lookup(const string &name);
+	//! Throws for a name this registry held and released, naming what was registered under it; a name it never held
+	//! is left to the catalog's own error
+	void ThrowIfReleased(const string &name);
+
+private:
+	struct Entry {
+		unique_ptr<TableRef> table;
+		string subject;
+	};
+	//! What a released name held, so a query that still reads it is told what is gone and not shown the name
+	struct Released {
+		string kind;
+		string subject;
+	};
+	//! How many released names are remembered, so a long session does not grow this without bound
+	static constexpr idx_t RELEASED_MEMORY = 4096;
+
+	atomic<idx_t> catalog_version {0};
+	mutex lock;
+	unordered_map<string, Entry> sources;
+	unordered_map<string, Released> released;
+	std::deque<string> released_order;
+};
+
 //! Holds the connection for one stretch of engine work. A second claim, and any claim from a callback of the
 //! connection's queries, is refused instead of waiting: the work it would wait for may be waiting for it.
 class ConnectionClaim {
@@ -107,20 +174,6 @@ private:
 void VerifyNoOpenResult(ClientContext &context);
 //! Names the refusal in an error from engine work that runs outside a Session, as ConnectionState::NameRefusal does
 void NameRefusal(ClientContext &context, const std::exception &error);
-
-//! Claims the connection while a relation binds, so a bind is refused rather than blocked; relations derived
-//! from one that has it inherit it
-class ClaimingContextWrapper : public ClientContextWrapper {
-public:
-	explicit ClaimingContextWrapper(shared_ptr<ClientContextWrapper> inner);
-
-	void TryBindRelation(Relation &relation, vector<ColumnDefinition> &columns) override;
-
-	static void Install(Relation &relation);
-
-private:
-	shared_ptr<ClientContextWrapper> inner;
-};
 
 //! A prepared statement with the tables its replacement scans resolved. A rebind at submission, after the
 //! catalog moved, finds the same tables instead of looking the names up again where the result is read.
@@ -145,12 +198,16 @@ public:
 	shared_ptr<Result> SubmitClaimed(unique_ptr<SQLStatement> statement, identifier_map_t<BoundParameterData> &values,
 	                                 const Format &format);
 	shared_ptr<Result> Submit(Prepared &prepared, identifier_map_t<BoundParameterData> &values, const Format &format);
-	//! A relation that writes is submitted as itself; one that reads as a statement over its query
-	shared_ptr<Result> Submit(const shared_ptr<Relation> &relation, const Format &format);
 	//! Binds a statement without running it, keeping the tables its replacement scans resolved in tables
 	StatementSignature Bind(unique_ptr<SQLStatement> statement, ResolvedTables &tables);
+	//! Binds a statement with values for its parameters, as the engine rebinds a prepared statement for the values it
+	//! runs with, so the names and types are those of the statement that runs; nothing runs
+	StatementSignature Bind(unique_ptr<SQLStatement> statement, ResolvedTables &tables,
+	                        const identifier_map_t<BoundParameterData> &values);
 	//! Runs a statement to its end and drops its rows
 	void Run(unique_ptr<SQLStatement> statement, const InterruptCheck &check);
+	//! Run for a caller that already holds the connection's claim
+	void RunClaimed(unique_ptr<SQLStatement> statement, const InterruptCheck &check);
 	//! Runs a statement to its end and drops its rows, its replacement scans answered from tables and nothing else
 	void Run(unique_ptr<SQLStatement> statement, const ResolvedTables &tables, const InterruptCheck &check);
 	ConnectionClaim Claim();
@@ -158,6 +215,8 @@ public:
 private:
 	shared_ptr<ClientContext> context;
 	shared_ptr<ConnectionState> state;
+	//! Counts the statements submitted here, which is where every statement of the client passes
+	shared_ptr<SourceRegistry> registry;
 };
 
 //! The statements of one SQL string, run in order as the engine's Query runs them: each is parsed only once the ones

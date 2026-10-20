@@ -111,8 +111,9 @@ class TestCanonicalExtensionTypes:
         con = duckdb.connect()
         con.create_function("test", test_function, ["UUID"], "UUID", type="arrow")
 
-        rel = con.sql("select ? as x", params=[uuid.UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")])
-        rel.project("test(x) from t").fetchall()
+        value = uuid.UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
+        rel = con.sql("select ? as x", params=[value])
+        assert rel.project("test(x) AS u").fetchall() == [(value,)]
 
     def test_unimplemented_extension(self, duckdb_cursor):
         class MyType(pa.ExtensionType):

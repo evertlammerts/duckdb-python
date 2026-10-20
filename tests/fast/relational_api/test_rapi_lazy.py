@@ -9,16 +9,37 @@ import duckdb
 def con():
     connection = duckdb.connect()
     connection.execute("CREATE SEQUENCE s")
+    register_tick(connection)
     yield connection
+    TICKS.pop(id(connection), None)
     connection.close()
 
 
+# A read is observed through a Python function that counts its calls, which the engine does not count as a write.
+TICKS = {}
+
+
+def register_tick(connection):
+    calls = []
+
+    def tick() -> int:
+        calls.append(1)
+        return len(calls)
+
+    connection.create_function("tick", tick, [], "BIGINT", side_effects=True)
+    TICKS[id(connection)] = calls
+
+
+def ran(con):
+    return bool(TICKS[id(con)])
+
+
+def runs(con):
+    return len(TICKS[id(con)])
+
+
 def counter(con):
-    return con.sql("SELECT nextval('s') AS v")
-
-
-def currval(con):
-    return con.execute("SELECT currval('s')").fetchall()[0][0]
+    return con.sql("SELECT tick() AS v")
 
 
 class TestRelationsKeepNoResult:
@@ -35,12 +56,12 @@ class TestRelationsKeepNoResult:
         rel = counter(con)
         assert terminal(rel) == 1
         assert terminal(rel) == 2
-        assert currval(con) == 2
+        assert runs(con) == 2
 
     def test_a_relation_is_not_run_when_it_is_built(self, con):
         counter(con).filter("v > 0")
-        con.execute("SELECT nextval('s')")
-        assert currval(con) == 1
+        con.execute("SELECT tick()").fetchall()
+        assert runs(con) == 1
 
     @pytest.mark.parametrize(
         "terminal",
@@ -87,10 +108,10 @@ class TestRelationsKeepNoResult:
 class TestMaterialize:
     def test_it_runs_once_and_every_read_sees_the_same_rows(self, con):
         materialized = counter(con).materialize()
-        assert currval(con) == 1
+        assert runs(con) == 1
         assert materialized.fetchall() == [(1,)]
         assert materialized.fetchall() == [(1,)]
-        assert currval(con) == 1
+        assert runs(con) == 1
 
     def test_it_composes_with_other_relations(self, con):
         materialized = con.sql("SELECT range AS i FROM range(5)").materialize()
@@ -109,37 +130,47 @@ class TestMaterialize:
         assert materialized.types == rel.types
 
 
-class TestSqlThatRunsOnce:
-    """A SELECT with params, and any other statement, runs at the call; its relation reads the rows back."""
+class TestSqlWithParamsIsLazy:
+    """A SELECT with params runs at every read with its values bound, like a relation without params."""
 
     @pytest.mark.parametrize(
         ("query", "params"),
         [
-            pytest.param("SELECT nextval('s') AS v, ? AS p", [1], id="positional"),
-            pytest.param("SELECT nextval('s') AS v, $p AS p", {"p": 1}, id="named"),
+            pytest.param("SELECT tick() AS v, ? AS p", [1], id="positional"),
+            pytest.param("SELECT tick() AS v, $p AS p", {"p": 1}, id="named"),
         ],
     )
-    def test_a_select_with_params_runs_at_the_call_and_never_again(self, con, query, params):
+    def test_a_select_with_params_runs_at_every_read(self, con, query, params):
         rel = con.sql(query, params=params)
-        assert currval(con) == 1
-        assert rel.fetchall() == [(1, 1)]
-        assert rel.fetchall() == [(1, 1)]
-        assert rel.filter("p = 1").fetchall() == [(1, 1)]
-        assert currval(con) == 1
+        assert rel.columns == ["v", "p"]
+        con.execute("SELECT tick()").fetchall()
+        assert runs(con) == 1
+        assert rel.fetchall() == [(2, 1)]
+        assert rel.fetchall() == [(3, 1)]
+        assert rel.filter("p = 1").fetchall() == [(4, 1)]
 
-    def test_it_reads_the_rows_of_the_call_not_the_table_now(self, con):
+    def test_it_reads_the_table_at_the_read(self, con):
         con.execute("CREATE TABLE t AS SELECT range AS i FROM range(5)")
         rel = con.sql("SELECT i FROM t WHERE i < ? ORDER BY i", params=[3])
-        con.execute("DROP TABLE t")
-        assert rel.fetchall() == [(0,), (1,), (2,)]
+        con.execute("DELETE FROM t WHERE i = 1")
+        assert rel.fetchall() == [(0,), (2,)]
 
-    def test_an_error_raises_at_the_call(self, con):
+    def test_an_error_raises_at_the_read(self, con):
+        rel = con.sql("SELECT error(?)", params=["boom"])
         with pytest.raises(duckdb.InvalidInputException, match="boom"):
-            con.sql("SELECT error(?)", params=["boom"])
+            rel.fetchall()
 
-    def test_a_statement_without_rows_runs_and_returns_none(self, con):
+
+class TestSqlThatRunsOnce:
+    """A statement other than a SELECT runs at the call; its relation reads what the statement returned."""
+
+    def test_a_statement_without_rows_runs_and_returns_its_count(self, con):
         con.execute("CREATE TABLE log (v BIGINT)")
-        assert con.sql("INSERT INTO log VALUES (?)", params=[5]) is None
+        rel = con.sql("INSERT INTO log VALUES (?)", params=[5])
+        assert con.execute("SELECT * FROM log").fetchall() == [(5,)]
+        assert rel.columns == ["Count"]
+        assert rel.fetchall() == [(1,)]
+        assert rel.fetchall() == [(1,)]
         assert con.execute("SELECT * FROM log").fetchall() == [(5,)]
 
     def test_a_statement_other_than_select_runs_once_without_params_too(self, con):
