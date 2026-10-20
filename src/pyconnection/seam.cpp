@@ -935,6 +935,10 @@ static std::shared_ptr<SourceHandle> RegisterCollection(DuckDBPyConnection &self
 	// The session owns the context across the take, which is the longest call of the seam
 	auto session = OpenSession(self);
 	auto &context = session.Context();
+	// While CONNECT-ed the engine sends every statement to the remote as text, which cannot name rows held here
+	if (context.IsConnected()) {
+		throw InvalidInputException("materialize() is not available while CONNECT-ed; DISCONNECT first");
+	}
 	DuckDBPyResult::Use use(result);
 	RequireFormat(*use, false, "_register_collection");
 	// The rows live in the buffers of the database that produced them. A database that is gone is not this one,
@@ -1422,6 +1426,10 @@ void DuckDBPySeam::InitializeConnectionMethods(nb::class_<DuckDBPyConnection> &m
 	m.def("_submit", &Submit, "Run one statement with parameter values to a result in the given format", nb::arg("sql"),
 	      nb::arg("values").none() = nb::none(), nb::arg("format") = "rows",
 	      nb::arg("batch_size") = DuckDBPyResult::DEFAULT_ARROW_BATCH_SIZE);
+	m.def("_result_as_arrow", &DuckDBPyConnection::ResultAsArrow,
+	      "The rows the connection's open result still holds, read back as a pyarrow Table, or as a "
+	      "RecordBatchReader when reader is set; None once the rows are used up",
+	      nb::arg("batch_size"), nb::kw_only(), nb::arg("reader"));
 	m.def("_register_source", &RegisterSourceMethod, "Register a Python object as a source statements can read",
 	      nb::arg("obj"), nb::arg("name").none() = nb::none());
 	m.def("_register_collection", &RegisterCollection, "Register the rows of a retained result as a source",

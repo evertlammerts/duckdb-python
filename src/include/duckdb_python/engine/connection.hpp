@@ -198,6 +198,9 @@ public:
 	shared_ptr<Result> SubmitClaimed(unique_ptr<SQLStatement> statement, identifier_map_t<BoundParameterData> &values,
 	                                 const Format &format);
 	shared_ptr<Result> Submit(Prepared &prepared, identifier_map_t<BoundParameterData> &values, const Format &format);
+	//! Scans a collection, for example to read rows a result already holds in another format
+	shared_ptr<Result> Submit(unique_ptr<ColumnDataCollection> collection, const vector<Identifier> &names,
+	                          const Format &format);
 	//! Binds a statement without running it, keeping the tables its replacement scans resolved in tables
 	StatementSignature Bind(unique_ptr<SQLStatement> statement, ResolvedTables &tables);
 	//! Binds a statement with values for its parameters, as the engine rebinds a prepared statement for the values it

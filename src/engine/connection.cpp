@@ -5,6 +5,9 @@
 #include "duckdb/planner/statement_preprocessor.hpp"
 #include "duckdb/main/valid_checker.hpp"
 #include "duckdb/parser/expression/function_expression.hpp"
+#include "duckdb/parser/expression/star_expression.hpp"
+#include "duckdb/parser/query_node/select_node.hpp"
+#include "duckdb/parser/tableref/column_data_ref.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
 #include "duckdb/transaction/meta_transaction.hpp"
@@ -339,6 +342,23 @@ shared_ptr<Result> Session::Submit(Prepared &prepared, identifier_map_t<BoundPar
 	}
 	NameRefusal(*state, *handle);
 	return make_shared_ptr<Result>(std::move(handle), prepared.statement->GetStatementType(), format);
+}
+
+shared_ptr<Result> Session::Submit(unique_ptr<ColumnDataCollection> collection, const vector<Identifier> &names,
+                                   const Format &format) {
+	// The binder rejects duplicate column names; the caller keeps the originals
+	auto deduplicated_names = names;
+	QueryResult::DeduplicateColumns(deduplicated_names);
+	auto table_ref = make_uniq<ColumnDataRef>(std::move(collection), std::move(deduplicated_names));
+	// Binding asserts on an unset alias
+	table_ref->alias = "materialized";
+	auto select_node = make_uniq<SelectNode>();
+	select_node->select_list.push_back(make_uniq<StarExpression>());
+	select_node->from_table = std::move(table_ref);
+	auto select = make_uniq<SelectStatement>();
+	select->node = std::move(select_node);
+	identifier_map_t<BoundParameterData> no_values;
+	return Submit(std::move(select), no_values, format);
 }
 
 StatementSignature Session::Bind(unique_ptr<SQLStatement> statement, ResolvedTables &tables) {

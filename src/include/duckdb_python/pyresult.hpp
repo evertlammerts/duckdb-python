@@ -24,7 +24,9 @@ public:
 	static constexpr idx_t DEFAULT_ARROW_BATCH_SIZE = 131072;
 
 public:
-	explicit DuckDBPyResult(shared_ptr<engine::Result> result);
+	//! names_override is the result's own names where they differ from the submitted statement's, which they do
+	//! for a statement the client wrote over rows it already held
+	explicit DuckDBPyResult(shared_ptr<engine::Result> result, vector<Identifier> names_override = {});
 	~DuckDBPyResult();
 
 public:
@@ -86,6 +88,11 @@ public:
 	bool HasWritesToRun() const;
 
 	unique_ptr<DataChunk> FetchChunk();
+	//! Every row the result still holds, the rows buffered from a partial fetch first; the result is empty
+	//! afterwards. Call with the GIL held.
+	unique_ptr<ColumnDataCollection> TakeRows(const engine::InterruptCheck &check);
+	//! The names the Python layer reports, which are names_override when that is set.
+	const vector<Identifier> &ResultNames() const;
 	//! The rows a completed DML statement changed, -1 otherwise
 	int64_t Rowcount();
 	//! The accumulated count of an executemany, which spans several results
@@ -102,8 +109,6 @@ private:
 	PandasDataFrame FrameFromNumpy(bool date_as_object, const nb::handle &o);
 
 	void ConvertDateTimeTypes(PandasDataFrame &df, bool date_as_object) const;
-	//! The names the Python layer reports, see the definition for why this is not always the result's own.
-	const vector<Identifier> &ResultNames() const;
 	bool Empty() const {
 		return !result;
 	}
@@ -124,6 +129,9 @@ private:
 	atomic<bool> in_use {false};
 	int64_t rowcount_override = -1;
 	idx_t chunk_offset = 0;
+	//! Set only for a result the client submitted over rows of an earlier one, whose names the scan deduplicated
+	//! and whose originals the caller carries here. Empty means the result's own names.
+	vector<Identifier> names_override;
 	unique_ptr<DataChunk> current_chunk;
 	// Holds the categories of Categorical/ENUM types
 	unordered_map<idx_t, nb::list> categories;

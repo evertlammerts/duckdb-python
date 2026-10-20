@@ -66,14 +66,19 @@ class TestArrowDeprecation:
             rel = duckdb.arrow(table)
         assert rel.fetchall() == [(1,), (2,), (3,)]
 
-    def test_the_dbapi_has_no_arrow_methods(self):
+    def test_the_dbapi_has_to_arrow_table_and_to_arrow_reader_and_no_deprecated_arrow_names(self):
         pa = pytest.importorskip("pyarrow")
-        removed = ["to_arrow_table", "fetch_arrow_table", "to_arrow_reader", "fetch_record_batch", "pl"]
+        present = ["to_arrow_table", "to_arrow_reader"]
+        gone = ["fetch_arrow_table", "fetch_record_batch", "pl"]
         with duckdb.connect() as con:
-            for name in [*removed, "arrow"]:
+            for name in [*gone, "arrow"]:
                 assert not hasattr(con, name)
-        for name in removed:
+            for name in present:
+                assert callable(getattr(con, name))
+        for name in gone:
             assert not hasattr(duckdb, name)
+        for name in present:
+            assert callable(getattr(duckdb, name))
         # duckdb.arrow() builds a relation from an Arrow object and has no reader form.
         with pytest.raises(TypeError):
             duckdb.arrow()

@@ -17,7 +17,8 @@ using namespace nanobind::literals;
 
 namespace duckdb {
 
-DuckDBPyResult::DuckDBPyResult(shared_ptr<engine::Result> result_p) : result(std::move(result_p)) {
+DuckDBPyResult::DuckDBPyResult(shared_ptr<engine::Result> result_p, vector<Identifier> names_override_p)
+    : result(std::move(result_p)), names_override(std::move(names_override_p)) {
 	if (!result) {
 		throw InternalException("PyResult created without a result object");
 	}
@@ -55,6 +56,9 @@ DuckDBPyResult::Use::~Use() {
 }
 
 const vector<Identifier> &DuckDBPyResult::ResultNames() const {
+	if (!names_override.empty()) {
+		return names_override;
+	}
 	return result->Names();
 }
 
@@ -108,6 +112,28 @@ unique_ptr<DataChunk> DuckDBPyResult::TakeBufferedRows() {
 	current_chunk.reset();
 	chunk_offset = 0;
 	return remainder;
+}
+
+unique_ptr<ColumnDataCollection> DuckDBPyResult::TakeRows(const engine::InterruptCheck &check) {
+	if (Empty()) {
+		throw InternalException("TakeRows called without a result object");
+	}
+	auto buffered = TakeBufferedRows();
+	unique_ptr<ColumnDataCollection> rows;
+	{
+		DUCKDB_PY_ASSERT_GIL_HELD();
+		nb::gil_scoped_release release;
+		auto taken = result->TakeChunks(check);
+		if (!buffered) {
+			return taken;
+		}
+		// Combine only appends, so the buffered rows, which come first, go into a new collection and the taken rows
+		// follow
+		rows = make_uniq<ColumnDataCollection>(Allocator::DefaultAllocator(), result->Types());
+		rows->Append(*buffered);
+		rows->Combine(*taken);
+	}
+	return rows;
 }
 
 Optional<nb::tuple> DuckDBPyResult::Fetchone() {
@@ -586,7 +612,11 @@ struct ArrowArrayStreamGuard {
 ArrowArrayStream DuckDBPyResult::FetchArrowArrayStream(idx_t rows_per_batch) {
 	RequireArrowFormat(*result);
 	auto state = make_uniq<ArrowStreamState>();
-	result->CopyArrowSchema(state->cached_schema);
+	if (names_override.empty()) {
+		result->CopyArrowSchema(state->cached_schema);
+	} else {
+		result->BuildArrowSchema(IdentifiersToStrings(names_override), state->cached_schema);
+	}
 	state->result = std::move(result);
 	current_chunk.reset();
 	chunk_offset = 0;
