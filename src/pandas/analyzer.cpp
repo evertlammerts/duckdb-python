@@ -559,9 +559,10 @@ bool PandasAnalyzer::Analyze(const PandasNumpyColumn &column, idx_t rows, option
 
 	auto cells = static_cast<PyObject *const *>(column.array.Data());
 	auto step = column.stride / sizeof(PyObject *);
-	auto masked = mask ? static_cast<const bool *>(mask->numpy_array.Data()) : nullptr;
+	// Bytes, because a numpy bool can hold any nonzero byte for true
+	auto masked = mask ? static_cast<const uint8_t *>(mask->numpy_array.Data()) : nullptr;
 	auto cell_at = [&](idx_t row) -> PyObject * {
-		return masked && masked[row] ? nullptr : cells[step * row];
+		return masked && masked[row] != 0 ? nullptr : cells[step * row];
 	};
 
 	bool can_convert = true;

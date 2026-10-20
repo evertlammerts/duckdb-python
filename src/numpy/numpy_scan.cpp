@@ -63,18 +63,18 @@ void ScanNumpyCategory(NumpyArray &column, idx_t count, idx_t offset, Vector &ou
 
 static void ApplyMask(PandasColumnBindData &bind_data, ValidityMask &validity, idx_t count, idx_t offset) {
 	D_ASSERT(bind_data.mask);
-	auto mask = reinterpret_cast<const bool *>(bind_data.mask->numpy_array.Data());
+	auto mask = static_cast<const uint8_t *>(bind_data.mask->numpy_array.Data());
 	for (idx_t i = 0; i < count; i++) {
-		auto is_null = mask[offset + i];
-		if (is_null) {
+		if (mask[offset + i] != 0) {
 			validity.SetInvalid(i);
 		}
 	}
 }
 
-//! One bool per row of the whole column, or null when the column has no mask
-static const bool *MaskedRows(const PandasColumnBindData &bind_data) {
-	return bind_data.mask ? static_cast<const bool *>(bind_data.mask->numpy_array.Data()) : nullptr;
+//! One numpy bool per row of the whole column, or null when the column has no mask. They are bytes, because numpy takes
+//! any nonzero byte for true and a C++ bool may hold only 0 or 1.
+static const uint8_t *MaskedRows(const PandasColumnBindData &bind_data) {
+	return bind_data.mask ? static_cast<const uint8_t *>(bind_data.mask->numpy_array.Data()) : nullptr;
 }
 
 template <class T>
@@ -163,15 +163,15 @@ void VerifyTypeConstraints(Vector &vec, idx_t count) {
 	}
 }
 
-void NumpyScan::ScanObjectColumn(ClientContext &context, PyObject **col, idx_t stride, const bool *masked, idx_t count,
-                                 idx_t offset, Vector &out) {
+void NumpyScan::ScanObjectColumn(ClientContext &context, PyObject **col, idx_t stride, const uint8_t *masked,
+                                 idx_t count, idx_t offset, Vector &out) {
 	// numpy_col is a sequential list of objects, that make up one "column" (Vector)
 	out.SetVectorType(VectorType::FLAT_VECTOR);
 	nb::gil_scoped_acquire gil; // We're creating python objects here, so we need the GIL
 
 	for (idx_t i = 0; i < count; i++) {
 		// A masked cell can hold a value of another type, or no object at all
-		if (masked && masked[offset + i]) {
+		if (masked && masked[offset + i] != 0) {
 			SetInvalidRecursive(out, i);
 			continue;
 		}
@@ -300,7 +300,7 @@ void NumpyScan::Scan(ClientContext &context, PandasColumnBindData &bind_data, id
 
 		for (idx_t row = 0; row < count; row++) {
 			// The hidden value of a masked row can overflow in the conversion
-			if (masked && masked[row + offset]) {
+			if (masked && masked[row + offset] != 0) {
 				mask.SetInvalid(row);
 				continue;
 			}
@@ -364,7 +364,7 @@ void NumpyScan::Scan(ClientContext &context, PandasColumnBindData &bind_data, id
 		// Loop over every row of the arrays contents
 		auto stride = numpy_col.stride;
 		for (idx_t row = 0; row < count; row++) {
-			if (masked && masked[row + offset]) {
+			if (masked && masked[row + offset] != 0) {
 				out_mask.SetInvalid(row);
 				continue;
 			}

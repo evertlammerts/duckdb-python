@@ -228,3 +228,28 @@ class _ZeroItemsize(np.ndarray):
 def test_array_subclass_overriding_itemsize(duckdb_cursor):
     source = {"a": np.arange(5, dtype="int64").view(_ZeroItemsize)}  # noqa: F841
     assert duckdb_cursor.execute("SELECT * FROM source").fetchall() == [(i,) for i in range(5)]
+
+
+def _mask_holding_the_byte_two() -> np.ndarray:
+    return np.array([0, 2, 0], dtype="uint8").view(np.bool_)
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        pytest.param(np.array([1, 2, 3], dtype=object), id="object"),
+        pytest.param(np.array([1, 2, 3], dtype="int64"), id="int64"),
+        pytest.param(np.array(["1", "2", "3"]), id="str"),
+        pytest.param(np.array([1, 2, 3], dtype="timedelta64[us]"), id="timedelta"),
+    ],
+)
+def test_mask_byte_other_than_one_masks_its_row(duckdb_cursor, values):
+    source = {"x": np.ma.masked_array(values, mask=_mask_holding_the_byte_two())}  # noqa: F841
+    expected = [(None,) if row == 1 else (value,) for row, value in enumerate(values.tolist())]
+    assert duckdb_cursor.execute("SELECT x FROM source").fetchall() == expected
+
+
+def test_nullable_mask_byte_other_than_one_masks_its_row(duckdb_cursor):
+    pd = pytest.importorskip("pandas")
+    df = pd.DataFrame({"x": pd.arrays.IntegerArray(np.array([1, 2, 3]), _mask_holding_the_byte_two())})  # noqa: F841
+    assert duckdb_cursor.execute("SELECT x FROM df").fetchall() == [(1,), (None,), (3,)]

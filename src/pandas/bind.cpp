@@ -57,7 +57,7 @@ vector<string> ColumnNamesFromLabels(nb::handle labels) {
 idx_t ColumnArrayRows(const string &column, nb::handle array) {
 	auto &import_cache = *DuckDBPyConnection::ImportCache();
 	if (!duckdb::PyUtil::IsInstance(array, import_cache.numpy.ndarray())) {
-		auto type_name = nb::cast<std::string>(nb::str(array.type().attr("__name__")));
+		auto type_name = nb::cast<std::string>(nb::str(nb::object(array.type().attr("__name__"))));
 		throw InvalidInputException("Column '%s' holds a '%s' where a column holds a numpy.ndarray", column, type_name);
 	}
 	auto shape = nb::cast<nb::tuple>(array.attr("shape"));
