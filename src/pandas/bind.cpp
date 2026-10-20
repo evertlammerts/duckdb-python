@@ -143,6 +143,9 @@ static LogicalType BindColumn(ClientContext &context, PandasBindColumn &column_p
 		if (duckdb::PyUtil::IsInstance(pandas_array, import_cache.pandas.arrays.ArrowStringArray())) {
 			// On pandas 2 its _data is the pyarrow ChunkedArray, not an ndarray.
 			data = column.attr("to_numpy")();
+		} else if (duckdb::PyUtil::IsInstance(pandas_array, import_cache.pandas.arrays.StringArray())) {
+			// to_numpy returns this same object array, but only after a pass over every value for missing ones.
+			data = pandas_array.attr("_ndarray");
 		} else if (nb::hasattr(pandas_array, "_data")) {
 			// This means we can access the numpy array directly
 			data = pandas_array.attr("_data");

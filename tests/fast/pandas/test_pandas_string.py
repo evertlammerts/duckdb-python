@@ -286,7 +286,6 @@ def test_python_string_column_without_pyarrow():
 
 
 PYARROW_BIND_REASON = "bind converts a pyarrow backed str column with to_numpy and isna"
-PYTHON_BIND_REASON = "bind reads python storage through to_numpy and isna"
 BIND_STORAGE = [
     pytest.param(
         "str",
@@ -303,10 +302,8 @@ BIND_STORAGE = [
         id="string_pyarrow",
         marks=[needs_pyarrow, needs_arrow_chunk_export, pytest.mark.xfail(strict=True, reason=PYARROW_BIND_REASON)],
     ),
-    pytest.param("string[python]", id="string_python", marks=pytest.mark.xfail(strict=True, reason=PYTHON_BIND_REASON)),
-    pytest.param(
-        "python_nan", id="python_nan", marks=[needs_pandas_3, pytest.mark.xfail(strict=True, reason=PYTHON_BIND_REASON)]
-    ),
+    pytest.param("string[python]", id="string_python"),
+    pytest.param("python_nan", id="python_nan", marks=needs_pandas_3),
 ]
 
 
@@ -671,6 +668,23 @@ def test_pyarrow_string_array_subclass_is_never_read_through_data(duckdb_cursor,
     assert result == _rows_of(values)
     assert reads == []
     assert [warning for warning in caught if issubclass(warning.category, FutureWarning)] == []
+
+
+@pytest.mark.parametrize("dtype", PYTHON_STORAGE)
+def test_python_string_array_subclass_converts_no_values_at_bind(duckdb_cursor, monkeypatch, dtype):
+    # pandas 2.3 backs python storage with NaN for missing values by a subclass of StringArray.
+    class Subclass(type(pd.array([], dtype=_dtype(dtype)))):
+        pass
+
+    rows = 300
+    values = [None if index % 3 == 1 else f"v{index}" for index in range(rows)]
+    frame = pd.DataFrame(
+        {"s": Subclass._from_sequence(values, dtype=_dtype(dtype)), "i": numpy.arange(rows, dtype=numpy.int64)}
+    )
+    assert type(frame["s"].array) is Subclass
+    _refuse_conversions(monkeypatch, Subclass, rows)
+    result = duckdb_cursor.sql("SELECT s FROM frame ORDER BY i").fetchall()
+    assert result == _rows_of(values)
 
 
 def _invalid_utf8_frames(pa, pieces):
