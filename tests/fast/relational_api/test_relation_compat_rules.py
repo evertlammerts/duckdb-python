@@ -525,9 +525,11 @@ class TestUserTextIsValidatedNotRewritten:
             build(con.sql("SELECT * FROM range(5) t(x)"))
 
     def test_a_deep_expression_within_the_connection_s_depth_limit(self, con):
-        con.execute("SET max_expression_depth = 3000")
-        deep = "1" + " + 1" * 1500
-        assert con.sql("SELECT 1 AS a").project(f"{deep} AS d").fetchall() == [(1501,)]
+        # One past the engine's default limit of 1000 proves the connection's setting applies; a far deeper expression
+        # overflowed the thread stack on the Windows ARM64 wheel job.
+        con.execute("SET max_expression_depth = 1200")
+        deep = "1" + " + 1" * 1001
+        assert con.sql("SELECT 1 AS a").project(f"{deep} AS d").fetchall() == [(1002,)]
 
 
 class TestAMarkerInAVerbsText:
