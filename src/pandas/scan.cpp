@@ -73,6 +73,14 @@ PandasScanFunction::PandasScanFunction()
 	serialize = PandasSerialize;
 	deserialize = PandasDeserialize;
 	projection_pushdown = true;
+	get_virtual_columns = PandasScanGetVirtualColumns;
+}
+
+virtual_column_map_t PandasScanFunction::PandasScanGetVirtualColumns(ClientContext &context,
+                                                                     optional_ptr<FunctionData> bind_data) {
+	virtual_column_map_t result;
+	result.insert(make_pair(COLUMN_IDENTIFIER_EMPTY, TableColumn("", LogicalType::BOOLEAN)));
+	return result;
 }
 
 OperatorPartitionData PandasScanFunction::PandasScanGetPartitionData(ClientContext &context,
@@ -192,6 +200,8 @@ void PandasScanFunction::PandasScanFunc(ClientContext &context, TableFunctionInp
 		auto col_idx = state.column_ids[idx];
 		if (col_idx == COLUMN_IDENTIFIER_ROW_ID) {
 			output.data[idx].Sequence(state.start, 1, this_count);
+		} else if (col_idx == COLUMN_IDENTIFIER_EMPTY) {
+			ConstantVector::SetNull(output.data[idx], count_t(this_count));
 		} else {
 			PandasBackendScanSwitch(context, data.pandas_bind_data[col_idx], this_count, state.start, output.data[idx]);
 		}

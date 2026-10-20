@@ -53,6 +53,9 @@ public:
 
 	static unique_ptr<NodeStatistics> PandasScanCardinality(ClientContext &context, const FunctionData *bind_data);
 
+	static virtual_column_map_t PandasScanGetVirtualColumns(ClientContext &context,
+	                                                        optional_ptr<FunctionData> bind_data);
+
 	static OperatorPartitionData PandasScanGetPartitionData(ClientContext &context,
 	                                                        TableFunctionGetPartitionInput &input);
 

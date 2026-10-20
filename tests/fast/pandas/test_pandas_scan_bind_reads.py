@@ -797,7 +797,6 @@ COLUMN_FREE_QUERIES = [
 ]
 
 
-@pytest.mark.xfail(strict=True, reason="the scan cannot be asked for zero columns, so count(*) and EXISTS read one")
 @pytest.mark.parametrize("sql", COLUMN_FREE_QUERIES)
 @pytest.mark.parametrize("first", ["k", "s"])
 def test_count_star_converts_no_column(duckdb_cursor, sql, first):
@@ -817,7 +816,6 @@ def _unconvertible_first_column(kind):
     return {"s": np.array(["ok", "\ud800"], dtype=object), "k": np.array([1, 2], dtype="int64")}
 
 
-@pytest.mark.xfail(strict=True, reason="count(*) and EXISTS read column 0, so its unconvertible value fails the query")
 @pytest.mark.parametrize("path", PATHS)
 @pytest.mark.parametrize(
     ("sql", "expected"),
