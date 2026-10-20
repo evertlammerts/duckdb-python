@@ -1,5 +1,6 @@
 #include "duckdb_python/pandas/pandas_scan.hpp"
 #include "duckdb_python/pandas/pandas_bind.hpp"
+#include "duckdb_python/engine/connection.hpp"
 #include "duckdb_python/numpy/array_wrapper.hpp"
 #include "utf8proc_wrapper.hpp"
 #include "duckdb/common/types/timestamp.hpp"
@@ -103,6 +104,7 @@ unique_ptr<FunctionData> PandasScanFunction::PandasScanBind(ClientContext &conte
 	DynamicCastCheck<PandasScanInfo>(input.ref.bind_info.get());
 	auto info = shared_ptr_cast<TableFunctionInfo, PandasScanInfo>(input.ref.bind_info);
 	nb::gil_scoped_acquire acquire;
+	engine::CallbackScope callback(context);
 	nb::handle df(info->df.obj);
 
 	vector<PandasColumnBindData> pandas_bind_data;

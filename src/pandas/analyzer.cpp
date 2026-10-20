@@ -351,6 +351,58 @@ LogicalType PandasAnalyzer::DictToStruct(const PyDictionary &dict, bool &can_con
 	return LogicalType::STRUCT(struct_children);
 }
 
+//! Whether every type in the tree is one GetItemType builds from plain Python values: only those may reach
+//! UpgradeType, which throws on ARRAY and UNION and has no merge rules for the other DuckDB types
+static bool IsAnalyzerType(const LogicalType &type) {
+	if (type.HasAlias() || type.HasExtensionInfo()) {
+		return false;
+	}
+	switch (type.id()) {
+	case LogicalTypeId::SQLNULL:
+	case LogicalTypeId::BOOLEAN:
+	case LogicalTypeId::TINYINT:
+	case LogicalTypeId::SMALLINT:
+	case LogicalTypeId::INTEGER:
+	case LogicalTypeId::BIGINT:
+	case LogicalTypeId::UTINYINT:
+	case LogicalTypeId::USMALLINT:
+	case LogicalTypeId::UINTEGER:
+	case LogicalTypeId::UBIGINT:
+	case LogicalTypeId::HUGEINT:
+	case LogicalTypeId::UHUGEINT:
+	case LogicalTypeId::FLOAT:
+	case LogicalTypeId::DOUBLE:
+	case LogicalTypeId::DECIMAL:
+	case LogicalTypeId::DATE:
+	case LogicalTypeId::TIME:
+	case LogicalTypeId::TIME_TZ:
+	case LogicalTypeId::TIMESTAMP_SEC:
+	case LogicalTypeId::TIMESTAMP_MS:
+	case LogicalTypeId::TIMESTAMP:
+	case LogicalTypeId::TIMESTAMP_NS:
+	case LogicalTypeId::TIMESTAMP_TZ:
+	case LogicalTypeId::INTERVAL:
+	case LogicalTypeId::UUID:
+	case LogicalTypeId::BLOB:
+		return true;
+	case LogicalTypeId::VARCHAR:
+		return StringType::GetCollation(type).empty();
+	case LogicalTypeId::LIST:
+		return IsAnalyzerType(ListType::GetChildType(type));
+	case LogicalTypeId::MAP:
+		return IsAnalyzerType(MapType::KeyType(type)) && IsAnalyzerType(MapType::ValueType(type));
+	case LogicalTypeId::STRUCT:
+		for (auto &child : StructType::GetChildTypes(type)) {
+			if (!IsAnalyzerType(child.second)) {
+				return false;
+			}
+		}
+		return true;
+	default:
+		return false;
+	}
+}
+
 //! 'can_convert' is used to communicate if internal structures encountered here are valid
 //! e.g python lists can consist of multiple different types, which we cant communicate downwards through
 //! LogicalType's alone
@@ -438,6 +490,14 @@ LogicalType PandasAnalyzer::GetItemType(nb::object ele, bool &can_convert) {
 			}
 		}
 		return LogicalType::LIST(ltype);
+	}
+	case PythonObjectType::Value: {
+		auto value_type = PythonValueType(ele);
+		if (IsAnalyzerType(value_type)) {
+			return value_type;
+		}
+		can_convert = false;
+		return LogicalType::VARCHAR;
 	}
 	case PythonObjectType::Other:
 		// Fall back to string for unknown types

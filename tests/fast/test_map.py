@@ -421,9 +421,6 @@ def test_map_integral_float_outside_the_chunk_sample_converts(duckdb_cursor, sch
     assert mapped.types == [duckdb.sqltypes.INTEGER]
 
 
-@pytest.mark.xfail(
-    strict=True, reason="the analyzer cannot type a duckdb.Value element, so map raises an internal error"
-)
 @pytest.mark.parametrize("schema_given", [True, False], ids=["explicit_schema", "inferred"])
 @pytest.mark.parametrize(
     ("make_value", "sql_type", "literal"),

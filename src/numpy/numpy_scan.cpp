@@ -175,7 +175,9 @@ void NumpyScan::ScanObjectColumn(ClientContext &context, PyObject **col, idx_t s
 			SetInvalidRecursive(out, i);
 			continue;
 		}
-		ScanNumpyObject(context, col[stride / sizeof(PyObject *) * (i + offset)], i, out);
+		// Converting can run Python, which lets another thread replace the cell and free the object it held
+		auto cell = nb::borrow<nb::object>(col[stride / sizeof(PyObject *) * (i + offset)]);
+		ScanNumpyObject(context, cell.ptr(), i, out);
 	}
 	VerifyTypeConstraints(out, count);
 }

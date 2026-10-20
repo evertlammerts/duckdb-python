@@ -1,6 +1,9 @@
 import datetime
 import enum
+import json
 import re
+import subprocess
+import sys
 import uuid
 from decimal import Decimal
 
@@ -977,7 +980,6 @@ def assert_connection_answers(con):
     assert con.cursor().execute("SELECT 42").fetchall() == [(42,)]
 
 
-@not_yet("a duckdb.Value element in an object column fails the analyzer with an internal error")
 @pytest.mark.parametrize(
     ("make_frame", "query", "expected"),
     [
@@ -1049,11 +1051,238 @@ def test_duckdb_value_elements(duckdb_cursor, make_frame, query, expected):
     assert_connection_answers(duckdb_cursor)
 
 
-@not_yet("a sampled duckdb.Value element fails the analyzer with an internal error")
 def test_sampled_array_value_with_plain_lists_after_it_binds_varchar(duckdb_cursor):
     duckdb_cursor.execute("SET pandas_analyze_sample=1")
     duckdb_cursor.register("frame", value_cells(array_value(), *([[1, 2, 3]] * 9)))
     assert duckdb_cursor.execute("SELECT DISTINCT typeof(amount) FROM frame").fetchall() == [("VARCHAR",)]
+    assert_connection_answers(duckdb_cursor)
+
+
+@pytest.mark.parametrize(
+    ("cells", "expected"),
+    [
+        pytest.param(
+            [duckdb.Value([1, 2], duckdb.sqltype("BIGINT[]")), [3, 4]],
+            [("BIGINT[]", [1, 2]), ("BIGINT[]", [3, 4])],
+            id="list_value_then_a_plain_list",
+        ),
+        pytest.param(
+            [duckdb.Value({"v": 1}, duckdb.sqltype("STRUCT(v BIGINT)")), {"v": 2}],
+            [("STRUCT(v BIGINT)", {"v": 1}), ("STRUCT(v BIGINT)", {"v": 2})],
+            id="struct_value_then_a_plain_dict",
+        ),
+        pytest.param(
+            [duckdb.Value({"k": 1}, duckdb.sqltype("MAP(VARCHAR, INTEGER)"))] * 2,
+            [("MAP(VARCHAR, INTEGER)", {"k": 1})] * 2,
+            id="map_values",
+        ),
+        pytest.param(
+            [duckdb.HugeIntegerValue(2**70), 2**70],
+            [("HUGEINT", 2**70)] * 2,
+            id="hugeint_value_then_a_plain_int",
+        ),
+        pytest.param(
+            [duckdb.UnsignedHugeIntegerValue(2**127)] * 2,
+            [("UHUGEINT", 2**127)] * 2,
+            id="uhugeint_values",
+        ),
+    ],
+)
+def test_value_elements_keep_their_type(duckdb_cursor, cells, expected):
+    duckdb_cursor.register("frame", value_cells(*cells))
+    assert duckdb_cursor.execute("SELECT typeof(amount), amount FROM frame").fetchall() == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "rows_equal_to_a"),
+    [
+        pytest.param(duckdb.Value('{"a": 1}', duckdb.sqltype("JSON")), 0, id="json"),
+        # Only the lower case cell equals 'a': a NOCASE column would match the upper case one too.
+        pytest.param(duckdb.Value("a", duckdb.sqltype("VARCHAR COLLATE NOCASE")), 1, id="nocase"),
+        pytest.param(duckdb.Value(["1"], duckdb.sqltype("JSON[]")), 0, id="list_of_json"),
+    ],
+)
+def test_value_element_of_an_aliased_or_collated_type_binds_plain_varchar(duckdb_cursor, value, rows_equal_to_a):
+    duckdb_cursor.register("frame", value_cells(value, "A"))
+    assert duckdb_cursor.execute("SELECT typeof(amount), amount FROM frame").fetchall() == [
+        ("VARCHAR", str(value)),
+        ("VARCHAR", "A"),
+    ]
+    assert duckdb_cursor.execute("SELECT count(*) FROM frame WHERE amount = 'a'").fetchall() == [(rows_equal_to_a,)]
+
+
+_TYPE_NAME_ON_THE_DEFAULT_CONNECTION_CHILD = """
+import duckdb
+import pandas as pd
+
+value = duckdb.Value(5, "INTEGER")
+frame = pd.DataFrame({"amount": pd.Series([value, value], dtype=object)})
+try:
+    print("rows", QUERY.fetchall(), flush=True)
+except duckdb.Error as error:
+    print("raised", type(error).__name__, str(error).splitlines()[0], flush=True)
+print("answers", duckdb.sql("SELECT 42").fetchall(), flush=True)
+"""
+TYPE_NAME_CHILD_TIMEOUT = 60
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        pytest.param('duckdb.sql("SELECT amount FROM frame")', id="sql"),
+        pytest.param('duckdb.default_connection().sql("SELECT amount FROM frame")', id="default_connection_sql"),
+        pytest.param("duckdb.from_df(frame)", id="from_df"),
+        pytest.param('duckdb.execute("SELECT amount FROM frame")', id="execute"),
+    ],
+)
+def test_value_element_with_a_type_name_on_the_default_connection_raises(query):
+    # Resolving the type name needs the connection this query's bind holds, so a wait for it would hang the process.
+    script = _TYPE_NAME_ON_THE_DEFAULT_CONNECTION_CHILD.replace("QUERY", query)
+    try:
+        child = subprocess.run(
+            [sys.executable, "-I", "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=TYPE_NAME_CHILD_TIMEOUT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as hang:
+        pytest.fail(f"the child did not finish within {TYPE_NAME_CHILD_TIMEOUT} seconds: {hang.stderr!r}")
+    assert child.returncode == 0, child.stderr[-2000:]
+    raised, answers = child.stdout.splitlines()
+    assert raised.startswith("raised InvalidInputException "), raised
+    assert answers == "answers [(42,)]"
+
+
+_TYPE_NAME_WHILE_ANOTHER_THREAD_BINDS_CHILD = """
+import collections
+import json
+import sys
+import threading
+import time
+
+import duckdb
+import pandas as pd
+
+rows, at = int(sys.argv[1]), int(sys.argv[2])
+cells = [1] * rows
+cells[at] = duckdb.Value(5, "INTEGER")
+columns = {f"c{i}": pd.Series([str(j) for j in range(rows)], dtype=object) for i in range(40)}
+columns["amount"] = pd.Series(cells, dtype=object)
+heavy = pd.DataFrame(columns)
+light = pd.DataFrame({"x": pd.Series(["a", "b"], dtype=object)})
+con = duckdb.connect()
+con.execute("SET enable_progress_bar = false")
+idle = repr(con.sql("SELECT sum(amount) FROM heavy").fetchall())
+stop = time.monotonic() + 4
+outcomes = collections.Counter()
+default_binds = 0
+
+
+def read_heavy():
+    while time.monotonic() < stop:
+        try:
+            outcomes[repr(con.sql("SELECT sum(amount) FROM heavy").fetchall())] += 1
+        except duckdb.Error as error:
+            outcomes[type(error).__name__] += 1
+
+
+def bind_light_on_the_default_connection():
+    global default_binds
+    while time.monotonic() < stop:
+        duckdb.sql("SELECT * FROM light")
+        default_binds += 1
+
+
+threads = [threading.Thread(target=read_heavy), threading.Thread(target=bind_light_on_the_default_connection)]
+for thread in threads:
+    thread.start()
+for thread in threads:
+    thread.join()
+print(json.dumps({"idle": idle, "outcomes": sorted(outcomes), "default_binds": default_binds}), flush=True)
+"""
+
+
+CROSS_THREAD_CHILD_TIMEOUT = 20
+
+
+@pytest.mark.parametrize("at", [pytest.param(0, id="sampled"), pytest.param(UNSAMPLED, id="outside_the_sample")])
+def test_value_element_with_a_type_name_while_another_thread_binds_on_the_default_connection(at):
+    try:
+        child = subprocess.run(
+            [sys.executable, "-I", "-c", _TYPE_NAME_WHILE_ANOTHER_THREAD_BINDS_CHILD, str(ROWS), str(at)],
+            capture_output=True,
+            text=True,
+            timeout=CROSS_THREAD_CHILD_TIMEOUT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as hang:
+        pytest.fail(f"the child did not finish within {CROSS_THREAD_CHILD_TIMEOUT} seconds: {hang.stderr!r}")
+    assert child.returncode == 0, child.stderr[-2000:]
+    report = json.loads(child.stdout)
+    total = f"[({ROWS + 4},)]"
+    assert report["idle"] == total
+    # A read either sums the column or is refused while the other thread holds the default connection.
+    assert set(report["outcomes"]) <= {total, "InvalidInputException"}, report
+    assert report["default_binds"] > 0
+
+
+_TYPE_NAME_WHILE_ANOTHER_THREAD_REPLACES_THE_CELLS_CHILD = """
+import sys
+import threading
+
+import duckdb
+import numpy as np
+
+sys.setswitchinterval(1e-4)
+rows = 300
+cells = np.empty(rows, dtype=object)
+cells[0] = 1
+for i in range(1, rows):
+    cells[i] = duckdb.Value(5, "INTEGER")
+data = {"amount": cells}
+con = duckdb.connect()
+con.execute("SET enable_progress_bar = false")
+con.execute("SET pandas_analyze_sample=1")
+con.execute("SET threads=1")
+stop = threading.Event()
+
+
+def replace_cells():
+    while not stop.is_set():
+        for i in range(1, rows):
+            cells[i] = duckdb.Value(5, "INTEGER")
+
+
+replacer = threading.Thread(target=replace_cells)
+replacer.start()
+try:
+    for _ in range(20):
+        print(con.execute("SELECT sum(amount) FROM data").fetchall(), flush=True)
+finally:
+    stop.set()
+    replacer.join()
+"""
+
+
+def test_value_elements_with_a_type_name_while_another_thread_replaces_them():
+    # Resolving a type name runs Python, so the other thread can replace a cell and drop its Value while it converts.
+    child = subprocess.run(
+        [sys.executable, "-I", "-c", _TYPE_NAME_WHILE_ANOTHER_THREAD_REPLACES_THE_CELLS_CHILD],
+        capture_output=True,
+        text=True,
+        timeout=TYPE_NAME_CHILD_TIMEOUT,
+        check=False,
+    )
+    assert child.returncode == 0, child.stderr[-2000:]
+    assert child.stdout.splitlines() == ["[(1496,)]"] * 20
+
+
+def test_value_element_whose_type_is_not_a_duckdb_type_raises(duckdb_cursor):
+    value = duckdb.IntegerValue(1)
+    value.type = 5
+    with pytest.raises(duckdb.InvalidInputException, match="should be of type DuckDBPyType"):
+        duckdb_cursor.register("frame", value_cells(value, value))
     assert_connection_answers(duckdb_cursor)
 
 

@@ -50,6 +50,8 @@ bool PandasIsImported(PythonImportCache &import_cache);
 bool NumpyMaIsImported();
 
 LogicalType SniffPythonIntegerType(nb::handle ele);
+//! The type of a duckdb.Value, or InvalidInputException when its 'type' attribute is not a DuckDB type
+LogicalType PythonValueType(nb::handle value);
 bool DictionaryHasMapFormat(const PyDictionary &dict);
 void TransformPythonObject(optional_ptr<ClientContext> context, nb::handle ele, Vector &vector, idx_t result_offset,
                            bool nan_as_null = true);
