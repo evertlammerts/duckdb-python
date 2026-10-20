@@ -320,7 +320,9 @@ class TestDictionariesAndRunEnds:
     def test_a_dictionary_is_decoded_once_per_large_batch(self):
         values = pa.array([f"value-{i:08d}" for i in range(DICTIONARY_VALUES)])
         # In order, since random indices into a large dictionary make the time depend on the machine's caches.
-        indices = pa.array((np.arange(DICTIONARY_ROWS) * DICTIONARY_VALUES // DICTIONARY_ROWS).astype(np.int32))
+        indices = pa.array(
+            (np.arange(DICTIONARY_ROWS, dtype=np.int64) * DICTIONARY_VALUES // DICTIONARY_ROWS).astype(np.int32)
+        )
         whole = pa.table({"d": pa.DictionaryArray.from_arrays(indices, values)})
         # Each slice keeps the whole dictionary, which the scan decodes again for every batch because it drops the
         # decoded dictionary when the batch changes.
