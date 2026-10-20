@@ -1,6 +1,8 @@
 #include "duckdb_python/engine/connection.hpp"
 
 #include "duckdb/main/statement_iterator.hpp"
+#include "duckdb/planner/planner.hpp"
+#include "duckdb/planner/statement_preprocessor.hpp"
 #include "duckdb/main/valid_checker.hpp"
 #include "duckdb/parser/expression/function_expression.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
@@ -344,6 +346,47 @@ StatementSignature Session::Bind(unique_ptr<SQLStatement> statement, ResolvedTab
 	ResolvingGuard guard(*state);
 	auto signature = context->BindStatement(std::move(statement));
 	tables = guard.End();
+	return signature;
+}
+
+StatementSignature Session::Bind(unique_ptr<SQLStatement> statement, ResolvedTables &tables,
+                                 const identifier_map_t<BoundParameterData> &values) {
+	ConnectionClaim claim(*state, *context);
+	ResolvingGuard guard(*state);
+	StatementSignature signature;
+	ErrorData bind_error;
+	context->RunFunctionInTransaction(
+	    [&]() {
+		    try {
+			    auto expanded = StatementPreprocessor(*context).ExpandStatement(std::move(statement));
+			    if (expanded.statements.empty()) {
+				    signature.properties.return_type = StatementReturnType::NOTHING;
+				    return;
+			    }
+			    if (expanded.statements.size() > 1) {
+				    throw InvalidInputException(ClientContext::EXPANDING_PARAMETERS_ERROR);
+			    }
+			    // The planner types each parameter from its value, as a rebind for the values run with does
+			    Planner planner(*context);
+			    planner.parameter_data = values;
+			    planner.CreatePlan(std::move(expanded.statements[0]));
+			    signature.names = planner.names;
+			    signature.types = planner.types;
+			    signature.properties = std::move(planner.properties);
+		    } catch (const std::exception &ex) {
+			    ErrorData error(ex);
+			    // Binding changes nothing, so a recoverable error leaves the caller's transaction as it was
+			    if (Exception::InvalidatesDatabase(error.Type())) {
+				    throw;
+			    }
+			    bind_error = std::move(error);
+		    }
+	    },
+	    false);
+	tables = guard.End();
+	if (bind_error.HasError()) {
+		bind_error.Throw();
+	}
 	return signature;
 }
 

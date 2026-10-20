@@ -1,12 +1,27 @@
 """Call forms of the relational API that user code relies on, checked against direct SQL on the same connection."""
 
+import datetime
+import decimal
 import gc
+import json
+import re
+import uuid
 
 import pytest
 
 import duckdb
 
 pd = pytest.importorskip("pandas")
+
+try:
+    import pyarrow
+except ImportError:
+    pyarrow = None
+
+try:
+    import polars
+except ImportError:
+    polars = None
 
 
 @pytest.fixture
@@ -17,6 +32,25 @@ def con():
     connection.execute("CREATE TABLE c AS SELECT * FROM (VALUES (2, 'Z')) v(i, z)")
     yield connection
     connection.close()
+
+
+def top_select(con, rel):
+    [(tree,)] = con.execute("SELECT json_serialize_sql(?)", [rel.sql_query()]).fetchall()
+    [statement] = json.loads(tree)["statements"]
+    return statement["node"]
+
+
+def select_count(con, rel):
+    [(tree,)] = con.execute("SELECT json_serialize_sql(?)", [rel.sql_query()]).fetchall()
+    pending, found = [json.loads(tree)], 0
+    while pending:
+        item = pending.pop()
+        if isinstance(item, dict):
+            found += item.get("type") == "SELECT_NODE"
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
+    return found
 
 
 def rows(result):
@@ -80,15 +114,112 @@ class TestFunctionLocalFrames:
         assert second.fetchall() == [(2,)]
         assert con.execute("SELECT a FROM frame").fetchall() == [(2,)]
 
-    def test_two_objects_captured_under_one_name_are_refused_when_combined(self, con):
+    def test_two_objects_captured_under_one_name_combine(self, con):
+        # Each capture is read inside the source that captured it, so the two never meet under one name.
         data = pd.DataFrame({"a": [1]})
         first = con.sql("SELECT a FROM data")
         data = pd.DataFrame({"a": [2]})  # noqa: F841
         second = con.sql("SELECT a FROM data")
         assert first.fetchall() == [(1,)]
         assert second.fetchall() == [(2,)]
-        with pytest.raises(duckdb.Error, match="data"):
-            first.union(second).fetchall()
+        assert rows(first.union(second).fetchall()) == [(1,), (2,)]
+
+    def test_two_frames_captured_under_one_name_by_two_steps_close_the_select(self, con):
+        # A SELECT holds one capture per name, so the step that captures another object under it reads a new SELECT.
+        rel = con.sql("SELECT * FROM range(4) t(a)")
+        for df in [pd.DataFrame({"a": [1, 2]}), pd.DataFrame({"a": [2]})]:  # noqa: B007
+            rel = rel.filter("a IN (SELECT a FROM df)")
+        assert rel.fetchall() == [(2,)]
+
+    def test_one_frame_captured_by_two_steps_closes_the_select(self, con):
+        # Each capture is its own registration, so a second capture of the name reads a new SELECT.
+        df = pd.DataFrame({"a": [1, 2, 3]})  # noqa: F841
+        once = con.table("t").filter("i IN (SELECT a FROM df)")
+        twice = once.filter("i > 1 AND i IN (SELECT a FROM df)")
+        in_one_step = con.table("t").filter("i IN (SELECT a FROM df) AND i > 1 AND i IN (SELECT a FROM df)")
+        assert select_count(con, twice) > select_count(con, in_one_step)
+        assert twice.sql_query().count("__duckdb_source_") == 2
+        assert rows(twice.fetchall()) == [(2, "b"), (3, "c")]
+
+    def test_a_frame_changed_in_place_is_read_as_it_is_at_each_step(self, con):
+        df = pd.DataFrame({"k": [1, 2]})
+        first = con.sql("SELECT * FROM (VALUES (1), (2), (3)) t(a)").filter("a IN (SELECT k FROM df)")
+        df["k"] = [2, 3]
+        second = first.filter("a IN (SELECT k FROM df)")
+        assert rows(second.fetchall()) == [(2,)]
+
+    @pytest.mark.skipif(polars is None, reason="reads a polars frame")
+    def test_two_joins_over_frames_local_to_a_helper_cross_each_reading_their_own(self, con):
+        def side(value, n):
+            df = polars.DataFrame({"k": [value]})  # noqa: F841
+            left = con.sql(f"SELECT * FROM (VALUES (1), (2)) t(a{n})").set_alias(f"l{n}")
+            right = con.sql(f"SELECT * FROM (VALUES (1), (2)) t(b{n})").set_alias(f"r{n}")
+            return left.join(right, f"a{n} = b{n} AND a{n} IN (SELECT k FROM df)")
+
+        first, second = side(1, 1), side(2, 2)
+        gc.collect()
+        assert first.cross(second).fetchall() == [(1, 1, 2, 2)]
+
+    def test_a_side_named_after_a_second_capture_closed_the_select(self, con):
+        con.execute("CREATE TABLE lk AS SELECT * FROM (VALUES (1, 10), (2, 20)) v(k, x)")
+        con.execute("CREATE TABLE rk AS SELECT * FROM (VALUES (1, 100), (2, 200)) v(k, x)")
+        joined = con.table("lk").join(con.table("rk"), "lk.k = rk.k")
+        df = pd.DataFrame({"a": [1, 2]})
+        first = joined.filter("lk.k IN (SELECT a FROM df)")
+        df = pd.DataFrame({"a": [100]})  # noqa: F841
+        with pytest.raises(duckdb.BinderException, match='Referenced table "rk" not found'):
+            first.filter("rk.x IN (SELECT a FROM df)")
+
+    def test_frames_bound_in_turn_to_an_uppercase_name_by_two_steps_close_the_select(self, con):
+        rel = con.sql("SELECT * FROM range(4) t(a)")
+        for DF in [pd.DataFrame({"a": [1, 2]}), pd.DataFrame({"a": [2]})]:  # noqa: B007
+            rel = rel.filter("a IN (SELECT a FROM DF)")
+        assert rel.fetchall() == [(2,)]
+
+    @pytest.mark.skipif(pyarrow is None, reason="reads an Arrow table")
+    def test_one_arrow_table_captured_by_two_steps_over_a_join_closes_the_select(self, con):
+        frame = pyarrow.table({"a": [1]})  # noqa: F841
+        pair = con.sql("SELECT 1 AS i", alias="l").cross(con.sql("SELECT 1 AS j", alias="r"))
+        second = pair.filter("l.i IN (SELECT a FROM frame)").filter("j IN (SELECT a FROM frame)")
+        in_one_step = pair.filter("l.i IN (SELECT a FROM frame) AND r.j IN (SELECT a FROM frame)")
+        assert select_count(con, second) > select_count(con, in_one_step)
+        assert second.sql_query().count("__duckdb_source_") == 2
+        assert second.fetchall() == [(1, 1)]
+
+    def test_one_relation_captured_by_two_steps_over_a_join_closes_the_select(self, con):
+        few = con.sql("SELECT 2 AS a")  # noqa: F841
+        joined = con.table("t").join(con.table("r"), "t.i = r.i")
+        twice = joined.filter("t.i IN (SELECT a FROM few)").filter("y IN (SELECT 'B' FROM few)")
+        in_one_step = joined.filter("t.i IN (SELECT a FROM few) AND y IN (SELECT 'B' FROM few)")
+        assert select_count(con, twice) > select_count(con, in_one_step)
+        assert twice.fetchall() == [(2, "b", 2, "B")]
+
+    def test_a_column_spelled_like_a_changed_variable_does_not_close_the_select(self, con):
+        pair = con.sql("SELECT 1 AS i, 9 AS frame", alias="l").cross(con.sql("SELECT 1 AS j", alias="r"))
+        frame = pd.DataFrame({"a": [1]})
+        first = pair.filter("l.i IN (SELECT a FROM frame)")
+        frame = pd.DataFrame({"a": [2]})  # noqa: F841
+        assert first.filter("l.frame = 9").fetchall() == [(1, 9, 1)]
+
+    def join_reading_one_frame(self, con):
+        x = con.sql("SELECT * FROM (VALUES (1), (2), (3)) v(a)").set_alias("x")
+        y = con.sql("SELECT * FROM (VALUES (1), (2), (3)) v(b)").set_alias("y")
+        df = pd.DataFrame({"a": [1, 2]})  # noqa: F841
+        return x.join(y, "x.a = y.b AND x.a IN (SELECT a FROM df)")
+
+    def test_two_join_conditions_capturing_different_frames_under_one_name_each_read_their_own(self, con):
+        first = self.join_reading_one_frame(con)
+        z = con.sql("SELECT * FROM (VALUES (1), (2), (3)) v(c)").set_alias("z")
+        df = pd.DataFrame({"a": [2, 3]})  # noqa: F841
+        second = first.join(z, "b = c AND c IN (SELECT a FROM df)")
+        assert rows(second.fetchall()) == [(2, 2, 2)]
+
+    def test_a_side_named_in_a_join_condition_after_the_inner_join_closed(self, con):
+        first = self.join_reading_one_frame(con)
+        z = con.sql("SELECT * FROM (VALUES (1), (2), (3)) v(c)").set_alias("z")
+        df = pd.DataFrame({"a": [2, 3]})  # noqa: F841
+        with pytest.raises(duckdb.BinderException, match='Referenced table "y" not found'):
+            first.join(z, "y.b = z.c AND z.c IN (SELECT a FROM df)")
 
     def test_frames_whose_names_differ_only_in_case_in_one_statement_meet_the_engine_s_ambiguity(self, con):
         # The engine refuses the statement before any capture runs, so its own error is the answer.
@@ -98,19 +229,18 @@ class TestFunctionLocalFrames:
             con.sql("SELECT * FROM tbl, TBL")
 
     @pytest.mark.parametrize(
-        "combine",
+        ("combine", "expected"),
         [
-            pytest.param(lambda left, right: left.cross(right), id="cross"),
-            pytest.param(lambda left, right: left.union(right), id="union"),
+            pytest.param(lambda left, right: left.cross(right), [(1, 2)], id="cross"),
+            pytest.param(lambda left, right: left.union(right), [(1,), (2,)], id="union"),
         ],
     )
-    def test_frames_whose_names_differ_only_in_case_from_two_steps_are_refused(self, con, combine):
+    def test_frames_whose_names_differ_only_in_case_from_two_steps_combine(self, con, combine, expected):
         tbl = pd.DataFrame({"a": [1]})  # noqa: F841
         TBL = pd.DataFrame({"a": [2]})  # noqa: F841
         left = con.sql("SELECT a FROM tbl")
         right = con.sql("SELECT a FROM TBL")
-        with pytest.raises(duckdb.InvalidInputException, match="differ only in case"):
-            combine(left, right).fetchall()
+        assert rows(combine(left, right).fetchall()) == expected
 
 
 class TestNamesInVerbs:
@@ -316,3 +446,212 @@ class TestModuleLevelFunctions:
     def test_arrow_of_an_arrow_table(self):
         pa = pytest.importorskip("pyarrow")
         assert duckdb.arrow(pa.table({"a": [1, 2]})).fetchall() == [(1,), (2,)]
+
+
+class TestAGroupsText:
+    """A groups text is a GROUP BY list and nothing after it."""
+
+    @pytest.fixture
+    def grouped(self, con):
+        con.execute("CREATE TABLE g AS SELECT * FROM (VALUES (1, 2, 'a'), (1, 3, 'b'), (2, 5, 'c')) v(id, t, v)")
+        return con.table("g")
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            pytest.param(lambda g: g.aggregate("id, sum(t) AS s", "id HAVING sum(t) > 3"), id="having"),
+            pytest.param(lambda g: g.aggregate("id, sum(t) AS s", "id LIMIT 1"), id="limit"),
+            pytest.param(lambda g: g.list("v", groups="id order by t asc"), id="order_by"),
+        ],
+    )
+    def test_a_clause_after_the_list_is_refused(self, grouped, build):
+        with pytest.raises(duckdb.ParserException, match="GROUP BY list"):
+            build(grouped)
+
+    @pytest.mark.parametrize(
+        "groups",
+        [
+            pytest.param("ROLLUP (id)", id="rollup"),
+            pytest.param("GROUPING SETS ((id), ())", id="grouping_sets"),
+            pytest.param("ALL", id="all"),
+        ],
+    )
+    def test_a_grouping_form_still_aggregates(self, con, grouped, groups):
+        rel = grouped.aggregate("id, sum(t) AS s", groups)
+        assert rows(rel.fetchall()) == rows(con.execute(f"SELECT id, sum(t) AS s FROM g GROUP BY {groups}").fetchall())
+
+
+class TestQueryTextReadsTheConnectionSettings:
+    def test_a_query_text_follows_the_regex_semantics_set_on_the_connection(self, con):
+        con.execute("SET regex_match_operator_semantics = 'full'")
+        assert con.sql("SELECT 1").query("q", "SELECT 'abc' ~ 'b'").fetchall() == [(False,)]
+
+
+class TestNamesGivenToProject:
+    """Among several arguments, a string that is more than one column reference is a column name, quoted whole."""
+
+    @pytest.mark.parametrize("verb", ["project", "select"])
+    def test_a_name_holding_a_semicolon_is_that_column(self, con, verb):
+        rel = getattr(con.sql('SELECT 1 AS "a;", 2 AS b'), verb)("a;", "b")
+        assert rel.fetchall() == [(1, 2)]
+
+    def test_a_name_holding_a_comment_is_a_missing_column_at_the_call(self, con):
+        name = "a " + "-" * 2 + " c"
+        with pytest.raises(duckdb.BinderException, match=re.escape(f'Referenced column "{name}" not found')):
+            con.sql("SELECT 1 AS a, 2 AS b").project(name, "b")
+
+
+class TestUserTextIsValidatedNotRewritten:
+    """A fragment is checked for the shape its verb takes and spliced as it was written."""
+
+    def test_a_list_comprehension_keeps_its_own_variable(self, con):
+        rel = con.sql("SELECT 0 AS x, [5, 6] AS l").project("[x for x in l if x > 0] AS lc")
+        assert rel.fetchall() == [([5, 6],)]
+
+    def test_a_projection_follows_the_regex_semantics_set_on_the_connection(self, con):
+        con.execute("SET regex_match_operator_semantics = 'full'")
+        assert con.sql("SELECT 'abc' AS s").project("s ~ 'b' AS m").fetchall() == [(False,)]
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            pytest.param(lambda rel: rel.filter("x = 1) OR (TRUE"), id="filter_closing_its_parenthesis"),
+            pytest.param(lambda rel: rel.filter("x = 1) UNION ALL SELECT 42 WHERE (TRUE"), id="filter_with_a_union"),
+            pytest.param(lambda rel: rel.order("x DESC LIMIT 1"), id="order_with_a_limit"),
+        ],
+    )
+    def test_a_fragment_of_another_shape_is_refused_at_the_call(self, con, build):
+        with pytest.raises(duckdb.ParserException):
+            build(con.sql("SELECT * FROM range(5) t(x)"))
+
+    def test_a_deep_expression_within_the_connection_s_depth_limit(self, con):
+        con.execute("SET max_expression_depth = 3000")
+        deep = "1" + " + 1" * 1500
+        assert con.sql("SELECT 1 AS a").project(f"{deep} AS d").fetchall() == [(1501,)]
+
+
+class TestAMarkerInAVerbsText:
+    """A parameter marker in a verb's text is refused at the call; it never reads another relation's value."""
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            pytest.param(lambda con: con.sql("SELECT $1 AS a", params=[7]).filter("a = $1"), id="filter"),
+            pytest.param(lambda con: con.sql("SELECT $1 AS a", params=[7]).project("a, $1 AS b"), id="project"),
+            pytest.param(
+                lambda con: con.sql("SELECT $1 AS a", params=[7]).query("q", "SELECT a, $1 AS w FROM q"), id="query"
+            ),
+            pytest.param(lambda con: con.sql("SELECT * FROM range(3) t(x)").filter("x = ?"), id="question_mark"),
+        ],
+    )
+    def test_it_is_refused(self, con, build):
+        with pytest.raises((duckdb.BinderException, duckdb.ParserException)):
+            build(con)
+
+
+class TestTheStarAmongSeveralArguments:
+    def test_a_star_beside_an_expression(self, con):
+        rel = con.sql("SELECT 1 AS i, 'x' AS c").select("*", duckdb.ColumnExpression("i").alias("j"))
+        assert rel.columns == ["i", "c", "j"]
+        assert rel.fetchall() == [(1, "x", 1)]
+
+    def test_a_star_beside_a_name(self, con):
+        assert con.sql("SELECT 1 AS i, 'x' AS c").select("*", "i").columns == ["i", "c", "i"]
+
+
+class TestReaderOptionValues:
+    """An option value is rendered from its base type's payload, as an expression literal is."""
+
+    @pytest.fixture
+    def csv(self, tmp_path):
+        path = tmp_path / "in.csv"
+        path.write_text("a,b\n1,2\n3,4\n")
+        return str(path)
+
+    def test_an_int_enum_option(self, con, csv):
+        import enum
+
+        class Rows(enum.IntEnum):
+            ONE = 1
+
+        rel = con.read_csv(csv, skiprows=Rows.ONE, header=False)
+        assert rel.fetchall() == con.execute(f"SELECT * FROM read_csv('{csv}', skip = 1, header = false)").fetchall()
+
+    def test_a_str_subclass_whose_replace_lies(self, con, csv):
+        class Sly(str):
+            __slots__ = ()
+
+            def replace(self, *args, **kwargs):
+                return str(self)
+
+        assert con.read_csv(csv, quotechar=Sly("'")).fetchall() == [(1, 2), (3, 4)]
+
+
+VALUES_ROWS = [
+    pytest.param([(1, "a", 2.5, True, None)], id="one_row_of_mixed_types"),
+    pytest.param([(1,), (2.5,)], id="int_then_float"),
+    pytest.param([(1,), (2**40,)], id="int_then_big_int"),
+    pytest.param([(None,), (1,)], id="null_then_int"),
+    pytest.param([([1, 2],)], id="nested_list"),
+    pytest.param([({"k": 1},)], id="dict"),
+    pytest.param([(decimal.Decimal("1.25"),)], id="decimal"),
+    pytest.param([(b"ab", memoryview(b"cd"))], id="bytes_and_memoryview"),
+    pytest.param(
+        [(datetime.date(2020, 1, 2), datetime.datetime(2020, 1, 2, 3, 4, tzinfo=datetime.timezone.utc))],
+        id="date_and_aware_datetime",
+    ),
+    pytest.param([(1,), ("2",)], id="int_then_a_string_of_an_int"),
+    pytest.param(
+        [(uuid.UUID(int=1),), ("00000000-0000-0000-0000-000000000002",)],
+        id="uuid_then_a_string_of_a_uuid",
+    ),
+    pytest.param([(datetime.date(2020, 1, 1),), ("2020-01-02",)], id="date_then_a_string_of_a_date"),
+    pytest.param([(b"\x00",), ("x",)], id="blob_then_a_string"),
+]
+
+
+def bound_values(con, rows):
+    width = len(rows[0])
+    marks = ", ".join("(" + ", ".join("?" for _ in range(width)) + ")" for _ in rows)
+    cursor = con.execute(f"SELECT * FROM (VALUES {marks})", [value for row in rows for value in row])
+    kinds = [str(column[1]) for column in cursor.description]
+    return kinds, cursor.fetchall()
+
+
+def values_of(con, rows):
+    return con.values(*rows) if len(rows) > 1 else con.values(list(rows[0]))
+
+
+class TestValuesRows:
+    """values() holds its rows converted as parameters are, with the types the engine's VALUES rule gives them."""
+
+    @pytest.mark.parametrize("rows", VALUES_ROWS)
+    def test_the_types_and_rows_are_those_of_the_same_values_bound(self, con, rows):
+        rel = values_of(con, rows)
+        assert ([str(kind) for kind in rel.types], rel.fetchall()) == bound_values(con, rows)
+
+    def test_an_incompatible_column_is_refused_at_the_call(self, con):
+        with pytest.raises(duckdb.NotImplementedException, match="Cannot combine types"):
+            con.values(("x",), (1,))
+
+    def test_the_text_reads_a_registry_source(self, con):
+        assert re.search(r"__duckdb_source_", con.values([1]).sql_query())
+
+    def test_its_type_is_a_value_list(self, con):
+        assert con.values([1]).type == "VALUE_LIST_RELATION"
+
+    @pytest.mark.parametrize(
+        ("text", "params"),
+        [
+            pytest.param("SELECT $v AS b", {"v": 2}, id="named"),
+            pytest.param("SELECT ? AS b", [2], id="positional"),
+        ],
+    )
+    def test_it_combines_with_a_parameterised_relation(self, con, text, params):
+        assert con.values([1]).cross(con.sql(text, params=params)).fetchall() == [(1, 2)]
+
+    def test_changing_the_python_rows_after_the_call_changes_nothing(self, con):
+        row = [[1, 2]]
+        rel = con.values(row)
+        row[0].append(3)
+        assert rel.fetchall() == [([1, 2],)]

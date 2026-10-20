@@ -1,4 +1,4 @@
-"""Expressions turn into SQL, and the values in them are passed as parameters, not written into the text."""
+"""Expressions turn into SQL text, and the values in them are written into that text."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import concurrent.futures
 import datetime
 import decimal
 import math
+import re
 import subprocess
 import sys
 import types
@@ -17,13 +18,10 @@ import pytest
 import duckdb
 from duckdb._expression import (
     Expr,
-    ParamSink,
-    PlanBase,
     coalesce,
     col,
     fn,
     lit,
-    param,
     plain_value,
     quote,
     render_literal,
@@ -36,6 +34,14 @@ from duckdb._expression import (
 
 np = pytest.importorskip("numpy")
 pd = pytest.importorskip("pandas")
+
+
+def _converts(value: object) -> bool:
+    try:
+        value.tolist()  # type: ignore[attr-defined]
+    except OverflowError:
+        return False
+    return True
 
 
 class NoOffset(datetime.tzinfo):
@@ -66,13 +72,6 @@ class Emptying(datetime.tzinfo):
 
     def tzname(self, moment: datetime.datetime | None) -> str:
         return "emptying"
-
-
-class Plan(PlanBase):
-    """A query an expression can refer to, standing in for a relation."""
-
-    def render(self, connection: object | None = None) -> str:
-        return "SELECT 1"
 
 
 @pytest.fixture(scope="module")
@@ -121,8 +120,8 @@ class TestNoneAndUnknownOperands:
 
     @pytest.mark.parametrize(
         "operand",
-        [object(), Fraction(1, 2), np.array([1, 2]), np.longdouble(1), Plan()],
-        ids=["object", "fraction", "array", "longdouble", "plan"],
+        [object(), Fraction(1, 2), np.array([1, 2]), np.longdouble(1)],
+        ids=["object", "fraction", "array", "longdouble"],
     )
     def test_equality_with_an_unconvertible_object_raises(self, operand: object) -> None:
         # Python's fallback would answer by identity, and that False combined into a condition reads as SQL's FALSE.
@@ -140,49 +139,11 @@ class TestNoneAndUnknownOperands:
             col("x") + object()
 
 
-class TestParameterSink:
-    """Values that could carry injection are passed as parameters; the rest are written into the text."""
+class TestValuesAreWrittenIntoTheText:
+    """A value in an expression is written into its SQL text as a literal."""
 
-    def test_strings_are_bound(self) -> None:
-        with ParamSink() as sink:
-            rendered = (col("name") == "ann").fragment()
-        assert rendered == '("name" = $1)'
-        assert sink.entries == [("literal", "ann", "VARCHAR")]
-
-    def test_numbers_stay_inline(self) -> None:
-        # A number cannot inject anything, and writing it in keeps DuckDB's own typing of the literal.
-        with ParamSink() as sink:
-            rendered = (col("age") > 30).fragment()
-        assert rendered == '("age" > 30)'
-        assert sink.entries == []
-
-    def test_bytes_are_bound(self) -> None:
-        with ParamSink() as sink:
-            (col("b") == b"\xde\xad").fragment()
-        assert sink.entries[0][2] == "BLOB"
-
-    def test_without_a_sink_everything_renders_inline(self) -> None:
-        # When DuckDB is asked for the column types, an untyped $1 would say nothing, so values go in.
+    def test_a_string_is_written_in_as_a_quoted_literal(self) -> None:
         assert (col("name") == "ann").fragment() == "(\"name\" = 'ann')"
-
-    def test_numbering_follows_render_order(self) -> None:
-        with ParamSink() as sink:
-            rendered = ((col("a") == "x") & (col("b") == "y")).fragment()
-        assert "$1" in rendered
-        assert "$2" in rendered
-        assert [e[1] for e in sink.entries] == ["x", "y"]
-
-    def test_named_placeholders_share_the_numbering(self) -> None:
-        with ParamSink() as sink:
-            ((col("a") == "x") & (col("b") == param("later"))).fragment()
-        assert [e[0] for e in sink.entries] == ["literal", "reference"]
-
-    def test_a_string_with_a_quote_is_bound_not_escaped_into_sql(self) -> None:
-        nasty = "'; DROP TABLE t; /*"
-        with ParamSink() as sink:
-            rendered = (col("x") == nasty).fragment()
-        assert nasty not in rendered
-        assert sink.entries[0][1] == nasty
 
 
 class TestSqlTypeOf:
@@ -206,8 +167,10 @@ class TestSqlTypeOf:
     def test_ambiguous_values_have_no_type(self) -> None:
         # Without an element type there is nothing honest to claim, so the value is written in instead.
         assert sql_type_of([]) is None
-        assert sql_type_of(["a", 1]) is None
         assert sql_type_of({1: "a", "x": "b"}) is None
+
+    def test_a_mixed_list_takes_the_parameter_path_s_type(self) -> None:
+        assert sql_type_of(["a", 1]) == "VARCHAR[]"
 
 
 class TestOperatorsEvaluate:
@@ -265,9 +228,7 @@ class TestPredicatesAndFunctions:
             evaluate(con, lit(1).isin([]))
         assert evaluate(con, lit([]).isin([])) is True
 
-    def test_isin_a_query_or_one_expression(self, con: duckdb.DuckDBPyConnection) -> None:
-        assert lit(1).isin(Plan()).fragment() == "(1 IN (SELECT 1))"
-        assert evaluate(con, lit(1).isin(Plan())) is True
+    def test_isin_takes_one_expression_as_one_member(self, con: duckdb.DuckDBPyConnection) -> None:
         # Changed: one expression is one member; list membership is list_contains.
         assert lit(2).isin(col("y")).fragment() == '(2 IN ("y"))'
         assert evaluate(con, lit(2).isin(col("y")), " FROM (SELECT 2 AS y)") is True
@@ -296,14 +257,6 @@ class TestPredicatesAndFunctions:
         # Without an escape the underscore is a wildcard and would match "axb".
         assert evaluate(con, lit("a_b").like("a!_b", escape="!")) is True
         assert evaluate(con, lit("axb").like("a!_b", escape="!")) is False
-
-    def test_a_like_pattern_is_bound(self) -> None:
-        # Patterns come from users as often as values do, so they never enter the SQL text either.
-        pattern = "%x'; DROP TABLE t; /*%"
-        with ParamSink() as sink:
-            sql = col("s").like(pattern).fragment()
-        assert "DROP" not in sql
-        assert sink.entries[0][1] == pattern
 
     def test_cast(self, con: duckdb.DuckDBPyConnection) -> None:
         assert evaluate(con, lit("42").cast("INTEGER")) == 42
@@ -398,28 +351,7 @@ class TestPresentation:
 class TestRichLiteralTypes:
     """Every type that can be passed as a query parameter also works inside an expression."""
 
-    @pytest.mark.parametrize(
-        ("value", "expected_type"),
-        [
-            (datetime.date(2026, 8, 1), "DATE"),
-            (datetime.datetime(2026, 8, 1, 12, 30), "TIMESTAMP"),
-            (
-                datetime.datetime(2026, 8, 1, tzinfo=datetime.UTC),
-                "TIMESTAMP WITH TIME ZONE",
-            ),
-            (datetime.time(12, 30), "TIME"),
-            (datetime.timedelta(days=2), "INTERVAL"),
-            (decimal.Decimal("1.50"), "DECIMAL"),
-            (uuid.UUID(int=1), "UUID"),
-        ],
-    )
-    def test_binds_with_its_type(self, value: object, expected_type: str) -> None:
-        with ParamSink() as sink:
-            rendered = (col("x") > value).fragment()
-        assert rendered == '("x" > $1)'
-        assert sink.entries == [("literal", value, expected_type)]
-
-    def test_renders_without_a_sink(self, con: duckdb.DuckDBPyConnection) -> None:
+    def test_a_date_comparison_describes_as_a_boolean(self, con: duckdb.DuckDBPyConnection) -> None:
         # The form with values written in is the one DuckDB is shown when asked for column types.
         expression = col("d") > datetime.date(2026, 8, 1)
         described = con.execute(f"DESCRIBE SELECT {expression.fragment()} AS b FROM (SELECT DATE '2020-01-01' AS d)")
@@ -429,12 +361,6 @@ class TestRichLiteralTypes:
         expression = col("d") > datetime.date(2026, 1, 1)
         rows = con.execute(f"SELECT {expression.fragment()} FROM (SELECT DATE '2026-08-01' AS d)").fetchall()
         assert rows[0][0] is True
-
-    def test_decimal_keeps_its_scale_when_bound(self) -> None:
-        # Writing a Decimal into the text would leave its scale to a format string.
-        with ParamSink() as sink:
-            (col("x") == decimal.Decimal("1.50")).fragment()
-        assert str(sink.entries[0][1]) == "1.50"
 
     def test_decimal_keeps_its_scale_when_written_in(self, con: duckdb.DuckDBPyConnection) -> None:
         assert render_literal(decimal.Decimal("1.50")) == "CAST('1.50' AS DECIMAL(3, 2))"
@@ -463,9 +389,8 @@ class TestRichLiteralTypes:
     def test_a_literal_of_only_nulls_is_written_in_for_the_binder_to_type(self, con: duckdb.DuckDBPyConnection) -> None:
         # sql_type_of gives [None] no type, so instead of binding it bare the list is written into the SQL, where
         # the binder types the NULLs from whatever meets them.
-        with ParamSink() as sink:
-            rendered = (col("x") == lit([None])).fragment()
-        assert (rendered, sink.entries) == ('("x" = [NULL])', [])
+        rendered = (col("x") == lit([None])).fragment()
+        assert rendered == '("x" = [NULL])'
         bound = con.execute(f"SELECT {rendered} FROM (SELECT ['a'] AS x)").fetchall()
         assert bound == [(False,)]
 
@@ -749,14 +674,19 @@ class TestFunctionFamilies:
 
     def test_a_lambda_family_method_takes_a_python_callable(self, con: duckdb.DuckDBPyConnection) -> None:
         doubled = col("xs").list().transform(lambda x: x * 2)
-        assert doubled.fragment() == 'list_transform("xs", lambda "x": ("x" * 2))'
+        # The variable is named after its parameter with a suffix drawn per lambda.
+        assert re.fullmatch(r'list_transform\("xs", lambda "(x_[0-9a-f]{6})": \("\1" \* 2\)\)', doubled.fragment())
         assert evaluate(con, doubled, " FROM (SELECT [1, 2] AS xs)") == [2, 4]
 
 
 class TestLambdasFromCallables:
     def test_one_and_two_parameters(self, con: duckdb.DuckDBPyConnection) -> None:
         total = fn("list_reduce", col("xs"), lambda acc, x: acc + x)
-        assert total.fragment() == 'list_reduce("xs", lambda "acc", "x": ("acc" + "x"))'
+        # Each variable is its parameter's name with a suffix of its own, so no two can fold to one name.
+        pattern = r'list_reduce\("xs", lambda "acc_([0-9a-f]{6})", "x_([0-9a-f]{6})": \("acc_\1" \+ "x_\2"\)\)'
+        found = re.fullmatch(pattern, total.fragment())
+        assert found
+        assert found.group(1) != found.group(2)
         assert evaluate(con, total, " FROM (SELECT [1, 2, 3] AS xs)") == 6
 
     def test_a_parameter_shadows_a_column_of_the_same_name(self, con: duckdb.DuckDBPyConnection) -> None:
@@ -855,17 +785,23 @@ class TestTemporalLiterals:
         assert sql_type_of(value) == written[0][0]
 
     @pytest.mark.parametrize(
-        "value",
+        ("value", "decided_by"),
         [
-            np.timedelta64(-1500, "ns"),
-            np.timedelta64(7_200_000_000_000_000_000, "us"),
-            np.array([2**62], "i8").view("datetime64[7D]")[0],
+            (np.timedelta64(-1500, "ns"), "engine"),
+            (np.timedelta64(7_200_000_000_000_000_000, "us"), "engine"),
+            (np.array([2**62], "i8").view("datetime64[7D]")[0], "numpy"),
         ],
         ids=["nanoseconds", "microseconds", "weeks"],
     )
     def test_what_a_parameter_cannot_hold_is_refused_written_in(
-        self, con: duckdb.DuckDBPyConnection, value: object
+        self, con: duckdb.DuckDBPyConnection, value: object, decided_by: str
     ) -> None:
+        # Numpy before 2.5 converts the weeks value to a plain int, which binds as a number and is no date to write.
+        if decided_by == "numpy" and _converts(value):
+            assert con.execute("SELECT typeof($1)", [value]).fetchall() == [("BIGINT",)]
+            with pytest.raises(duckdb.InvalidInputException, match="Expected a date"):
+                render_literal(value)
+            return
         with pytest.raises((duckdb.Error, OverflowError)) as written:
             render_literal(value)
         with pytest.raises((duckdb.Error, OverflowError)) as bound:
@@ -904,40 +840,11 @@ class TestTemporalLiterals:
     def test_a_missing_value_is_null(self, missing: object) -> None:
         assert render_literal(missing) == "NULL"
 
-    @pytest.mark.parametrize(
-        ("value", "type_text"),
-        [(np.datetime64("2020-01-02", "D"), "DATE"), (np.datetime64("2020-01-01", "us"), "TIMESTAMP")],
-        ids=["days", "microseconds"],
-    )
-    def test_a_numpy_scalar_reaches_its_parameter_unchanged(self, value: object, type_text: str) -> None:
-        with ParamSink() as sink:
-            compared = (col("x") > value).fragment()
-            called = fn("year", value).fragment()
-        assert (compared, called) == ('("x" > $1)', '"year"($2)')
-        assert [(kind, type_found) for kind, _, type_found in sink.entries] == [("literal", type_text)] * 2
-        assert all(bound is value for _, bound, _ in sink.entries)
-
-    def test_a_numpy_scalar_on_the_left_reaches_its_parameter_unchanged(self) -> None:
-        value = np.datetime64("2020-06-01", "ms")
-        with ParamSink() as sink:
-            rendered = (value > col("x")).fragment()
-        assert rendered == '("x" < $1)'
-        [(kind, bound, type_text)] = sink.entries
-        # The type this engine's parameter conversion gives a datetime64 in milliseconds.
-        assert (kind, type_text) == ("literal", "TIMESTAMP")
-        assert bound is value
-
     @pytest.mark.parametrize("missing", [pd.NaT, np.timedelta64("NaT", "ns"), np.datetime64("NaT", "ms")], ids=str)
     def test_a_missing_operand_is_written_in_as_null(self, con: duckdb.DuckDBPyConnection, missing: object) -> None:
-        with ParamSink() as sink:
-            rendered = (col("x") + missing).fragment()
-        assert (rendered, sink.entries) == ('("x" + NULL)', [])
+        rendered = (col("x") + missing).fragment()
+        assert rendered == '("x" + NULL)'
         assert con.execute(f"SELECT {rendered} FROM (SELECT TIMESTAMP '2020-01-01' AS x)").fetchall() == [(None,)]
-
-    def test_a_list_of_both_kinds_is_refused_when_collected(self) -> None:
-        mixed = [datetime.datetime(2020, 1, 1), datetime.datetime(2020, 1, 1, tzinfo=datetime.UTC)]
-        with ParamSink(), pytest.raises(duckdb.InvalidInputException, match="with and without a time zone"):
-            lit(mixed).fragment()
 
 
 class TestNestedTemporalLiterals:
@@ -1066,14 +973,6 @@ class TestNumpyScalarsAreTheirPythonValues:
         assert evaluate(con, fn("greatest", col("id"), np.int64(4)), source) == 4
         assert lit(np.int16(7)).fragment() == "7"
 
-    def test_a_list_or_dict_holding_numpy_binds_plain_values(self) -> None:
-        with ParamSink() as sink:
-            lit([np.int64(1), np.int64(2)]).fragment()
-            lit({"a": np.float32(0.5)}).fragment()
-        listed, keyed = (value for _, value, _ in sink.entries)
-        assert (listed, keyed) == ([1, 2], {"a": 0.5})
-        assert [type(v) for v in [*listed, *keyed.values()]] == [int, int, float]
-
     def test_numpy_written_into_the_text_is_its_value(self) -> None:
         assert render_literal([np.int64(1), np.float64(0.5)]) == "[1, 0.5::DOUBLE]"
         assert render_literal({np.int64(1): np.bool_(False)}) == "MAP {1: FALSE}"
@@ -1100,10 +999,6 @@ class TestNumpyScalarsAreTheirPythonValues:
         assert lit(1).fragment() == "1"
         assert (col("x") + 1.5).fragment() == '("x" + 1.5::DOUBLE)'
         assert render_literal([1, [2, {"a": 3}]]) == "[1, [2, {'a': 3}]]"
-        with ParamSink() as sink:
-            lit([1, 2]).fragment()
-            lit({"a": [3]}).fragment()
-        assert [value for _, value, _ in sink.entries] == [[1, 2], {"a": [3]}]
 
     def test_a_container_without_numpy_values_comes_back_as_itself(self) -> None:
         nested = [[1, 2.5, "a"], {"k": (3, None)}, (datetime.date(2020, 1, 1),)]

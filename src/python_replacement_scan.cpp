@@ -224,8 +224,8 @@ unique_ptr<TableRef> PythonReplacementScan::ReplacementObject(const nb::object &
 	return replacement;
 }
 
-unique_ptr<TableRef> PythonReplacementScan::TryReplacementObject(const nb::object &entry, const string &name,
-                                                                 ClientContext &context, ArrowSourceKind kind) {
+static unique_ptr<TableRef> ReplacementFor(const nb::object &entry, const string &name, ClientContext &context,
+                                           ArrowSourceKind kind) {
 	auto table_function = make_uniq<TableFunctionRef>();
 	vector<unique_ptr<ParsedExpression>> children;
 	NumpyObjectType numpytype;
@@ -248,7 +248,7 @@ unique_ptr<TableRef> PythonReplacementScan::TryReplacementObject(const nb::objec
 	// A dict, list or numpy array is read by pandas_scan without asking for Arrow exports, whose probe would report an
 	// attribute lookup that a dict subclass answers with KeyError.
 	if (!IsNumpyContainer(entry)) {
-		switch (ClassifyArrowObject(entry, name, kind)) {
+		switch (PythonReplacementScan::ClassifyArrowObject(entry, name, kind)) {
 		case ArrowObjectKind::SOURCE:
 			return CreateArrowScan(entry, name, kind);
 		case ArrowObjectKind::MESSAGE_READER:
@@ -302,6 +302,11 @@ unique_ptr<TableRef> PythonReplacementScan::TryReplacementObject(const nb::objec
 		return nullptr;
 	}
 	return std::move(table_function);
+}
+
+unique_ptr<TableRef> PythonReplacementScan::TryReplacementObject(const nb::object &entry, const string &name,
+                                                                 ClientContext &context, ArrowSourceKind kind) {
+	return ReplacementFor(entry, name, context, kind);
 }
 
 static bool IsBuiltinFunction(const nb::object &object) {

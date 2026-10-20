@@ -2,6 +2,7 @@
 
 import decimal
 import math
+import re
 
 import pytest
 
@@ -39,6 +40,30 @@ class TestBinaryValues:
     def test_a_binary_operand_compares_with_a_blob(self, con, value):
         rel = con.table("t").filter(ColumnExpression("b") == value)
         assert rel.fetchall() == con.execute("SELECT * FROM t WHERE b = '\\x00'::BLOB").fetchall()
+
+    def test_a_memoryview_is_a_blob_value(self, con):
+        rel = con.values([memoryview(b"abc")])
+        assert [str(kind) for kind in rel.types] == ["BLOB"]
+        assert rel.fetchall() == [(b"abc",)]
+
+    def test_a_memoryview_beside_another_value(self, con):
+        assert [str(kind) for kind in con.values([1, memoryview(b"abc")]).types] == ["INTEGER", "BLOB"]
+
+    def test_a_memoryview_as_a_constant_and_as_an_operand(self, con):
+        assert con.sql("SELECT 1").project(ConstantExpression(memoryview(b"abc"))).fetchall() == [(b"abc",)]
+        blob = con.sql("SELECT 'abc'::BLOB AS b")
+        assert blob.filter(ColumnExpression("b") == memoryview(b"abc")).fetchall() == [(b"abc",)]
+
+    def test_a_memoryview_of_another_item_format_gives_its_raw_bytes(self, con):
+        assert con.values([memoryview(bytearray(b"ab")).cast("H")]).fetchall() == [(b"ab",)]
+
+    def test_a_strided_memoryview_gives_its_logical_bytes(self, con):
+        # New behaviour: the old client read the raw buffer and raised BufferError for a view that is not contiguous.
+        assert con.values([memoryview(b"abcdef")[::2]]).fetchall() == [(b"ace",)]
+
+    def test_a_value_no_literal_can_hold_is_a_type_error_naming_its_type(self, con):
+        with pytest.raises(TypeError, match="set"):
+            con.values([{1, 2}])
 
 
 class TestOldCallForms:
@@ -192,12 +217,12 @@ class TestDecimalsTheParameterPathHolds:
 
 
 class TestDecimalWidthAtTheEdges:
-    """The width is the larger of the integral digits and the scale, so DECIMAL(38) holds both edges."""
+    """The width counts the leading zero of a fraction as the parameter path does, and past 38 the value is DOUBLE."""
 
     @pytest.mark.parametrize(
         ("text", "kind"),
         [
-            pytest.param("1e-38", "DECIMAL(38,38)", id="smallest_scale_38"),
+            pytest.param("1e-38", "DOUBLE", id="smallest_scale_38"),
             pytest.param("9" * 38, "DECIMAL(38,0)", id="largest_integral"),
             pytest.param("0." + "9" * 38, "DECIMAL(38,38)", id="largest_fraction"),
         ],
@@ -205,8 +230,8 @@ class TestDecimalWidthAtTheEdges:
     def test_a_decimal_at_the_edge_renders_at_that_width(self, con, text, kind):
         value = decimal.Decimal(text)
         rel = con.sql("SELECT 1 AS z").select(ConstantExpression(value).alias("d"))
-        assert [str(t) for t in rel.types] == [kind]
-        assert rel.fetchall() == [(value,)]
+        assert [str(t) for t in rel.types] == [kind] == [con.execute("SELECT typeof(?)", [value]).fetchall()[0][0]]
+        assert rel.fetchall() == con.execute("SELECT ?", [value]).fetchall()
 
 
 class TestKeywordForms:
@@ -273,6 +298,129 @@ class TestAMarkerInsideAValue:
         assert joined.fetchall() == [("prefix$1suffix", 1, "prefix$1suffix", "x")]
 
 
+class TestLiteralsOfSubclasses:
+    """A literal is its base type's value; an overriding method of a subclass never becomes SQL."""
+
+    def test_an_int_subclass(self, con):
+        class Sly(int):
+            def __str__(self) -> str:
+                return "version()"
+
+            __repr__ = __str__
+
+        assert con.sql("SELECT 1").project(ConstantExpression(Sly(7))).fetchall() == [(7,)]
+
+    def test_a_str_subclass(self, con):
+        class Sly(str):
+            __slots__ = ()
+
+            def replace(self, *args):
+                return "' || version() || '"
+
+        assert con.sql("SELECT 1").project(ConstantExpression(Sly("safe"))).fetchall() == [("safe",)]
+
+    def test_a_float_subclass(self, con):
+        class Sly(float):
+            def __repr__(self) -> str:
+                return "42.0"
+
+            __str__ = __repr__
+
+        assert con.sql("SELECT 1").project(ConstantExpression(Sly(1.5))).fetchall() == [(1.5,)]
+
+
+class TestLiteralsFollowTheParameterPath:
+    """Where a literal could differ from the parameter path, it takes the parameter path's type and value."""
+
+    def literal_and_bound(self, con, value):
+        rel = con.sql("SELECT 1").select(ConstantExpression(value).alias("v"))
+        literal = ([str(kind) for kind in rel.types], rel.fetchall())
+        cursor = con.execute("SELECT ? AS v", [value])
+        return literal, ([str(column[1]) for column in cursor.description], cursor.fetchall())
+
+    def test_a_decimal_beside_an_unsigned_integer_in_a_struct_list_keeps_its_width(self, con):
+        value = [{"d": decimal.Decimal("0.0001"), "u": 2**63}]
+        literal, bound = self.literal_and_bound(con, value)
+        assert bound[1] == [(value,)]
+        assert literal == bound
+
+    def test_a_null_in_a_list_does_not_decide_the_element_type(self, con):
+        value = [1, 2**63, None]
+        assert str(con.values([value]).types[0]) == con.execute("SELECT typeof(?)", [value]).fetchall()[0][0]
+
+    def test_a_decimal_counts_the_leading_zero_of_its_fraction(self, con):
+        assert [str(kind) for kind in con.values([decimal.Decimal("0.001")]).types] == ["DECIMAL(4,3)"]
+
+    def test_an_empty_dict_is_an_empty_map(self, con):
+        rel = con.values([{}])
+        assert [str(kind) for kind in rel.types] == ['MAP("NULL", "NULL")']
+        assert rel.fetchall() == [({},)]
+
+    def test_a_mixed_list_takes_the_parameter_path_s_element_type(self, con):
+        rel = con.values([[1, "a"]])
+        assert [str(kind) for kind in rel.types] == ["VARCHAR[]"]
+        assert rel.fetchall() == [(["1", "a"],)]
+
+    def test_a_dict_with_int_keys_stays_a_map(self, con):
+        assert [str(kind) for kind in con.values([{1: "a"}]).types] == ["MAP(INTEGER, VARCHAR)"]
+
+    def test_a_typed_memoryview_value(self, con):
+        value = duckdb.Value(memoryview(b"abc"), duckdb.sqltypes.BLOB)
+        assert con.execute("SELECT ?", [value]).fetchall() == [(b"abc",)]
+        assert con.values([value]).fetchall() == [(b"abc",)]
+
+    def test_an_integer_past_the_string_limit_is_refused_as_a_parameter_is(self, con):
+        value = 10**5000
+        with pytest.raises(duckdb.InvalidInputException, match="too large for 128-bit integer type"):
+            con.execute("SELECT ?", [value])
+        with pytest.raises(duckdb.InvalidInputException, match="too large for 128-bit integer type"):
+            con.values([value])
+
+
+class TestIntegerLiteralTypes:
+    """An int is typed as the parameter path types it: BIGINT, then UBIGINT, then HUGEINT, then refused."""
+
+    def typeof(self, con, value):
+        return con.sql("SELECT 1").project(FunctionExpression("typeof", ConstantExpression(value))).fetchall()
+
+    @pytest.mark.parametrize(
+        ("value", "kind"),
+        [
+            pytest.param(2**63, "UBIGINT", id="past_int64"),
+            pytest.param(2**64, "HUGEINT", id="past_uint64"),
+            pytest.param(-(2**63) - 1, "HUGEINT", id="below_int64"),
+        ],
+    )
+    def test_the_type_is_the_parameter_path_s(self, con, value, kind):
+        assert self.typeof(con, value) == con.execute("SELECT typeof(?)", [value]).fetchall() == [(kind,)]
+
+    def test_an_unsigned_sum_overflows_as_the_engine_says(self, con):
+        with pytest.raises(duckdb.OutOfRangeException, match="Overflow"):
+            con.sql("SELECT 1").project(ConstantExpression(2**63) + ConstantExpression(2**63)).fetchall()
+
+    def test_a_value_past_int128_is_refused_as_a_parameter_is(self, con):
+        with pytest.raises(duckdb.InvalidInputException):
+            con.execute("SELECT ?", [2**128])
+        with pytest.raises(duckdb.InvalidInputException):
+            con.sql("SELECT 1").project(ConstantExpression(2**128)).fetchall()
+
+
+class TestThePublicAnnotations:
+    def test_mypy_accepts_the_supported_calls(self, tmp_path):
+        api = pytest.importorskip("mypy.api")
+        snippet = tmp_path / "calls.py"
+        snippet.write_text(
+            "from duckdb import CaseExpression, Expression, when\n\n"
+            'Expression("x")\n'
+            "CaseExpression(True, 1)\n"
+            "when(True)\n"
+        )
+        dash = "-" * 2
+        flags = [f"{dash}{flag}" for flag in ("strict", "no-incremental", "follow-imports=silent")]
+        report, errors, status = api.run([str(snippet), *flags, f"{dash}cache-dir", str(tmp_path)])
+        assert status == 0, report + errors
+
+
 class TestRawTextInsideALambda:
     """A lambda variable written into raw SQL text names the variable the lambda finally binds."""
 
@@ -292,3 +440,19 @@ class TestRawTextInsideALambda:
         direct = "SELECT list_transform(xss, lambda xs: list_transform(xs, lambda x: x + k)) FROM nested"
         expected = con.execute(direct).fetchall()
         assert con.table("nested").select(shifted).fetchall() == expected == [([[11, 12], [13]],)]
+
+    def test_an_aliased_lambda_variable_still_binds(self, con):
+        renamed = duckdb.lit([1, 2]).list().transform(lambda x: x.alias("item"))
+        assert con.sql("SELECT 1").project(renamed).fetchall() == [([1, 2],)]
+
+    def test_an_aliased_lambda_variable_inside_a_function(self, con):
+        packed = duckdb.lit([1, 2]).list().transform(lambda x: duckdb.fn("struct_pack", x.alias("item")))
+        assert con.sql("SELECT 1").project(packed).fetchall() == [([{"item": 1}, {"item": 2}],)]
+
+    def test_a_lambda_variable_is_named_after_its_parameter(self, con):
+        rel = con.sql("SELECT 1").project(duckdb.lit([1, 2]).list().transform(lambda x: x + 1))
+        assert re.search(r"\bx_[0-9a-f]{6}\b", rel.sql_query())
+
+    def test_two_parameters_differing_only_in_case_are_two_variables(self, con):
+        summed = duckdb.lit([10, 20]).list().transform(lambda x, X: x + X)
+        assert con.sql("SELECT 1").project(summed).fetchall() == [([11, 22],)]

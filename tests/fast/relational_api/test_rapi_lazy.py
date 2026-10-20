@@ -9,16 +9,37 @@ import duckdb
 def con():
     connection = duckdb.connect()
     connection.execute("CREATE SEQUENCE s")
+    register_tick(connection)
     yield connection
+    TICKS.pop(id(connection), None)
     connection.close()
 
 
+# A read is observed through a Python function that counts its calls, which the engine does not count as a write.
+TICKS = {}
+
+
+def register_tick(connection):
+    calls = []
+
+    def tick() -> int:
+        calls.append(1)
+        return len(calls)
+
+    connection.create_function("tick", tick, [], "BIGINT", side_effects=True)
+    TICKS[id(connection)] = calls
+
+
+def ran(con):
+    return bool(TICKS[id(con)])
+
+
+def runs(con):
+    return len(TICKS[id(con)])
+
+
 def counter(con):
-    return con.sql("SELECT nextval('s') AS v")
-
-
-def currval(con):
-    return con.execute("SELECT currval('s')").fetchall()[0][0]
+    return con.sql("SELECT tick() AS v")
 
 
 class TestRelationsKeepNoResult:
@@ -35,12 +56,12 @@ class TestRelationsKeepNoResult:
         rel = counter(con)
         assert terminal(rel) == 1
         assert terminal(rel) == 2
-        assert currval(con) == 2
+        assert runs(con) == 2
 
     def test_a_relation_is_not_run_when_it_is_built(self, con):
         counter(con).filter("v > 0")
-        con.execute("SELECT nextval('s')")
-        assert currval(con) == 1
+        con.execute("SELECT tick()").fetchall()
+        assert runs(con) == 1
 
     @pytest.mark.parametrize(
         "terminal",
@@ -87,10 +108,10 @@ class TestRelationsKeepNoResult:
 class TestMaterialize:
     def test_it_runs_once_and_every_read_sees_the_same_rows(self, con):
         materialized = counter(con).materialize()
-        assert currval(con) == 1
+        assert runs(con) == 1
         assert materialized.fetchall() == [(1,)]
         assert materialized.fetchall() == [(1,)]
-        assert currval(con) == 1
+        assert runs(con) == 1
 
     def test_it_composes_with_other_relations(self, con):
         materialized = con.sql("SELECT range AS i FROM range(5)").materialize()
@@ -115,15 +136,15 @@ class TestSqlWithParamsIsLazy:
     @pytest.mark.parametrize(
         ("query", "params"),
         [
-            pytest.param("SELECT nextval('s') AS v, ? AS p", [1], id="positional"),
-            pytest.param("SELECT nextval('s') AS v, $p AS p", {"p": 1}, id="named"),
+            pytest.param("SELECT tick() AS v, ? AS p", [1], id="positional"),
+            pytest.param("SELECT tick() AS v, $p AS p", {"p": 1}, id="named"),
         ],
     )
     def test_a_select_with_params_runs_at_every_read(self, con, query, params):
         rel = con.sql(query, params=params)
         assert rel.columns == ["v", "p"]
-        con.execute("SELECT nextval('s')").fetchall()
-        assert currval(con) == 1
+        con.execute("SELECT tick()").fetchall()
+        assert runs(con) == 1
         assert rel.fetchall() == [(2, 1)]
         assert rel.fetchall() == [(3, 1)]
         assert rel.filter("p = 1").fetchall() == [(4, 1)]

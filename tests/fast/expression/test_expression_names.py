@@ -7,7 +7,7 @@ import pickle
 import pytest
 
 import duckdb
-from duckdb._expression import Side, coalesce, col, fn, fold_name, function_name, lit, star
+from duckdb._expression import coalesce, col, fn, fold_name, function_name, lit, star
 
 
 @pytest.fixture(scope="module")
@@ -145,25 +145,6 @@ class TestBracketsReachIntoValues:
 
 
 class TestJoinSidesAreTheConditionsArguments:
-    def test_a_side_qualifies_its_columns(self, con: duckdb.DuckDBPyConnection) -> None:
-        left, right = Side("l"), Side("r")
-        condition = left["customer"] == right["name"]
-        assert condition.fragment() == '("l"."customer" = "r"."name")'
-        source = "(SELECT 1 AS id, 'acme' AS customer) l JOIN (SELECT 'acme' AS name, 7 AS score) r"
-        assert con.execute(f"SELECT * FROM {source} ON {condition}").fetchall() == [(1, "acme", "acme", 7)]
-
-    def test_sides_take_dotted_names_and_fields(self) -> None:
-        condition = Side("l")["shipping"]["zip"] == Side("r")["zip.code"]
-        assert condition.fragment() == '("l"."shipping"[\'zip\'] = "r"."zip.code")'
-
-    def test_a_side_has_brackets_and_nothing_else(self) -> None:
-        with pytest.raises(AttributeError, match=r"\['id'\]"):
-            _ = Side("l").id
-        with pytest.raises(TypeError, match="column name"):
-            Side("l")[0]
-        assert Side("l").alias == "l"
-        assert repr(Side("l")) == "<Side l>"
-
     def test_a_dotted_side_name_is_a_column_now(self, con: duckdb.DuckDBPyConnection) -> None:
         source = "(SELECT 1 AS id) l JOIN (SELECT 1 AS id) r"
         with pytest.raises(duckdb.Error, match=r"l\.id"):

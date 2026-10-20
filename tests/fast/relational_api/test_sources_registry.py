@@ -10,6 +10,7 @@ import duckdb
 
 pd = pytest.importorskip("pandas")
 pa = pytest.importorskip("pyarrow")
+np = pytest.importorskip("numpy")
 
 
 @pytest.fixture
@@ -320,17 +321,6 @@ class TestOtherConnectionsOfTheDatabase:
         assert con.execute("SELECT view_name FROM duckdb_views() WHERE NOT internal").fetchall() == []
         con.close()
 
-    def test_a_view_over_a_materialized_relation_is_stored_in_a_database_file(self, tmp_path):
-        # The view's definition carries the rows it reads, so it reads after a reopen, as the shipping client did.
-        path = str(tmp_path / "saved.duckdb")
-        con = duckdb.connect(path)
-        con.sql("SELECT 42 AS x").materialize().create_view("v")
-        assert con.sql("SELECT x FROM v").fetchall() == [(42,)]
-        con.close()
-        con = duckdb.connect(path)
-        assert con.sql("SELECT x FROM v").fetchall() == [(42,)]
-        con.close()
-
     def test_a_view_over_a_relation_read_by_variable_is_stored_in_a_database_file(self, tmp_path):
         # The relation is written into the view as its own text, so the view reads after a reopen.
         path = str(tmp_path / "saved.duckdb")
@@ -345,10 +335,6 @@ class TestOtherConnectionsOfTheDatabase:
         con = duckdb.connect(path)
         assert con.sql("SELECT b, t FROM w ORDER BY b").fetchall() == expected
         con.close()
-
-    def test_a_view_over_a_materialized_relation_is_created_in_memory(self, con):
-        con.sql("SELECT 42 AS x").materialize().create_view("v")
-        assert con.sql("SELECT x FROM v").fetchall() == [(42,)]
 
     def test_in_memory_the_view_is_persistent_and_a_cursor_reads_it(self, con):
         con.from_df(frame()).create_view("w")
@@ -427,6 +413,25 @@ class TestCaptureAtTheCall:
         rel = con.sql("SELECT a + 1 AS b FROM first")
         first = con.sql("SELECT 10 AS a")  # noqa: F841
         assert rel.fetchall() == [(2,)]
+
+
+class TestACaptureIsScopedToItsSource:
+    """A captured name is read inside the source that captured it, so captures of one name combine."""
+
+    def test_two_relations_over_one_local_name_combine(self, con):
+        def load(value):
+            df = pd.DataFrame({"a": [value]})  # noqa: F841
+            return con.sql("SELECT * FROM df")
+
+        assert sorted(load(1).union(load(2)).fetchall()) == [(1,), (2,)]
+        assert load(1).set_alias("l").cross(load(2).set_alias("r")).fetchall() == [(1, 2)]
+
+    def test_a_table_of_the_captured_name_is_read_elsewhere_in_the_statement(self, con):
+        df = pd.DataFrame({"a": [1]})  # noqa: F841
+        left = con.sql("SELECT * FROM df").set_alias("left_side")
+        con.execute("CREATE TABLE df AS SELECT 99 AS a")
+        right = con.table("df").set_alias("right_side")
+        assert left.cross(right).fetchall() == [(1, 99)]
 
 
 class TestARegistryReferenceKeepsEverySource:
@@ -544,18 +549,14 @@ class TestAViewOverAQueryThatNamesARegistryKey:
         assert con.sql("SELECT x FROM v").fetchall() == expected
         assert held.fetchall() == [(1,)]
 
-    def test_a_view_over_a_pivot_whose_value_list_is_a_subquery_reads_after_both_frames_go(self, con):
-        # Such a PIVOT runs at the call, so the view reads the held rows, as the shipping client's did.
+    def test_a_view_over_a_pivot_whose_value_list_is_a_subquery_is_refused(self, con):
+        # Such a PIVOT runs at the call, so its rows are held and a persistent view over them is refused.
         con.register("facts", pd.DataFrame({"year": [2020, 2021], "v": [7, 8]}))
         con.register("years", pd.DataFrame({"year": [2020]}))
-        text = "PIVOT facts ON year IN (SELECT year FROM years) USING sum(v)"
-        expected = con.execute(text).fetchall()
-        assert expected == [(7,)]
-        con.sql(text).create_view("v")
-        con.unregister("facts")
-        con.unregister("years")
-        gc.collect()
-        assert con.sql("SELECT * FROM v").fetchall() == expected
+        rel = con.sql("PIVOT facts ON year IN (SELECT year FROM years) USING sum(v)")
+        with pytest.raises(duckdb.InvalidInputException, match=r"register\("):
+            rel.create_view("v")
+        assert rel.fetchall() == [(7,)]
 
     def test_a_pivot_over_a_registry_key_with_a_literal_value_list_reads_after_the_frame_goes(self, con):
         # The PIVOT's source is written into the view, so the view reads after the frame's relation goes.
@@ -571,6 +572,155 @@ class TestAViewOverAQueryThatNamesARegistryKey:
         gc.collect()
         assert alive() is not None
         assert con.sql("SELECT * FROM v").fetchall() == expected
+
+
+class TestAViewOverTheSourceNameItself:
+    """The name sql_query() shows for a frame can be written in a query, and a view over it reads what it means."""
+
+    def test_a_column_alias_list_on_the_source_carries_into_a_view(self, con):
+        held = con.from_df(pd.DataFrame({"x": [1]}))
+        key = registry_key(held)
+        text = re.sub(rf"{re.escape(key)} AS \"[^\"]+\"", f"{key} AS s(y)", held.sql_query())
+        assert text != held.sql_query()
+        rel = con.sql(text)
+        assert rel.columns == ["y"]
+        rel.create_view("v")
+        assert con.sql("SELECT * FROM v").columns == ["y"]
+
+    def test_a_common_table_expression_named_like_its_source_reads_and_owns_it(self, con):
+        frame = pd.DataFrame({"x": [1]})
+        held = con.from_df(frame)
+        key = registry_key(held)
+        con.sql(f"WITH {key} AS (SELECT x + 1 AS x FROM {key}) SELECT * FROM {key}").create_view("v")
+        del held, frame
+        gc.collect()
+        assert con.sql("SELECT * FROM v").fetchall() == [(2,)]
+
+
+class TestAFrameIsReadAsItIsNow:
+    def test_from_df_after_a_column_was_added_reads_the_new_column(self, con):
+        frame = pd.DataFrame({"a": [1, 2]})
+        earlier = con.from_df(frame)
+        frame["b"] = [3, 4]
+        later = con.from_df(frame)
+        assert later.columns == ["a", "b"]
+        assert later.fetchall() == [(1, 3), (2, 4)]
+        assert earlier.columns == ["a"]
+
+    def test_a_reader_registered_twice_still_reads_its_rows(self, con):
+        batch = pa.record_batch([pa.array([1, 2])], names=["a"])
+        reader = pa.RecordBatchReader.from_batches(batch.schema, [batch])
+        con.from_arrow(reader)
+        second = con.from_arrow(reader)
+        assert second.fetchall() == [(1,), (2,)]
+
+
+class TestDeepViews:
+    def test_a_view_over_a_three_hundred_table_join(self, con):
+        con.execute("CREATE TABLE one AS SELECT 1 AS a")
+        joins = ", ".join(f"one AS t{i}" for i in range(300))
+        con.sql(f"SELECT t0.a FROM {joins}").create_view("wide")
+        assert con.execute("SELECT * FROM wide").fetchall() == [(1,)]
+
+    def test_a_view_over_one_hundred_and_thirty_nested_subqueries(self, con):
+        con.execute("CREATE TABLE one AS SELECT 1 AS a")
+        text = "SELECT * FROM " + "(SELECT * FROM " * 130 + "one" + ")" * 130
+        con.sql(text).create_view("deep")
+        assert con.execute("SELECT * FROM deep").fetchall() == [(1,)]
+
+
+def one_shot_reader():
+    batch = pa.record_batch([pa.array([1])], names=["a"])
+    return pa.RecordBatchReader.from_batches(batch.schema, [batch])
+
+
+class TestAPersistentViewByTheKindOfItsSource:
+    """In a database file a view over a registered Python object is refused; a registered relation is stored as text."""
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            pytest.param(lambda con: con.from_df(pd.DataFrame({"a": [1]})), id="pandas"),
+            pytest.param(lambda con: con.from_arrow(pa.table({"a": [1]})), id="arrow_table"),
+            pytest.param(lambda con: con.from_arrow(one_shot_reader()), id="arrow_reader"),
+            pytest.param(
+                lambda con: (con.register("arrays", {"a": np.array([1])}), con.sql("SELECT * FROM arrays"))[1],
+                id="numpy_arrays",
+            ),
+        ],
+    )
+    def test_a_registry_source_is_refused(self, tmp_path, build):
+        con = duckdb.connect(str(tmp_path / "saved.duckdb"))
+        with pytest.raises(duckdb.InvalidInputException, match="database file"):
+            build(con).create_view("v")
+        con.close()
+
+    def test_a_view_over_a_registered_relation_over_a_table_is_stored(self, tmp_path):
+        con = duckdb.connect(str(tmp_path / "saved.duckdb"))
+        con.execute("CREATE TABLE people AS SELECT range AS id FROM range(3)")
+        con.register("adults", con.table("people").filter("id > 0"))
+        con.sql("SELECT * FROM adults").create_view("pv")
+        assert sorted(con.table("pv").fetchall()) == [(1,), (2,)]
+        con.close()
+
+
+def held_values(con):
+    return con.values([1, "a"])
+
+
+def held_materialized(con):
+    return con.sql("SELECT 1 AS a").materialize()
+
+
+def held_step_over_materialized(con):
+    return con.sql("SELECT 1 AS a").materialize().filter("a = 1")
+
+
+def held_by_running_at_the_call(con):
+    con.execute("CREATE SEQUENCE s")
+    return con.sql("SELECT nextval('s') AS n")
+
+
+HELD_ROWS = [
+    pytest.param(held_values, [(1, "a")], id="values"),
+    pytest.param(held_materialized, [(1,)], id="materialize"),
+    pytest.param(held_step_over_materialized, [(1,)], id="step_over_materialize"),
+    pytest.param(held_by_running_at_the_call, [(1,)], id="ran_at_the_call"),
+]
+
+
+class TestAViewOverHeldRows:
+    """A persistent view over held rows is refused; create() stores the rows and register() reads them."""
+
+    def refused(self, con, call):
+        with pytest.raises(duckdb.InvalidInputException) as caught:
+            call()
+        assert "create(" in str(caught.value)
+        assert "register(" in str(caught.value)
+        assert con.execute("SELECT count(*) FROM duckdb_views() WHERE NOT internal").fetchall() == [(0,)]
+
+    @pytest.mark.parametrize("verb", ["create_view", "to_view"])
+    @pytest.mark.parametrize(("build", "rows"), HELD_ROWS)
+    def test_a_persistent_view_is_refused(self, con, build, rows, verb):
+        rel = build(con)
+        self.refused(con, lambda: getattr(rel, verb)("v"))
+        assert rel.fetchall() == rows
+
+    def test_a_persistent_view_is_refused_in_a_database_file(self, tmp_path):
+        con = duckdb.connect(str(tmp_path / "saved.duckdb"))
+        self.refused(con, lambda: con.sql("SELECT 42 AS x").materialize().create_view("v"))
+        con.close()
+
+    @pytest.mark.parametrize(("build", "rows"), HELD_ROWS)
+    def test_register_reads_the_rows(self, con, build, rows):
+        con.register("r", build(con))
+        assert con.sql("SELECT * FROM r").fetchall() == rows
+
+    def test_register_reads_the_rows_in_a_database_file(self, tmp_path):
+        con = duckdb.connect(str(tmp_path / "saved.duckdb"))
+        con.register("r", con.values([1, "a"]))
+        assert con.sql("SELECT * FROM r").fetchall() == [(1, "a")]
+        con.close()
 
 
 class TestUnregisterAfterARename:

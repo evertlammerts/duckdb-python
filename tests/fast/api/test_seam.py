@@ -1328,12 +1328,20 @@ class TestRegisterSource:
 
 
 class TestSourceIdentity:
-    def test_the_same_object_reads_as_one_source(self, con):
-        frame = pd.DataFrame({"i": [1, 2]})
-        first = con._register_source(frame)
-        second = con._register_source(frame)
+    def test_an_object_read_once_is_one_source(self, con):
+        reader = pa.table({"i": [1, 2]}).to_reader()
+        first = con._register_source(reader)
+        second = con._register_source(reader)
         assert second.name == first.name
         assert con._submit(f'SELECT * FROM "{first.name}"').fetchall() == [(1,), (2,)]
+
+    def test_a_frame_is_adapted_afresh_each_time(self, con):
+        frame = pd.DataFrame({"i": [1, 2]})
+        first = con._register_source(frame)
+        frame["j"] = [3, 4]
+        second = con._register_source(frame)
+        assert second.name != first.name
+        assert con._submit(f'SELECT * FROM "{second.name}"').fetchall() == [(1, 3), (2, 4)]
 
     def test_one_statement_reads_it_twice(self, con):
         frame = pd.DataFrame({"i": [1, 2]})
@@ -1348,9 +1356,9 @@ class TestSourceIdentity:
         assert first.name != second.name
 
     def test_the_entry_lives_while_either_handle_does(self, con):
-        frame = pd.DataFrame({"i": [1]})
-        first = con._register_source(frame)
-        second = con._register_source(frame)
+        reader = pa.table({"i": [1]}).to_reader()
+        first = con._register_source(reader)
+        second = con._register_source(reader)
         name = first.name
         del first
         gc.collect()
@@ -1373,32 +1381,46 @@ class TestSourceIdentity:
     @pytest.mark.parametrize(
         "make",
         [
-            lambda: pa.table({"i": [1]}),
             lambda: pa.table({"i": [1, 2]}).to_reader(),
+            lambda: pa.table({"i": [1, 2]}).__arrow_c_stream__(),
+        ],
+        ids=["arrow_reader", "arrow_stream_capsule"],
+    )
+    def test_a_kind_read_once_reuses_its_registration(self, con, make):
+        obj = make()
+        first = con._register_source(obj)
+        assert con._register_source(obj).name == first.name
+        # A one shot stream proves the object was adapted once, not twice
+        assert con._submit(f'SELECT * FROM "{first.name}"').fetchall()[0] == (1,)
+
+    @pytest.mark.parametrize(
+        "make",
+        [
+            lambda: pa.table({"i": [1]}),
             lambda: pd.DataFrame({"i": [1]}),
             lambda: np.array([1]),
             lambda: {"i": np.array([1])},
             lambda: [np.array([1])],
         ],
-        ids=["arrow_table", "arrow_reader", "pandas", "numpy", "dict", "list"],
+        ids=["arrow_table", "pandas", "numpy", "dict", "list"],
     )
-    def test_object_kinds_including_those_without_weak_references(self, con, make):
+    def test_a_kind_read_again_gets_a_registration_each_time(self, con, make):
         obj = make()
         first = con._register_source(obj)
-        assert con._register_source(obj).name == first.name
-        # A one shot Arrow reader proves the object was adapted once, not twice
-        assert con._submit(f'SELECT * FROM "{first.name}"').fetchall()[0] == (1,)
+        second = con._register_source(obj)
+        assert second.name != first.name
+        assert con._submit(f'SELECT * FROM "{second.name}"').fetchall()[0] == (1,)
 
     def test_each_connection_registers_its_own(self, con):
         frame = pd.DataFrame({"i": [1]})
         assert con.cursor()._register_source(frame).name != con._register_source(frame).name
 
-    def test_register_shares_the_entry_with_a_source_of_the_same_frame(self, con):
+    def test_register_adapts_the_frame_afresh(self, con):
         frame = pd.DataFrame({"i": [1]})
         handle = con._register_source(frame)
         con.register("frame_view", frame)
         view = con.execute("SELECT sql FROM duckdb_views() WHERE view_name = 'frame_view'").fetchall()[0][0]
-        assert handle.name in view
+        assert handle.name not in view
         assert con.execute("SELECT * FROM frame_view").fetchall() == [(1,)]
         del handle
         gc.collect()
@@ -1456,6 +1478,40 @@ class TestRegisterCollection:
         result = duckdb.connect()._submit("SELECT 1")
         with pytest.raises(duckdb.InvalidInputException, match="another database"):
             con._register_collection(result)
+
+
+class TestRegisterValues:
+    @pytest.mark.timeout(60)
+    def test_refused_when_a_call_takes_the_connection_while_it_converts(self, con, blocking_udf):
+        started, release = blocking_udf
+        converting = threading.Event()
+        staged, ran = [], []
+
+        class GatedDate(datetime.date):
+            @property
+            def year(self):
+                converting.set()
+                assert started.wait(30)
+                return 2020
+
+        def stage():
+            try:
+                staged.append(con._register_values([(GatedDate(2020, 1, 1),)]))
+            except duckdb.ResourceInUseException as error:
+                staged.append(error)
+
+        staging = threading.Thread(target=stage)
+        staging.start()
+        assert converting.wait(30)
+        running = threading.Thread(target=lambda: ran.append(con._submit("SELECT block(1)").fetchall()))
+        running.start()
+        staging.join(30)
+        release.set()
+        running.join(30)
+        assert ran == [[(1,)]]
+        assert len(staged) == 1
+        assert isinstance(staged[0], duckdb.ResourceInUseException)
+        assert "busy with another call" in str(staged[0])
 
 
 class TestRegisterMap:
@@ -1667,15 +1723,15 @@ class TestCreateView:
         assert reopened.execute("SELECT * FROM r").fetchall() == [(1,), (2,)]
         reopened.close()
 
-    def test_a_collection_is_stored_in_a_file(self, tmp_path):
-        path = tmp_path / "f.db"
-        first = duckdb.connect(path)
-        rows = first._register_collection(first._submit("SELECT 41 AS x UNION ALL SELECT 42"))
-        first._create_view("c", f'SELECT * FROM "{rows.name}"')
-        first.close()
-        reopened = duckdb.connect(path)
-        assert reopened.execute("SELECT * FROM c ORDER BY x").fetchall() == [(41,), (42,)]
-        reopened.close()
+    def test_a_collection_is_refused_in_a_file(self, tmp_path):
+        connection = duckdb.connect(tmp_path / "f.db")
+        rows = connection._register_collection(connection._submit("SELECT 41 AS x UNION ALL SELECT 42"))
+        with pytest.raises(duckdb.InvalidInputException) as caught:
+            connection._create_view("c", f'SELECT * FROM "{rows.name}"')
+        assert "create(" in str(caught.value)
+        assert "register(" in str(caught.value)
+        assert connection.execute("SELECT count(*) FROM duckdb_views() WHERE NOT internal").fetchall() == [(0,)]
+        connection.close()
 
     def test_a_python_object_cannot_be_stored_in_a_file(self, tmp_path):
         connection = duckdb.connect(tmp_path / "f.db")

@@ -12,7 +12,7 @@ import duckdb
 @pytest.fixture
 def con(tmp_path):
     connection = duckdb.connect()
-    connection.execute("CREATE SEQUENCE s")
+    register_tick(connection)
     connection.execute("CREATE TABLE t AS SELECT * FROM (VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd')) v(i, x)")
     connection.execute("CREATE MACRO plus_one(a) AS a + 1")
     connection.execute(
@@ -21,19 +21,31 @@ def con(tmp_path):
     connection.execute("CREATE MACRO first_n(n) AS TABLE SELECT range AS r FROM range(n)")
     (tmp_path / "in.csv").write_text("i,s\n1,a\n2,b\n")
     yield connection
+    TICKS.pop(id(connection), None)
     connection.close()
 
 
-def sequence_used(con):
-    try:
-        con.execute("SELECT currval('s')").fetchall()
-    except duckdb.SequenceException:
-        return False
-    return True
+# A read is observed through a Python function that counts its calls, which the engine does not count as a write.
+TICKS = {}
 
 
-def currval(con):
-    return con.execute("SELECT currval('s')").fetchall()[0][0]
+def register_tick(connection):
+    calls = []
+
+    def tick() -> int:
+        calls.append(1)
+        return len(calls)
+
+    connection.create_function("tick", tick, [], "BIGINT", side_effects=True)
+    TICKS[id(connection)] = calls
+
+
+def ran(con):
+    return bool(TICKS[id(con)])
+
+
+def runs(con):
+    return len(TICKS[id(con)])
 
 
 def executed(con, sql, params):
@@ -54,14 +66,14 @@ class TestReadsAreLazy:
     @pytest.mark.parametrize(
         ("sql", "params"),
         [
-            pytest.param("SELECT nextval('s') AS v, ? AS p", [1], id="question_mark"),
-            pytest.param("SELECT nextval('s') AS v, $1 AS p", [1], id="positional"),
-            pytest.param("SELECT nextval('s') AS v, $p AS p", {"p": 1}, id="named"),
+            pytest.param("SELECT tick() AS v, ? AS p", [1], id="question_mark"),
+            pytest.param("SELECT tick() AS v, $1 AS p", [1], id="positional"),
+            pytest.param("SELECT tick() AS v, $p AS p", {"p": 1}, id="named"),
         ],
     )
     def test_every_read_binds_and_runs_again(self, con, sql, params):
         rel = con.sql(sql, params=params)
-        assert not sequence_used(con)
+        assert not ran(con)
         assert rel.fetchall() == [(1, 1)]
         assert rel.fetchall() == [(2, 1)]
         assert rel.filter("p = 1").fetchall() == [(3, 1)]
@@ -122,13 +134,13 @@ class TestTheSchemaIsTypedFromTheValues:
     @pytest.mark.parametrize(
         ("sql", "params"),
         [
-            pytest.param("SELECT ? AS p, ? + 1 AS q, nextval('s') AS n", [1, 2], id="integers"),
-            pytest.param("SELECT i + $1 AS v, nextval('s') AS n FROM t", [1], id="arithmetic"),
-            pytest.param("SELECT r, nextval('s') AS n FROM range(?) AS g(r)", [3], id="table_function"),
-            pytest.param("SELECT r, nextval('s') AS n FROM first_n(?)", [3], id="table_macro"),
-            pytest.param("SELECT i, nextval('s') AS n FROM t WHERE i = any(?)", [[1, 2]], id="any"),
-            pytest.param("SELECT $1 AS a, $1::INTEGER AS b, nextval('s') AS n", [1], id="cast_and_bare"),
-            pytest.param("SELECT s, nextval('s') AS n FROM read_csv($path)", None, id="file"),
+            pytest.param("SELECT ? AS p, ? + 1 AS q, tick() AS n", [1, 2], id="integers"),
+            pytest.param("SELECT i + $1 AS v, tick() AS n FROM t", [1], id="arithmetic"),
+            pytest.param("SELECT r, tick() AS n FROM range(?) AS g(r)", [3], id="table_function"),
+            pytest.param("SELECT r, tick() AS n FROM first_n(?)", [3], id="table_macro"),
+            pytest.param("SELECT i, tick() AS n FROM t WHERE i = any(?)", [[1, 2]], id="any"),
+            pytest.param("SELECT $1 AS a, $1::INTEGER AS b, tick() AS n", [1], id="cast_and_bare"),
+            pytest.param("SELECT s, tick() AS n FROM read_csv($path)", None, id="file"),
         ],
     )
     def test_the_schema_is_known_before_any_read(self, con, tmp_path, sql, params):
@@ -136,7 +148,7 @@ class TestTheSchemaIsTypedFromTheValues:
             params = {"path": str(tmp_path / "in.csv")}
         rel = con.sql(sql, params=params)
         names, types, description = rel.columns, rel.types, rel.description
-        assert not sequence_used(con)
+        assert not ran(con)
         expected_schema, _ = executed(con, sql, params)
         assert [(name, str(kind)) for name, kind in zip(names, types, strict=True)] == expected_schema
         assert [(column[0], str(column[1])) for column in description] == expected_schema
@@ -165,6 +177,42 @@ class TestMarkersInTheText:
         assert con.sql(sql, params=params).fetchall() == con.execute(sql, params).fetchall() == [(2,), (3,)]
 
 
+class TestTheNamesOfAParameterisedSource:
+    """The names are those of the statement that runs, markers and all, while the types come from the values."""
+
+    def source(self, con):
+        return con.sql("SELECT ? + 1, 'a' || ?", params=[1, "b"])
+
+    def test_the_columns_are_the_names_of_the_running_statement(self, con):
+        rel = self.source(con)
+        assert rel.columns == ["($1 + 1)", "('a' || $2)"] == list(rel.df().columns)
+        assert [str(kind) for kind in rel.types] == ["INTEGER", "VARCHAR"]
+
+    def test_a_column_is_reached_by_that_name(self, con):
+        assert self.source(con).project('"($1 + 1)"').fetchall() == [(2,)]
+
+    def test_a_view_names_its_columns_so_too(self, con):
+        self.source(con).create_view("named")
+        cursor = con.execute("SELECT * FROM named")
+        assert [column[0] for column in cursor.description] == ["($1 + 1)", "('a' || $2)"]
+        assert cursor.fetchall() == [(2, "ab")]
+
+
+class TestParametersInAPivot:
+    def test_a_marker_in_the_on_expression(self, con):
+        text = "PIVOT (SELECT 1 AS i) ON (i + ?) IN (2) USING count(*)"
+        left = con.sql(text, params=[1])
+        assert left.columns == ["2"]
+        assert left.cross(con.sql(text, params=[2])).fetchall() == [(1, 0)]
+
+    def test_a_marker_in_the_in_list(self, con):
+        text = "PIVOT (SELECT 1 AS k, 5 AS c UNION ALL SELECT 2, 6) ON c IN (?) USING sum(k)"
+        pivoted = con.sql(text, params=[5])
+        assert pivoted.columns == ["5"]
+        assert pivoted.fetchall() == [(1,)]
+        assert con.sql("SELECT ?::INT AS z", params=[1]).cross(pivoted).fetchall() == [(1, 1)]
+
+
 class TestStepsOverAParameterisedRelation:
     def test_a_filter_and_a_limit(self, con):
         rel = con.sql("SELECT i, x FROM t WHERE i > ?", params=[1]).filter("i < 4").order("i").limit(1)
@@ -185,20 +233,20 @@ class TestStepsOverAParameterisedRelation:
         assert joined.columns == ["a", "b", "c"]
 
     def test_two_parameterised_relations_combine_lazily(self, con):
-        left = con.sql("SELECT $1 AS a, nextval('s') AS n", params=[1])
+        left = con.sql("SELECT $1 AS a, tick() AS n", params=[1])
         right = con.sql("SELECT $1 AS c", params=[3])
         joined = left.cross(right)
-        assert not sequence_used(con)
+        assert not ran(con)
         assert joined.fetchall() == [(1, 1, 3)]
         assert joined.fetchall() == [(1, 2, 3)]
 
     def test_a_union_of_two_parameterised_relations_reads_both_values(self, con):
-        left = con.sql("SELECT ? AS a, nextval('s') AS n", params=[1])
-        right = con.sql("SELECT ? AS a, nextval('s') AS n", params=[2])
+        left = con.sql("SELECT ? AS a, tick() AS n", params=[1])
+        right = con.sql("SELECT ? AS a, tick() AS n", params=[2])
         union = left.union(right)
-        assert not sequence_used(con)
+        assert not ran(con)
         assert sorted(row[0] for row in union.fetchall()) == [1, 2]
-        assert currval(con) == 2
+        assert runs(con) == 2
 
     def test_a_join_with_parameters_on_both_sides(self, con):
         left = con.sql("SELECT * FROM t WHERE i > ?", params=[1]).set_alias("a")
@@ -260,6 +308,17 @@ class TestParameterNamesFoldAsTheEngineFoldsThem:
         assert con.sql("SELECT $P AS a, $p AS b", params={"P": 1}).fetchall() == expected == [(1, 1)]
 
 
+class TestTheMarkerGrammarIsTheEngines:
+    def test_a_numbered_question_mark_is_that_positional_parameter(self, con):
+        text = "SELECT ?1 + ?1 AS s"
+        assert con.sql(text, params=[7]).fetchall() == con.execute(text, [7]).fetchall() == [(14,)]
+
+    def test_numbered_question_marks_of_two_relations_each_read_their_own(self, con):
+        left = con.sql("SELECT ?1 AS a", params=[1])
+        right = con.sql("SELECT ?1 + ?1 AS b", params=[20])
+        assert left.cross(right).fetchall() == [(1, 40)]
+
+
 class TestValuesMustMatchTheMarkers:
     @pytest.mark.parametrize(
         ("sql", "params"),
@@ -304,7 +363,7 @@ class TestValuesAreCopiedAtTheCall:
 
     def test_every_read_binds_the_values_of_the_call(self, con):
         values = [1]
-        rel = con.sql("SELECT ? AS p, nextval('s') AS n", params=values)
+        rel = con.sql("SELECT ? AS p, tick() AS n", params=values)
         values[0] = 9
         assert rel.fetchall() == [(1, 1)]
         assert rel.fetchall() == [(1, 2)]

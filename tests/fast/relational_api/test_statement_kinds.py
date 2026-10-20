@@ -41,24 +41,53 @@ def rows(result):
 
 
 class TestReadsAreLazy:
+    @pytest.fixture
+    def ticks(self, con):
+        calls = []
+
+        def tick() -> int:
+            calls.append(1)
+            return len(calls)
+
+        con.create_function("tick", tick, [], "BIGINT", side_effects=True)
+        con.execute("CREATE MACRO ticked() AS TABLE SELECT tick() AS v")
+        return calls
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            pytest.param("SELECT tick() AS v", id="select"),
+            pytest.param("FROM range(1) SELECT tick() AS v", id="from_first"),
+            pytest.param("VALUES (tick())", id="values"),
+            pytest.param("WITH c AS (SELECT tick() AS v) SELECT * FROM c", id="cte"),
+            pytest.param("SELECT * FROM (SELECT tick() AS v) USING SAMPLE 100%", id="sample"),
+            pytest.param("FROM ticked()", id="table_macro"),
+        ],
+    )
+    def test_the_call_runs_nothing_and_every_read_runs_it(self, con, ticks, sql):
+        # The observer is a Python function, which the engine does not count as a write.
+        rel = con.sql(sql)
+        assert len(ticks) == 0
+        rel.fetchall()
+        first = len(ticks)
+        assert first > 0
+        rel.fetchall()
+        assert len(ticks) == 2 * first
+
     @pytest.mark.parametrize(
         "sql",
         [
             pytest.param("SELECT nextval('s') AS v", id="select"),
-            pytest.param("FROM range(1) SELECT nextval('s') AS v", id="from_first"),
-            pytest.param("VALUES (nextval('s'))", id="values"),
             pytest.param("WITH c AS (SELECT nextval('s') AS v) SELECT * FROM c", id="cte"),
-            pytest.param("SELECT * FROM (SELECT nextval('s') AS v) USING SAMPLE 100%", id="sample"),
-            pytest.param("FROM counted()", id="table_macro"),
         ],
     )
-    def test_the_call_runs_nothing_and_every_read_runs_it(self, con, sql):
+    def test_a_select_the_engine_says_writes_runs_once_at_the_call(self, con, sql):
+        # Advancing a sequence modifies the database, so the engine reports the statement as a write.
         rel = con.sql(sql)
-        assert not sequence_used(con)
-        rel.fetchall()
-        first = currval(con)
-        rel.fetchall()
-        assert currval(con) == 2 * first
+        assert sequence_used(con)
+        after_the_call = currval(con)
+        assert rel.fetchall() == rel.fetchall()
+        assert currval(con) == after_the_call
 
     @pytest.mark.parametrize(
         ("sql", "change"),
@@ -375,6 +404,10 @@ class TestScripts:
         with pytest.raises(duckdb.NotImplementedException, match="only supported for the last statement"):
             con.sql("SELECT ? AS p; SELECT 1 AS q", params=[1])
 
+    def test_a_setting_an_earlier_statement_changes_reaches_the_last_statement_s_schema(self, con):
+        rel = con.sql("SET integer_division = true; SELECT 7 / 2 AS d")
+        assert (rel.columns, [str(kind) for kind in rel.types], rel.fetchall()) == (["d"], ["INTEGER"], [(3,)])
+
     def test_the_earlier_rows_are_kept_when_the_last_statement_returns_none(self, con):
         rel = con.sql("SELECT 7 AS a; CREATE TABLE later (i INTEGER)")
         assert (rel.columns, rel.fetchall()) == (["a"], [(7,)])
@@ -483,3 +516,60 @@ class TestAScriptsLastStatement:
             con.sql(script)
         assert transaction_state(con) is duckdb.TransactionException
         con.execute("ROLLBACK")
+
+
+class TestASequenceReadOnAFreshSequence:
+    def test_select_nextval_runs_at_the_call(self, con):
+        rel = con.sql("SELECT nextval('s') AS v")
+        assert currval(con) == 1
+        assert rel.fetchall() == [(1,)]
+        assert rel.fetchall() == [(1,)]
+        assert currval(con) == 1
+
+
+class TestAWritingCteWithAQuotedConflictTarget:
+    def test_it_constructs_and_writes_once(self, con):
+        con.execute('CREATE TABLE tw ("two words" INTEGER PRIMARY KEY)')
+        text = 'WITH w AS (INSERT INTO tw VALUES (?) ON CONFLICT ("two words") DO NOTHING RETURNING *) SELECT * FROM w'
+        rel = con.sql(text, params=[2])
+        assert con.execute("SELECT count(*) FROM tw").fetchall() == [(1,)]
+        assert rel.fetchall() == [(2,)]
+        assert rel.fetchall() == [(2,)]
+        assert con.execute("SELECT count(*) FROM tw").fetchall() == [(1,)]
+
+
+class TestTextBeyondAscii:
+    """Text beyond ASCII before a token changes nothing the engine reads after it."""
+
+    def test_a_marker_after_it_is_counted(self, con):
+        assert con.sql("SELECT 'é' AS s, ? AS p", params=[7]).fetchall() == [("é", 7)]
+
+    def test_a_writing_cte_after_it_runs_once(self, con):
+        con.execute("CREATE TABLE written (i INTEGER)")
+        rel = con.sql("WITH q AS (SELECT 'é' AS s), w AS (INSERT INTO written VALUES (1) RETURNING i) SELECT * FROM w")
+        assert con.execute("SELECT count(*) FROM written").fetchall() == [(1,)]
+        rel.fetchall()
+        rel.fetchall()
+        assert con.execute("SELECT count(*) FROM written").fetchall() == [(1,)]
+
+    def test_a_filter_ending_in_a_line_comment_after_it(self, con):
+        rel = con.sql("SELECT 'é' AS s").filter("s = 'é' " + "-" * 2 + " note")
+        assert rel.fetchall() == [("é",)]
+
+    def test_a_join_condition_naming_such_a_column_alone_is_using(self, con):
+        left = con.sql("SELECT 1 AS é, 2 AS x", alias="l")
+        right = con.sql("SELECT 1 AS é, 3 AS y", alias="r")
+        rel = left.join(right, "é")
+        assert rel.columns == ["é", "x", "y"]
+        assert rel.fetchall() == [(1, 2, 3)]
+
+    def test_a_query_text_with_a_semicolon_inside_a_literal_is_one_statement(self, con):
+        rel = con.sql("SELECT 1 AS a").query("q", "SELECT 'é;' AS s FROM q")
+        assert rel.fetchall() == [("é;",)]
+
+
+class TestAKeywordAsAColumnName:
+    def test_a_column_named_select_renders_quoted_and_binds(self, con):
+        rel = con.sql('SELECT 1 AS "select"').project(duckdb.ColumnExpression("select"))
+        assert '"select"' in rel.sql_query()
+        assert rel.fetchall() == [(1,)]

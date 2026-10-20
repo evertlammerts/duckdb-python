@@ -576,9 +576,9 @@ class TestRelation:
             """
             ).to_view("vw")
 
-        create_view(duckdb_cursor)
-        res = duckdb_cursor.sql("select * from vw").fetchall()[0]
-        assert res == ("test",)
+        with pytest.raises(duckdb.InvalidInputException, match=r"register\("):
+            create_view(duckdb_cursor)
+        assert duckdb_cursor.sql("select * from tbl").fetchall() == [("test",)]
 
     def test_materialized_relation_view2(self, duckdb_cursor):
         # This creates a MaterializedRelation

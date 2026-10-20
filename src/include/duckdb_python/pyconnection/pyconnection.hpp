@@ -393,7 +393,7 @@ public:
 
 	//! Runs every statement of the query but the last, as RunQuery does, and returns (the kept rows result or None,
 	//! the last statement's text or None, its parsed type in lower case or None)
-	nb::tuple PrepareScript(const nb::object &query, const nb::object &params);
+	nb::tuple PrepareScript(const nb::object &query, const nb::object &params, bool with_statement = false);
 
 	unordered_set<string> GetTableNames(const string &query, bool qualified);
 

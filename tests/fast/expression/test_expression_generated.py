@@ -3,9 +3,14 @@
 import importlib
 from pathlib import Path
 
+import pytest
+
 import duckdb
 
 ROOT = Path(__file__).resolve().parents[3]
+
+# The generators live in the source checkout, which a wheel's test job does not have beside the tests.
+pytestmark = pytest.mark.skipif(not (ROOT / "scripts").is_dir(), reason="needs the source checkout's scripts")
 
 
 def generator(monkeypatch, name):

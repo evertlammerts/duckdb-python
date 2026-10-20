@@ -200,6 +200,10 @@ public:
 	shared_ptr<Result> Submit(Prepared &prepared, identifier_map_t<BoundParameterData> &values, const Format &format);
 	//! Binds a statement without running it, keeping the tables its replacement scans resolved in tables
 	StatementSignature Bind(unique_ptr<SQLStatement> statement, ResolvedTables &tables);
+	//! Binds a statement with values for its parameters, as the engine rebinds a prepared statement for the values it
+	//! runs with, so the names and types are those of the statement that runs; nothing runs
+	StatementSignature Bind(unique_ptr<SQLStatement> statement, ResolvedTables &tables,
+	                        const identifier_map_t<BoundParameterData> &values);
 	//! Runs a statement to its end and drops its rows
 	void Run(unique_ptr<SQLStatement> statement, const InterruptCheck &check);
 	//! Run for a caller that already holds the connection's claim

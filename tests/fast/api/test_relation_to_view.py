@@ -9,11 +9,8 @@ class TestRelationToView:
         res = rel.fetchall()
         assert res == [("test", "this is a long string")]
 
-        rel.to_view("vw1")
-
-        view = duckdb_cursor.table("vw1")
-        res = view.fetchall()
-        assert res == [("test", "this is a long string")]
+        with pytest.raises(duckdb.InvalidInputException, match=r"register\("):
+            rel.to_view("vw1")
 
     def test_relation_to_view(self, duckdb_cursor):
         rel = duckdb_cursor.sql("select 'test', 'this is a long string'")

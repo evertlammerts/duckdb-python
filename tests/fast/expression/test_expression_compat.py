@@ -25,7 +25,7 @@ from duckdb import (
     when,
 )
 from duckdb import _expression as expression_module
-from duckdb._expression import param, string_literals
+from duckdb._expression import string_literals
 from duckdb.sqltypes import BIGINT, DOUBLE, INTEGER, SQLNULL, TIMESTAMP, VARCHAR, DuckDBPyType
 from duckdb.value.constant import (
     BinaryValue,
@@ -89,10 +89,6 @@ class TestTheModuleExportsThePythonTree:
         for name in names:
             assert getattr(duckdb, name) is getattr(expression_module, name)
             assert name in duckdb.__all__
-
-    def test_param_stays_in_the_module(self) -> None:
-        assert not hasattr(duckdb, "param")
-        assert "param" not in duckdb.__all__
 
     def test_compat_and_new_constructors_combine(self, con: duckdb.DuckDBPyConnection) -> None:
         combined = (ColumnExpression("a") + lit(1)) * fn("abs", ConstantExpression(-2))
@@ -305,21 +301,25 @@ class TestStarExpression:
 
 class TestSQLExpression:
     @pytest.mark.parametrize(
-        ("text", "name", "select"),
+        ("text", "name", "body", "alias"),
         [
-            ("sum(x) AS total", "total", 'sum(x) AS "total"'),
-            ('sum(x) AS "Total"', "Total", 'sum(x) AS "Total"'),
-            ("x total", "total", 'x AS "total"'),
-            ('x AS "we""ird"', 'we"ird', 'x AS "we""ird"'),
-            ('x AS "x AS y"', "x AS y", 'x AS "x AS y"'),
-            ("CAST(x AS INTEGER) AS n", "n", 'CAST(x AS INTEGER) AS "n"'),
-            ("x + 1 AS n", "n", '(x + 1) AS "n"'),
+            ("sum(x) AS total", "total", "sum(x)", 'AS "total"'),
+            ('sum(x) AS "Total"', "Total", "sum(x)", 'AS "Total"'),
+            ("x total", "total", "x", 'AS "total"'),
+            ('x AS "we""ird"', 'we"ird', "x", 'AS "we""ird"'),
+            ('x AS "x AS y"', "x AS y", "x", 'AS "x AS y"'),
+            ("CAST(x AS INTEGER) AS n", "n", "CAST(x AS INTEGER)", 'AS "n"'),
+            ("x + 1 AS n", "n", "x + 1", 'AS "n"'),
         ],
     )
-    def test_an_alias_names_the_column(self, con: duckdb.DuckDBPyConnection, text: str, name: str, select: str) -> None:
+    def test_an_alias_names_the_column(
+        self, con: duckdb.DuckDBPyConnection, text: str, name: str, body: str, alias: str
+    ) -> None:
+        # The alias the parser finds is split off and rendered by the layer; the rest is the text as written.
         expression = SQLExpression(text)
         assert expression.get_name() == name
-        assert expression.as_select() == select
+        assert str(expression) == body
+        assert expression.as_select().endswith(alias)
         described = con.execute(f"SELECT {expression.as_select()} FROM (SELECT 2 AS x)")
         assert [d[0] for d in described.description] == [name]
         assert expression.alias("other").as_select().endswith(' AS "other"')
@@ -333,20 +333,25 @@ class TestSQLExpression:
         ],
     )
     def test_an_as_inside_is_no_alias(self, text: str, parsed: str) -> None:
+        # The name is the engine's for the column, while the SQL stays as written.
         assert SQLExpression(text).get_name() == parsed
-        assert SQLExpression(text).as_select() == parsed
+        assert str(SQLExpression(text)) == text
 
     @pytest.mark.parametrize(
-        ("text", "parsed"),
+        ("text", "written"),
         [
-            ("a % 2 = 0 AND b LIKE '%o%'", "(((a % 2) = 0) AND (b ~~ '%o%'))"),
-            ("UPPER(b)", "upper(b)"),
+            ("a % 2 = 0 AND b LIKE '%o%'", "a % 2 = 0 AND b LIKE '%o%'"),
+            ("UPPER(b)", "UPPER(b)"),
             ("1;", "1"),
         ],
     )
-    def test_the_parsers_spelling_is_what_renders(self, text: str, parsed: str) -> None:
-        # The text goes through the engine's parser and the parsed form is embedded, so its spelling shows.
-        assert str(SQLExpression(text)) == parsed
+    def test_the_text_renders_as_written(self, text: str, written: str) -> None:
+        # The text is checked by the parser and spliced unchanged; a trailing semicolon stays out of it.
+        assert str(SQLExpression(text)) == written
+
+    def test_the_connection_s_parser_settings_apply(self, con: duckdb.DuckDBPyConnection) -> None:
+        con.execute("SET regex_match_operator_semantics = 'full'")
+        assert con.sql("SELECT 'abc' AS s").project(SQLExpression("s ~ 'b'")).fetchall() == [(False,)]
 
     def test_a_parsed_condition_still_runs(self, con: duckdb.DuckDBPyConnection) -> None:
         expression = SQLExpression("a % 2 = 0 AND b LIKE '%o%'")
@@ -545,8 +550,8 @@ class TestCompatMethods:
         assert capsys.readouterr().out == "(\"a\" = 'x')\n"
 
     def test_str_and_repr_are_the_text_with_values_written_in(self) -> None:
-        expression = (col("s") == "it's") & (col("d") > datetime.date(2020, 1, 2)) & (col("p") == param("p"))
-        text = "(((\"s\" = 'it''s') AND (\"d\" > '2020-01-02'::DATE)) AND (\"p\" = $p))"
+        expression = (col("s") == "it's") & (col("d") > datetime.date(2020, 1, 2))
+        text = "((\"s\" = 'it''s') AND (\"d\" > '2020-01-02'::DATE))"
         assert str(expression) == text
         assert repr(expression) == text
 
@@ -675,7 +680,7 @@ class TestStringLiterals:
 
     def test_only_plain_string_literals_count(self) -> None:
         expression = (
-            (col("a")["field"] == param("p"))
+            (col("a")["field"] == col("p"))
             & (duckdb.sql_expr("'s'") == lit(["in a list"]))
             & (ConstantExpression(Value("v", VARCHAR)) == col("b").cast("VARCHAR").alias("named"))
             & StarExpression(exclude=["c"]).is_null()

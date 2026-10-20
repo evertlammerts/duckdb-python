@@ -11,18 +11,18 @@ same tree, so an expression made either way combines with any other.
 from __future__ import annotations
 
 import contextlib
-import contextvars
 import copy
 import datetime
 import decimal
 import inspect
+import math
 import re
 import secrets
 import string
 import sys
 import uuid
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, NoReturn, Self, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, NoReturn, TypeAlias, cast
 
 import _duckdb
 from _duckdb import Error, InvalidInputException
@@ -47,21 +47,17 @@ PythonValue: TypeAlias = object
 ValueOrExpr: TypeAlias = object
 ValueSequence: TypeAlias = "Iterable[object]"
 Exprs: TypeAlias = "Expression | Sequence[Expression]"
-_AttributeName: TypeAlias = str
 _FieldKey: TypeAlias = "str | int"
 _Renames: TypeAlias = "Mapping[str, str] | Iterable[tuple[str, str]]"
 _TextValue: TypeAlias = str
 
 __all__ = [
     "Expression",
-    "ParamSink",
-    "Side",
     "coalesce",
     "col",
     "count_all",
     "fn",
     "lit",
-    "param",
     "sql_expr",
     "star",
     "when",
@@ -85,13 +81,6 @@ def _invalid_input(message: str) -> InvalidInputException:
 def fold_name(name: str) -> str:
     """A name as DuckDB compares names: ASCII letters case folded, every other character as written."""
     return name.translate(_ASCII_LOWER)
-
-
-class PlanBase:
-    """What an expression needs of a query; a base class, so nothing else with a `render` method can be spliced in."""
-
-    def render(self, connection: object | None = None) -> str:  # pragma: no cover (abstract)
-        raise NotImplementedError
 
 
 def name_parts(name: object, what: str = "name") -> tuple[str, ...]:
@@ -227,10 +216,40 @@ LITERAL_TYPES = (
 )
 
 # Widening order for numeric literals, so a list of mixed numbers gets a type none overflows; only numbers widen.
-_NUMERIC_RANK = {"INTEGER": 1, "BIGINT": 2, "HUGEINT": 3, "DOUBLE": 4}
+_NUMERIC_RANK = {"INTEGER": 1, "BIGINT": 2, "UBIGINT": 3, "HUGEINT": 4, "UHUGEINT": 5, "DOUBLE": 6}
 
 _INT32 = 2**31
 _INT64 = 2**63
+_INT128 = 2**127
+
+
+def _integer_type(value: int) -> str:
+    """The type the parameter path gives a Python int, refused with its error beyond 128 bits."""
+    if -_INT32 <= value < _INT32:
+        return "INTEGER"
+    if -_INT64 <= value < _INT64:
+        return "BIGINT"
+    if 0 <= value < 2 * _INT64:
+        return "UBIGINT"
+    if -_INT128 <= value < _INT128:
+        return "HUGEINT"
+    if 0 <= value < 2 * _INT128:
+        return "UHUGEINT"
+    digits = ""
+    with contextlib.suppress(ValueError):
+        # Past Python's limit on the digits it prints, the message goes without them, as the parameter path's does.
+        digits = f": {value}"
+    message = f"Python integer too large for 128-bit integer type{digits}"
+    raise _invalid_input(message)
+
+
+def _holds_unsigned(value: object) -> bool:
+    """Whether an int only an unsigned BIGINT holds is in `value`, at any depth."""
+    if isinstance(value, (list, tuple)):
+        return any(_holds_unsigned(item) for item in value)
+    if isinstance(value, dict):
+        return any(_holds_unsigned(key) or _holds_unsigned(item) for key, item in value.items())
+    return isinstance(value, int) and not isinstance(value, bool) and _integer_type(value) == "UBIGINT"
 
 
 def _widen(types: list[str]) -> str | None:
@@ -239,7 +258,11 @@ def _widen(types: list[str]) -> str | None:
     if len(unique) == 1:
         return unique[0]
     if all(t in _NUMERIC_RANK for t in unique):
-        return "DOUBLE" if "DOUBLE" in unique else max(unique, key=lambda t: _NUMERIC_RANK[t])
+        if "DOUBLE" in unique:
+            return "DOUBLE"
+        widest = max(unique, key=lambda t: _NUMERIC_RANK[t])
+        # As the parameter path widens: an unsigned BIGINT beside a signed integer needs a HUGEINT.
+        return "HUGEINT" if widest == "UBIGINT" else widest
     return None
 
 
@@ -284,32 +307,68 @@ class _NumpyTypes(NamedTuple):
     duration: type
 
 
+#: The numpy module the scalar types were read from, and those types; read again only for another module object.
+_numpy_seen: list[Any] = [None, None]
+
+
 def _numpy_types() -> _NumpyTypes | None:
     """The scalar types of numpy, or None when no value can be a numpy scalar."""
     # Looked up rather than imported, so that importing duckdb does not import numpy; without it there are no scalars.
     numpy = sys.modules.get("numpy")
-    # A numpy still importing on another thread can lack these, and then nothing has made one of its scalars yet.
+    if numpy is None:
+        return None
+    if _numpy_seen[0] is numpy:
+        return cast("_NumpyTypes", _numpy_seen[1])
+    # A numpy still importing on another thread can lack these, and then nothing has made one of its scalars yet, so
+    # that answer is not kept.
     found = [getattr(numpy, name, None) for name in ("bool_", "integer", "floating", "timedelta64")]
-    if numpy is None or not all(isinstance(kind, type) for kind in found):
+    if not all(isinstance(kind, type) for kind in found):
         return None
     *scalars, duration = cast("list[type]", found)
-    return _NumpyTypes(tuple(scalars), duration)
+    types = _NumpyTypes(tuple(scalars), duration)
+    _numpy_seen[:] = [numpy, types]
+    return types
 
 
-def _converted(value: object, numpy: _NumpyTypes) -> object:
-    """One value that is no container, a numpy bool, integer or float scalar becoming its Python value."""
-    if not isinstance(value, numpy.scalars):
+def _converted(value: object, numpy: _NumpyTypes | None) -> object:
+    """One value that is no container, a numpy bool, integer or float scalar or a memoryview becoming its Python value.
+
+    A memoryview is the bytes it shows, in order, whatever its item format or strides.
+    """
+    if isinstance(value, memoryview):
+        return value.tobytes()
+    if numpy is not None and isinstance(value, numpy.scalars):
+        # A timedelta64 is a numpy integer too, and its unit would be lost.
+        return value if isinstance(value, numpy.duration) else cast("Any", value).item()
+    return _base_value(value)
+
+
+def _base_value(value: object) -> object:
+    """An int, float, str, bytes or Decimal of a subclass as the base type's value it holds, anything else as it is.
+
+    Read through the base type's own methods, as the parameter path reads the stored value, so a subclass's own
+    `__str__`, `__repr__` or `replace` cannot change what is written into the SQL.
+    """
+    if isinstance(value, bool):
         return value
-    # A timedelta64 is a numpy integer too, and its unit would be lost.
-    return value if isinstance(value, numpy.duration) else cast("Any", value).item()
+    if isinstance(value, int):
+        return int.__int__(value)
+    if isinstance(value, float):
+        return float.__float__(value)
+    if isinstance(value, str):
+        return str.__str__(value)
+    if isinstance(value, bytes):
+        return bytes.__bytes__(value)
+    if isinstance(value, decimal.Decimal) and type(value) is not decimal.Decimal:
+        return decimal.Decimal(value)
+    return value
 
 
 def _as_python(value: object) -> object:
-    """A numpy bool, integer or float scalar as the Python value it stands for, and anything else as it is."""
+    """A numpy bool, int or float scalar or a memoryview as the Python value it stands for, anything else as it is."""
     if type(value) in _NATIVE:
         return value
-    numpy = _numpy_types()
-    return value if numpy is None else _converted(value, numpy)
+    return _converted(value, _numpy_types())
 
 
 def _all_native(container: list[Any] | tuple[Any, ...] | dict[Any, Any]) -> bool:
@@ -334,15 +393,13 @@ def _rebuilt(container: object, children: list[object]) -> object:
 
 
 def plain_value(value: object) -> object:
-    """`value` with every numpy bool, integer and float scalar in it, however deeply nested, as its Python value.
+    """`value` with each numpy bool, int or float scalar and each memoryview in it, at any depth, as its Python value.
 
     A container holding none comes back as the same object, so a caller still sees whatever happens to it later.
     """
     if type(value) in _NATIVE:
         return value
     numpy = _numpy_types()
-    if numpy is None:
-        return value
     if not isinstance(value, _CONTAINERS):
         return _converted(value, numpy)
     if _all_native(value):
@@ -403,15 +460,18 @@ def _holds_temporal(value: object) -> bool:
 
 def sql_type_of(value: object) -> str | None:
     """The SQL type to bind a Python value as, or None when it is ambiguous."""
-    # Integer widths mirror DuckDB's own, so a bound value lands on the type an inline literal would have.
+    if isinstance(value, decimal.Decimal) and _decimal_shape(value) is not None:
+        # Bound alone, a decimal takes its width from its value; only a member of a container needs it written.
+        return "DECIMAL"
+    return _value_type(value)
+
+
+def _value_type(value: object) -> str | None:
+    """The full SQL type of a Python value, as a member of a container is cast to it, or None when it is ambiguous."""
     if isinstance(value, bool):
         return "BOOLEAN"
     if isinstance(value, int):
-        if -_INT32 <= value < _INT32:
-            return "INTEGER"
-        if -_INT64 <= value < _INT64:
-            return "BIGINT"
-        return "HUGEINT"
+        return _integer_type(value)
     if isinstance(value, float):
         return "DOUBLE"
     if isinstance(value, str):
@@ -435,28 +495,35 @@ def sql_type_of(value: object) -> str | None:
     if _is_numpy_temporal(value):
         return _conversion_type_of(value)
     if isinstance(value, decimal.Decimal):
-        return "DECIMAL" if _decimal_shape(value) is not None else _seam.literal_type(value)
+        shape = _decimal_shape(value)
+        # The full type: a bare DECIMAL is DECIMAL(18,3), which would round a value finer than that.
+        return f"DECIMAL({shape[0]}, {shape[1]})" if shape is not None else _seam.literal_type(value)
     if isinstance(value, uuid.UUID):
         return "UUID"
     if isinstance(value, (list, tuple)):
-        element_types = [sql_type_of(item) for item in value]
+        # A NULL takes the type of its neighbours, so it gives none of its own.
+        element_types = [_value_type(item) for item in value if item is not None]
         if not element_types or any(t is None for t in element_types):
             return None
         element = _widen([t for t in element_types if t is not None])
-        return f"{element}[]" if element else None
+        if element:
+            return f"{element}[]"
+        # Where no numeric widening holds them all, the parameter path's own conversion decides; a date or time among
+        # them is refused by the rules for mixing those instead.
+        return None if _holds_temporal(value) else _conversion_type_of(value)
     if isinstance(value, dict):
         # Text keys make a STRUCT and any others a MAP, the same rule `render_literal` and the C++ converter use.
         if not value:
             # An empty dict is an empty STRUCT, which has no type to bind as, so it is written into the SQL.
             return None
         if all(isinstance(k, str) for k in value):
-            fields = [(k, sql_type_of(v)) for k, v in value.items()]
+            fields = [(k, _value_type(v)) for k, v in value.items()]
             if any(t is None for _, t in fields):
                 return None
             return "STRUCT(" + ", ".join(f"{quote(k)} {t}" for k, t in fields) + ")"
-        key_types = [sql_type_of(k) for k in value]
-        value_types = [sql_type_of(v) for v in value.values()]
-        if any(t is None for t in key_types) or any(t is None for t in value_types):
+        key_types = [_value_type(k) for k in value]
+        value_types = [_value_type(v) for v in value.values() if v is not None]
+        if not value_types or any(t is None for t in key_types) or any(t is None for t in value_types):
             return None
         key = _widen([t for t in key_types if t is not None])
         val = _widen([t for t in value_types if t is not None])
@@ -464,36 +531,20 @@ def sql_type_of(value: object) -> str | None:
     return None
 
 
-def _needs_param(value: object) -> bool:
-    """Whether a value is bound as a parameter rather than written into the SQL."""
-    # Text and composites stay out of the SQL, decimals and dates bind exactly, and numbers inline as DuckDB types them.
-    return _is_numpy_temporal(value) or isinstance(
-        value,
-        (
-            str,
-            bytes,
-            bytearray,
-            list,
-            tuple,
-            dict,
-            datetime.date,
-            datetime.time,
-            datetime.timedelta,
-            decimal.Decimal,
-            uuid.UUID,
-        ),
-    )
-
-
 def _decimal_shape(value: decimal.Decimal) -> tuple[int, int] | None:
     """The width and scale of the DECIMAL that holds `value` exactly, or None when no DECIMAL(38) can."""
     if not value.is_finite():
         return None
-    # Width and scale come from the value: a bare DECIMAL is DECIMAL(18,3) and silently rounds anything finer.
+    # Width and scale come from the value, as the parameter path reads them: a bare DECIMAL is DECIMAL(18,3) and
+    # silently rounds anything finer, and a fraction holding fewer digits than its scale has an integer digit too.
     _, digits, exponent = value.as_tuple()
-    scale = max(0, -int(exponent))
-    width = max(len(digits) + max(int(exponent), 0), scale)
-    return (width, scale) if width <= 38 else None
+    places = int(exponent)
+    if places >= 0:
+        width, scale = len(digits) + places, 0
+    else:
+        scale = -places
+        width = scale + 1 if scale > len(digits) else len(digits)
+    return (width, scale) if len(digits) <= 38 and width <= 38 else None
 
 
 def render_literal(value: object) -> str:
@@ -542,14 +593,13 @@ def _rendered(value: object) -> str:
     if isinstance(value, bool):
         return "TRUE" if value else "FALSE"
     if isinstance(value, int):
-        return str(value)
+        # Bare digits read as the parameter path types the value, except an unsigned BIGINT, which they read as HUGEINT.
+        return f"CAST({value} AS UBIGINT)" if _integer_type(value) == "UBIGINT" else str(value)
     if isinstance(value, float):
-        if value != value:
+        if math.isnan(value):
             return "'NaN'::DOUBLE"
-        if value == float("inf"):
-            return "'Infinity'::DOUBLE"
-        if value == float("-inf"):
-            return "'-Infinity'::DOUBLE"
+        if math.isinf(value):
+            return "'Infinity'::DOUBLE" if value > 0 else "'-Infinity'::DOUBLE"
         # Written bare, DuckDB would read 1.5 as DECIMAL, where a Python float is a double.
         return f"{value!r}::DOUBLE"
     if isinstance(value, str):
@@ -557,7 +607,7 @@ def _rendered(value: object) -> str:
         return f"'{escaped}'"
     if isinstance(value, (bytes, bytearray)):
         # One escape per byte: DuckDB reads exactly two hex digits after each, so one escape would cover only the first.
-        escaped = "".join(f"\\x{byte:02x}" for byte in value)
+        escaped = "\\x" + value.hex(" ").replace(" ", "\\x") if value else ""
         return f"'{escaped}'::BLOB"
     if _is_temporal(value):
         return _seam.temporal_literal(value)
@@ -574,68 +624,42 @@ def _rendered(value: object) -> str:
     if isinstance(value, Value):
         return _seam.value_literal(value)
     if isinstance(value, (list, tuple)):
-        return "[" + ", ".join(_rendered(item) for item in value) + "]"
+        if _mixed(value):
+            # The engine would type the elements one by one and fail; the parameter path converts them to one type.
+            return _seam.value_literal(value)
+        return _typed_as_bound(value, "[" + ", ".join(_rendered(item) for item in value) + "]")
     if isinstance(value, dict):
-        # Reached only when nothing is collecting parameters; text keys make a struct, anything else a map.
-        if all(isinstance(k, str) for k in value):
+        # Reached only when nothing is collecting parameters; text keys make a struct, anything else a map, and an
+        # empty dict is the empty map the parameter path makes of it.
+        if value and all(isinstance(k, str) for k in value):
             entries = ", ".join(f"{_rendered(k)}: {_rendered(v)}" for k, v in value.items())
             return "{" + entries + "}"
         entries = ", ".join(f"{_rendered(k)}: {_rendered(v)}" for k, v in value.items())
-        return "MAP {" + entries + "}"
+        return _typed_as_bound(value, "MAP {" + entries + "}")
     message = f"cannot render a literal of type {type(value).__name__}: {value!r}"
     raise TypeError(message)
 
 
-# Collecting the values a query binds.
+def _typed_as_bound(value: list[Any] | tuple[Any, ...] | dict[Any, Any], text: str) -> str:
+    """A list or map literal cast to the type the parameter path gives it, where it holds an unsigned BIGINT.
 
-_sink_stack: contextvars.ContextVar[tuple[ParamSink, ...]] = contextvars.ContextVar("duckdb_param_sink", default=())
-
-#: The error a `param()` raises when nothing is collecting values, or None where standing in NULL is right.
-_param_refusal: contextvars.ContextVar[str | None] = contextvars.ContextVar("duckdb_param_refusal", default=None)
-
-#: Whether SQL is being built for a reader rather than for the engine, where a `param()` shows its own name.
-_naming_params: contextvars.ContextVar[bool] = contextvars.ContextVar("duckdb_naming_params", default=False)
-
-
-class ParamSink:
-    """Collects the values a query binds, numbered `$1`, `$2` and so on; `param()` shares the numbering."""
-
-    __slots__ = ("_token", "entries")
-
-    def __init__(self) -> None:
-        #: ("literal", value, type) or ("reference", name)
-        self.entries: list[tuple[str, Any, str | None]] = []
-
-    def add_literal(self, value: object, type_text: str | None) -> int:
-        """Record a value pulled out of the SQL, returning its 1-based position."""
-        self.entries.append(("literal", value, type_text))
-        return len(self.entries)
-
-    def add_reference(self, name: str) -> int:
-        """Record a named placeholder, returning its 1-based position."""
-        self.entries.append(("reference", name, None))
-        return len(self.entries)
-
-    def __enter__(self) -> Self:
-        self._token = _sink_stack.set((*_sink_stack.get(), self))
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        _sink_stack.reset(self._token)
+    Unwritten, the engine would widen that BIGINT with its neighbours to an unsigned type where the parameter path
+    widens to HUGEINT.
+    """
+    if not _holds_unsigned(value):
+        return text
+    type_text = sql_type_of(value)
+    return text if type_text is None else f"CAST({text} AS {type_text})"
 
 
-#: While a query is being built, each step's name by identity, so a subquery used twice becomes one reference.
-_step_names: contextvars.ContextVar[dict[int, str] | None] = contextvars.ContextVar("duckdb_step_names", default=None)
-
-
-@contextlib.contextmanager
-def rendering_steps(names: dict[int, str]) -> Iterator[None]:
-    """Make the step names visible to subqueries while the SQL is built."""
-    token = _step_names.set(names)
-    try:
-        yield
-    finally:
-        _step_names.reset(token)
+def _mixed(value: list[Any] | tuple[Any, ...] | dict[Any, Any]) -> bool:
+    """Whether a list holds values of types no numeric widening brings together, which the parameter path converts."""
+    if not isinstance(value, (list, tuple)):
+        return False
+    types = [sql_type_of(item) for item in value if item is not None]
+    if None in types or len(set(types)) < 2 or _widen([t for t in types if t is not None]) is not None:
+        return False
+    return not _holds_temporal(value) and _conversion_type_of(value) is not None
 
 
 def _children(value: object) -> Iterable[object]:
@@ -651,7 +675,7 @@ def string_literals(value: object) -> list[str]:
     """Every text value an expression, or a container of them, took from a bare string operand, in tree order.
 
     Only strings given where an expression was expected count, as in `col("a") == "x"`: not `lit("x")` or
-    `ConstantExpression("x")`, not a `param()`, not the text of `sql_expr`, not a string inside a list or a
+    `ConstantExpression("x")`, not the text of `sql_expr`, not a string inside a list or a
     `duckdb.Value`, and not a name, a type or a struct field.
     """
     found: list[str] = []
@@ -664,71 +688,6 @@ def string_literals(value: object) -> list[str]:
             continue
         stack.extend(reversed(list(_children(item))))
     return found
-
-
-def parameters_in(value: object) -> list[str]:
-    """The names of every `param()` an expression, or a container of them, holds, in tree order."""
-    found: list[str] = []
-    stack: list[object] = [value]
-    while stack:
-        item = stack.pop()
-        if isinstance(item, Param):
-            found.append(item.name)
-            continue
-        stack.extend(reversed(list(_children(item))))
-    return found
-
-
-def subqueries(value: object) -> list[PlanBase]:
-    """Every query an expression, or a container of them, refers to, in tree order, each once."""
-    found: list[PlanBase] = []
-    seen: set[int] = set()
-    stack: list[object] = [value]
-    while stack:
-        item = stack.pop()
-        if isinstance(item, SubQuery):
-            if id(item.query) not in seen:
-                seen.add(id(item.query))
-                found.append(item.query)
-            continue
-        stack.extend(reversed(list(_children(item))))
-    return found
-
-
-def active_sink() -> ParamSink | None:
-    """The innermost collector of parameter values, if one is active."""
-    stack = _sink_stack.get()
-    return stack[-1] if stack else None
-
-
-@contextlib.contextmanager
-def suspended_sinks() -> Iterator[None]:
-    """Build SQL with values written in, since `$1` tells DuckDB nothing when it is asked for column types."""
-    token = _sink_stack.set(())
-    try:
-        yield
-    finally:
-        _sink_stack.reset(token)
-
-
-@contextlib.contextmanager
-def naming_parameters() -> Iterator[None]:
-    """Build SQL for a reader, where a `param()` writes its own name rather than the NULL the engine is given."""
-    token = _naming_params.set(True)
-    try:
-        yield
-    finally:
-        _naming_params.reset(token)
-
-
-@contextlib.contextmanager
-def refusing_parameters(message: str) -> Iterator[None]:
-    """Make a `param()` raise `TypeError(message)` rather than stand in NULL, which a macro body would bake in."""
-    token = _param_refusal.set(message)
-    try:
-        yield
-    finally:
-        _param_refusal.reset(token)
 
 
 # The tree.
@@ -746,69 +705,6 @@ def _coerce(other: object) -> Expression | None:
     if callable(other):
         return _as_lambda(other)
     return None
-
-
-def _identifiers(sql: str) -> set[str]:
-    """Every name a piece of SQL text could read, folded, over reading: keywords and function names count too."""
-    tokens = _duckdb.tokenize(sql)
-    found: set[str] = set()
-    for index, (offset, kind) in enumerate(tokens):
-        if kind not in (_duckdb.token_type.identifier, _duckdb.token_type.keyword):
-            continue
-        end = tokens[index + 1][0] if index + 1 < len(tokens) else len(sql)
-        word = sql[offset:end].strip()
-        if len(word) > 1 and word[0] == word[-1] == '"':
-            word = word[1:-1].replace('""', '"')
-        found.add(fold_name(word))
-    return found
-
-
-def _names_read(node: object, found: set[str], seen: set[int], raws: list[Raw]) -> None:
-    """Collect, folded, every name a lambda variable could capture inside `node`: columns, SQL text, inner lambdas.
-
-    The pieces of SQL text are collected too, since a variable written into one is spelled there by its stand-in name.
-    """
-    if id(node) in seen:
-        return
-    seen.add(id(node))
-    children: Iterable[object]
-    if isinstance(node, Col):
-        found.update(fold_name(part) for part in node.parts)
-    elif isinstance(node, Lambda):
-        found.update(fold_name(name) for name in node.names)
-    elif isinstance(node, Raw):
-        found.update(_identifiers(node.sql))
-        raws.append(node)
-    if isinstance(node, Expression):
-        children = vars(node).values()
-    elif isinstance(node, (list, tuple)):
-        children = node
-    elif isinstance(node, dict):
-        children = [*node.keys(), *node.values()]
-    else:
-        return
-    for child in children:
-        _names_read(child, found, seen, raws)
-
-
-def _lambda_names(names: list[str], read: set[str]) -> list[str]:
-    """SQL names for a lambda's variables that no name its body reads folds to, so Python's scopes hold.
-
-    SQL folds case, so `X` is `x`, and a variable binds before a column, so a variable named like a column the
-    body reads, or like an inner lambda's variable, would capture it; the Python name is kept where it is free
-    and suffixed where it is not.
-    """
-    held = set(read)
-    chosen: list[str] = []
-    for name in names:
-        fresh = name
-        suffix = 0
-        while fold_name(fresh) in held:
-            suffix += 1
-            fresh = f"{name}_{suffix}"
-        held.add(fold_name(fresh))
-        chosen.append(fresh)
-    return chosen
 
 
 def _as_lambda(function: Callable[..., object]) -> Expression:
@@ -831,10 +727,10 @@ def _as_lambda(function: Callable[..., object]) -> Expression:
                 f"and `{parameter}` ({parameter.kind.description}) is not one"
             )
             raise TypeError(message)
-    # The body is built once over stand-in names no SQL name can equal; the real names are chosen once the names the
-    # body reads are known, and written into the same variables.
-    stand_in = f"\x00{secrets.token_hex(8)}"
-    variables = [Variable(f"{stand_in}{index}") for index in range(len(parameters))]
+    # Each variable has a name no column or other variable has, even one SQL folds to the same, so the Python scopes
+    # hold in SQL as written.
+    names = [f"{parameter.name}_{secrets.token_hex(3)}" for parameter in parameters]
+    variables = [Variable(name) for name in names]
     try:
         body = function(*variables)
     except TypeError as reason:
@@ -848,24 +744,6 @@ def _as_lambda(function: Callable[..., object]) -> Expression:
         )
         raise TypeError(message)
     lifted = _lift(body)
-    read: set[str] = set()
-    raws: list[Raw] = []
-    _names_read(lifted, read, set(), raws)
-    names = _lambda_names([p.name for p in parameters], read)
-    spelled = {quote(variable.name): quote(name) for variable, name in zip(variables, names, strict=True)}
-    for variable, name in zip(variables, names, strict=True):
-        variable.name = name
-    # A variable written into SQL text, as `sql_expr(f"{x} + 1")`, is spelled there by its quoted stand-in, which no
-    # SQL text or value can hold since it begins with NUL; only that spelling is replaced, so a value is never touched.
-    for raw in raws:
-        for old, new in spelled.items():
-            raw.sql = raw.sql.replace(old, new)
-        if stand_in in raw.sql:
-            message = (
-                f"while building a SQL lambda from {label}: a lambda variable was written into SQL text in a form "
-                "that cannot be renamed; write it with f'{{x}}' as it renders, or build the body from expressions"
-            )
-            raise TypeError(message)
     return Lambda(names, lifted)
 
 
@@ -976,7 +854,9 @@ class Expression(AggregateMethods, FuncNamespaces, metaclass=_ExpressionClass):
     # where numpy would convert it to a Python value first and lose its unit.
     __array_ufunc__ = None
 
-    def __init__(self) -> None:
+    def __init__(self, *parts: str) -> None:
+        # `parts` types the earlier API's `Expression("x")`, which the metaclass answers; the nodes pass none.
+        del parts
         self._alias: str | None = None
         self._direction: str | None = None
         self._nulls: str | None = None
@@ -1194,7 +1074,7 @@ class Expression(AggregateMethods, FuncNamespaces, metaclass=_ExpressionClass):
         return self.is_not_null()
 
     def isin(self, *values: ValueOrExpr) -> Expression:
-        """Membership of several values, as `isin(1, 2)`, the form of the earlier expression API, or of a query.
+        """Membership of several values, as `isin(1, 2)`, the form of the earlier expression API.
 
         One argument is one member, so a list given as one argument is compared whole; its elements are several
         arguments, and asking whether a list-typed column holds a value is `fn("list_contains", ...)`.
@@ -1212,8 +1092,6 @@ class Expression(AggregateMethods, FuncNamespaces, metaclass=_ExpressionClass):
         if len(values) > 1:
             return In(self, [_lift(v) for v in values])
         only = values[0]
-        if isinstance(only, PlanBase):
-            return Binary("IN", self, SubQuery(only))
         # One argument is one member, list or not; the elements of a list are given as several arguments.
         return In(self, [_lift(only)])
 
@@ -1317,10 +1195,8 @@ class Expression(AggregateMethods, FuncNamespaces, metaclass=_ExpressionClass):
         return self._with(_alias=None, _direction=None, _nulls=None)
 
     def __str__(self) -> str:
-        """The SQL text, with every value written in and a parameter shown by its name."""
-        # Nothing collects here, so the text is built once and no later pass can read a value's own `$1` as a marker.
-        with suspended_sinks(), naming_parameters():
-            return self.fragment()
+        """The SQL text, with every value written in."""
+        return self.fragment()
 
     def __repr__(self) -> str:
         return str(self)
@@ -1337,7 +1213,7 @@ class Expression(AggregateMethods, FuncNamespaces, metaclass=_ExpressionClass):
         """Print the SQL text."""
         print(self)
 
-    def when(self, condition: Expression, value: ValueOrExpr) -> Expression:
+    def when(self, condition: ValueOrExpr, value: ValueOrExpr) -> Expression:
         """Another branch of a CASE built by `CaseExpression`, tried after the ones before it."""
         case = self._case("when")
         return case._with(branches=[*case.branches, (_as_condition(condition, "when"), _lift(value))])
@@ -1362,28 +1238,6 @@ class Col(Expression):
 
     def fragment(self) -> str:
         return identifier(self.parts)
-
-
-class Side:
-    """One side of a join, inside its condition, where `l["id"]` is that side's column."""
-
-    def __init__(self, alias: NewName) -> None:
-        self.alias = alias
-
-    def __getitem__(self, name: ColumnName) -> Expression:
-        if not isinstance(name, str):
-            message = f"a join side is indexed by column name, not by {type(name).__name__}"  # type: ignore[unreachable]
-            raise TypeError(message)
-        return Col((self.alias, *name_parts(name, "column name")))
-
-    def __getattr__(self, name: _AttributeName) -> NoReturn:
-        if name.startswith("__") or name == "alias":
-            raise AttributeError(name)
-        message = f"a join side has no attribute {name!r}; its columns are reached as {self.alias}[{name!r}]"
-        raise AttributeError(message)
-
-    def __repr__(self) -> str:
-        return f"<Side {self.alias}>"
 
 
 class Index(Expression):
@@ -1453,7 +1307,7 @@ class Star(Expression):
 
 
 class Lit(Expression):
-    """A Python value, written into the SQL where that is safe and otherwise bound as `$n`."""
+    """A Python value, written into the SQL."""
 
     def __init__(self, value: object, *, lifted: bool = False) -> None:
         super().__init__()
@@ -1462,10 +1316,12 @@ class Lit(Expression):
         # A snapshot, so a list or dict the caller goes on changing cannot change the query with it.
         try:
             if isinstance(value, Value):
-                value = Value(copy.deepcopy(value.object), value.type)
+                value = Value(copy.deepcopy(plain_value(value.object)), value.type)
             elif isinstance(value, bytearray):
                 value = bytes(value)
-            self.value = plain_value(copy.deepcopy(value) if isinstance(value, (list, tuple, dict)) else value)
+            # Plain first: a memoryview anywhere in it cannot be copied, and its bytes can.
+            value = plain_value(value)
+            self.value = copy.deepcopy(value) if isinstance(value, (list, tuple, dict)) else value
         except (TypeError, copy.Error) as reason:
             message = f"a literal holds a value that is not plain data: {reason}"
             raise TypeError(message) from None
@@ -1475,33 +1331,7 @@ class Lit(Expression):
     def fragment(self) -> str:
         if self.written is not None:
             return self.written
-        sink = active_sink()
-        if sink is not None and _needs_param(self.value):
-            type_text = sql_type_of(self.value)
-            if type_text is not None:
-                position = sink.add_literal(self.value, type_text)
-                return f"${position}"
         return render_literal(self.value)
-
-
-class Param(Expression):
-    """A named placeholder whose value is supplied when the query runs."""
-
-    def __init__(self, name: str) -> None:
-        super().__init__()
-        self.name = name
-
-    def fragment(self) -> str:
-        sink = active_sink()
-        if sink is None:
-            if _naming_params.get():
-                return f"${self.name}"
-            refusal = _param_refusal.get()
-            if refusal is not None:
-                raise TypeError(refusal)
-            # Only reached when DuckDB is being asked for column types, where NULL says as little as a placeholder.
-            return "NULL"
-        return f"${sink.add_reference(self.name)}"
 
 
 class Raw(Expression):
@@ -1514,6 +1344,27 @@ class Raw(Expression):
 
     def fragment(self) -> str:
         return self.sql if self.bare else f"({self.sql})"
+
+
+class WrittenSql(Raw):
+    """An expression's SQL as the caller wrote it, checked by the parser and spliced in parentheses on its own lines.
+
+    Its text shows as written; its name is the one the engine gives the column, the parser's rendering of the text.
+    """
+
+    def __init__(self, sql: str, name: str) -> None:
+        super().__init__(sql)
+        self.name = name
+
+    def get_name(self) -> str:
+        """The name a query gives this expression's column: its alias, or the engine's rendering of its text."""
+        return self._alias if self._alias is not None else self.name
+
+    def fragment(self) -> str:
+        return f"(\n{self.sql}\n)"
+
+    def __str__(self) -> str:
+        return self.sql
 
 
 class Binary(Expression):
@@ -1602,7 +1453,7 @@ class Like(Expression):
 
 
 class Variable(Expression):
-    """A lambda's parameter, which takes the name even where a column has it too, so the Python name decides."""
+    """A lambda's parameter, under a name of its own: its Python name with a random suffix."""
 
     def __init__(self, name: str) -> None:
         super().__init__()
@@ -1622,22 +1473,6 @@ class Lambda(Expression):
 
     def fragment(self) -> str:
         return f"lambda {', '.join(quote(name) for name in self.names)}: {self.body.fragment()}"
-
-
-class SubQuery(Expression):
-    """A whole query standing in for a value."""
-
-    def __init__(self, query: PlanBase) -> None:
-        super().__init__()
-        self.query = query
-
-    def fragment(self) -> str:
-        names = _step_names.get()
-        if names is not None and id(self.query) in names:
-            # Already a step of the query being built, so a reference to it, computed once however often it is used.
-            return f"(SELECT * FROM {names[id(self.query)]})"
-        # Built on its own, with its own steps inside these parentheses; its values still reach the collector.
-        return f"({self.query.render()})"
 
 
 class Collate(Expression):
@@ -1847,7 +1682,7 @@ class ThenBuilder(PendingCase):
     def __init__(self, branches: list[tuple[Expression, Expression]]) -> None:
         self._branches = branches
 
-    def when(self, condition: Expression) -> CaseBuilder:
+    def when(self, condition: ValueOrExpr) -> CaseBuilder:
         """Another condition."""
         return CaseBuilder(self._branches, _as_condition(condition, "when"))
 
@@ -1883,11 +1718,6 @@ def lit(value: PythonValue) -> Expression:
     return Lit(value)
 
 
-def param(name: NewName) -> Expression:
-    """A placeholder whose value is supplied when the query runs."""
-    return Param(_as_name(name, "parameter name"))
-
-
 def star(exclude: ColumnNames = (), rename: _Renames | None = None) -> Expression:
     """`*`, optionally dropping or renaming columns; `exclude="id"` drops the one column `id`."""
     return Star(_as_names(exclude, "column name"), _as_renames(rename))
@@ -1906,7 +1736,7 @@ def sql_expr(sql: SqlText) -> Expression:
     return Raw(_as_sql(sql, "sql_expr"))
 
 
-def when(condition: Expression) -> CaseBuilder:
+def when(condition: ValueOrExpr) -> CaseBuilder:
     """Begins a CASE. Continue with `.then(...)`."""
     return CaseBuilder([], _as_condition(condition, "when"))
 
@@ -1985,11 +1815,16 @@ def ColumnExpression(*names: ColumnName) -> Expression:
 
 def ConstantExpression(value: PythonValue) -> Expression:
     """A value; a `duckdb.Value` is written as a cast to its type, and a numpy array as the list it holds."""
+    return constant(value, "ConstantExpression takes a value")
+
+
+def constant(value: object, refusal: str) -> Expression:
+    """A value as a constant; where no constant holds it, a TypeError that says `refusal` and names its type."""
     kind = type(value)
     if kind.__module__ == "numpy" and kind.__name__ == "ndarray":
         value = cast("Any", value).tolist()
     if isinstance(value, Expression) or not _is_value(value):
-        message = f"ConstantExpression takes a value, not {type(value).__name__}"
+        message = f"{refusal}, not {type(value).__name__}"
         raise TypeError(message)
     return Lit(value)
 
@@ -1999,7 +1834,7 @@ def FunctionExpression(function_name: QualifiedName, *args: ValueOrExpr) -> Expr
     return fn(function_name, *args)
 
 
-def CaseExpression(condition: Expression, value: ValueOrExpr) -> Expression:
+def CaseExpression(condition: ValueOrExpr, value: ValueOrExpr) -> Expression:
     """`CASE WHEN condition THEN value`, extended by `.when(condition, value)` and closed by `.otherwise(value)`."""
     return Case([(_as_condition(condition, "CaseExpression"), _lift(value))], Lit(None))
 
@@ -2038,10 +1873,10 @@ _ALIASED = re.compile(r'(?P<body>.*) AS (?P<alias>"(?:[^"]|"")*"|[^\W\d]\w*)', r
 
 
 def SQLExpression(expression: SqlText) -> Expression:
-    """One SQL expression, read by the parser here and written as the parser writes it, never from untrusted input.
+    """One SQL expression, checked by the parser here and written as given, never from untrusted input.
 
-    An alias in the text names the column, as `SQLExpression("sum(x) AS total")` does. The parser's spelling is what
-    renders, so `SQLExpression("x::INTEGER")` is `CAST(x AS INTEGER)`.
+    An alias in the text names the column, as `SQLExpression("sum(x) AS total")` does; the rest of the text is what
+    the SQL holds, in parentheses on lines of its own.
     """
     text = _as_sql(expression, "SQLExpression")
     parsed = _seam.parse_expressions(text)
@@ -2053,12 +1888,48 @@ def SQLExpression(expression: SqlText) -> Expression:
         raise _invalid_input(message)
     aliased = _ALIASED.fullmatch(parsed[0])
     if aliased is None or not _is_one_expression(aliased["body"]):
-        # The text as given need not be an expression on its own: a trailing semicolon or comment only parses alone.
-        return Raw(parsed[0], bare=True)
+        return WrittenSql(_expression_body(text, aliased=False), parsed[0])
     alias = aliased["alias"]
     if alias.startswith('"'):
         alias = alias[1:-1].replace('""', '"')
-    return Raw(aliased["body"], bare=True).alias(alias)
+    return WrittenSql(_expression_body(text, aliased=True), aliased["body"]).alias(alias)
+
+
+def _expression_body(text: str, *, aliased: bool) -> str:
+    """The text of one expression without a trailing semicolon, and without its alias where the parser read one.
+
+    The alias is the last token, and the AS before it when there is one.
+    """
+    found = text_tokens(text)
+    words = []
+    for position, (offset, kind) in enumerate(found):
+        end = found[position + 1][0] if position + 1 < len(found) else len(text)
+        if kind != _duckdb.token_type.comment:
+            words.append((offset, kind, text[offset:end].strip()))
+    while words and words[-1][2] == ";":
+        words.pop()
+    if aliased and words:
+        words.pop()
+        if words and words[-1][1] == _duckdb.token_type.keyword and fold_name(words[-1][2]) == "as":
+            words.pop()
+    if not words:
+        return text.strip()
+    last_offset, _, last_word = words[-1]
+    return text[: last_offset + len(last_word)].strip()
+
+
+def text_tokens(text: str) -> list[tuple[int, _duckdb.token_type]]:
+    """The engine's tokens of a text, each with the string index it starts at; the tokenizer counts UTF-8 bytes."""
+    found = _duckdb.tokenize(text)
+    if text.isascii():
+        return found
+    index_of = [0] * (len(text.encode()) + 1)
+    position = 0
+    for index, char in enumerate(text):
+        index_of[position] = index
+        position += len(char.encode())
+    index_of[position] = len(text)
+    return [(index_of[offset], kind) for offset, kind in found]
 
 
 def _is_one_expression(text: str) -> bool:

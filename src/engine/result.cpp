@@ -5,6 +5,7 @@
 #include "duckdb/common/arrow/nanoarrow/nanoarrow.hpp"
 #include "duckdb/common/enums/query_result_state.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/database.hpp"
 
 namespace duckdb {
 namespace engine {

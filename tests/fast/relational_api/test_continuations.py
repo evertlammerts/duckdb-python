@@ -1098,6 +1098,15 @@ class TestADeepSetOperation:
             u.filter("zz.a = 1")
 
 
+class TestALongChainOfSteps:
+    def test_six_hundred_filters_read_their_alias_and_join(self, con):
+        rel = con.sql("SELECT 1 AS a")
+        for _ in range(600):
+            rel = rel.filter("a = 1")
+        assert rel.alias.startswith("unnamed_relation_")
+        assert rel.cross(con.sql("SELECT 2 AS b")).columns == ["a", "b"]
+
+
 class TestALongChainOfJoins:
     @pytest.mark.timeout(30)
     def test_twenty_four_joins_build_and_render(self, con):

@@ -227,7 +227,8 @@ class TestRAPIAggregations:
         expected = [([1, 1, 2, 10, 11, -1, 5, None],)]
         assert len(result) == len(expected)
         assert all(r == e for r, e in zip(result, expected, strict=False))
-        result = table.list("v", groups="id order by t asc", projected_columns="id").order("id").fetchall()
+        # The ORDER BY never applied; a groups text holds only a GROUP BY list.
+        result = table.list("v", groups="id", projected_columns="id").order("id").fetchall()
         expected = [(1, [1, 1, 2]), (2, [10, 11]), (3, [-1, 5, None])]
         assert len(result) == len(expected)
         assert all(r == e for r, e in zip(result, expected, strict=False))
@@ -267,9 +268,8 @@ class TestRAPIAggregations:
         expected = [("h/e/l/l/o/,/wor/ld",)]
         assert len(result) == len(expected)
         assert all(r == e for r, e in zip(result, expected, strict=False))
-        result = (
-            table.string_agg("s", sep="/", groups="id order by t asc", projected_columns="id").order("id").fetchall()
-        )
+        # The ORDER BY never applied; a groups text holds only a GROUP BY list.
+        result = table.string_agg("s", sep="/", groups="id", projected_columns="id").order("id").fetchall()
         expected = [(1, "h/e/l"), (2, "l/o"), (3, ",/wor/ld")]
         assert len(result) == len(expected)
         assert all(r == e for r, e in zip(result, expected, strict=False))

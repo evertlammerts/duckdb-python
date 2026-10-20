@@ -964,7 +964,7 @@ PathLike DuckDBPyConnection::GetPathLike(const nb::object &object) {
 	return PathLike::Create(object, *this);
 }
 
-nb::tuple DuckDBPyConnection::PrepareScript(const nb::object &query, const nb::object &params) {
+nb::tuple DuckDBPyConnection::PrepareScript(const nb::object &query, const nb::object &params, bool with_statement) {
 	auto statements = GetStatements(query);
 	auto last_statement = RunAllButLast(statements, false);
 	if (!last_statement && HasParameters(params)) {
@@ -976,12 +976,18 @@ nb::tuple DuckDBPyConnection::PrepareScript(const nb::object &query, const nb::o
 		nb::gil_scoped_release release;
 		kept = statements.Choose(nullptr);
 	}
+	// The group's parser keeps the settings it started with, so after an earlier statement such as a SET the parsed
+	// last statement can differ from what its text parses to now
+	auto earlier_ran = kept != nullptr;
 	nb::object kept_result = nb::none();
 	// A kept result that returns no rows only stands in for a last statement that returns none, which the caller runs
 	if (kept && kept->Properties().return_type == StatementReturnType::QUERY_RESULT) {
 		kept_result = nb::cast(std::make_shared<DuckDBPyResult>(std::move(kept)));
 	}
 	if (!last_statement) {
+		if (with_statement) {
+			return nb::make_tuple(kept_result, nb::none(), nb::none(), nb::none());
+		}
 		return nb::make_tuple(kept_result, nb::none(), nb::none());
 	}
 	auto &location = last_statement->stmt_location;
@@ -994,6 +1000,15 @@ nb::tuple DuckDBPyConnection::PrepareScript(const nb::object &query, const nb::o
 		text.pop_back();
 	}
 	auto type_name = StringUtil::Lower(StatementTypeToString(last_statement->type));
+	if (with_statement) {
+		// The parsed statement too, so a caller binds it without parsing the text again
+		nb::object statement = nb::none();
+		if (!earlier_ran) {
+			statement = nb::cast(std::make_shared<DuckDBPyStatement>(std::move(last_statement)));
+		}
+		return nb::make_tuple(kept_result, nb::str(text.c_str(), text.size()),
+		                      nb::str(type_name.c_str(), type_name.size()), statement);
+	}
 	return nb::make_tuple(kept_result, nb::str(text.c_str(), text.size()),
 	                      nb::str(type_name.c_str(), type_name.size()));
 }

@@ -15,11 +15,35 @@ from duckdb import ColumnExpression, ConstantExpression, StarExpression
 @pytest.fixture
 def con():
     connection = duckdb.connect()
-    connection.execute("CREATE SEQUENCE s")
+    register_tick(connection)
     connection.execute("CREATE TABLE t AS SELECT * FROM (VALUES (1, 'a'), (2, 'b'), (3, 'c')) v(i, x)")
     connection.execute("CREATE TABLE r AS SELECT * FROM (VALUES (2, 'B'), (3, 'C'), (4, 'D')) v(i, y)")
     yield connection
+    TICKS.pop(id(connection), None)
     connection.close()
+
+
+# A read is observed through a Python function that counts its calls, which the engine does not count as a write.
+TICKS = {}
+
+
+def register_tick(connection):
+    calls = []
+
+    def tick() -> int:
+        calls.append(1)
+        return len(calls)
+
+    connection.create_function("tick", tick, [], "BIGINT", side_effects=True)
+    TICKS[id(connection)] = calls
+
+
+def ran(con):
+    return bool(TICKS[id(con)])
+
+
+def runs(con):
+    return len(TICKS[id(con)])
 
 
 ARROW = pytest.mark.skipif(importlib.util.find_spec("pyarrow") is None, reason="needs pyarrow")
@@ -27,19 +51,7 @@ POLARS = pytest.mark.skipif(importlib.util.find_spec("polars") is None, reason="
 
 
 def counter(con):
-    return con.sql("SELECT nextval('s') AS v, 'x' AS w")
-
-
-def sequence_used(con):
-    try:
-        con.execute("SELECT currval('s')").fetchall()
-    except duckdb.SequenceException:
-        return False
-    return True
-
-
-def currval(con):
-    return con.execute("SELECT currval('s')").fetchall()[0][0]
+    return con.sql("SELECT tick() AS v, 'x' AS w")
 
 
 def described(con, sql):
@@ -72,14 +84,14 @@ class TestNoRowsAreKept:
     def test_every_read_runs_the_source_again(self, con, step):
         rel = step(counter(con))
         rel.fetchall()
-        first = currval(con)
+        first = runs(con)
         rel.fetchall()
-        assert currval(con) == 2 * first
+        assert runs(con) == 2 * first
 
     @pytest.mark.parametrize("step", STEPS)
     def test_building_a_step_runs_nothing(self, con, step):
         step(counter(con))
-        assert not sequence_used(con)
+        assert not ran(con)
 
 
 class TestErrorsRaiseWhereTheStepIsBuilt:
@@ -132,9 +144,9 @@ class TestTheSchemaIsReadWithoutRunning:
         ],
     )
     @pytest.mark.parametrize("step", STEPS)
-    def test_the_sequence_does_not_advance(self, con, step, read):
+    def test_the_observer_does_not_run(self, con, step, read):
         read(step(counter(con)))
-        assert not sequence_used(con)
+        assert not ran(con)
 
     def test_a_derivation_binds_once_over_typed_empty_inputs_and_reads_nothing(self, con, monkeypatch):
         from duckdb import _seam
@@ -166,7 +178,7 @@ class TestTheSchemaIsReadWithoutRunning:
             assert [column[0] for column in derived.description] == ["v", "w"]
         assert binds == []
         assert submits == []
-        assert not sequence_used(con)
+        assert not ran(con)
 
     def test_shape_runs_one_count_and_reads_its_width_from_the_schema(self, con, monkeypatch):
         # Shape is a tuple, so its first item, len(), runs a count each time it is read.
@@ -188,17 +200,17 @@ class TestTheSchemaIsReadWithoutRunning:
         monkeypatch.setattr(_seam, "submit", counted_submit)
         assert derived.shape == (1, 2)
         assert (len(binds), len(submits)) == (1, 1)
-        assert currval(con) == 1
+        assert runs(con) == 1
         assert derived.shape == (1, 2)
         assert (len(binds), len(submits)) == (2, 2)
-        assert currval(con) == 2
+        assert runs(con) == 2
 
     def test_names_and_types_are_those_the_engine_gives(self, con):
         rel = counter(con).project("v + 1 AS a, upper(w) AS b, [v] AS c, {'k': w} AS d").filter("a > 0")
         expected = described(
             con,
             "SELECT * FROM (SELECT v + 1 AS a, upper(w) AS b, [v] AS c, {'k': w} AS d "
-            "FROM (SELECT nextval('s') AS v, 'x' AS w)) WHERE a > 0",
+            "FROM (SELECT tick() AS v, 'x' AS w)) WHERE a > 0",
         )
         assert [(name, str(kind)) for name, kind in zip(rel.columns, rel.types, strict=True)] == expected
         assert [(name, str(kind)) for name, kind, *_ in rel.description] == expected
@@ -371,7 +383,7 @@ class TestEveryTerminalRunsAgain:
         rel = counter(con).filter("v > 0").project("v")
         assert terminal(rel) == 1
         assert terminal(rel) == 2
-        assert currval(con) == 2
+        assert runs(con) == 2
 
 
 LINE_COMMENT = "-" * 2
@@ -479,7 +491,7 @@ class TestNewVerbNames:
 class TestNotebookDisplay:
     def test_a_display_runs_the_relation_once(self, con):
         bundle = counter(con)._repr_mimebundle_()
-        assert currval(con) == 1
+        assert runs(con) == 1
         assert {"text/plain", "text/html"} <= set(bundle)
 
 
@@ -507,6 +519,23 @@ class TestTypesThatDoNotParseBack:
         assert [str(kind) for kind in source.types] == ["ENUM()"]
         assert source.filter("true").fetchall() == []
         assert source.limit(1).columns == ["c"]
+
+    def test_a_struct_field_keeps_its_case_in_the_stand_in(self, con):
+        con.execute("SET preserve_identifier_case = 'uppercase'")
+        projected = con.sql('SELECT NULL::STRUCT("a" INTEGER) AS s').project("unnest(s)")
+        direct = con.execute('SELECT unnest(s) FROM (SELECT NULL::STRUCT("a" INTEGER) AS s)')
+        assert projected.columns == [column[0] for column in direct.description] == ["a"]
+        direct.fetchall()
+
+    def test_two_collations_in_a_join_are_refused_at_construction(self, con):
+        nocase = con.sql("SELECT 'a' COLLATE NOCASE AS s")
+        noaccent = con.sql("SELECT 'a' COLLATE NOACCENT AS s")
+        with pytest.raises(duckdb.BinderException, match="collation"):
+            nocase.join(noaccent, "s")
+
+    def test_one_collation_on_both_sides_joins(self, con):
+        rel = con.sql("SELECT 'a' COLLATE NOCASE AS s").join(con.sql("SELECT 'A' COLLATE NOCASE AS s"), "s")
+        assert rel.fetchall() == [("a",)]
 
     @pytest.mark.parametrize(
         "source",

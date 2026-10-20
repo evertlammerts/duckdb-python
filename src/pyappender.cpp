@@ -5,6 +5,7 @@
 #include "duckdb_python/python_conversion.hpp"
 #include "duckdb_python/pytype.hpp"
 #include "duckdb_python/pyutil.hpp"
+#include "duckdb_python/staged_rows.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry_retriever.hpp"
@@ -483,25 +484,11 @@ void DuckDBPyAppender::ThrowIfBroken() const {
 }
 
 Value DuckDBPyAppender::Convert(ClientContext &context, const nb::handle &object, const LogicalType &type) {
-	auto value = TransformPythonValue(context, object, LogicalType::UNKNOWN, false);
-	if (value.IsNull() || value.type() == type) {
-		return value;
-	}
-	// Without an error string the cast raises its own exception, as the cast of an executemany parameter does
-	Vector input(value, count_t(1));
-	Vector result(type, 1);
-	GetCastFunctionInput get_input(context);
-	VectorOperations::TryCast(CastFunctionSet::Get(context), get_input, input, result, 1, nullptr);
-	return result.GetValue(0);
+	return CastToColumn(context, TransformPythonValue(context, object, LogicalType::UNKNOWN, false), type);
 }
 
 void DuckDBPyAppender::Stage(const vector<Value> &row) {
-	auto index = staged.size();
-	for (idx_t i = 0; i < row.size(); i++) {
-		staged.data[i].SetValue(index, row[i]);
-	}
-	staged.SetChildCardinality(index + 1);
-	if (staged.size() == STANDARD_VECTOR_SIZE) {
+	if (StageRow(staged, row)) {
 		MoveStagedIntoBuffer();
 	}
 }

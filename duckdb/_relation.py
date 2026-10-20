@@ -20,12 +20,13 @@ import struct
 import sys
 import warnings
 from collections.abc import Iterable, Mapping
-from typing import TYPE_CHECKING, Any, ClassVar, NoReturn
+from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, cast
 
 import _duckdb
 
 from duckdb import _seam
-from duckdb._expression import PendingCase, fold_name
+from duckdb._expression import PendingCase, _is_value, constant, fold_name, plain_value, quote, text_tokens
+from duckdb._sql_keywords import KEYWORDS
 
 if TYPE_CHECKING:
     import builtins
@@ -62,13 +63,8 @@ _REMOVED_METHODS = {
     "fetch_df_chunk": "rel.to_arrow_reader() to read in batches, or rel.limit(n).df()",
     "execute": "rel.materialize() to run it once and keep its rows, or a method such as fetchall()",
 }
-_PLAIN_IDENTIFIER = re.compile(r'^(?:"(?:[^"]|"")*"|[A-Za-z_][A-Za-z0-9_$]*)$')
-_QUALIFIED_IDENTIFIER = re.compile(
-    r'^(?:"(?:[^"]|"")*"|[A-Za-z_][A-Za-z0-9_$]*)(?:\.(?:"(?:[^"]|"")*"|[A-Za-z_][A-Za-z0-9_$]*))+$'
-)
 _BARE_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _LOWER_NAME = re.compile(r"^[a-z_][a-z0-9_]*$")
-_AFTER_GROUPS = frozenset({"having", "qualify", "window", "order", "limit", "offset"})
 _SHOW_PRAGMA = re.compile(r"""^\s*pragma\s+(?:"show"|show)\s*\(\s*'((?:[^']|'')*)'\s*\)\s*;?\s*$""", re.IGNORECASE)
 _ERROR_NAMES = {
     "InvalidInputException": "Invalid Input",
@@ -87,16 +83,9 @@ def _error(kind: type[Exception], message: str) -> Exception:
     return kind(f"{prefix} Error: {message}" if prefix else message)
 
 
-def _quote(name: str) -> str:
-    return '"' + name.replace('"', '""') + '"'
-
-
 def _name_text(name: str) -> str:
     """A name written so SQL folds its case when it is a plain identifier, quoted otherwise."""
-    if not _BARE_NAME.match(name):
-        return _quote(name)
-    tokens = _duckdb.tokenize(name)
-    return name if len(tokens) == 1 and tokens[0][1] == _duckdb.token_type.identifier else _quote(name)
+    return name if _BARE_NAME.match(name) and fold_name(name) not in KEYWORDS else quote(name)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -109,7 +98,7 @@ class _WithClause:
 
 def _with_clause(text: str) -> _WithClause | None:
     """The WITH list a query starts with, read from the tokenizer, so a name can be added to that list."""
-    tokens = [(o, k) for o, k in _duckdb.tokenize(text) if k != _duckdb.token_type.comment]
+    tokens = [(o, k) for o, k in text_tokens(text) if k != _duckdb.token_type.comment]
     words = []
     for index, (offset, kind) in enumerate(tokens):
         end = tokens[index + 1][0] if index + 1 < len(tokens) else len(text)
@@ -170,7 +159,7 @@ def _query_statement(step: QueryOver, source: str, ctes: list[tuple[str, str]]) 
         listed = ",\n".join(f"{name} AS NOT MATERIALIZED (\n{body}\n)" for name, body in [*ctes, own])
         head = "WITH RECURSIVE" if clause.recursive else "WITH"
         return f"{head} {listed},\n{clause.listed}\n{clause.rest}"
-    tokens = [(o, k) for o, k in _duckdb.tokenize(step.text) if k != _duckdb.token_type.comment]
+    tokens = [(o, k) for o, k in text_tokens(step.text) if k != _duckdb.token_type.comment]
     first = fold_name(step.text[tokens[0][0] :].split(None, 1)[0]) if tokens else ""
     if clause is None and first in ("select", "from", "values"):
         return _assemble([*ctes, own], step.text)
@@ -179,9 +168,7 @@ def _query_statement(step: QueryOver, source: str, ctes: list[tuple[str, str]]) 
 
 def _optional_quote(part: str) -> str:
     """A name part as the engine prints a qualified name: bare when it is a plain lower case identifier."""
-    tokens = _duckdb.tokenize(part) if part else []
-    plain = _LOWER_NAME.match(part) and len(tokens) == 1 and tokens[0][1] == _duckdb.token_type.identifier
-    return part if plain else _quote(part)
+    return part if _LOWER_NAME.match(part) and part not in KEYWORDS else quote(part)
 
 
 def _api() -> Any:  # noqa: ANN401
@@ -203,12 +190,23 @@ def _expression_text(value: object) -> str:
         # A verb refuses what it cannot take with the engine's class for a bad argument; the TypeError is for the
         # builder in an expression position.
         raise _error(_duckdb.InvalidInputException, value.unfinished)
-    if isinstance(value, str):
-        _encodable(value)
     try:
-        return _encodable(str(_api().ConstantExpression(value)))
+        return _constant_text(value, "ConstantExpression takes a value")
     except (_duckdb.NotImplementedException, TypeError) as error:
         raise _error(_duckdb.InvalidInputException, "Please provide arguments of type Expression!") from error
+
+
+def _value_text(value: object) -> str:
+    """SQL text of one value of the list `values()` takes, where a value no constant holds is refused by its type."""
+    if _is_expression(value) or isinstance(value, PendingCase):
+        return _expression_text(value)
+    return _constant_text(value, "values() takes a value or an expression")
+
+
+def _constant_text(value: object, refusal: str) -> str:
+    if isinstance(value, str):
+        _encodable(value)
+    return _encodable(str(constant(value, refusal)))
 
 
 def _encodable(text: str) -> str:
@@ -224,25 +222,9 @@ def _encodable(text: str) -> str:
     return text
 
 
-def _sql_text(text: str) -> str:
-    """A SQL fragment without its comments, so a line comment cannot swallow the clause rendered after it."""
-    tokens = _duckdb.tokenize(_encodable(text))
-    if not any(kind == _duckdb.token_type.comment for _, kind in tokens):
-        return text
-    pieces: list[str] = []
-    for index, (offset, kind) in enumerate(tokens):
-        end = tokens[index + 1][0] if index + 1 < len(tokens) else len(text)
-        pieces.append(" " if kind == _duckdb.token_type.comment else text[offset:end])
-    return text[: tokens[0][0]] + "".join(pieces).strip()
-
-
-def _parsed(con: _duckdb.DuckDBPyConnection, text: str) -> builtins.list[str]:
-    """The expressions of a list; a closed connection is reported as such, not as the text failing to parse."""
-    try:
-        return _seam.parse_expressions(text)
-    except _duckdb.ParserException:
-        _ensure_open(con)
-        raise
+def _spliced(text: str) -> str:
+    """A SQL fragment to splice into a statement, ending its line, so a line comment in it ends there too."""
+    return _encodable(text) + "\n"
 
 
 def _items_of(con: _duckdb.DuckDBPyConnection, args: tuple[object, ...]) -> str:
@@ -253,25 +235,9 @@ def _items_of(con: _duckdb.DuckDBPyConnection, args: tuple[object, ...]) -> str:
 
 
 def _select_list(con: _duckdb.DuckDBPyConnection, text: str) -> str:
-    """A select list given as one string, read by the expression list parser as the old relation read it."""
-    return ", ".join(_parsed(con, _encodable(text)))
-
-
-def _is_reference(text: str) -> bool:
-    """Whether text reads as a column reference: identifiers joined by dots and nothing else."""
-    tokens = _duckdb.tokenize(text)
-    if not tokens or len(tokens) % 2 == 0:
-        return False
-    for position, (offset, kind) in enumerate(tokens):
-        end = tokens[position + 1][0] if position + 1 < len(tokens) else len(text)
-        word = text[offset:end].strip()
-        if position % 2 == 0:
-            if kind != _duckdb.token_type.identifier:
-                return False
-        elif word != ".":
-            # The tokenizer reads the dot of a qualified name as the start of a number, so the text decides.
-            return False
-    return True
+    """A select list given as one string, checked by the connection's parser and written as given."""
+    _seam.check_text(con, _encodable(text), "expressions")
+    return _spliced(text)
 
 
 def _one_name(value: object) -> str:
@@ -294,12 +260,18 @@ def _column_name(value: str | bytes) -> str:
     name holds a space; a string that reads as neither is quoted, and the binder refuses it by name.
     """
     text = _encodable(value.decode() if isinstance(value, bytes) else value)
-    return text if _is_reference(text) else _quote(text)
+    if any(kind == _duckdb.token_type.comment or text.startswith(";", offset) for offset, kind in text_tokens(text)):
+        # The parser reads past a comment or a semicolon, so such text is one name, quoted whole.
+        return quote(text)
+    parts = _seam.column_reference(text)
+    return ".".join(quote(part) for part in parts) if parts is not None else quote(text)
 
 
 def _select_item(con: _duckdb.DuckDBPyConnection, value: object) -> str:
-    """One select list item: an expression with its alias, or one whole column name."""
+    """One select list item: an expression with its alias, or one whole column name, or the star."""
     del con
+    if isinstance(value, str) and value == "*":
+        return "*"
     if isinstance(value, (str, bytes)):
         return _column_name(value)
     if not _is_expression(value):
@@ -309,16 +281,16 @@ def _select_item(con: _duckdb.DuckDBPyConnection, value: object) -> str:
         return _encodable(str(as_select()))
     text = _encodable(str(value))
     name = value.get_name()  # type: ignore[attr-defined]
-    return text if name == text else f"{text} AS {_quote(name)}"
+    return text if name == text else f"{text} AS {quote(name)}"
 
 
 def _order_item(con: _duckdb.DuckDBPyConnection, value: object) -> str:
-    """One ORDER BY key: an expression with its direction, or SQL order text."""
-    del con
+    """One ORDER BY key: an expression with its direction, or SQL order text, checked and written as given."""
     if isinstance(value, bytes):
         value = value.decode()
     if isinstance(value, str):
-        return _sql_text(value)
+        _seam.check_text(con, _encodable(value), "order")
+        return _spliced(value)
     as_order = getattr(value, "as_order", None)
     if callable(as_order):
         return _encodable(str(as_order()))
@@ -333,8 +305,14 @@ def _plain_item(con: _duckdb.DuckDBPyConnection, value: object) -> str:
     return _expression_text(value)
 
 
-def _condition_text(value: object) -> str:
-    return _sql_text(value) if isinstance(value, str) else _expression_text(value)
+def _condition_text(con: _duckdb.DuckDBPyConnection, value: object, what: str | None) -> str:
+    """A condition, or the aggregates of a pivot where `what` is None, as SQL; text is checked and written as given."""
+    if not isinstance(value, str):
+        return _expression_text(value)
+    count = _seam.check_text(con, _encodable(value), "expressions")
+    if what is not None and count != 1:
+        raise _error(_duckdb.ParserException, f"Expected a single expression as {what}")
+    return _spliced(value)
 
 
 def _strip_semicolons(text: str) -> str:
@@ -346,7 +324,7 @@ def _strip_semicolons(text: str) -> str:
 
 def _wrap(text: str, alias: str) -> str:
     """Raw query text as a subquery, which admits DESCRIBE, SHOW and SUMMARIZE bodies and a trailing comment."""
-    return f"SELECT * FROM (\n{text}\n) AS {_quote(alias)}"
+    return f"SELECT * FROM (\n{text}\n) AS {quote(alias)}"
 
 
 def _assemble(ctes: list[tuple[str, str]], body: str) -> str:
@@ -359,9 +337,39 @@ def _assemble(ctes: list[tuple[str, str]], body: str) -> str:
     return f"WITH {listed}\n{body}"
 
 
-def _stub(names: list[str], types: list[DuckDBPyType]) -> str:
-    columns = ", ".join(f"NULL::{t} AS {_quote(n)}" for n, t in zip(names, types, strict=True))
-    return f"SELECT {columns} WHERE FALSE"
+def _stub(names: list[str], types: list[DuckDBPyType]) -> str | None:
+    """An empty SELECT of typed NULLs standing in for these columns, or None where one has a type it cannot write.
+
+    A type's text leaves out its collation, which a column of its own carries as COLLATE; a collation on a type inside
+    a list or struct has no such spelling.
+    """
+    columns: list[str] = []
+    for name, type_ in zip(names, types, strict=True):
+        collation = _seam.collation(type_)
+        if collation is None:
+            return None
+        collated = f" COLLATE {quote(collation)}" if collation else ""
+        columns.append(f"NULL::{_stand_in_type(type_)}{collated} AS {quote(name)}")
+    return f"SELECT {', '.join(columns)} WHERE FALSE"
+
+
+def _stand_in_type(type_: DuckDBPyType) -> str:
+    """A type's SQL with every field name quoted, so the names keep their case whatever the connection folds to."""
+    kind = type_.id
+    children = type_.children if kind in ("struct", "union", "list", "array", "map") else []
+    if kind in ("struct", "union"):
+        # A union's first child is its tag.
+        fields = children[1:] if kind == "union" else children
+        written = ", ".join(f"{quote(name)} {_stand_in_type(cast('DuckDBPyType', child))}" for name, child in fields)
+        return f"{kind.upper()}({written})"
+    if kind == "list":
+        return f"{_stand_in_type(cast('DuckDBPyType', children[0][1]))}[]"
+    if kind == "array":
+        return f"{_stand_in_type(cast('DuckDBPyType', children[0][1]))}[{children[1][1]}]"
+    if kind == "map":
+        key, value = (cast("DuckDBPyType", child) for _, child in children)
+        return f"MAP({_stand_in_type(key)}, {_stand_in_type(value)})"
+    return str(type_)
 
 
 def _split_qualified(text: str) -> list[str]:
@@ -391,27 +399,38 @@ def _split_qualified(text: str) -> list[str]:
 
 
 def _split_list(text: str) -> list[str]:
-    """Split on commas the way the old aggregate shortcuts did, with no trailing empty piece."""
+    """The items of a comma separated list, split at the commas outside any parenthesis, with no trailing empty one."""
     if not text:
         return []
-    pieces = text.split(",")
+    pieces: list[str] = []
+    start = 0
+    depth = 0
+    found = text_tokens(text)
+    for position, (offset, kind) in enumerate(found):
+        if kind != _duckdb.token_type.operator:
+            continue
+        end = found[position + 1][0] if position + 1 < len(found) else len(text)
+        for index in range(offset, end):
+            char = text[index]
+            if char in "([{":
+                depth += 1
+            elif char in ")]}":
+                depth -= 1
+            elif char == "," and depth == 0:
+                pieces.append(text[start:index])
+                start = index + 1
+    pieces.append(text[start:])
     if pieces[-1] == "":
         pieces.pop()
     return pieces
 
 
-def _group_list(text: str) -> str:
-    """The GROUP BY list at the start of a groups argument; the old relation parsed only that and ignored the rest."""
-    tokens = _duckdb.tokenize(text)
-    depth = 0
-    for index, (offset, kind) in enumerate(tokens):
-        end = tokens[index + 1][0] if index + 1 < len(tokens) else len(text)
-        token = text[offset:end].strip()
-        if kind == _duckdb.token_type.operator:
-            depth += token.count("(") - token.count(")")
-        elif depth == 0 and kind == _duckdb.token_type.keyword and fold_name(token) in _AFTER_GROUPS:
-            return text[:offset].strip()
-    return text.strip()
+def _group_list(con: _duckdb.DuckDBPyConnection, text: str) -> str:
+    """A groups argument, which is a GROUP BY list and nothing more, checked and written as given."""
+    if not text.strip():
+        return ""
+    _seam.check_text(con, _encodable(text), "groups")
+    return _spliced(text)
 
 
 def _float_text(value: float) -> str:
@@ -464,15 +483,20 @@ def _markers(text: str) -> tuple[_Marker, ...]:
 
     A bare `?` is one past the highest positional number seen so far, as the engine numbers it.
     """
-    tokens = _duckdb.tokenize(text)
+    tokens = text_tokens(text)
     found: list[_Marker] = []
     highest = 0
     for index, (offset, kind) in enumerate(tokens):
         if kind != _duckdb.token_type.operator:
             continue
         if text.startswith("?", offset):
-            highest += 1
-            found.append(_Marker(offset, offset + 1, str(highest), positional=True))
+            end = offset + 1
+            while end < len(text) and text[end].isdigit():
+                end += 1
+            # `?N` is positional N, as `$N` is, and a bare `?` is one past the highest number so far.
+            number = int(text[offset + 1 : end]) if end > offset + 1 else highest + 1
+            highest = max(highest, number)
+            found.append(_Marker(offset, end, str(number), positional=True))
             continue
         if not text.startswith("$", offset) or index + 1 >= len(tokens):
             continue
@@ -586,7 +610,11 @@ def _renumbered(text: str, markers: tuple[_Marker, ...], offset: int) -> str:
 
 
 def _option_literal(value: object) -> str:
-    """A reader or COPY option value as SQL: strings quoted, lists as lists, dicts as structs."""
+    """A reader or COPY option value as SQL: strings quoted, lists as lists, dicts as structs.
+
+    Written from the value a subclass holds, read through its base type as an expression's literal is.
+    """
+    value = plain_value(value)
     if value is None:
         return "NULL"
     if isinstance(value, bool):
@@ -668,7 +696,7 @@ class Table(Source):
         return self.kind if self.base else "QUERY_RELATION"
 
     def name(self) -> str:
-        return ".".join(_quote(p) for p in self.parts)
+        return ".".join(quote(p) for p in self.parts)
 
     def from_item(self) -> str:
         return self.name()
@@ -701,7 +729,7 @@ class TableFunction(Source):
     arguments: tuple[str, ...]
 
     def from_item(self) -> str:
-        return f"{_quote(self.name)}({', '.join(self.arguments)})"
+        return f"{quote(self.name)}({', '.join(self.arguments)})"
 
     def implicit_alias(self) -> str | None:
         return self.name
@@ -734,7 +762,7 @@ class Registered(Source):
     name: str
 
     def from_item(self) -> str:
-        return _quote(self.name)
+        return quote(self.name)
 
     def implicit_alias(self) -> str | None:
         return self.name
@@ -743,6 +771,11 @@ class Registered(Source):
 @dataclasses.dataclass(frozen=True)
 class Held(Registered):
     kind: ClassVar[str] = "MATERIALIZED_RELATION"
+
+
+@dataclasses.dataclass(frozen=True)
+class ValueRows(Held):
+    kind: ClassVar[str] = "VALUE_LIST_RELATION"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -826,7 +859,7 @@ class Join(Step):
         if self.on is not None:
             clause = f" ON {self.on}"
         elif self.using:
-            clause = " USING (" + ", ".join(_quote(c) for c in self.using) + ")"
+            clause = " USING (" + ", ".join(quote(c) for c in self.using) + ")"
         return f"{items[0]} {self.keyword} JOIN {items[1]}{clause}"
 
 
@@ -852,8 +885,8 @@ class Unpivot(Step):
     value: str
 
     def render(self, items: tuple[str, ...]) -> str:
-        folded = ", ".join(_quote(c) for c in self.columns)
-        into = f"INTO NAME {_quote(self.name)} VALUE {_quote(self.value)}"
+        folded = ", ".join(quote(c) for c in self.columns)
+        into = f"INTO NAME {quote(self.name)} VALUE {quote(self.value)}"
         return f"SELECT * FROM (UNPIVOT (SELECT * FROM {items[0]}) ON {folded} {into})"
 
 
@@ -1012,12 +1045,118 @@ def _open_for(step: Step, inputs: tuple[DuckDBPyRelation, ...]) -> _Select | Non
     inp = inputs[0]
     if inp._open is not None:
         appended = inp._open.admit(step)
+        if appended is not None and _captures_held_name(step, inp):
+            # Every capture is a registration of its own, so a name the SELECT already holds starts the step's own.
+            appended = None
         if appended is not None:
             # The input's own SELECT, which it holds over itself, is now held by this node over the input.
             if appended.source is None:
                 appended = dataclasses.replace(appended, source=inp, continues=True)
             return appended
     return _Select(inp).admit(step)
+
+
+def _captures_held_name(step: Step, inp: DuckDBPyRelation) -> bool:
+    """Whether the step's text captures a name the input's SELECT holds for another registration.
+
+    The step's clause alone is bound with capture over typed empty stand-ins of the SELECT's FROM items, without the
+    captures the SELECT holds, which would answer for those names in the step's own bind.
+    """
+    held = _held_keys(_rendered_here(inp))
+    if not held:
+        return False
+    alone = _Select(inp).admit(step)
+    if alone is None:
+        return False
+    stubs: list[tuple[str, str]] = []
+    source = _probe_from(inp, stubs)
+    if source is None:
+        return False
+    try:
+        signature = _seam.bind(inp._con, _assemble(stubs, alone.render(source)), capture=True)
+    except _duckdb.Error:
+        # The bind of the step itself reports what is wrong with its text.
+        return False
+    return _clashes(signature.captured, held)
+
+
+def _held_keys(nodes: Iterable[DuckDBPyRelation]) -> dict[str, str]:
+    """The registration each Python variable the nodes' texts captured reads, by its name as SQL folds it."""
+    return {fold_name(name): key for name, key in _all_captured(nodes)}
+
+
+def _clashes(captured: Iterable[tuple[str, _seam.SourceHandle]], held: dict[str, str]) -> bool:
+    """Whether a capture registers anew a name, as SQL folds it, that `held` holds."""
+    return any(fold_name(name) in held and handle.name != held[fold_name(name)] for name, handle in captured)
+
+
+def _probe_from(node: DuckDBPyRelation, stubs: list[tuple[str, str]]) -> str | None:
+    """The FROM of the node's open SELECT over stand-ins, or None where a column has a type a stand-in cannot write."""
+    owner = _owner(node)
+    if owner is None:
+        return _probe_item(_source_of(node), stubs, inline=False)
+    if isinstance(owner._step, Join):
+        return _probe_join(owner, stubs)
+    return _probe_item(owner, stubs, inline=False)
+
+
+def _probe_item(node: DuckDBPyRelation, stubs: list[tuple[str, str]], *, inline: bool) -> str | None:
+    """A FROM item over typed empty stand-ins under the aliases the real item has, holding no text of the user's."""
+    if inline:
+        inner = _probe_join(node, stubs)
+        return None if inner is None else f"({inner})"
+    text = _stub(*node._schema)
+    if text is None:
+        return None
+    name = quote(f"__duckdb_probe{len(stubs)}")
+    stubs.append((name, text))
+    return f"{name} AS {quote(node.alias)}"
+
+
+def _probe_join(join: DuckDBPyRelation, stubs: list[tuple[str, str]]) -> str | None:
+    """A join over stand-ins with the names in scope the real one has, and a condition that always holds."""
+    step = join._step
+    assert isinstance(step, Join)
+    items = []
+    for side, inline in _sides_of(join):
+        item = _probe_item(side, stubs, inline=inline)
+        if item is None:
+            return None
+        items.append(item)
+    return (step if step.on is None else dataclasses.replace(step, on="TRUE")).source(tuple(items))
+
+
+def _close_clashing_sides(
+    con: _duckdb.DuckDBPyConnection, step: Join, sides: tuple[tuple[DuckDBPyRelation, bool], ...]
+) -> tuple[tuple[DuckDBPyRelation, bool], ...]:
+    """The sides, with an inlined join entering closed where a name it captured is held for another registration.
+
+    The join's condition is bound with capture over stand-ins of the sides, so it lists the names it captures now; each
+    inlined side is then checked against those and against the sides before it.
+    """
+    held = [_held_keys(_rendered_here(side)) if inline else {} for side, inline in sides]
+    if not any(held):
+        return sides
+    claims: dict[str, str] = {}
+    stubs: list[tuple[str, str]] = []
+    probed = [_probe_item(side, stubs, inline=inline) for side, inline in sides] if step.on is not None else []
+    items = tuple(item for item in probed if item is not None)
+    if probed and len(items) == len(probed):
+        try:
+            signature = _seam.bind(con, _assemble(stubs, "SELECT * FROM " + step.source(items)), capture=True)
+        except _duckdb.Error:
+            # The bind of the join itself reports what is wrong with its condition.
+            return sides
+        claims = {fold_name(name): handle.name for name, handle in signature.captured}
+    result = []
+    for (side, inline), keys in zip(sides, held, strict=True):
+        if any(name in claims and claims[name] != key for name, key in keys.items()):
+            inline = False
+        else:
+            for name, key in keys.items():
+                claims.setdefault(name, key)
+        result.append((side, inline))
+    return tuple(result)
 
 
 def _source_of(node: DuckDBPyRelation) -> DuckDBPyRelation:
@@ -1057,7 +1196,7 @@ def _item(
         # Naming the result means using it from outside, so the named SELECT is read rather than inlined.
         named = alias if alias is not None else node._step.alias
         return _item(node._inputs[0], names, in_join=False, alias=named, in_place=in_place)
-    spelled = _quote(alias if alias is not None else node.alias)
+    spelled = quote(alias if alias is not None else node.alias)
     if in_place and _in_place(node):
         assert isinstance(node._step, Source)
         return f"{node._step.from_item()} AS {spelled}"
@@ -1137,7 +1276,7 @@ def _from_text(node: DuckDBPyRelation, names: dict[int, str]) -> str:
     # The source itself, which needs no name of its own where the FROM item already carries one.
     assert isinstance(owner._step, Source)
     text = owner._step.from_item()
-    return text if owner.alias == owner._step.implicit_alias() else f"{text} AS {_quote(owner.alias)}"
+    return text if owner.alias == owner._step.implicit_alias() else f"{text} AS {quote(owner.alias)}"
 
 
 def _from_nodes(node: DuckDBPyRelation) -> list[DuckDBPyRelation]:
@@ -1214,28 +1353,22 @@ def _tree(top: DuckDBPyRelation) -> list[DuckDBPyRelation]:
 
 
 def _captured_ctes(captured: Iterable[tuple[str, str]]) -> list[tuple[str, str]]:
-    return [(_name_text(name), f"SELECT * FROM {_quote(key)}") for name, key in captured]
+    return [(_name_text(name), f"SELECT * FROM {quote(key)}") for name, key in captured]
 
 
 def _all_captured(nodes: Iterable[DuckDBPyRelation]) -> list[tuple[str, str]]:
-    """The Python variables a statement reads, each once; one name for two objects, or two spellings, is refused."""
-    by_name: dict[str, str] = {}
-    by_fold: dict[str, str] = {}
+    """The Python variables a SELECT reads, each once.
+
+    A step or a join that captures a name already read, as SQL folds it, under another registration starts a SELECT of
+    its own, so one name here is one registration.
+    """
+    by_name: dict[str, tuple[str, str]] = {}
     for node in nodes:
         for name, key in node._captured:
-            known = by_name.get(name)
-            if known is not None and known != key:
-                message = f'Two different Python objects are read under the name "{name}"; rename one of them'
-                raise _error(_duckdb.InvalidInputException, message)
-            spelled = by_fold.setdefault(fold_name(name), name)
-            if spelled != name:
-                message = (
-                    f'The Python variables "{spelled}" and "{name}" differ only in case, which SQL does not tell '
-                    "apart; rename one of them"
-                )
-                raise _error(_duckdb.InvalidInputException, message)
-            by_name[name] = key
-    return list(by_name.items())
+            if by_name.setdefault(fold_name(name), (name, key))[1] != key:
+                message = f'One SELECT reads two registrations under the name "{name}"'
+                raise _error(_duckdb.InternalException, message)
+    return list(by_name.values())
 
 
 def _render(
@@ -1246,7 +1379,7 @@ def _render(
     With `wrap_text` a query's own text is read as a subquery, so the statement can follow CREATE TABLE AS and the like.
     """
     order = _order(top)
-    names = {id(node): _quote(f"__duckdb_s{i}") for i, node in enumerate(order)}
+    names = {id(node): quote(f"__duckdb_s{i}") for i, node in enumerate(order)}
     holders = [n for n in order if n._params is not None]
     positional = [n for n in holders if not isinstance(n._params, dict)]
     named = [n for n in holders if isinstance(n._params, dict)]
@@ -1266,26 +1399,37 @@ def _render(
                 offsets[id(node)] = len(flat)
             flat.extend(node._params)
         values = flat
-    ctes = _captured_ctes(_all_captured(_tree(top)))
+    ctes: list[tuple[str, str]] = []
     last = ""
     for node in order:
         text = None
         if isinstance(node._step, Sql) and node._params is not None:
             if literals:
-                text = _literal_text(node._step.text, node._step.markers, node._params)
+                # Written in, the values would name the columns they make; the names stay those of what runs.
+                written = _literal_text(node._step.text, node._step.markers, node._params)
+                columns = ", ".join(quote(name) for name in node._schema[0])
+                text = f"SELECT * FROM (\n{written}\n) AS {quote(node.alias)}({columns})"
             elif id(node) in offsets:
                 text = _renumbered(node._step.text, node._step.markers, offsets[id(node)])
         is_top = node is top
         body = _body(node, names, top=is_top, text=text)
+        # A Python variable a node's text read is in scope in that node's own SELECT only, never in the rest of the
+        # statement, where the same name can read another object or a catalog table.
+        own = _captured_ctes(_all_captured(_rendered_here(node)))
+        if isinstance(node._step, QueryOver) and is_top and not wrap_text:
+            source = _item(top._inputs[0], names, in_join=False)
+            return _query_statement(node._step, source, [*ctes, *own]), None if literals else values
+        if own:
+            if is_top and isinstance(node._step, Sql):
+                # The text as written can be a statement a WITH list cannot lead, DESCRIBE for one.
+                body = _wrap(body, node.alias)
+            body = _assemble(own, body)
         if is_top:
             last = body
         else:
             ctes.append((names[id(node)], body))
-    if isinstance(top._step, Sql) and (ctes or wrap_text):
+    if isinstance(top._step, Sql) and (ctes or wrap_text) and not top._captured:
         last = _wrap(last, top.alias)
-    if isinstance(top._step, QueryOver) and not wrap_text:
-        source = _item(top._inputs[0], names, in_join=False)
-        return _query_statement(top._step, source, ctes), None if literals else values
     return _assemble(ctes, last), None if literals else values
 
 
@@ -1309,6 +1453,7 @@ def _bind_with_stand_ins(
     real: Callable[[], str],
     *,
     capture: bool = False,
+    values: list[Any] | dict[str, Any] | None = None,
 ) -> _seam.Signature:
     """Bind a statement over typed stand-ins, or the real statement where a stand-in itself does not bind.
 
@@ -1317,7 +1462,7 @@ def _bind_with_stand_ins(
     own text still raises.
     """
     try:
-        return _seam.bind(node._con, statement, capture=capture)
+        return _seam.bind(node._con, statement, capture=capture, values=values)
     except _duckdb.Error:
         if not _stub_refused(node, stubs):
             raise
@@ -1355,24 +1500,24 @@ def _ask(node: DuckDBPyRelation) -> tuple[builtins.list[str], builtins.list[Duck
     """The node's columns, asked of the binder over typed empty stand-ins for the steps it reads."""
     names: dict[int, str] = {}
     stubs: list[tuple[str, str]] = []
+    writable = True
     for position, inp in enumerate(_references(node)):
         if id(inp) in names:
             continue
-        stub = _quote(f"__duckdb_in{position}")
+        stub = quote(f"__duckdb_in{position}")
         names[id(inp)] = stub
         # The input's own columns, duplicate names and all, which the boundary deduplicates as the real one does.
-        stubs.append((stub, _stub(*inp._schema)))
-    text = None
-    if isinstance(node._step, Sql) and node._params is not None:
-        text = _literal_text(node._step.text, node._step.markers, node._params)
-    body = _body(node, names, top=True, text=text)
-    ctes = _captured_ctes(_all_captured(_rendered_here(node))) + stubs
-    if isinstance(node._step, Sql) and ctes:
-        body = _wrap(body, node.alias)
-    statement = _assemble(ctes, body)
-    if isinstance(node._step, QueryOver):
-        statement = _query_statement(node._step, _item(node._inputs[0], names, in_join=False), ctes)
-    signature = _bind_with_stand_ins(node, statement, stubs, lambda: _render(node, literals=True)[0], capture=True)
+        text = _stub(*inp._schema)
+        writable = writable and text is not None
+        stubs.append((stub, text or ""))
+    if writable:
+        # A query's values are bound as the parameters they are, so its names and types are those of what runs.
+        values = node._params if isinstance(node._step, Sql) else None
+        signature = _bind_with_stand_ins(
+            node, _stand_in_statement(node, names, stubs), stubs, _real(node), capture=True, values=values
+        )
+    else:
+        signature = _seam.bind(node._con, _real(node)(), capture=True)
     if not isinstance(node._step, Held):
         # A held result answers for the statement that produced it, which a re-bind of its rows cannot know.
         node._return_type = signature.return_type
@@ -1380,6 +1525,21 @@ def _ask(node: DuckDBPyRelation) -> tuple[builtins.list[str], builtins.list[Duck
         node._captured = (*node._captured, *((n, h.name) for n, h in signature.captured))
         node._handles = (*node._handles, *(h for _, h in signature.captured))
     return signature.names, signature.types
+
+
+def _stand_in_statement(node: DuckDBPyRelation, names: dict[int, str], stubs: list[tuple[str, str]]) -> str:
+    """The node's own statement over the stand-ins named in `names`, a query's parameters left as markers."""
+    body = _body(node, names, top=True)
+    ctes = _captured_ctes(_all_captured(_rendered_here(node))) + stubs
+    if isinstance(node._step, Sql) and ctes:
+        body = _wrap(body, node.alias)
+    if isinstance(node._step, QueryOver):
+        return _query_statement(node._step, _item(node._inputs[0], names, in_join=False), ctes)
+    return _assemble(ctes, body)
+
+
+def _real(node: DuckDBPyRelation) -> Callable[[], str]:
+    return lambda: _render(node, literals=True)[0]
 
 
 def _refresh(top: DuckDBPyRelation) -> None:
@@ -1469,16 +1629,15 @@ class DuckDBPyRelation:
         if isinstance(step, Join):
             # Decided once: asked again on every read, the decisions of the joins below it would double the cost of
             # each level of a chain of joins.
-            rel._sides = (
+            chosen = (
                 sides if sides is not None else tuple(_join_items(inputs[0], inputs[1], sides_closed=step.sides_closed))
             )
+            rel._sides = _close_clashing_sides(con, step, chosen)
         rel._open = _open_for(step, inputs)
         rel._schema = schema if schema is not None else _ask(rel)
         if return_type is not None:
             # The statement the relation holds decides, not the bind of the step that reads its rows back.
             rel._return_type = return_type
-        if inputs or rel._captured:
-            _all_captured(_tree(rel))
         return rel
 
     def _derive(
@@ -1553,12 +1712,13 @@ class DuckDBPyRelation:
     @property
     def alias(self) -> str:
         """Get the name of the current alias."""
-        if self._alias is not None:
-            return self._alias
-        if self._alias_from is not None:
-            return self._alias_from.alias
-        self._alias = _unnamed()
-        return self._alias
+        # A loop, so a chain of steps longer than Python's recursion limit still has an alias.
+        node = self
+        while node._alias is None and node._alias_from is not None:
+            node = node._alias_from
+        if node._alias is None:
+            node._alias = _unnamed()
+        return node._alias
 
     @property
     def type(self) -> str:
@@ -1635,9 +1795,9 @@ class DuckDBPyRelation:
             names, types = self._schema
         reference: str | None = None
         if len(names) == 1 and types[0].id == "struct" and any(field == name for field, _ in types[0].children):
-            reference = f"{_quote(names[0])}.{_quote(name)}"
+            reference = f"{quote(names[0])}.{quote(name)}"
         elif any(fold_name(column) == fold_name(name) for column in names):
-            reference = _quote(name)
+            reference = quote(name)
         if reference is None:
             replacement = _REMOVED_METHODS.get(name)
             if replacement is not None:
@@ -1648,12 +1808,12 @@ class DuckDBPyRelation:
                 raise AttributeError(msg)
             msg = f"This relation does not contain a column by the name of '{name}'"
             raise AttributeError(msg)
-        return self._derive(Project(f"{reference} AS {_quote(name)}"))
+        return self._derive(Project(f"{reference} AS {quote(name)}"))
 
     def filter(self, filter_expr: object) -> DuckDBPyRelation:
         """Filter the relation object by the filter in filter_expr."""
         _warn_on_literal_names(filter_expr, self.columns)
-        return self._derive(Filter(_condition_text(filter_expr)))
+        return self._derive(Filter(_condition_text(self._con, filter_expr, "filter condition")))
 
     def project(self, *args: object, groups: str = "") -> DuckDBPyRelation:
         """Project the relation object by the projection in project_expr."""
@@ -1672,7 +1832,7 @@ class DuckDBPyRelation:
             _warn_on_literal_names(arg, columns)
         items = _items_of(self._con, args)
         if groups:
-            return self._derive(Aggregate(items, _group_list(_sql_text(groups)) or None))
+            return self._derive(Aggregate(items, _group_list(self._con, groups) or None))
         return self._derive(Project(items))
 
     def select_types(self, types: object) -> DuckDBPyRelation:
@@ -1690,7 +1850,7 @@ class DuckDBPyRelation:
                 raise _error(_duckdb.InvalidInputException, message)
         if not wanted:
             raise _error(_duckdb.InvalidInputException, "List of types can not be empty!")
-        chosen = [_quote(n) for n, t in zip(*self._fresh(), strict=True) if any(t == w for w in wanted)]
+        chosen = [quote(n) for n, t in zip(*self._fresh(), strict=True) if any(t == w for w in wanted)]
         if not chosen:
             raise _error(_duckdb.InvalidInputException, "None of the columns matched the provided type filter!")
         return self._derive(Project(", ".join(chosen)))
@@ -1740,7 +1900,7 @@ class DuckDBPyRelation:
             raise _error(_duckdb.InvalidInputException, message)
         groups = None
         if isinstance(group_expr, str):
-            groups = _group_list(_sql_text(group_expr)) or None
+            groups = _group_list(self._con, group_expr) or None
         elif group_expr is not None:
             groups = _expression_text(group_expr)
         return self._derive(Aggregate(items, groups))
@@ -1830,8 +1990,8 @@ class DuckDBPyRelation:
             raise TypeError(msg)
         existing = {fold_name(name) for name in self.columns}
         rendered = {n: _plain_item(self._con, v) for n, v in columns.items()}
-        replaced = [f"{text} AS {_quote(n)}" for n, text in rendered.items() if fold_name(n) in existing]
-        added = [f"{text} AS {_quote(n)}" for n, text in rendered.items() if fold_name(n) not in existing]
+        replaced = [f"{text} AS {quote(n)}" for n, text in rendered.items() if fold_name(n) in existing]
+        added = [f"{text} AS {quote(n)}" for n, text in rendered.items() if fold_name(n) not in existing]
         star = f"* REPLACE ({', '.join(replaced)})" if replaced else "*"
         return self._derive(Star(", ".join([star, *added])))
 
@@ -1840,7 +2000,7 @@ class DuckDBPyRelation:
         if not columns:
             msg = "drop needs at least one column"
             raise TypeError(msg)
-        return self._derive(Star(f"* EXCLUDE ({', '.join(_quote(c) for c in columns)})"))
+        return self._derive(Star(f"* EXCLUDE ({', '.join(quote(c) for c in columns)})"))
 
     def rename(self, **columns: str) -> DuckDBPyRelation:
         """Rename columns, given as old=new."""
@@ -1853,7 +2013,7 @@ class DuckDBPyRelation:
                 # The engine ignores a missing name in a RENAME list, where it refuses one in EXCLUDE, so `drop` and
                 # `rename` would disagree about the same mistake; both refuse it, in the engine's words.
                 raise _error(_duckdb.BinderException, f'Column "{old}" in RENAME list not found in FROM clause')
-        pairs = ", ".join(f"{_quote(old)} AS {_quote(new)}" for old, new in columns.items())
+        pairs = ", ".join(f"{quote(old)} AS {quote(new)}" for old, new in columns.items())
         return self._derive(Star(f"* RENAME ({pairs})"))
 
     def unnest(self, *columns: str) -> DuckDBPyRelation:
@@ -1861,7 +2021,7 @@ class DuckDBPyRelation:
         if not columns:
             msg = "unnest needs at least one column"
             raise TypeError(msg)
-        expanded = ", ".join(f"unnest({_quote(c)}) AS {_quote(c)}" for c in columns)
+        expanded = ", ".join(f"unnest({quote(c)}) AS {quote(c)}" for c in columns)
         return self._derive(Star(f"* REPLACE ({expanded})"))
 
     def unpivot(self, *columns: str, name: str = "name", value: str = "value") -> DuckDBPyRelation:
@@ -1877,7 +2037,7 @@ class DuckDBPyRelation:
         if not listed:
             msg = "pivot needs at least one value"
             raise TypeError(msg)
-        return self._derive(Pivot(_plain_item(self._con, column), listed, _condition_text(aggregate)))
+        return self._derive(Pivot(_plain_item(self._con, column), listed, _condition_text(self._con, aggregate, None)))
 
     def sample(
         self, n: int | None = None, *, percent: float | None = None, seed: int | None = None, method: str | None = None
@@ -1919,27 +2079,29 @@ class DuckDBPyRelation:
         pieces = _split_list(aggregated_columns)
         if fold_name(function_name) == "count" and not pieces:
             pieces = ["*"]
-        text = f"{projected_columns}, " if projected_columns else ""
+        # Each piece of user text ends its line, so a line comment in one cannot reach the SQL written after it.
+        text = f"{_select_list(self._con, projected_columns)}, " if projected_columns else ""
         nulls = " ignore nulls) " if ignore_nulls else ") "
+        after = f"{nulls}{_spliced(window_spec)}" if window_spec else nulls
+        parameter = _spliced(function_parameter) if function_parameter else ""
         if not pieces and function_parameter:
-            return f"{text}{function_name}({function_parameter}{nulls}{window_spec}"
+            return f"{text}{function_name}({parameter}{after}"
         rendered: builtins.list[str] = []
         for piece in pieces:
             trimmed = piece.strip()
             if not trimmed:
                 raise _error(_duckdb.ParserException, f"Invalid column expression: '{piece}'")
-            expression: str | None = None
             try:
-                parsed = _seam.parse_expressions(trimmed)
-                if len(parsed) == 1:
-                    expression = parsed[0]
+                count = _seam.check_text(self._con, _encodable(trimmed), "expressions")
             except _duckdb.ParserException:
-                _ensure_open(self._con)
-                expression = _quote(trimmed)
-            if expression is None:
-                raise _error(_duckdb.ParserException, f"Invalid column expression: {trimmed}")
-            argument = expression if not function_parameter else f"{expression},{function_parameter}"
-            rendered.append(f"{function_name}({argument}{nulls}{window_spec}")
+                # Text that does not parse names one column, a name with a space in it for one.
+                expression = quote(trimmed)
+            else:
+                if count != 1:
+                    raise _error(_duckdb.ParserException, f"Invalid column expression: {trimmed}")
+                expression = _spliced(trimmed)
+            argument = expression if not function_parameter else f"{expression},{parameter}"
+            rendered.append(f"{function_name}({argument}{after}")
         return text + ",".join(rendered)
 
     def _aggregate_shortcut(
@@ -1966,7 +2128,7 @@ class DuckDBPyRelation:
         text = self._expression_list(
             function_name, columns, parameters, projected_columns, window_spec, ignore_nulls=ignore_nulls
         )
-        return self._derive(Project(_sql_text(text)))
+        return self._derive(Project(_select_list(self._con, text)))
 
     def _aggregate_or_window(
         self,
@@ -2150,7 +2312,7 @@ class DuckDBPyRelation:
 
     def unique(self, unique_aggr: str) -> DuckDBPyRelation:
         """Returns the distinct values in a column."""
-        return self._derive(Project(_sql_text(unique_aggr))).distinct()
+        return self._derive(Project(_select_list(self._con, unique_aggr))).distinct()
 
     def median(
         self, expression: str, groups: str = "", window_spec: str = "", projected_columns: str = ""
@@ -2321,14 +2483,14 @@ class DuckDBPyRelation:
         outer = ["UNNEST([" + ", ".join(f"'{name}'" for name, _ in statistics) + "]) AS aggr"]
         for c, (name, column_type) in enumerate(zip(*self._fresh(), strict=True)):
             numeric = column_type.id in _NUMERIC_TYPE_IDS
-            aliases = [_quote(f"__describe_{c}_{i}") for i in range(len(statistics))]
+            aliases = [quote(f"__describe_{c}_{i}") for i in range(len(statistics))]
             for (function, numeric_only), alias in zip(statistics, aliases, strict=True):
                 if numeric_only and not numeric:
                     stat = "NULL"
                 else:
-                    stat = f"{function}({_quote(name)})::{'DOUBLE' if numeric else 'VARCHAR'}"
+                    stat = f"{function}({quote(name)})::{'DOUBLE' if numeric else 'VARCHAR'}"
                 inner.append(f"{stat} AS {alias}")
-            outer.append(f"UNNEST([{', '.join(aliases)}]) AS {_quote(name)}")
+            outer.append(f"UNNEST([{', '.join(aliases)}]) AS {quote(name)}")
         stats = self._derive(Aggregate(", ".join(inner)))
         return stats._derive(Project(", ".join(outer)))
 
@@ -2448,7 +2610,7 @@ class DuckDBPyRelation:
         if rows.columns == self.columns:
             return rows
         pairs = zip(rows.columns, self.columns, strict=True)
-        return rows._derive(Project(", ".join(f"{_quote(held)} AS {_quote(own)}" for held, own in pairs)))
+        return rows._derive(Project(", ".join(f"{quote(held)} AS {quote(own)}" for held, own in pairs)))
 
     def _box(self, **options: Any) -> str:  # noqa: ANN401
         return self._shown(self.limit(_BOX_LIMIT))._submit().to_box(**options)
@@ -2554,20 +2716,23 @@ class DuckDBPyRelation:
         """
         _ensure_open(self._con)
         text = _strip_semicolons(sql_query)
-        if _statement_count(text) != 1:
+        if _seam.statement_count(self._con, text) != 1:
             raise _error(_duckdb.InvalidInputException, "'DuckDBPyRelation.query' only accepts a single statement")
+        if _markers(text):
+            message = "Unexpected prepared parameter. This type of statement can't be prepared!"
+            raise _error(_duckdb.BinderException, message)
         shown = _SHOW_PRAGMA.match(text)
         if shown is not None:
             literal = shown.group(1).replace("''", "'")
             parts = _split_qualified(literal)
             if not all(parts):
                 raise _error(_duckdb.ParserException, f"Zero-length identifier in qualified name! (input: {literal})")
-            text = "DESCRIBE " + ".".join(_quote(p) for p in parts)
+            text = "DESCRIBE " + ".".join(quote(p) for p in parts)
         _refresh(self)
         with _reading_as(self, virtual_table_name):
-            _, last, kind = _seam.prepare_script(self._con, text, None)
+            _, last, kind, _ = _seam.prepare_script_parsed(self._con, text, None)
             last = _strip_semicolons(last) if last else text
-            if kind != "SELECT" or _writes(last):
+            if kind != "SELECT" or _seam.bind(self._con, last).writes:
                 # A statement that writes runs at the call and the relation holds what it returned.
                 return _run_now(self._con, last, None, "", None)
             step = QueryOver(virtual_table_name, last)
@@ -2637,7 +2802,7 @@ class DuckDBPyRelation:
 
     def update(self, set: object, *, condition: object = None) -> None:
         """Update the given relation with the provided expressions."""
-        where = "" if condition is None else f" WHERE {_condition_text(condition)}"
+        where = "" if condition is None else f" WHERE {_condition_text(self._con, condition, 'update condition')}"
         if not isinstance(set, Mapping):
             message = "Please provide 'set' as a dictionary of column name to Expression"
             raise _error(_duckdb.InvalidInputException, message)
@@ -2661,7 +2826,7 @@ class DuckDBPyRelation:
                     raise
                 message = f"Please provide an object of type Expression as the value, not {type(value)}"
                 raise _error(_duckdb.InvalidInputException, message) from error
-            assignments.append(f"{_quote(name)} = {text}")
+            assignments.append(f"{quote(name)} = {text}")
         step = self._step
         if not self._reads_a_table():
             raise _error(_duckdb.InvalidInputException, "UPDATE can only be used on base tables")
@@ -2902,7 +3067,7 @@ def _reading_as(relation: DuckDBPyRelation, name: str) -> Iterator[None]:
     its own name, binds against it; the entry goes when the call returns, so the name is visible nowhere else. A name
     the catalog already holds is left alone, and the statement binds against what is there.
     """
-    quoted = _quote(name)
+    quoted = quote(name)
     # The catalog says whether the name is taken, so a view whose body cannot bind raises with what is missing
     # instead of being taken for a name already in use, which reported the user's own query name.
     created = _seam.table_kind(relation._con, name) == "none"
@@ -2913,56 +3078,6 @@ def _reading_as(relation: DuckDBPyRelation, name: str) -> Iterator[None]:
     finally:
         if created:
             _seam.submit(relation._con, f"DROP VIEW IF EXISTS {quoted}", None).drain()
-
-
-_WRITE_KEYWORDS = frozenset({"insert", "update", "delete", "merge"})
-
-
-def _writes(text: str) -> bool:
-    """Whether a SELECT holds a write, which it can only as the body of a common table expression.
-
-    The grammar admits a statement inside a SELECT only as `name AS [NOT MATERIALIZED] (statement)`, its
-    `WithStatement` rule, so a write keyword counts only as the first word inside a parenthesis that follows `AS`,
-    optionally with `[NOT] MATERIALIZED`. Anywhere else, a function argument or a subquery included, it is a name,
-    and a column called `insert` is read, not written. The seam reports the same parsed type, `select`,
-    for a statement with a writing common table expression as for a plain one, so the shape of the text is what is
-    left to read.
-    """
-    words: list[str] = []
-    tokens = _duckdb.tokenize(text)
-    for index, (offset, kind) in enumerate(tokens):
-        if kind == _duckdb.token_type.comment:
-            continue
-        end = tokens[index + 1][0] if index + 1 < len(tokens) else len(text)
-        word = fold_name(text[offset:end].strip())
-        if not word:
-            continue
-        if kind == _duckdb.token_type.keyword and word in _WRITE_KEYWORDS and words[-1:] == ["("]:
-            before = words[:-1]
-            if before[-1:] == ["as"] or before[-2:] == ["as", "materialized"] or before[-3:] == _AS_NOT_MATERIALIZED:
-                return True
-        words.append(word)
-    return False
-
-
-_AS_NOT_MATERIALIZED = ["as", "not", "materialized"]
-
-
-def _statement_count(text: str) -> int:
-    """How many statements a text holds, from the tokenizer: groups of tokens between semicolons."""
-    tokens = _duckdb.tokenize(text)
-    count = 0
-    current = False
-    for index, (offset, kind) in enumerate(tokens):
-        if kind == _duckdb.token_type.comment:
-            continue
-        end = tokens[index + 1][0] if index + 1 < len(tokens) else len(text)
-        if kind == _duckdb.token_type.operator and text[offset:end].strip() == ";":
-            count += int(current)
-            current = False
-            continue
-        current = True
-    return count + int(current)
 
 
 _TREE_SCRIPT = """
@@ -3015,11 +3130,14 @@ resizeTFTree();
 
 
 def _display_html(pages: list[str]) -> None:
-    from IPython.display import HTML, display
+    import IPython.display
 
+    # IPython ships no annotations, so the two callables are typed here instead of ignoring each call.
+    show: Callable[[object], None] = IPython.display.display
+    html: Callable[[str], object] = IPython.display.HTML
     for page in pages:
-        display(HTML(page))
-    display(HTML(_TREE_SCRIPT))
+        show(html(page))
+    show(html(_TREE_SCRIPT))
 
 
 def _ensure_open(con: _duckdb.DuckDBPyConnection) -> None:
@@ -3042,7 +3160,7 @@ def _write_target(con: _duckdb.DuckDBPyConnection, name: str, sql_form: str) -> 
             f"({sql_form.format(rendered)}) instead"
         )
         raise _error(_duckdb.NotImplementedException, message)
-    return ".".join(_quote(p) for p in parts)
+    return ".".join(quote(p) for p in parts)
 
 
 def _string_option(options: list[tuple[str, str]], method: str, argument: str, value: object, option: str) -> None:
@@ -3076,7 +3194,7 @@ def _partition_option(options: list[tuple[str, str]], method: str, partition_by:
         return
     if not isinstance(partition_by, list) or not all(isinstance(p, str) for p in partition_by):
         raise _error(_duckdb.InvalidInputException, f"{method} only accepts 'partition_by' as a list of strings")
-    options.append(("PARTITION_BY", "(" + ", ".join(_quote(p) for p in partition_by) + ")"))
+    options.append(("PARTITION_BY", "(" + ", ".join(quote(p) for p in partition_by) + ")"))
 
 
 def _field_ids(field_ids: Mapping[object, object]) -> str:
@@ -3164,40 +3282,38 @@ def _suffixed(left: tuple[str, list[str]], right: tuple[str, list[str]], merged:
             raise _error(_duckdb.InvalidInputException, message)
     if merged:
         # Only the bare star merges a USING key, so the right copies are renamed through it by their qualified name.
-        renamed = ", ".join(f"{_quote(right_alias)}.{_quote(n)} AS {_quote(n + suffix)}" for n in shared)
+        renamed = ", ".join(f"{quote(right_alias)}.{quote(n)} AS {quote(n + suffix)}" for n in shared)
         return f"* RENAME ({renamed})"
-    renamed = ", ".join(f"{_quote(n)} AS {_quote(n + suffix)}" for n in shared)
-    return f"{_quote(left_alias)}.*, {_quote(right_alias)}.* RENAME ({renamed})"
+    renamed = ", ".join(f"{quote(n)} AS {quote(n + suffix)}" for n in shared)
+    return f"{quote(left_alias)}.*, {quote(right_alias)}.* RENAME ({renamed})"
 
 
 def _boundary_names(rel: DuckDBPyRelation) -> list[str]:
     """The names a relation exposes as a FROM item, asked of the binder over a typed stand-in of it."""
     reading = 'SELECT * FROM "__duckdb_side"'
-    stubs = [("__duckdb_side", _stub(*rel._schema))]
 
     def real() -> str:
         return _assemble([("__duckdb_side", _render(rel, literals=True)[0])], reading)
 
+    stub = _stub(*rel._schema)
+    if stub is None:
+        return list(_seam.bind(rel._con, real()).names)
+    stubs = [("__duckdb_side", stub)]
     return list(_bind_with_stand_ins(rel, _assemble(stubs, reading), stubs, real).names)
-
-
-def _is_column_reference(text: str) -> bool:
-    return fold_name(text) not in ("true", "false", "null") and bool(
-        _PLAIN_IDENTIFIER.match(text) or _QUALIFIED_IDENTIFIER.match(text)
-    )
 
 
 def _using_columns(texts: list[str]) -> tuple[str, ...] | None:
     """The USING list a condition means: the engine reads plain column names, or a list of conditions, as USING."""
-    if len(texts) == 1 and not _is_column_reference(texts[0]):
+    references = [_seam.column_reference(text) for text in texts]
+    if len(texts) == 1 and references[0] is None:
         return None
     columns = []
-    for text in texts:
-        if not _is_column_reference(text):
+    for parts in references:
+        if parts is None:
             raise _error(_duckdb.ParserException, "Expected a single expression as join condition")
-        if _QUALIFIED_IDENTIFIER.match(text):
+        if len(parts) > 1:
             raise _error(_duckdb.ParserException, "Expected unqualified column for column in USING clause")
-        columns.append(_split_qualified(text)[0])
+        columns.append(parts[0])
     return tuple(columns)
 
 
@@ -3207,9 +3323,13 @@ def _join_condition(
     if condition is None:
         return None, ()
     if isinstance(condition, str):
-        parsed = _parsed(con, condition)
-        using = _using_columns(parsed)
-        return (None, using) if using is not None else (_sql_text(condition), ())
+        count = _seam.check_text(con, _encodable(condition), "expressions")
+        using = _using_columns(_split_list(condition))
+        if using is not None:
+            return None, using
+        if count != 1:
+            raise _error(_duckdb.ParserException, "Expected a single expression as join condition")
+        return _spliced(condition), ()
     if isinstance(condition, (list, tuple)):
         names = []
         for item in condition:
@@ -3291,11 +3411,15 @@ def _reading_source(
     markers: tuple[_Marker, ...],
     values: list[Any] | dict[str, Any] | None,
     alias: str,
+    parsed: _duckdb.Statement | None = None,
 ) -> DuckDBPyRelation | None:
-    """A lazy relation over a query that reads, or None when the binder says it must run now."""
-    asked = _literal_text(text, markers, values) if values is not None else text
-    signature = _seam.bind(con, asked, capture=True)
-    if signature.return_type != "query_result" or signature.deferred:
+    """A lazy relation over a query that reads, or None when the binder says it must run now.
+
+    A SELECT the engine says changes a database, through a common table expression that writes or a sequence's
+    nextval, runs at the call, because a relation over it would write again on every read.
+    """
+    signature = _seam.bind(con, parsed if parsed is not None else text, capture=True, values=values)
+    if signature.return_type != "query_result" or signature.deferred or signature.writes:
         return None
     return DuckDBPyRelation._make(
         con,
@@ -3358,23 +3482,21 @@ def sql(
     _refuse_one_name_twice(params)
     if isinstance(query, str):
         _encodable(query)
-    kept, text, kind = _seam.prepare_script(con, query, params)  # type: ignore[arg-type]
+    kept, text, kind, parsed = _seam.prepare_script_parsed(con, query, params)  # type: ignore[arg-type]
     if text is None:
         if given:
             message = "Parameters were given, but the last statement of the query takes none"
             raise _error(_duckdb.InvalidInputException, message)
         return _held(con, kept, alias) if kept is not None else None
     text = _strip_semicolons(text)
-    # A statement that writes runs at the call, even where its parsed type is SELECT, because a relation over it
-    # would write again on every read, which running it once at the call prevents.
-    if kind == "SELECT" and not _writes(text):
+    if kind == "SELECT":
         markers = _markers(text)
         values: list[Any] | dict[str, Any] | None = None
         if given:
             values = _parameter_values(markers, params)
         elif markers:
             _parameter_values(markers, [] if markers[0].positional else {})
-        relation = _reading_source(con, text, markers, values, alias)
+        relation = _reading_source(con, text, markers, values, alias, parsed)
         if relation is not None:
             return relation
     return _run_now(con, text, params, alias, kept)
@@ -3446,8 +3568,13 @@ def values(con: _duckdb.DuckDBPyConnection, *args: object) -> DuckDBPyRelation:
     """A relation over rows given here: one list of values, expressions, or tuples of expressions."""
     if not args:
         raise _error(_duckdb.InvalidInputException, "Could not create a ValueRelation without any inputs")
+    held = _value_rows(args)
+    if held is not None:
+        # Held as rows, each value converted once now, so the Python objects can change afterwards.
+        handle = _seam.register_values(con, held)
+        return DuckDBPyRelation._make(con, ValueRows(handle.name), alias=_unnamed(), handles=(handle,))
     if len(args) == 1 and isinstance(args[0], list):
-        rows: tuple[tuple[str, ...], ...] = (tuple(_expression_text(v) for v in args[0]),)
+        rows: tuple[tuple[str, ...], ...] = (tuple(_value_text(v) for v in args[0]),)
     elif isinstance(args[0], tuple):
         collected: list[tuple[str, ...]] = []
         for arg in args:
@@ -3464,6 +3591,35 @@ def values(con: _duckdb.DuckDBPyConnection, *args: object) -> DuckDBPyRelation:
     else:
         rows = (_value_row(args),)
     return DuckDBPyRelation._make(con, Values(rows), alias=_unnamed())
+
+
+def _value_rows(args: tuple[object, ...]) -> list[tuple[object, ...]] | None:
+    """The rows `values()` was given, when every one of them holds only Python values.
+
+    None where one holds an expression, which only a VALUES list in SQL can hold, or anything that is no value.
+    """
+    if len(args) == 1 and isinstance(args[0], list):
+        rows = [tuple(args[0])]
+    elif all(isinstance(arg, tuple) for arg in args):
+        rows = [cast("tuple[object, ...]", arg) for arg in args]
+    else:
+        rows = [args]
+    for row in rows:
+        if not row or any(_is_expression(value) or isinstance(value, PendingCase) for value in row):
+            return None
+        if not all(_is_value(value) for value in row) or any(_keyed_by_other_than_text(value) for value in row):
+            return None
+    # A memoryview is the bytes it shows, as a literal's is, where the parameter path reads its raw buffer.
+    return [tuple(plain_value(value) for value in row) for row in rows]
+
+
+def _keyed_by_other_than_text(value: object) -> bool:
+    """Whether a dict with a key that is not a string is in `value`: a MAP, which the parameter path makes a STRUCT."""
+    if isinstance(value, dict):
+        return any(not isinstance(key, str) or _keyed_by_other_than_text(item) for key, item in value.items())
+    if isinstance(value, (list, tuple)):
+        return any(_keyed_by_other_than_text(item) for item in value)
+    return False
 
 
 def table_function(con: _duckdb.DuckDBPyConnection, name: str, parameters: object = None) -> DuckDBPyRelation:
@@ -3622,7 +3778,7 @@ def _pin_reader_schema(rel: DuckDBPyRelation) -> None:
         # sniffed on every read, since its own columns are what the union is made of.
         typed = [(name, value) for name, value in step.options if name not in _TYPE_OPTIONS]
         pinned_options = [*typed, ("types", _bound_columns(names[:width], types[:width]))]
-        projection = ", ".join(_quote(name) for name in names)
+        projection = ", ".join(quote(name) for name in names)
     elif step.function.startswith("read_csv"):
         # Without the dialect the reader would still have to sniff one, which is the cost this pinning removes, so
         # detection is only turned off when the sniffer answered for a single file. What the user set stays theirs.
