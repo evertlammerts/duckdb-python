@@ -474,7 +474,6 @@ needs_pandas_3 = pytest.mark.skipif(not PANDAS_GE_3, reason="before pandas 3 the
 
 @pytest.mark.parametrize("chunks", [1, 2], ids=["one_arrow_chunk", "two_arrow_chunks"])
 @pytest.mark.parametrize("dtype", [pytest.param("str", marks=needs_pandas_3), "string[pyarrow]"])
-@pytest.mark.xfail(strict=True, reason="a returned str column is converted to Python objects through to_numpy")
 def test_map_str_column_is_read_as_arrow(duckdb_cursor, monkeypatch, dtype, chunks):
     pytest.importorskip("pyarrow")
     arrow_string_array = pd.arrays.ArrowStringArray

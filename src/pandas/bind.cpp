@@ -1,6 +1,8 @@
 #include "duckdb_python/pandas/pandas_bind.hpp"
 #include "duckdb_python/pandas/pandas_analyzer.hpp"
 #include "duckdb_python/pandas/column/pandas_numpy_column.hpp"
+#include "duckdb_python/pandas/column/pandas_arrow_column.hpp"
+#include "duckdb_python/arrow/python_arrow_scan.hpp"
 #include "duckdb_python/numpy/numpy_array.hpp"
 #include "duckdb_python/pyconnection/pyconnection.hpp"
 #include "duckdb_python/python_conversion.hpp"
@@ -66,12 +68,50 @@ idx_t ColumnArrayRows(const string &column, nb::handle array) {
 	return nb::cast<idx_t>(shape[0]);
 }
 
-void CheckColumnArray(const string &column, nb::handle array, idx_t row_count, const string &counted_from) {
-	auto rows = ColumnArrayRows(column, array);
+static void CheckColumnRows(const string &column, idx_t rows, idx_t row_count, const string &counted_from) {
 	if (rows != row_count) {
 		throw InvalidInputException("Column '%s' has %llu rows where %s has %llu", column, rows, counted_from,
 		                            row_count);
 	}
+}
+
+void CheckColumnArray(const string &column, nb::handle array, idx_t row_count, const string &counted_from) {
+	CheckColumnRows(column, ColumnArrayRows(column, array), row_count, counted_from);
+}
+
+//! Reading the chunks costs an export of each chunk at every bind, where to_numpy costs a conversion of each row, so
+//! a column whose chunks are shorter than this on average is cheaper to convert.
+static constexpr idx_t ARROW_ROWS_PER_CHUNK = 50;
+
+//! The column read from its own chunks, or null when it is to be converted with to_numpy instead
+static unique_ptr<PandasArrowColumn> BindArrowStringColumn(ClientContext &context, const string &name,
+                                                           nb::handle pandas_array, idx_t row_count,
+                                                           const string &counted_from) {
+	nb::object chunked_array = pandas_array.attr("__arrow_array__")();
+	nb::object pyarrow_type = chunked_array.attr("type");
+	// Before pyarrow 14 nothing exports through capsules.
+	if (!PyUtil::HasAttribute(pyarrow_type, "__arrow_c_schema__")) {
+		return nullptr;
+	}
+	if (row_count < ARROW_ROWS_PER_CHUNK * nb::cast<idx_t>(chunked_array.attr("num_chunks"))) {
+		return nullptr;
+	}
+	auto subject = StringUtil::Format("column '%s'", name);
+	nb::object schema = pyarrow_type.attr("__arrow_c_schema__")();
+	auto arrow_type = ArrowType::GetArrowLogicalType(context, InCapsule<ArrowSchema>(schema, "arrow_schema", subject));
+	// Only a plain layout may be read without the engine adopting the chunks.
+	if (arrow_type->GetDuckType().id() != LogicalTypeId::VARCHAR ||
+	    arrow_type->GetPhysicalType() != ArrowArrayPhysicalType::DEFAULT) {
+		return nullptr;
+	}
+	auto result = make_uniq<PandasArrowColumn>(chunked_array, std::move(arrow_type));
+	nb::object chunks = chunked_array.attr("chunks");
+	for (auto chunk : chunks) {
+		auto exported = nb::cast<nb::tuple>(chunk.attr("__arrow_c_array__")());
+		result->AddChunk(InCapsule<ArrowArray>(exported[1], "arrow_array", subject));
+	}
+	CheckColumnRows(name, result->starts.back(), row_count, counted_from);
+	return result;
 }
 
 std::unique_ptr<RegisteredArray> RegisterMask(nb::handle mask) {
@@ -141,6 +181,12 @@ static LogicalType BindColumn(ClientContext &context, PandasBindColumn &column_p
 		auto pandas_array = column.attr("array");
 		auto &import_cache = *DuckDBPyConnection::ImportCache();
 		if (duckdb::PyUtil::IsInstance(pandas_array, import_cache.pandas.arrays.ArrowStringArray())) {
+			auto arrow_column = BindArrowStringColumn(context, bind_data.name, pandas_array, row_count, counted_from);
+			if (arrow_column) {
+				column_type = arrow_column->arrow_type->GetDuckType();
+				bind_data.pandas_col = std::move(arrow_column);
+				return column_type;
+			}
 			// On pandas 2 its _data is the pyarrow ChunkedArray, not an ndarray.
 			data = column.attr("to_numpy")();
 		} else if (duckdb::PyUtil::IsInstance(pandas_array, import_cache.pandas.arrays.StringArray())) {

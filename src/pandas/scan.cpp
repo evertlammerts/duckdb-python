@@ -7,6 +7,8 @@
 #include "duckdb_python/numpy/numpy_bind.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb_python/pandas/column/pandas_numpy_column.hpp"
+#include "duckdb_python/pandas/column/pandas_arrow_column.hpp"
+#include "duckdb_python/arrow/arrow_importer.hpp"
 #include "duckdb_python/pyutil.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 
@@ -168,12 +170,51 @@ double PandasScanFunction::PandasProgress(ClientContext &context, const Function
 	return percentage;
 }
 
+static void ScanArrowColumn(ClientContext &context, PandasArrowColumn &column, idx_t count, idx_t offset, Vector &out) {
+	if (count == 0) {
+		return;
+	}
+	auto &starts = column.starts;
+	auto chunk_idx = NumericCast<idx_t>(std::upper_bound(starts.begin(), starts.end(), offset) - starts.begin()) - 1;
+	auto position = offset - starts[chunk_idx];
+	if (position + count <= starts[chunk_idx + 1] - starts[chunk_idx]) {
+		ArrowArrayScanState state(context);
+		ReadArrowColumn(out, column.chunks[chunk_idx].arrow_array, *column.arrow_type, position, count, state);
+		return;
+	}
+	// Only the entries are copied: the strings stay in the chunks, which the bind data keeps alive.
+	Vector piece(out.GetType());
+	auto target = FlatVector::GetDataMutable<string_t>(out);
+	auto &target_validity = FlatVector::ValidityMutable(out);
+	for (idx_t written = 0; written < count; chunk_idx++, position = 0) {
+		auto rows = MinValue(count - written, starts[chunk_idx + 1] - starts[chunk_idx] - position);
+		FlatVector::ValidityMutable(piece).Reset();
+		ArrowArrayScanState state(context);
+		ReadArrowColumn(piece, column.chunks[chunk_idx].arrow_array, *column.arrow_type, position, rows, state);
+		auto source = FlatVector::GetData<string_t>(piece);
+		auto &source_validity = FlatVector::Validity(piece);
+		for (idx_t row = 0; row < rows; row++) {
+			if (source_validity.RowIsValid(row)) {
+				target[written + row] = source[row];
+			} else {
+				target_validity.SetInvalid(written + row);
+			}
+		}
+		written += rows;
+	}
+	FlatVector::SetSize(out, count);
+}
+
 void PandasScanFunction::PandasBackendScanSwitch(ClientContext &context, PandasColumnBindData &bind_data, idx_t count,
                                                  idx_t offset, Vector &out) {
 	auto backend = bind_data.pandas_col->Backend();
 	switch (backend) {
 	case PandasColumnBackend::NUMPY: {
 		NumpyScan::Scan(context, bind_data, count, offset, out);
+		break;
+	}
+	case PandasColumnBackend::ARROW: {
+		ScanArrowColumn(context, static_cast<PandasArrowColumn &>(*bind_data.pandas_col), count, offset, out);
 		break;
 	}
 	default: {

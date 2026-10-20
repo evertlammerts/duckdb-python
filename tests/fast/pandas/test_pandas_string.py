@@ -1,9 +1,11 @@
 import ctypes
 import datetime
+import gc
 import importlib.metadata
 import importlib.util
 import itertools
 import json
+import re
 import statistics
 import subprocess
 import sys
@@ -61,7 +63,7 @@ class TestPandasString:
 
 # A pyarrow backed str column averaging at least this many rows per chunk is read from its Arrow chunks, and one
 # below it is converted with to_numpy; must equal the threshold the scan uses.
-ARROW_ROWS_PER_CHUNK = 100
+ARROW_ROWS_PER_CHUNK = 50
 VECTOR_SIZE = 2048
 
 needs_pyarrow = pytest.mark.skipif(importlib.util.find_spec("pyarrow") is None, reason="pyarrow is not installed")
@@ -285,23 +287,9 @@ def test_python_string_column_without_pyarrow():
     }
 
 
-PYARROW_BIND_REASON = "bind converts a pyarrow backed str column with to_numpy and isna"
 BIND_STORAGE = [
-    pytest.param(
-        "str",
-        id="default_str",
-        marks=[
-            needs_pyarrow,
-            needs_pandas_3,
-            needs_arrow_chunk_export,
-            pytest.mark.xfail(strict=True, reason=PYARROW_BIND_REASON),
-        ],
-    ),
-    pytest.param(
-        "string[pyarrow]",
-        id="string_pyarrow",
-        marks=[needs_pyarrow, needs_arrow_chunk_export, pytest.mark.xfail(strict=True, reason=PYARROW_BIND_REASON)],
-    ),
+    pytest.param("str", id="default_str", marks=[needs_pyarrow, needs_pandas_3, needs_arrow_chunk_export]),
+    pytest.param("string[pyarrow]", id="string_pyarrow", marks=[needs_pyarrow, needs_arrow_chunk_export]),
     pytest.param("string[python]", id="string_python"),
     pytest.param("python_nan", id="python_nan", marks=needs_pandas_3),
 ]
@@ -568,7 +556,8 @@ SHORT_CHUNKS = [
         id="average_below_the_threshold",
     ),
     pytest.param(
-        lambda dtype: _chunked([["v"] * ARROW_ROWS_PER_CHUNK, []], dtype), id="empty_chunk_lowers_the_average"
+        lambda dtype: _chunked([["v"] * ARROW_ROWS_PER_CHUNK, [], ["v"] * ARROW_ROWS_PER_CHUNK], dtype),
+        id="empty_chunk_lowers_the_average",
     ),
 ]
 LONG_CHUNKS = [
@@ -594,7 +583,6 @@ def test_str_short_chunks_read_through_to_numpy(duckdb_cursor, monkeypatch, dtyp
 
 
 @needs_arrow_chunk_export
-@pytest.mark.xfail(strict=True, reason="bind converts a pyarrow backed str column with to_numpy whatever its chunks")
 @pytest.mark.parametrize("layout", LONG_CHUNKS)
 @pytest.mark.parametrize("dtype", PYARROW_STORAGE)
 def test_str_long_chunks_read_as_arrow(duckdb_cursor, monkeypatch, dtype, layout):
@@ -606,7 +594,6 @@ def test_str_long_chunks_read_as_arrow(duckdb_cursor, monkeypatch, dtype, layout
 
 
 @needs_arrow_chunk_export
-@pytest.mark.xfail(strict=True, reason="bind converts every pyarrow backed str column with to_numpy")
 @pytest.mark.parametrize("dtype", PYARROW_STORAGE)
 def test_str_chunk_length_rule_applies_per_column(duckdb_cursor, monkeypatch, dtype):
     rows = 3 * ARROW_ROWS_PER_CHUNK
@@ -622,6 +609,60 @@ def test_str_chunk_length_rule_applies_per_column(duckdb_cursor, monkeypatch, dt
     result = duckdb_cursor.sql("SELECT long, short FROM frame ORDER BY i").fetchall()
     assert result == list(zip(long_values, short_values, strict=False))
     assert set(calls) == {rows // 2}
+
+
+@needs_arrow_chunk_export
+@pytest.mark.parametrize(
+    ("pieces", "converted"),
+    [
+        pytest.param([ARROW_ROWS_PER_CHUNK, 0], True, id="with_an_empty_chunk"),
+        pytest.param([ARROW_ROWS_PER_CHUNK], False, id="without_one"),
+    ],
+)
+@pytest.mark.parametrize("dtype", PYARROW_STORAGE)
+def test_str_empty_chunk_of_a_map_result_lowers_the_average(duckdb_cursor, monkeypatch, dtype, pieces, converted):
+    # On pandas 3 a registered frame is read through a shallow copy, which drops empty chunks at either end.
+    values = [f"v{index}" for index in range(ARROW_ROWS_PER_CHUNK)]
+
+    def produce(_):
+        return pd.DataFrame({"s": _chunked(_split(values, pieces), dtype).array})
+
+    calls = _to_numpy_calls(monkeypatch, pd.arrays.ArrowStringArray, len(values))
+    rows = duckdb_cursor.sql("SELECT 1 AS x").map(produce).fetchall()
+    assert rows == _rows_of(values)
+    assert bool(calls) == converted
+
+
+@needs_arrow_chunk_export
+@pytest.mark.parametrize("dtype", PYARROW_STORAGE)
+def test_map_result_str_column_with_zero_chunks_reads_no_rows(duckdb_cursor, pa, dtype):
+    def produce(_):
+        result = pd.DataFrame({"s": _filtered_to_nothing(pa, _dtype(dtype)).array})
+        assert result["s"].array._pa_array.num_chunks == 0
+        return result
+
+    relation = duckdb_cursor.sql("SELECT 1 AS x").map(produce)
+    types = _types(relation)
+    rows = relation.fetchall()
+    assert types == ["VARCHAR"]
+    assert rows == []
+
+
+@needs_arrow_chunk_export
+@pytest.mark.parametrize("dtype", PYARROW_STORAGE)
+def test_str_chunks_are_released_once_the_frame_is_gone(pa, dtype):
+    # Collected first, so that only the arrays this test makes are counted.
+    gc.collect()
+    before = pa.total_allocated_bytes()
+    values = [f"value {index}" for index in range(3 * ARROW_ROWS_PER_CHUNK)]
+    frame = _frame(_chunked(_pieces(values, ARROW_ROWS_PER_CHUNK), dtype))
+    with duckdb.connect() as con:
+        con.register("frame", frame)
+        rows = con.sql("SELECT s FROM frame ORDER BY i").fetchall()
+    del frame
+    gc.collect()
+    assert rows == _rows_of(values)
+    assert pa.total_allocated_bytes() == before
 
 
 @pytest.mark.parametrize("rows", [3, 3 * ARROW_ROWS_PER_CHUNK], ids=["short", "long"])
@@ -730,13 +771,10 @@ def _outcome(setup, use, frame):
 
 
 @needs_arrow_chunk_export
-@pytest.mark.xfail(strict=True, reason="a str column with invalid UTF-8 fails at bind in to_numpy whatever its chunks")
 @pytest.mark.parametrize(("setup", "use"), INVALID_UTF8_USES)
 @pytest.mark.parametrize(
     "pieces",
     [
-        pytest.param([1, 1, 1], id="one_row_per_chunk"),
-        pytest.param([ARROW_ROWS_PER_CHUNK - 1], id="one_chunk_just_below_the_threshold"),
         pytest.param([ARROW_ROWS_PER_CHUNK], id="one_chunk_at_the_threshold"),
         pytest.param([2 * ARROW_ROWS_PER_CHUNK, 1], id="long_chunk_with_an_appended_row"),
     ],
@@ -746,6 +784,21 @@ def test_str_invalid_utf8_by_layout(pa, pieces, setup, use):
     expected = _outcome(setup, use, arrow_dtype_frame)
     outcome = _outcome(setup, use, frame)
     assert outcome == expected
+
+
+@pytest.mark.parametrize(("setup", "use"), INVALID_UTF8_USES)
+@pytest.mark.parametrize(
+    "pieces",
+    [
+        pytest.param([1, 1, 1], id="one_row_per_chunk"),
+        pytest.param([ARROW_ROWS_PER_CHUNK - 1], id="one_chunk_just_below_the_threshold"),
+    ],
+)
+def test_str_invalid_utf8_below_the_threshold_fails_at_bind(pa, pieces, setup, use):
+    frame, _ = _invalid_utf8_frames(pa, pieces)
+    error_type, message = _outcome(setup, use, frame)
+    assert error_type is duckdb.Error
+    assert re.search(r"Wrapping .* failed", message)
 
 
 GIL_HOLD_SECONDS = 0.2
@@ -786,22 +839,21 @@ def _scan_growth_in_holds(frame):
     return (held - free) / GIL_HOLD_SECONDS, (held_calls, free_calls)
 
 
-GIL_STR_REASON = "a pyarrow backed str column is scanned through Python objects"
 GIL_COLUMNS = [
     pytest.param(
         lambda pa, values: pd.array(values, dtype="str"),
         id="default_str",
-        marks=[needs_pandas_3, needs_arrow_chunk_export, pytest.mark.xfail(strict=True, reason=GIL_STR_REASON)],
+        marks=[needs_pandas_3, needs_arrow_chunk_export],
     ),
     pytest.param(
         lambda pa, values: pd.array(values, dtype="string[pyarrow]"),
         id="string_pyarrow",
-        marks=[needs_arrow_chunk_export, pytest.mark.xfail(strict=True, reason=GIL_STR_REASON)],
+        marks=needs_arrow_chunk_export,
     ),
     pytest.param(
         lambda pa, values: _chunked(_pieces(values, 1000), "string[pyarrow]").array,
         id="string_pyarrow_many_chunks",
-        marks=[needs_arrow_chunk_export, pytest.mark.xfail(strict=True, reason=GIL_STR_REASON)],
+        marks=needs_arrow_chunk_export,
     ),
 ]
 

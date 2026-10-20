@@ -563,11 +563,7 @@ ORDINARY_SHUTDOWN = [
         (),
         True,
         id="two_chunk_str_frame_with_a_running_scan_at_exit",
-        marks=[
-            _needs("pyarrow"),
-            _needs("pandas"),
-            pytest.mark.xfail(strict=False, reason="exit can hang while a scan that takes the GIL is running"),
-        ],
+        marks=[_needs("pyarrow"), _needs("pandas")],
     ),
     pytest.param(
         """
@@ -595,11 +591,7 @@ ORDINARY_SHUTDOWN = [
         (),
         True,
         id="short_chunk_str_frame_with_a_running_scan_at_exit",
-        marks=[
-            _needs("pandas"),
-            _needs("pyarrow"),
-            pytest.mark.xfail(strict=False, reason="exit can hang while a scan that takes the GIL is running"),
-        ],
+        marks=[_needs("pandas"), _needs("pyarrow")],
     ),
     pytest.param(
         """
