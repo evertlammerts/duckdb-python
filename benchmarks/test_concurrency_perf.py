@@ -9,8 +9,8 @@ core execution. Primary signal is LOCAL WALLTIME:
 Under CI Callgrind threads are serialized, so wall-clock contention is invisible there; the deterministic count
 still captures per-batch Produce GIL calls + UDF dispatch. Never gated either way.
 
-GOTCHA: a SINGLE-BATCH arrow table does NOT parallelize (one batch = one serial scan unit). The arrow scan bench
-MUST use a MULTI-BATCH table AND a CPU-heavy aggregate (a cheap sum is bandwidth-bound and won't parallelize).
+GOTCHA: the arrow scan splits each batch into ranges of 122880 rows, so a batch shorter than two ranges is one serial
+scan unit. The arrow scan bench MUST use a CPU-heavy aggregate (a cheap sum is bandwidth-bound and won't parallelize).
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ import pandas as pd  # noqa: E402
 pytestmark = pytest.mark.informational
 
 N_SCAN = 1_000_000
-BATCH = 20_000  # -> 50 record batches; MULTI-BATCH required for the arrow scan to parallelize (see GOTCHA)
+BATCH = 20_000  # -> 50 record batches, each one serial scan unit (see GOTCHA)
 N_UDF_NATIVE = 200_000  # native UDF = one Python call per row; keep modest (Callgrind instruments every call)
 N_UDF_ARROW = 1_000_000  # arrow UDF = one call per chunk (vectorized)
 THREADS = [1, 4, 8]

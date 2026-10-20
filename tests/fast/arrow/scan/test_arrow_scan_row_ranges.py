@@ -30,8 +30,6 @@ import scan.test_python_arrow_scan_core as core  # noqa: E402
 RANGE_ROWS = 122_880
 THREADS = 4
 LARGE = 1_000_003
-NOT_SPLIT = "a large batch is still read whole by one thread"
-not_split = pytest.mark.xfail(strict=True, raises=AssertionError, reason=NOT_SPLIT)
 
 
 def arange(rows):
@@ -106,7 +104,7 @@ before_pandas_3 = pytest.mark.skipif(not PANDAS_GE_3, reason="before pandas 3 a 
 
 
 def _one_chunk_param(name):
-    return pytest.param(name, marks=[not_split, before_pandas_3] if name in SERIES_SOURCES else [not_split])
+    return pytest.param(name, marks=[before_pandas_3] if name in SERIES_SOURCES else [])
 
 
 class TestThreads:
@@ -121,7 +119,6 @@ class TestThreads:
             assert con.execute(query).fetchall()[0][0] > 1
 
     @pytest.mark.timeout(60)
-    @not_split
     def test_a_large_batch_after_a_small_one_is_read_by_several_threads(self):
         schema = pa.schema([("a", pa.int64())])
         batches = [pa.record_batch([pa.array(arange(rows))], schema=schema) for rows in (10, LARGE)]
@@ -133,7 +130,6 @@ class TestThreads:
             assert con.execute(query).fetchall()[0][0] > 2
 
     @pytest.mark.timeout(60)
-    @not_split
     def test_a_large_batch_of_a_stream_pulled_under_the_gil_is_read_by_several_threads(self):
         source = core.PythonStreamSource(pa.table({"a": arange(LARGE)}), max_chunksize=LARGE)
         with duckdb.connect(config={"threads": THREADS}) as con:
@@ -161,7 +157,6 @@ class TestThreads:
             query = reading_threads(con, "src")
             assert con.execute(query).fetchall()[0][0] == 1
 
-    @not_split
     @pytest.mark.timeout(60)
     @pytest.mark.parametrize("source", ["table", "array"])
     @pytest.mark.parametrize("rows", [2 * RANGE_ROWS, 3 * RANGE_ROWS - 1], ids=["two_ranges", "two_and_a_remainder"])
@@ -802,11 +797,6 @@ class TestUnchanged:
 
 class TestVerifyParallelism:
     @pytest.mark.timeout(60)
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason="under verify_parallelism a one chunk source is still read by one thread",
-    )
     def test_verify_parallelism_splits_a_one_chunk_source_into_vectors(self):
         table = pa.table({"a": arange(3 * 2048)})
         with duckdb.connect(config={"threads": THREADS}) as con:

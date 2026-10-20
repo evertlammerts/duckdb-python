@@ -14,12 +14,14 @@
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/function/table/arrow.hpp"
+#include "duckdb/main/client_config.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/external_dependencies.hpp"
 #include "duckdb/parser/expression/function_expression.hpp"
 #include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/storage/statistics/node_statistics.hpp"
+#include "duckdb/storage/storage_info.hpp"
 #include "duckdb_python/engine/connection.hpp"
 #include "duckdb_python/exceptions.hpp"
 #include "duckdb_python/pyconnection/pyconnection.hpp"
@@ -554,9 +556,16 @@ struct PythonArrowScanGlobalState : public GlobalTableFunctionState {
 	//! Started by an exit handler that runs after the exit hook, while other threads can still take the GIL
 	bool started_during_exit = false;
 	idx_t max_threads = 1;
+	//! A pulled batch is read in ranges of this many rows from its start, the last one also taking a remainder shorter
+	//! than a range
+	idx_t range_rows = DEFAULT_ROW_GROUP_SIZE;
 
-	//! Guards the pull, the claim of a batch index and the claim of the single batch
+	//! Guards the pull, the claim of a range with its batch index, and the claim of the single batch
 	mutex pull_lock;
+	//! The batch whose ranges are being handed out, checked once by the thread that pulled it
+	shared_ptr<ArrowArrayWrapper> current;
+	//! The first row of current not yet handed out
+	idx_t next_row = 0;
 	idx_t next_batch = 0;
 	bool exhausted = false;
 };
@@ -660,8 +669,15 @@ unique_ptr<GlobalTableFunctionState> PythonArrowScanInitGlobal(ClientContext &co
 			                            name, types[i].ToString(), bind_data.types[expected].ToString());
 		}
 	}
-	// A single batch is one claim, which only one thread can ever work on.
-	result->max_threads = exported.IsArray() ? 1 : STREAM_MAX_THREADS;
+	// One vector ranges under verify_parallelism, as in the engine's own scans, so queries under it cross range ends.
+	result->range_rows =
+	    ClientConfig::GetConfig(context).verify_parallelism ? STANDARD_VECTOR_SIZE : DEFAULT_ROW_GROUP_SIZE;
+	result->max_threads = STREAM_MAX_THREADS;
+	if (result->single) {
+		// Its number of ranges, as the last one takes a remainder shorter than a range
+		const auto length = result->single.value.length;
+		result->max_threads = MaxValue<idx_t>(1, length > 0 ? NumericCast<idx_t>(length) / result->range_rows : 0);
+	}
 	if (!exported.IsArray()) {
 		auto stream = TakeFromCapsule<ArrowArrayStream>(exported.stream, STREAM_CAPSULE, subject);
 		stream.release_under_gil = result->python_callbacks;
@@ -723,38 +739,58 @@ void PythonArrowScanExec(ClientContext &context, TableFunctionInput &data, DataC
 	auto &global = data.global_state->Cast<PythonArrowScanGlobalState>();
 	auto &local = data.local_state->Cast<PythonArrowScanLocalState>();
 	while (!local.importer.Next(output)) {
+		// Declared before the lock, so a batch refused or used up here is released after it, as a release may take the
+		// GIL.
 		ArrowArrayWrapper pulled;
+		shared_ptr<ArrowArrayWrapper> batch;
+		idx_t start = 0;
+		idx_t rows = 0;
+		bool last = true;
 		{
 			lock_guard<mutex> guard(global.pull_lock);
-			if (global.exhausted) {
-				return;
-			}
-			if (!global.stream) {
-				pulled.arrow_array = global.single.value;
-				global.single.value.release = nullptr;
-				global.exhausted = true;
-			} else {
+			if (!global.current) {
+				if (global.exhausted) {
+					return;
+				}
+				if (!global.stream) {
+					pulled.arrow_array = global.single.value;
+					global.single.value.release = nullptr;
+					global.exhausted = true;
+				} else {
+					try {
+						PullNext(context, global, pulled.arrow_array);
+					} catch (...) {
+						// A stream that failed is not pulled again by another thread while the query is cancelled.
+						global.exhausted = true;
+						throw;
+					}
+					if (!pulled.arrow_array.release) {
+						global.exhausted = true;
+					} else if (global.wrap) {
+						WrapAsBatch(pulled.arrow_array);
+					}
+				}
+				if (!pulled.arrow_array.release) {
+					return;
+				}
 				try {
-					PullNext(context, global, pulled.arrow_array);
+					global.current = local.importer.Adopt(pulled.arrow_array);
 				} catch (...) {
-					// A stream that failed is not pulled again by another thread while the query is cancelled.
 					global.exhausted = true;
 					throw;
 				}
-				if (!pulled.arrow_array.release) {
-					global.exhausted = true;
-				} else if (global.wrap) {
-					WrapAsBatch(pulled.arrow_array);
-				}
+				global.next_row = 0;
 			}
-			if (pulled.arrow_array.release) {
-				local.batch_index = global.next_batch++;
-			}
+			const auto length = NumericCast<idx_t>(global.current->arrow_array.length);
+			start = global.next_row;
+			const auto remaining = length - start;
+			rows = remaining < 2 * global.range_rows ? remaining : global.range_rows;
+			global.next_row += rows;
+			last = global.next_row == length;
+			batch = last ? std::move(global.current) : global.current;
+			local.batch_index = global.next_batch++;
 		}
-		if (!pulled.arrow_array.release) {
-			continue;
-		}
-		local.importer.Append(pulled.arrow_array);
+		local.importer.Read(std::move(batch), start, rows, last);
 	}
 }
 

@@ -17,18 +17,23 @@ void ReadArrowColumn(Vector &vector, ArrowArray &array, const ArrowType &arrow_t
                      ArrowArrayScanState &state, ValidityMask *row_validity = nullptr);
 
 //! Converts Arrow record batches into DataChunks of at most STANDARD_VECTOR_SIZE rows against one resolved schema, one
-//! batch at a time, referencing the batch's buffers where the engine's conversion allows. The batch's own validity
-//! bitmap makes a whole row NULL. Not thread safe: each scanning thread owns one.
+//! range of rows of one batch at a time, referencing the batch's buffers where the engine's conversion allows. The
+//! batch's own validity bitmap makes a whole row NULL. Not thread safe: each scanning thread owns one, and threads
+//! share a batch by reading different ranges of it.
 class ArrowBatchImporter {
 public:
 	//! Output column i is read from batch column columns[i]
 	ArrowBatchImporter(ClientContext &context, shared_ptr<ArrowTableSchema> schema, vector<idx_t> columns);
 
-	//! Takes the batch over, clearing its release, after checking its shape against the schema; the previous batch
-	//! is dropped, drained or not
+	//! Checks the batch's shape against the schema and takes it over, clearing its release; a refused batch keeps it
+	shared_ptr<ArrowArrayWrapper> Adopt(ArrowArray &batch) const;
+	//! Reads rows [start, start + rows) of an adopted batch next. The column states stay while ranges of the same
+	//! batch follow; `last` says none will, so they go once this range is drained.
+	void Read(shared_ptr<ArrowArrayWrapper> batch, idx_t start, idx_t rows, bool last);
+	//! Adopts the batch and reads all of it next; the previous batch is dropped, drained or not
 	void Append(ArrowArray &batch);
-	//! Fills `output`, whose columns match the requested ones, with the next rows of the current batch; false once
-	//! the batch is drained
+	//! Fills `output`, whose columns match the requested ones, with the next rows of the current range; false once
+	//! the range is drained
 	bool Next(DataChunk &output);
 
 private:
@@ -40,8 +45,10 @@ private:
 	const vector<idx_t> columns;
 	shared_ptr<ArrowArrayWrapper> batch;
 	idx_t offset = 0;
-	idx_t length = 0;
-	//! Kept while one batch is drained, so its dictionaries are decoded once rather than once per chunk
+	idx_t end = 0;
+	bool last = true;
+	//! Kept across the ranges of one batch, so its dictionaries are decoded once rather than once per chunk or range.
+	//! Dropped with the batch, since the engine caches run ends with no key.
 	unordered_map<idx_t, unique_ptr<ArrowArrayScanState>> states;
 };
 

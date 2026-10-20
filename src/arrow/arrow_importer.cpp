@@ -252,7 +252,7 @@ ArrowBatchImporter::ArrowBatchImporter(ClientContext &context, shared_ptr<ArrowT
       columns(std::move(columns_p)) {
 }
 
-void ArrowBatchImporter::Append(ArrowArray &incoming) {
+shared_ptr<ArrowArrayWrapper> ArrowBatchImporter::Adopt(ArrowArray &incoming) const {
 	const auto expected = arrow_columns.size();
 	if (incoming.n_children < 0 || NumericCast<idx_t>(incoming.n_children) != expected) {
 		throw InvalidInputException("an Arrow batch carried %d columns where %d were expected", incoming.n_children,
@@ -289,13 +289,27 @@ void ArrowBatchImporter::Append(ArrowArray &incoming) {
 	for (auto column : columns) {
 		CheckNested(*incoming.children[column], *arrow_columns.at(column), column, 0, false);
 	}
-	states.clear();
 	auto owned = make_shared_ptr<ArrowArrayWrapper>();
 	owned->arrow_array = incoming;
 	incoming.release = nullptr;
-	batch = std::move(owned);
-	offset = 0;
-	length = NumericCast<idx_t>(batch->arrow_array.length);
+	return owned;
+}
+
+void ArrowBatchImporter::Read(shared_ptr<ArrowArrayWrapper> batch_p, idx_t start, idx_t rows, bool last_p) {
+	D_ASSERT(batch_p && start + rows <= NumericCast<idx_t>(batch_p->arrow_array.length));
+	if (batch_p != batch) {
+		states.clear();
+		batch = std::move(batch_p);
+	}
+	offset = start;
+	end = start + rows;
+	last = last_p;
+}
+
+void ArrowBatchImporter::Append(ArrowArray &incoming) {
+	auto adopted = Adopt(incoming);
+	const auto rows = NumericCast<idx_t>(adopted->arrow_array.length);
+	Read(std::move(adopted), 0, rows, true);
 }
 
 ArrowArrayScanState &ArrowBatchImporter::StateOf(idx_t column) {
@@ -312,14 +326,16 @@ ArrowArrayScanState &ArrowBatchImporter::StateOf(idx_t column) {
 }
 
 bool ArrowBatchImporter::Next(DataChunk &output) {
-	if (!batch || offset >= length) {
-		states.clear();
-		batch.reset();
+	if (!batch || offset >= end) {
+		if (last) {
+			states.clear();
+			batch.reset();
+		}
 		return false;
 	}
 	D_ASSERT(output.ColumnCount() == columns.size());
 	auto &array = batch->arrow_array;
-	const auto rows = MinValue<idx_t>(STANDARD_VECTOR_SIZE, length - offset);
+	const auto rows = MinValue<idx_t>(STANDARD_VECTOR_SIZE, end - offset);
 	// The batch offset is folded into the row position, which the engine hands on to nested children, rather than
 	// passed as the parent offset, which its struct conversion does not hand on.
 	const auto position = NumericCast<idx_t>(array.offset) + offset;
