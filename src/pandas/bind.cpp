@@ -104,7 +104,7 @@ static unique_ptr<PandasArrowColumn> BindArrowStringColumn(ClientContext &contex
 	    arrow_type->GetPhysicalType() != ArrowArrayPhysicalType::DEFAULT) {
 		return nullptr;
 	}
-	auto result = make_uniq<PandasArrowColumn>(chunked_array, std::move(arrow_type));
+	auto result = make_uniq<PandasArrowColumn>(std::move(arrow_type));
 	nb::object chunks = chunked_array.attr("chunks");
 	for (auto chunk : chunks) {
 		auto exported = nb::cast<nb::tuple>(chunk.attr("__arrow_c_array__")());

@@ -665,6 +665,34 @@ def test_str_chunks_are_released_once_the_frame_is_gone(pa, dtype):
     assert pa.total_allocated_bytes() == before
 
 
+@needs_arrow_chunk_export
+@pytest.mark.parametrize("dtype", PYARROW_STORAGE)
+def test_str_chunks_outlive_the_frames_column_while_a_result_streams(pa, dtype):
+    gc.collect()
+    before = pa.total_allocated_bytes()
+    values = [f"value {index}" for index in range(4 * VECTOR_SIZE)]
+    frame = _frame(_chunked(_pieces(values, 4 * ARROW_ROWS_PER_CHUNK), dtype))
+    gc.collect()
+    column_bytes = pa.total_allocated_bytes() - before
+    with duckdb.connect(config={"threads": 1}) as con:
+        # A small buffer stops the scan from reading ahead, so part of the column is read after it is replaced.
+        con.execute("SET streaming_buffer_size = '1KB'")
+        con.execute("SET enable_progress_bar = true")
+        con.execute("SET enable_progress_bar_print = false")
+        con.register("view", frame)
+        con.execute("SELECT s FROM view")
+        first = con.fetchmany(3)
+        assert 0 <= con.query_progress() < 100
+        frame["s"] = 0
+        gc.collect()
+        assert pa.total_allocated_bytes() - before >= column_bytes
+        rows = first + con.fetchall()
+    del frame
+    gc.collect()
+    assert rows == _rows_of(values)
+    assert pa.total_allocated_bytes() == before
+
+
 @pytest.mark.parametrize("rows", [3, 3 * ARROW_ROWS_PER_CHUNK], ids=["short", "long"])
 @pytest.mark.parametrize("dtype", PYARROW_STORAGE)
 def test_pyarrow_string_column_is_never_read_through_data(duckdb_cursor, monkeypatch, dtype, rows):
