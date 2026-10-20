@@ -39,6 +39,7 @@ __all__ = [
     "register_map",
     "register_source",
     "register_values",
+    "result_arrow",
     "statement_count",
     "submit",
     "table_kind",
@@ -96,6 +97,16 @@ def submit(
 ) -> Result:
     """Run one statement with its values, to the format a terminal needs."""
     return con._submit(sql, values, format, batch_size)  # type: ignore[arg-type]
+
+
+def result_arrow(con: _duckdb.DuckDBPyConnection, batch_size: int, *, reader: bool) -> Any:  # noqa: ANN401
+    """The rows the connection's open result still holds, as Arrow; None once a fetch has used them up.
+
+    The rows are taken out of the result and read back through a statement over them, so they come out in the
+    Arrow encoding this connection's settings produce. With `reader` the statement streams into a
+    `RecordBatchReader`, which holds the connection until it is read out, dropped or closed.
+    """
+    return con._result_as_arrow(batch_size, reader=reader)
 
 
 def prepare_script_parsed(

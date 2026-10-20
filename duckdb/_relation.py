@@ -4411,7 +4411,27 @@ def _connection_from_arrow(self: _duckdb.DuckDBPyConnection, arrow_object: objec
     return from_arrow(self, arrow_object)
 
 
-#: The relation producing methods of a connection, by name.
+_ARROW_TABLE_COPY_WARNING = (
+    "Arrow output on a DB-API result makes an extra copy of the rows, use con.sql(query).to_arrow_table() instead."
+)
+_ARROW_READER_COPY_WARNING = (
+    "Arrow output on a DB-API result makes an extra copy of the rows, use con.sql(query).to_arrow_reader() instead."
+)
+
+
+def _connection_to_arrow_table(self: _duckdb.DuckDBPyConnection, batch_size: int = _seam.DEFAULT_BATCH_SIZE) -> Any:  # noqa: ANN401
+    """Every row the pending result still holds, as an Arrow Table."""
+    warnings.warn(_ARROW_TABLE_COPY_WARNING, UserWarning, _caller_level())
+    return _seam.result_arrow(self, int(batch_size), reader=False)
+
+
+def _connection_to_arrow_reader(self: _duckdb.DuckDBPyConnection, batch_size: int = _seam.DEFAULT_BATCH_SIZE) -> Any:  # noqa: ANN401
+    """A reader over every row the pending result still holds."""
+    warnings.warn(_ARROW_READER_COPY_WARNING, UserWarning, _caller_level())
+    return _seam.result_arrow(self, int(batch_size), reader=True)
+
+
+#: The Python methods of a connection, by name.
 CONNECTION_METHODS: dict[str, Any] = {
     "sql": _connection_sql,
     "query": _connection_sql,
@@ -4427,6 +4447,8 @@ CONNECTION_METHODS: dict[str, Any] = {
     "from_parquet": _connection_read_parquet,
     "from_df": _connection_from_df,
     "from_arrow": _connection_from_arrow,
+    "to_arrow_table": _connection_to_arrow_table,
+    "to_arrow_reader": _connection_to_arrow_reader,
 }
 
 
@@ -4609,3 +4631,17 @@ def module_query_df(
 def module_arrow(arrow_object: object, *, connection: _duckdb.DuckDBPyConnection | None = None) -> DuckDBPyRelation:
     """Create a relation object from an Arrow object."""
     return from_arrow(_connection(connection), arrow_object)
+
+
+def module_to_arrow_table(
+    batch_size: int = _seam.DEFAULT_BATCH_SIZE, *, connection: _duckdb.DuckDBPyConnection | None = None
+) -> Any:  # noqa: ANN401
+    """Every row the connection's pending result still holds, as an Arrow Table."""
+    return _connection_to_arrow_table(_connection(connection), batch_size)
+
+
+def module_to_arrow_reader(
+    batch_size: int = _seam.DEFAULT_BATCH_SIZE, *, connection: _duckdb.DuckDBPyConnection | None = None
+) -> Any:  # noqa: ANN401
+    """A reader over every row the connection's pending result still holds."""
+    return _connection_to_arrow_reader(_connection(connection), batch_size)

@@ -174,6 +174,17 @@ void DbapiResult::Supersede() {
 	}
 }
 
+unique_ptr<ColumnDataCollection> DbapiResult::TakeRows(vector<Identifier> &names) {
+	if (!result) {
+		return nullptr;
+	}
+	// Moved out first: the take runs the statement to its end or ends it, so the rows never come back, and a
+	// failure must leave the result read out rather than reporting its error at every later fetch
+	auto taken = std::move(result);
+	names = taken->ResultNames();
+	return taken->TakeRows(DuckDBPyConnection::CheckSignals);
+}
+
 void DbapiResult::Abort() {
 	if (result) {
 		result->Close();
@@ -1415,6 +1426,64 @@ nb::dict DuckDBPyConnection::FetchTF() {
 	}
 	auto &result = con.GetResult();
 	return result.FetchTF();
+}
+
+nb::object DuckDBPyConnection::ResultAsArrow(idx_t batch_size, bool reader) {
+	ConnectionLockGuard conn_lock(*this);
+	// Asked before the result, so a closed connection reports itself and not the slot its close emptied
+	auto session = EngineSession();
+	if (!con.HasResult()) {
+		throw InvalidInputException("No open result set");
+	}
+	// While CONNECT-ed the engine sends every statement to the remote as text, and a statement over rows held
+	// here has none, so the rows would be taken for nothing
+	if (session.Context().IsConnected()) {
+		throw InvalidInputException("Arrow output on a DB-API result is not available while CONNECT-ed; DISCONNECT "
+		                            "first, or use con.sql(query).to_arrow_table() or to_arrow_reader()");
+	}
+	// Everything that can refuse before the rows are taken does so, so a refused call costs no rows
+	if (reader) {
+		DuckDBPyResult::CheckBatchSize(batch_size);
+	}
+	auto format = engine::Format::Arrow(batch_size);
+	// Imported before the engine checks, so no Python code runs between what they find and the take
+	nb::module_::import_("pyarrow");
+	auto held = con.GetResult().EngineResult();
+	{
+		DUCKDB_PY_ASSERT_GIL_HELD();
+		nb::gil_scoped_release release;
+		auto claim = session.Claim();
+		// The engine refuses an aborted transaction here under its own lock, and a running result keeps its
+		// transaction active, so the empty function neither begins nor commits anything the result depends on
+		session.Context().RunFunctionInTransaction([] {});
+		// Another open result, a relation's reader for one, would refuse the statement over the rows after the take;
+		// a running DB-API result is itself the one open result and the take drains it
+		if (held && !held->Running()) {
+			engine::VerifyNoOpenResult(session.Context());
+		}
+	}
+
+	vector<Identifier> names;
+	auto rows = con.GetResult().TakeRows(names);
+	if (!rows) {
+		return nb::none();
+	}
+	shared_ptr<engine::Result> arrow;
+	{
+		DUCKDB_PY_ASSERT_GIL_HELD();
+		nb::gil_scoped_release release;
+		arrow = session.Submit(std::move(rows), names, format);
+		if (reader) {
+			arrow->Settle(DuckDBPyConnection::CheckSignals);
+		} else {
+			arrow->Retain(DuckDBPyConnection::CheckSignals);
+		}
+	}
+	DuckDBPyResult converted(std::move(arrow), std::move(names));
+	if (reader) {
+		return nb::cast(converted.FetchRecordBatchReader(batch_size));
+	}
+	return nb::cast(converted.FetchArrowTable(batch_size, false));
 }
 
 identifier_map_t<Value> TransformPyConfigDict(const nb::dict &py_config_dict) {

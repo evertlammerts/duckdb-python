@@ -86,6 +86,10 @@ public:
 	//! Makes way for the next statement: one that may write runs to its end, so its effects are not lost; one
 	//! that reads is cancelled
 	void Supersede();
+	//! Every row the result still holds, under names, which leaves it read out as a consuming fetch does; null
+	//! when the rows were used up already. The rows are gone even when the take fails, since it ran the
+	//! statement to its end or ended it.
+	unique_ptr<ColumnDataCollection> TakeRows(vector<Identifier> &names);
 	shared_ptr<engine::Result> EngineResult() const {
 		return result ? result->EngineResult() : nullptr;
 	}
@@ -440,6 +444,9 @@ public:
 	nb::dict FetchPyTorch();
 
 	nb::dict FetchTF();
+	//! The rows of the last execute() result as Arrow, read back through a statement over them on this
+	//! connection. reader hands out a stream of batches, otherwise a table. None once the rows are used up.
+	nb::object ResultAsArrow(idx_t batch_size, bool reader);
 
 	//! Drops the last execute() result the way the next statement requires; cancel skips the drain
 	void SupersedeResult(bool cancel);

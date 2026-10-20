@@ -234,6 +234,8 @@ filter = _relation.module_filter
 limit = _relation.module_limit
 order = _relation.module_order
 query_df = _relation.module_query_df
+to_arrow_table = _relation.module_to_arrow_table
+to_arrow_reader = _relation.module_to_arrow_reader
 
 __all__: list[str] = [
     "Appender",
@@ -422,6 +424,8 @@ __all__: list[str] = [
     "table_function",
     "tf",
     "threadsafety",
+    "to_arrow_reader",
+    "to_arrow_table",
     "token_type",
     "tokenize",
     "torch",

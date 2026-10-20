@@ -234,8 +234,9 @@ void Result::SettleClaimed(const InterruptCheck &check) {
 			handle->ThrowError();
 		}
 		if (query_state == QueryResultState::FINISHED) {
-			// A statement that sank no row ends undecided, its empty rows collected
-			state = State::RETAINED;
+			// A statement that sank no row finishes undecided, and Poll reporting FINISHED does not end the query,
+			// so it is retained here, which does
+			RetainClaimed(check);
 		}
 	} catch (...) {
 		CloseAfterFailure(std::current_exception());
