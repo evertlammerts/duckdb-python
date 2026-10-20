@@ -46,8 +46,12 @@ class PythonImportCache;
 PythonObjectType GetPythonObjectType(nb::handle &ele);
 //! Whether a value can be pandas.NaT or pandas.NA: only an imported pandas can have produced one
 bool PandasIsImported(PythonImportCache &import_cache);
+//! Whether a value can be a numpy masked array or numpy.ma.masked; numpy 2 imports numpy.ma only on first use
+bool NumpyMaIsImported();
 
 LogicalType SniffPythonIntegerType(nb::handle ele);
+//! The type of a duckdb.Value, or InvalidInputException when its 'type' attribute is not a DuckDB type
+LogicalType PythonValueType(nb::handle value);
 bool DictionaryHasMapFormat(const PyDictionary &dict);
 void TransformPythonObject(optional_ptr<ClientContext> context, nb::handle ele, Vector &vector, idx_t result_offset,
                            bool nan_as_null = true);

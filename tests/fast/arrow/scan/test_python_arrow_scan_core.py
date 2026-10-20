@@ -1536,6 +1536,58 @@ def _overflowing_column_offset(array):
     array.children[0].contents.offset = 2**63 - 1
 
 
+def ranged_struct_array():
+    # Five row group sized ranges and a shorter remainder, so threads share the one array.
+    k = np.arange(5 * 122_880 + 17, dtype=np.int64)
+    return pa.StructArray.from_arrays([pa.array(k), pc.cast(pa.array(k % 101), pa.string())], names=["i", "s"])
+
+
+class CountingArraySource(ArraySource):
+    """One struct array whose every export counts its releases.
+
+    A given length overwrites the exported one, so the scan sees rows its columns do not hold.
+    """
+
+    def __init__(self, array, length=None) -> None:
+        super().__init__(array)
+        self.length = length
+        self.lock = threading.Lock()
+        self.exported = 0
+        self.released = 0
+        self.released_again = 0
+        self.originals = {}
+        self._release_array = _RELEASE(self._release_one)
+
+    def stream(self, columns, filters):
+        schema, capsule = self.obj.__arrow_c_array__()
+        array = _ArrowArray.from_address(_capsule_pointer(id(capsule), b"arrow_array"))
+        if self.length is not None:
+            array.length = self.length
+        with self.lock:
+            self.exported += 1
+            key = self.exported
+            self.originals[key] = (array.release, array.private_data)
+        array.private_data = key
+        array.release = ctypes.cast(self._release_array, ctypes.c_void_p)
+        return (schema, capsule), False
+
+    def _release_one(self, pointer):
+        array = _ArrowArray.from_address(pointer)
+        with self.lock:
+            original = self.originals.pop(array.private_data, None)
+            if original is None:
+                # A copy of an already released array still points here with its old key.
+                self.released_again += 1
+                return
+            self.released += 1
+        array.release, array.private_data = original
+        _RELEASE(original[0])(pointer)
+
+    def counts(self):
+        gc.collect()
+        return (self.exported - self.released, self.released_again)
+
+
 class _ArrowSchemaHead(ctypes.Structure):
     _fields_: ClassVar = [
         ("format", ctypes.c_void_p),
@@ -2222,6 +2274,59 @@ class TestReleases:
             with pytest.raises(duckdb.InvalidInputException, match=message):
                 con.execute("SELECT * FROM t").fetchall()
             assert eventually(lambda: source.counts() == [(0, 1)]), source.counts()
+
+    @pytest.mark.timeout(60)
+    @pytest.mark.parametrize("threads", [1, THREADS])
+    @pytest.mark.parametrize(
+        ("length", "message"),
+        [
+            (-1, "an Arrow batch has offset 0 and length -1, which do not describe a range of rows"),
+            (-300_000, "an Arrow batch has offset 0 and length -300000, which do not describe a range of rows"),
+            (
+                400_000,
+                "Arrow array child length does not match the array length:"
+                " column 0 holds 300000 rows where 400000 were expected",
+            ),
+        ],
+        ids=["minus_one", "minus_several_ranges", "longer_than_its_column"],
+    )
+    def test_a_single_array_with_an_impossible_length_is_refused(self, length, message, threads):
+        from _pushdown_helpers import eventually
+
+        array = pa.StructArray.from_arrays([pa.array(range(300_000), pa.int64())], names=["a"])
+        source = CountingArraySource(array, length)
+        with duckdb.connect(config={"threads": threads}) as con:
+            con._register_arrow_source("t", source)
+            with pytest.raises(duckdb.InvalidInputException, match=re.escape(message)):
+                con.execute("SELECT count(*), sum(a) FROM t").fetchall()
+            assert eventually(lambda: source.counts() == (0, 0)), source.counts()
+            assert con.execute("SELECT 42").fetchall() == [(42,)]
+        assert source.exported > 0
+
+    @pytest.mark.timeout(60)
+    @pytest.mark.parametrize("threads", [1, THREADS])
+    @pytest.mark.parametrize("query", ["SELECT count(*), sum(i) FROM t", "SELECT i FROM t LIMIT 3", "SELECT s FROM t"])
+    def test_a_single_array_read_in_ranges_is_released_once(self, query, threads):
+        source = CountingArraySource(ranged_struct_array())
+        with duckdb.connect(config={"threads": threads}) as con:
+            con._register_arrow_source("t", source)
+            con.execute(query).fetchall()
+            assert source.counts() == (0, 0)
+        assert source.exported > 0
+
+    @pytest.mark.timeout(60)
+    @pytest.mark.parametrize("threads", [1, THREADS])
+    def test_a_single_array_read_in_ranges_is_released_once_when_its_result_closes_half_fetched(self, threads):
+        from _pushdown_helpers import eventually
+
+        source = CountingArraySource(ranged_struct_array())
+        with duckdb.connect(config={"threads": threads}) as con:
+            con._register_arrow_source("t", source)
+            result = con.execute("SELECT i, s FROM t")
+            assert len(result.fetchmany(10)) == 10
+            result.close()
+            assert eventually(lambda: source.counts() == (0, 0)), source.counts()
+        assert source.exported > 0
 
     @pytest.mark.timeout(60)
     def test_a_conversion_failure_releases_every_array(self):

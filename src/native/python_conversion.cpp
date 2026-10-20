@@ -464,6 +464,16 @@ LogicalType SniffPythonIntegerType(nb::handle ele) {
 	return res.type();
 }
 
+LogicalType PythonValueType(nb::handle value) {
+	nb::object type = value.attr("type");
+	std::unique_ptr<DuckDBPyType> value_type;
+	if (!DuckDBPyType::TryConvert(type, value_type)) {
+		string actual_type = nb::cast<std::string>(nb::str(type.type()));
+		throw InvalidInputException("The 'type' of a Value should be of type DuckDBPyType, not '%s'", actual_type);
+	}
+	return value_type->Type();
+}
+
 Value TransformDictionary(optional_ptr<ClientContext> context, const PyDictionary &dict, bool nan_as_null) {
 	//! DICT -> MAP FORMAT
 	// keys() = [key, value]
@@ -516,6 +526,16 @@ bool PandasIsImported(PythonImportCache &import_cache) {
 		PyErr_Clear();
 	}
 	return module && module != Py_None;
+}
+
+bool NumpyMaIsImported() {
+	nb::str name("numpy.ma");
+	auto module = nb::steal(PyImport_GetModule(name.ptr()));
+	if (!module.is_valid()) {
+		PyErr_Clear();
+		return false;
+	}
+	return !module.is_none();
 }
 
 PythonObjectType GetPythonObjectType(nb::handle &ele) {
@@ -717,16 +737,9 @@ struct PythonValueConversion {
 			}
 		}
 		case PythonObjectType::Value: {
-			// Extract the internal object and the type from the Value instance
-			auto object = ele.attr("object");
-			nb::object type = ele.attr("type");
-			std::unique_ptr<DuckDBPyType> internal_type;
-			if (!DuckDBPyType::TryConvert(type, internal_type)) {
-				string actual_type = nb::cast<std::string>(nb::str((type).type()));
-				throw InvalidInputException("The 'type' of a Value should be of type DuckDBPyType, not '%s'",
-				                            actual_type);
-			}
-			return TransformPythonValue(context, object, internal_type->Type(), nan_as_null);
+			nb::object object = ele.attr("object");
+			auto value_type = PythonValueType(ele);
+			return TransformPythonValue(context, object, value_type, nan_as_null);
 		}
 		default:
 			throw InternalException("Unsupported fallback");

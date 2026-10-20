@@ -213,13 +213,46 @@ void ApplyBatchValidity(Vector &vector, const ValidityMask &batch_validity, idx_
 
 } // namespace
 
+void ReadArrowColumn(Vector &vector, ArrowArray &array, const ArrowType &arrow_type, idx_t position, idx_t rows,
+                     ArrowArrayScanState &state, ValidityMask *row_validity) {
+	switch (arrow_type.GetPhysicalType()) {
+	case ArrowArrayPhysicalType::DICTIONARY_ENCODED:
+		if (!array.dictionary) {
+			throw InvalidInputException("a dictionary-encoded Arrow column has no dictionary");
+		}
+		ArrowToDuckDBConversion::ColumnArrowToDuckDBDictionary(vector, array, position, state, rows, arrow_type, -1,
+		                                                       row_validity);
+		break;
+	case ArrowArrayPhysicalType::RUN_END_ENCODED:
+		ArrowToDuckDBConversion::ColumnArrowToDuckDBRunEndEncoded(vector, array, position, state, rows, arrow_type, -1,
+		                                                          row_validity);
+		break;
+	case ArrowArrayPhysicalType::DEFAULT:
+		ArrowToDuckDBConversion::SetValidityMask(vector, array, position, rows, 0, -1);
+		// Merged before the conversion so a struct or union column passes the NULL rows on to its children.
+		if (row_validity) {
+			ApplyBatchValidity(vector, *row_validity, rows);
+		}
+		ArrowToDuckDBConversion::ColumnArrowToDuckDB(vector, array, position, state, rows, arrow_type, -1,
+		                                             row_validity);
+		break;
+	default:
+		throw NotImplementedException("Only default, dictionary and run-end encoded Arrow layouts are supported");
+	}
+	FlatVector::SetSize(vector, rows);
+	// A conversion may rebuild the validity mask from the column's own buffers.
+	if (row_validity && vector.GetVectorType() == VectorType::FLAT_VECTOR) {
+		ApplyBatchValidity(vector, *row_validity, rows);
+	}
+}
+
 ArrowBatchImporter::ArrowBatchImporter(ClientContext &context, shared_ptr<ArrowTableSchema> schema_p,
                                        vector<idx_t> columns_p)
     : context(context), schema(std::move(schema_p)), arrow_columns(schema->GetColumns()),
       columns(std::move(columns_p)) {
 }
 
-void ArrowBatchImporter::Append(ArrowArray &incoming) {
+shared_ptr<ArrowArrayWrapper> ArrowBatchImporter::Adopt(ArrowArray &incoming) const {
 	const auto expected = arrow_columns.size();
 	if (incoming.n_children < 0 || NumericCast<idx_t>(incoming.n_children) != expected) {
 		throw InvalidInputException("an Arrow batch carried %d columns where %d were expected", incoming.n_children,
@@ -256,13 +289,27 @@ void ArrowBatchImporter::Append(ArrowArray &incoming) {
 	for (auto column : columns) {
 		CheckNested(*incoming.children[column], *arrow_columns.at(column), column, 0, false);
 	}
-	states.clear();
 	auto owned = make_shared_ptr<ArrowArrayWrapper>();
 	owned->arrow_array = incoming;
 	incoming.release = nullptr;
-	batch = std::move(owned);
-	offset = 0;
-	length = NumericCast<idx_t>(batch->arrow_array.length);
+	return owned;
+}
+
+void ArrowBatchImporter::Read(shared_ptr<ArrowArrayWrapper> batch_p, idx_t start, idx_t rows, bool last_p) {
+	D_ASSERT(batch_p && start + rows <= NumericCast<idx_t>(batch_p->arrow_array.length));
+	if (batch_p != batch) {
+		states.clear();
+		batch = std::move(batch_p);
+	}
+	offset = start;
+	end = start + rows;
+	last = last_p;
+}
+
+void ArrowBatchImporter::Append(ArrowArray &incoming) {
+	auto adopted = Adopt(incoming);
+	const auto rows = NumericCast<idx_t>(adopted->arrow_array.length);
+	Read(std::move(adopted), 0, rows, true);
 }
 
 ArrowArrayScanState &ArrowBatchImporter::StateOf(idx_t column) {
@@ -279,14 +326,16 @@ ArrowArrayScanState &ArrowBatchImporter::StateOf(idx_t column) {
 }
 
 bool ArrowBatchImporter::Next(DataChunk &output) {
-	if (!batch || offset >= length) {
-		states.clear();
-		batch.reset();
+	if (!batch || offset >= end) {
+		if (last) {
+			states.clear();
+			batch.reset();
+		}
 		return false;
 	}
 	D_ASSERT(output.ColumnCount() == columns.size());
 	auto &array = batch->arrow_array;
-	const auto rows = MinValue<idx_t>(STANDARD_VECTOR_SIZE, length - offset);
+	const auto rows = MinValue<idx_t>(STANDARD_VECTOR_SIZE, end - offset);
 	// The batch offset is folded into the row position, which the engine hands on to nested children, rather than
 	// passed as the parent offset, which its struct conversion does not hand on.
 	const auto position = NumericCast<idx_t>(array.offset) + offset;
@@ -294,39 +343,8 @@ bool ArrowBatchImporter::Next(DataChunk &output) {
 	auto batch_validity = BatchValidity(array, offset, rows);
 	for (idx_t i = 0; i < columns.size(); i++) {
 		const auto column = columns[i];
-		auto &child = *array.children[column];
-		auto &arrow_type = *arrow_columns.at(column);
-		auto &state = StateOf(column);
-		auto &vector = output.data[i];
-		switch (arrow_type.GetPhysicalType()) {
-		case ArrowArrayPhysicalType::DICTIONARY_ENCODED:
-			if (!child.dictionary) {
-				throw InvalidInputException("a dictionary-encoded Arrow column has no dictionary");
-			}
-			ArrowToDuckDBConversion::ColumnArrowToDuckDBDictionary(vector, child, position, state, rows, arrow_type, -1,
-			                                                       batch_validity.get());
-			break;
-		case ArrowArrayPhysicalType::RUN_END_ENCODED:
-			ArrowToDuckDBConversion::ColumnArrowToDuckDBRunEndEncoded(vector, child, position, state, rows, arrow_type,
-			                                                          -1, batch_validity.get());
-			break;
-		case ArrowArrayPhysicalType::DEFAULT:
-			ArrowToDuckDBConversion::SetValidityMask(vector, child, position, rows, 0, -1);
-			// Merged before the conversion so a struct or union column passes the NULL rows on to its children.
-			if (batch_validity) {
-				ApplyBatchValidity(vector, *batch_validity, rows);
-			}
-			ArrowToDuckDBConversion::ColumnArrowToDuckDB(vector, child, position, state, rows, arrow_type, -1,
-			                                             batch_validity.get());
-			break;
-		default:
-			throw NotImplementedException("Only default, dictionary and run-end encoded Arrow layouts are supported");
-		}
-		FlatVector::SetSize(vector, rows);
-		// A conversion may rebuild the validity mask from the column's own buffers.
-		if (batch_validity && vector.GetVectorType() == VectorType::FLAT_VECTOR) {
-			ApplyBatchValidity(vector, *batch_validity, rows);
-		}
+		ReadArrowColumn(output.data[i], *array.children[column], *arrow_columns.at(column), position, rows,
+		                StateOf(column), batch_validity.get());
 	}
 	offset += rows;
 	return true;
