@@ -275,8 +275,11 @@ function(duckdb_python_link_extensions target_name)
   #
   # An extension archive is only pulled in through its describe function, so we
   # also generate a static extension loader listing them, which defines
-  # duckdb_register_static_extensions(). The module calls it at import time. The
-  # loader is always generated so that call never needs special-casing.
+  # duckdb_register_static_extensions(). DuckDB's autoregister source calls it
+  # from a static initializer, so the extensions are registered as soon as the
+  # library is loaded, also when the ADBC driver manager dlopens it without a
+  # Python import. The loader is always generated so that call never needs
+  # special-casing.
   if(LINK_EXTENSIONS)
     set(link_extensions ${LINK_EXTENSIONS})
   else()
@@ -333,7 +336,12 @@ function(duckdb_python_link_extensions target_name)
   set(loader
       "${CMAKE_CURRENT_BINARY_DIR}/${target_name}_static_extension_loader.cpp")
   _duckdb_python_write_static_extension_loader("${loader}" ${loader_extensions})
-  target_sources(${target_name} PRIVATE "${loader}")
+  target_sources(
+    ${target_name}
+    PRIVATE
+      "${loader}"
+      "${DUCKDB_SOURCE_PATH}/extension/loader/static_extension_autoregister.cpp"
+  )
 endfunction()
 
 # ════════════════════════════════════════════════════════════════════════════════
