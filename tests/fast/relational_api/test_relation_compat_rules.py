@@ -3,6 +3,7 @@
 import datetime
 import decimal
 import gc
+import importlib.util
 import json
 import re
 import uuid
@@ -148,7 +149,10 @@ class TestFunctionLocalFrames:
         second = first.filter("a IN (SELECT k FROM df)")
         assert rows(second.fetchall()) == [(2,)]
 
-    @pytest.mark.skipif(polars is None, reason="reads a polars frame")
+    @pytest.mark.skipif(
+        polars is None or importlib.util.find_spec("pyarrow") is None,
+        reason="reads a polars frame, which travels through Arrow",
+    )
     def test_two_joins_over_frames_local_to_a_helper_cross_each_reading_their_own(self, con):
         def side(value, n):
             df = polars.DataFrame({"k": [value]})  # noqa: F841
@@ -524,12 +528,14 @@ class TestUserTextIsValidatedNotRewritten:
         with pytest.raises(duckdb.ParserException):
             build(con.sql("SELECT * FROM range(5) t(x)"))
 
-    def test_a_deep_expression_within_the_connection_s_depth_limit(self, con):
-        # One past the engine's default limit of 1000 proves the connection's setting applies; a far deeper expression
-        # overflowed the thread stack on the Windows ARM64 wheel job.
-        con.execute("SET max_expression_depth = 1200")
-        deep = "1" + " + 1" * 1001
-        assert con.sql("SELECT 1 AS a").project(f"{deep} AS d").fetchall() == [(1002,)]
+    def test_the_connection_s_depth_limit_decides_for_a_verb_s_text(self, con):
+        # Lowered, not raised: the engine's recursion past its default depth of 1000 overflows the main thread stack
+        # of the Windows wheel jobs.
+        con.execute("SET max_expression_depth = 50")
+        base = con.sql("SELECT 1 AS a")
+        assert base.project("1" + " + 1" * 40 + " AS d").fetchall() == [(41,)]
+        with pytest.raises(duckdb.ParserException, match="Max expression depth limit of 50 exceeded"):
+            base.project("1" + " + 1" * 60 + " AS d")
 
 
 class TestAMarkerInAVerbsText:

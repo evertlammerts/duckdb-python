@@ -47,7 +47,10 @@ def runs(con):
 
 
 ARROW = pytest.mark.skipif(importlib.util.find_spec("pyarrow") is None, reason="needs pyarrow")
-POLARS = pytest.mark.skipif(importlib.util.find_spec("polars") is None, reason="needs polars")
+POLARS = pytest.mark.skipif(
+    importlib.util.find_spec("polars") is None or importlib.util.find_spec("pyarrow") is None,
+    reason="needs polars and pyarrow; a polars frame travels through Arrow",
+)
 
 
 def counter(con):
@@ -557,6 +560,7 @@ class TestWhatAMistakeShows:
             con.table("t").filter("nope > 1")
         assert len(traceback.extract_tb(error.value.__traceback__)) <= 4
 
+    @POLARS
     def test_a_migration_warning_names_the_calling_file(self, con):
         with pytest.warns(DeprecationWarning, match="(?i)deprecated") as warned:
             con.table("t").fetch_arrow_table()
