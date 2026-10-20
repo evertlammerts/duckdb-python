@@ -1074,7 +1074,8 @@ NB_MODULE(DUCKDB_PYTHON_LIB_NAME, m) { // NOLINT
 	(void)keep_alive;
 	// END
 
-	// Register the statically linked extensions before any database can be opened
+	// A static initializer registered the linked extensions when the library was loaded. Repeating the call is a no-op
+	// on a healthy build and makes a broken build fail at import instead of at the first connect.
 	if (duckdb_register_static_extensions() != 0) {
 		throw std::runtime_error("Failed to register the statically linked DuckDB extensions");
 	}
