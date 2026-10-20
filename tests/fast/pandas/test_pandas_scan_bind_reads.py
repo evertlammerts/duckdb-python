@@ -783,7 +783,6 @@ def _scan_in_order(con, source, path):
     return _execute(con, source, path, "SELECT x FROM {source} ORDER BY i")
 
 
-@pytest.mark.xfail(strict=True, reason="the scan reads a nullable column's mask as if it were contiguous")
 @pytest.mark.parametrize("path", PATHS)
 @pytest.mark.parametrize("rows", [slice(None, None, 2), slice(1, None, 3)], ids=["every_second", "every_third_from_1"])
 @pytest.mark.parametrize("dtype", ["Int64", "boolean", "Float64"])
@@ -812,7 +811,6 @@ def _every_second_of(values):
     return backing[::2]
 
 
-@pytest.mark.xfail(strict=True, reason="the scan reads a nullable column's mask as if it were contiguous")
 @pytest.mark.parametrize("path", PATHS)
 @pytest.mark.parametrize("dtype", ["Int64", "boolean", "Float64"])
 def test_nullable_column_with_a_strided_mask_keeps_it(duckdb_cursor, path, dtype):

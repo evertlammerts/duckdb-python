@@ -480,7 +480,6 @@ def test_map_value_elements_keep_the_database(duckdb_cursor, make_value, sql_typ
         pytest.param("Float64", [1.5, None, None, 4.5, 5.5, 6.5], id="Float64"),
     ],
 )
-@pytest.mark.xfail(strict=True, reason="the mask of a sliced nullable column is read as if it were contiguous")
 def test_map_sliced_nullable_column_keeps_its_mask(duckdb_cursor, dtype, values, rows):
     # Each slice keeps one missing value and drops another, so a mask read at the wrong stride moves a NULL.
     sliced = pd.DataFrame({"a": pd.array(values, dtype=dtype)}).iloc[rows]

@@ -47,6 +47,11 @@ private:
 
 }; // namespace
 
+std::unique_ptr<RegisteredArray> RegisterMask(nb::handle mask) {
+	auto contiguous = nb::module_::import_("numpy").attr("ascontiguousarray")(mask, nb::arg("dtype") = "bool");
+	return std::make_unique<RegisteredArray>(NumpyArray(std::move(contiguous)));
+}
+
 static LogicalType BindColumn(ClientContext &context, PandasBindColumn &column_p, PandasColumnBindData &bind_data) {
 	LogicalType column_type;
 	auto &column = column_p.handle;
@@ -56,7 +61,7 @@ static LogicalType BindColumn(ClientContext &context, PandasBindColumn &column_p
 
 	if (column_has_mask) {
 		// masked object, fetch the internal data and mask array
-		bind_data.mask = std::make_unique<RegisteredArray>(NumpyArray(column.attr("array").attr("_mask")));
+		bind_data.mask = RegisterMask(column.attr("array").attr("_mask"));
 	}
 
 	if (bind_data.numpy_type.type == NumpyNullableType::CATEGORY) {

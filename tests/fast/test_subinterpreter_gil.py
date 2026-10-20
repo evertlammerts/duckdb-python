@@ -328,13 +328,7 @@ def _run(imports: str, body: str) -> subprocess.CompletedProcess[str]:
             ),
             ["False", f"[({sum(1 for i in range(300000) if i % 10)}, {sum(i for i in range(300000) if i % 10)})]"],
             id="map_sliced_nullable_output",
-            marks=[
-                _needs("numpy"),
-                _needs("pandas"),
-                pytest.mark.xfail(
-                    strict=True, reason="the mask of a sliced nullable column is read as if it were contiguous"
-                ),
-            ],
+            marks=[_needs("numpy"), _needs("pandas")],
         ),
         pytest.param(
             ARROW_IMPORTS + ONE_CHUNK_TABLE,

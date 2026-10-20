@@ -17,6 +17,9 @@ struct RegisteredArray {
 	NumpyArray numpy_array;
 };
 
+//! The scan reads a mask as one bool byte per row from its first element, so any other layout or dtype is copied.
+std::unique_ptr<RegisteredArray> RegisterMask(nb::handle mask);
+
 struct PandasColumnBindData {
 	NumpyType numpy_type;
 	std::unique_ptr<PandasColumn> pandas_col;
