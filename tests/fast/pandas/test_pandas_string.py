@@ -627,7 +627,6 @@ def test_str_chunk_length_rule_applies_per_column(duckdb_cursor, monkeypatch, dt
     assert set(calls) == {rows // 2}
 
 
-@pytest.mark.xfail(strict=True, reason="bind reads a pyarrow backed str column through _data when the attribute exists")
 @pytest.mark.parametrize("rows", [3, 3 * ARROW_ROWS_PER_CHUNK], ids=["short", "long"])
 @pytest.mark.parametrize("dtype", PYARROW_STORAGE)
 def test_pyarrow_string_column_is_never_read_through_data(duckdb_cursor, monkeypatch, dtype, rows):
@@ -642,6 +641,30 @@ def test_pyarrow_string_column_is_never_read_through_data(duckdb_cursor, monkeyp
     values = ["a", None, "c"] * (rows // 3)
     frame = _frame(pd.Series(values, dtype=_dtype(dtype)))  # noqa: F841
     monkeypatch.setattr(pd.arrays.ArrowStringArray, "_data", property(deprecated_data), raising=False)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = duckdb_cursor.sql("SELECT s FROM frame ORDER BY i").fetchall()
+    assert result == _rows_of(values)
+    assert reads == []
+    assert [warning for warning in caught if issubclass(warning.category, FutureWarning)] == []
+
+
+@pytest.mark.parametrize("rows", [3, 3 * ARROW_ROWS_PER_CHUNK], ids=["short", "long"])
+def test_pyarrow_string_array_subclass_is_never_read_through_data(duckdb_cursor, pa, rows):
+    # pandas 2 backs string[pyarrow_numpy] and infer_string with a subclass of ArrowStringArray.
+    reads = []
+
+    class SubclassWithData(pd.arrays.ArrowStringArray):
+        @property
+        def _data(self):
+            reads.append(len(self))
+            warnings.warn("ArrowStringArray._data is deprecated", FutureWarning, stacklevel=2)
+            return self._pa_array
+
+    values = ["a", None, "c"] * (rows // 3)
+    array = SubclassWithData(pa.chunked_array([pa.array(values, type=pa.large_string())]))
+    frame = pd.DataFrame({"s": array, "i": numpy.arange(rows, dtype=numpy.int64)})
+    assert type(frame["s"].array) is SubclassWithData
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         result = duckdb_cursor.sql("SELECT s FROM frame ORDER BY i").fetchall()

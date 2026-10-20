@@ -107,7 +107,11 @@ static LogicalType BindColumn(ClientContext &context, PandasBindColumn &column_p
 		column_type = NumpyToLogicalType(bind_data.numpy_type);
 	} else {
 		auto pandas_array = column.attr("array");
-		if (nb::hasattr(pandas_array, "_data")) {
+		auto &import_cache = *DuckDBPyConnection::ImportCache();
+		if (duckdb::PyUtil::IsInstance(pandas_array, import_cache.pandas.arrays.ArrowStringArray())) {
+			// On pandas 2 its _data is the pyarrow ChunkedArray, not an ndarray.
+			bind_data.pandas_col = std::make_unique<PandasNumpyColumn>(NumpyArray(column.attr("to_numpy")()));
+		} else if (nb::hasattr(pandas_array, "_data")) {
 			// This means we can access the numpy array directly
 			bind_data.pandas_col = std::make_unique<PandasNumpyColumn>(NumpyArray(column.attr("array").attr("_data")));
 		} else if (nb::hasattr(pandas_array, "asi8")) {

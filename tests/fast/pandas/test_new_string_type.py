@@ -21,7 +21,6 @@ def _infer_string_frame(values):
 
 
 @pytest.mark.skipif(Version(pd.__version__) >= Version("3.0"), reason="Pandas >= 3.0 has the new string type")
-@pytest.mark.xfail(strict=True, reason="pandas 2 pyarrow backed str columns are read through _data, which fails")
 @pytest.mark.parametrize("rows", [2, 1000])
 @pytest.mark.parametrize(
     "make_frame",
@@ -32,13 +31,13 @@ def _infer_string_frame(values):
         ),
     ],
 )
-def test_new_str_type_pandas_lt_3_0(make_frame, rows):
+def test_new_str_type_pandas_lt_3_0(duckdb_cursor, make_frame, rows):
     values = ["DuckDB", None] * (rows // 2)
     df = make_frame(values)  # noqa: F841
     # Under the warnings as errors filter the deprecation warning on _data makes it look absent, which hides the
     # strides error that reading it causes.
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        result = duckdb.sql("select * from df").fetchall()
+        result = duckdb_cursor.sql("select * from df").fetchall()
     assert result == [("DuckDB",), (None,)] * (rows // 2)
     assert [warning for warning in caught if issubclass(warning.category, FutureWarning)] == []
