@@ -256,3 +256,136 @@ def test_nullable_mask_byte_other_than_one_masks_its_row(duckdb_cursor):
     pd = pytest.importorskip("pandas")
     df = pd.DataFrame({"x": pd.arrays.IntegerArray(np.array([1, 2, 3]), _mask_holding_the_byte_two())})  # noqa: F841
     assert duckdb_cursor.execute("SELECT x FROM df").fetchall() == [(1,), (None,), (3,)]
+
+
+# Masked rows on each side of a word, a 64 byte block, a vector and a partition boundary, and a word of masked bytes.
+_WORD_EDGE_ROWS = [0, 7, 8, 9, 15, 16, 31, 32, 33, *range(40, 48), 50, 52, 63, 64, 65, 127, 128]
+_MASKED_ROW_CANDIDATES = [*_WORD_EDGE_ROWS, 2047, 2048, 2049, 102_399, 102_400, 102_401]
+_MASK_BYTES = [1, 2, 0x7F, 0x80, 0xFF]
+_LONG_MASK_ROWS = 2 * 102_400 + 2048 + 13
+
+
+def _mask_slice_with_bytes(rows: int, start: int) -> np.ndarray:
+    hidden = [row for row in _MASKED_ROW_CANDIDATES if row < rows - 3] + [rows - 3, rows - 1]
+    raw = np.zeros(start + rows, dtype=np.uint8)
+    raw[[start + row for row in hidden]] = [_MASK_BYTES[i % len(_MASK_BYTES)] for i in range(len(hidden))]
+    return raw.view(np.bool_)[start:]
+
+
+# Each column holds a value derived from its row number, which the SQL check recomputes; an object column holds a
+# value of another type on each masked row, which it reads right only by skipping it.
+_EDGE_MASK_COLUMNS = {
+    "int64": (lambda ints: ints, None, "v = i"),
+    "bool": (lambda ints: ints % 2 == 0, None, "v = (i % 2 = 0)"),
+    "float64": (lambda ints: ints + 0.5, None, "v = i + 0.5"),
+    "datetime64_us": (lambda ints: ints.view("datetime64[us]"), None, "v = make_timestamp(i)"),
+    "timedelta64_us": (lambda ints: ints.view("timedelta64[us]"), None, "v = to_microseconds(i)"),
+    "object_str": (lambda ints: np.array([f"s{i}" for i in ints.tolist()], dtype=object), 7, "v = 's' || i"),
+    "object_int": (lambda ints: np.array(ints.tolist(), dtype=object), "hidden", "v = i"),
+}
+
+
+@pytest.mark.parametrize("start", [0, 1, 5], ids=["aligned", "odd_address", "address_plus_5"])
+@pytest.mark.parametrize("rows", [5, 13, 40, 100, _LONG_MASK_ROWS])
+@pytest.mark.parametrize("column_id", list(_EDGE_MASK_COLUMNS))
+def test_mask_bytes_at_word_vector_and_partition_edges_match_numpy(duckdb_cursor, column_id, rows, start):
+    make, other_type, check = _EDGE_MASK_COLUMNS[column_id]
+    ints = np.arange(rows, dtype="int64")
+    mask = _mask_slice_with_bytes(rows, start)
+    data = make(ints)
+    if other_type is not None:
+        data[mask] = other_type
+    source = np.ma.masked_array(data, mask=mask)
+    assert np.ma.getmask(source).ctypes.data == mask.ctypes.data
+    duckdb_cursor.execute("SET threads=4")
+    duckdb_cursor.register("src", {"i": ints, "v": source})
+    query = f"SELECT list(i ORDER BY i) FILTER (WHERE v IS NULL), count(*) FILTER (WHERE {check}) FROM src"
+    hidden = np.flatnonzero(mask.view(np.uint8)).tolist()
+    assert duckdb_cursor.execute(query).fetchall() == [(hidden, rows - len(hidden))]
+
+
+@pytest.mark.parametrize("start", [0, 1], ids=["aligned", "odd_address"])
+def test_nullable_mask_bytes_at_word_vector_and_partition_edges_match_numpy(duckdb_cursor, start):
+    pd = pytest.importorskip("pandas")
+    rows = _LONG_MASK_ROWS
+    ints = np.arange(rows, dtype="int64")
+    mask = _mask_slice_with_bytes(rows, start)
+    df = pd.DataFrame({"i": ints, "v": pd.arrays.IntegerArray(ints.copy(), mask)}, copy=False)
+    assert df["v"].array._mask.ctypes.data == mask.ctypes.data
+    duckdb_cursor.execute("SET threads=4")
+    duckdb_cursor.register("src", df)
+    query = "SELECT list(i ORDER BY i) FILTER (WHERE v IS NULL), count(*) FILTER (WHERE v = i) FROM src"
+    hidden = np.flatnonzero(mask.view(np.uint8)).tolist()
+    assert duckdb_cursor.execute(query).fetchall() == [(hidden, rows - len(hidden))]
+
+
+def _dense_mask_slice(rows: int, start: int) -> np.ndarray:
+    raw = np.zeros(start + rows, dtype=np.uint8)
+    hidden = raw[start:]
+    hidden[64:128] = 0xFF
+    hidden[128:192] = 1
+    hidden[[128, 191]] = 0
+    if rows > 2048 + 64:
+        hidden[2048 - 64 : 2048 + 64] = 2
+    hidden[rows - (rows % 64 or 64) :] = 0x80
+    return raw.view(np.bool_)[start:]
+
+
+# Whole 64 row blocks masked, a block masked but for its first and last row, and a masked last block.
+@pytest.mark.parametrize("start", [0, 1], ids=["aligned", "odd_address"])
+@pytest.mark.parametrize("rows", [200, 2048 + 100, _LONG_MASK_ROWS])
+@pytest.mark.parametrize("column_id", list(_EDGE_MASK_COLUMNS))
+def test_mask_hiding_whole_blocks_matches_numpy(duckdb_cursor, column_id, rows, start):
+    make, other_type, check = _EDGE_MASK_COLUMNS[column_id]
+    ints = np.arange(rows, dtype="int64")
+    mask = _dense_mask_slice(rows, start)
+    data = make(ints)
+    if other_type is not None:
+        data[mask] = other_type
+    duckdb_cursor.execute("SET threads=4")
+    duckdb_cursor.register("src", {"i": ints, "v": np.ma.masked_array(data, mask=mask)})
+    query = f"SELECT list(i ORDER BY i) FILTER (WHERE v IS NULL), count(*) FILTER (WHERE {check}) FROM src"
+    hidden = np.flatnonzero(mask.view(np.uint8)).tolist()
+    assert duckdb_cursor.execute(query).fetchall() == [(hidden, rows - len(hidden))]
+
+
+@pytest.mark.parametrize("make_mask", [_mask_slice_with_bytes, _dense_mask_slice], ids=["sparse", "dense"])
+def test_masked_struct_object_column_hides_its_fields(duckdb_cursor, make_mask):
+    rows = 2048 + 100
+    ints = np.arange(rows, dtype="int64")
+    mask = make_mask(rows, 1)
+    data = np.array([{"k": i} for i in ints.tolist()], dtype=object)
+    data[mask] = "hidden"
+    duckdb_cursor.register("src", {"i": ints, "v": np.ma.masked_array(data, mask=mask)})
+    query = (
+        "SELECT list(i ORDER BY i) FILTER (WHERE v IS NULL), list(i ORDER BY i) FILTER (WHERE v.k IS NULL),"
+        " count(*) FILTER (WHERE v.k = i) FROM src"
+    )
+    hidden = np.flatnonzero(mask.view(np.uint8)).tolist()
+    assert duckdb_cursor.execute(query).fetchall() == [(hidden, hidden, rows - len(hidden))]
+
+
+# NaT rows on each side of a 64 row block and of the vector edge, with no mask, a sparse mask and a dense one; each
+# masked row that is not NaT hides the largest int64, which overflows in the conversion from seconds.
+@pytest.mark.parametrize("unit", ["us", "s"])
+@pytest.mark.parametrize(
+    "make_mask", [None, _mask_slice_with_bytes, _dense_mask_slice], ids=["no_mask", "sparse", "dense"]
+)
+def test_timedelta_nat_next_to_masked_rows_matches_numpy(duckdb_cursor, unit, make_mask):
+    rows = 2048 + 100
+    ints = np.arange(rows, dtype="int64")
+    values = ints.copy()
+    values[[0, 1, 62, 63, 64, 127, 128, 2047, 2048, rows - 1]] = np.iinfo(np.int64).min
+    not_a_time = np.isnat(values.view(f"timedelta64[{unit}]"))
+    if make_mask is None:
+        mask = np.zeros(rows, dtype=bool)
+        source = values.view(f"timedelta64[{unit}]")
+    else:
+        mask = make_mask(rows, 1)
+        values[mask & ~not_a_time] = np.iinfo(np.int64).max
+        source = np.ma.masked_array(values.view(f"timedelta64[{unit}]"), mask=mask)
+    duckdb_cursor.register("src", {"i": ints, "v": source})
+    to_interval = "to_microseconds" if unit == "us" else "to_seconds"
+    query = f"SELECT list(i ORDER BY i) FILTER (WHERE v IS NULL), count(*) FILTER (WHERE v = {to_interval}(i)) FROM src"
+    hidden = np.flatnonzero(not_a_time | mask).tolist()
+    assert duckdb_cursor.execute(query).fetchall() == [(hidden, rows - len(hidden))]
