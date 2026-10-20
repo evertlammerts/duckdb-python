@@ -251,23 +251,14 @@ def _run(imports: str, body: str) -> subprocess.CompletedProcess[str]:
             _at_four_threads('print(con.sql("SELECT count(a), sum(a) FROM ints").fetchall())'),
             [f"[({sum(1 for i in range(300000) if i % 10)}, {sum(i for i in range(300000) if i % 10)})]"],
             id="numpy_masked_dict",
-            marks=[
-                _needs("numpy"),
-                pytest.mark.xfail(strict=True, reason="a masked array in a dict reads its masked elements as values"),
-            ],
+            marks=_needs("numpy"),
         ),
         pytest.param(
             OBJECT_IMPORTS + MASKED_DICTS,
             _at_four_threads('print(con.sql("SELECT count(a), sum(CAST(a AS BIGINT)) FROM objects").fetchall())'),
             [f"[({sum(1 for i in range(300000) if i % 10 != 1)}, {sum(i for i in range(300000) if i % 10 != 1)})]"],
             id="numpy_masked_object_dict",
-            marks=[
-                _needs("numpy"),
-                _needs("pandas"),
-                pytest.mark.xfail(
-                    strict=True, reason="a masked object array in a dict reads its masked elements as values"
-                ),
-            ],
+            marks=[_needs("numpy"), _needs("pandas")],
         ),
         # The largest values are unmasked, so a crash or hang hidden by the expected failures above still shows here.
         pytest.param(
@@ -289,13 +280,7 @@ def _run(imports: str, body: str) -> subprocess.CompletedProcess[str]:
             _at_four_threads('print(con.sql("SELECT count(a), sum(a) FROM masked_object_ints").fetchall())'),
             [f"[({sum(1 for i in range(300000) if i % 10 != 1)}, {sum(i for i in range(300000) if i % 10 != 1)})]"],
             id="object_typed_masked_dict",
-            marks=[
-                _needs("numpy"),
-                _needs("pandas"),
-                pytest.mark.xfail(
-                    strict=True, reason="a masked object array bound to a number type reads its masked elements"
-                ),
-            ],
+            marks=[_needs("numpy"), _needs("pandas")],
         ),
         pytest.param(
             OBJECT_IMPORTS + OBJECT_INTS,

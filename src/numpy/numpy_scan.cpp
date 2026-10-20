@@ -72,6 +72,11 @@ static void ApplyMask(PandasColumnBindData &bind_data, ValidityMask &validity, i
 	}
 }
 
+//! One bool per row of the whole column, or null when the column has no mask
+static const bool *MaskedRows(const PandasColumnBindData &bind_data) {
+	return bind_data.mask ? static_cast<const bool *>(bind_data.mask->numpy_array.Data()) : nullptr;
+}
+
 template <class T>
 void ScanNumpyMasked(PandasColumnBindData &bind_data, idx_t count, idx_t offset, Vector &out) {
 	D_ASSERT(bind_data.pandas_col->Backend() == PandasColumnBackend::NUMPY);
@@ -158,22 +163,19 @@ void VerifyTypeConstraints(Vector &vec, idx_t count) {
 	}
 }
 
-void NumpyScan::ScanObjectColumn(ClientContext &context, PyObject **col, idx_t stride, idx_t count, idx_t offset,
-                                 Vector &out) {
+void NumpyScan::ScanObjectColumn(ClientContext &context, PyObject **col, idx_t stride, const bool *masked, idx_t count,
+                                 idx_t offset, Vector &out) {
 	// numpy_col is a sequential list of objects, that make up one "column" (Vector)
 	out.SetVectorType(VectorType::FLAT_VECTOR);
 	nb::gil_scoped_acquire gil; // We're creating python objects here, so we need the GIL
 
-	if (stride == sizeof(PyObject *)) {
-		auto src_ptr = col + offset;
-		for (idx_t i = 0; i < count; i++) {
-			ScanNumpyObject(context, src_ptr[i], i, out);
+	for (idx_t i = 0; i < count; i++) {
+		// A masked cell can hold a value of another type, or no object at all
+		if (masked && masked[offset + i]) {
+			SetInvalidRecursive(out, i);
+			continue;
 		}
-	} else {
-		for (idx_t i = 0; i < count; i++) {
-			auto src_ptr = col[stride / sizeof(PyObject *) * (i + offset)];
-			ScanNumpyObject(context, src_ptr, i, out);
-		}
+		ScanNumpyObject(context, col[stride / sizeof(PyObject *) * (i + offset)], i, out);
 	}
 	VerifyTypeConstraints(out, count);
 }
@@ -280,6 +282,9 @@ void NumpyScan::Scan(ClientContext &context, PandasColumnBindData &bind_data, id
 				tgt_ptr[row] = input;
 			}
 		}
+		if (bind_data.mask) {
+			ApplyMask(bind_data, FlatVector::ValidityMutable(out), count, offset);
+		}
 		break;
 	}
 	case NumpyNullableType::TIMEDELTA_NS:
@@ -289,8 +294,14 @@ void NumpyScan::Scan(ClientContext &context, PandasColumnBindData &bind_data, id
 		auto src_ptr = reinterpret_cast<const int64_t *>(array.Data());
 		auto tgt_ptr = FlatVector::GetDataMutable<interval_t>(out);
 		auto &mask = FlatVector::ValidityMutable(out);
+		auto masked = MaskedRows(bind_data);
 
 		for (idx_t row = 0; row < count; row++) {
+			// The hidden value of a masked row can overflow in the conversion
+			if (masked && masked[row + offset]) {
+				mask.SetInvalid(row);
+				continue;
+			}
 			auto source_idx = stride / sizeof(int64_t) * (row + offset);
 			if (src_ptr[source_idx] <= NumericLimits<int64_t>::Minimum()) {
 				// pandas Not a Time (NaT)
@@ -335,7 +346,8 @@ void NumpyScan::Scan(ClientContext &context, PandasColumnBindData &bind_data, id
 		const bool is_object_col = bind_data.numpy_type.type == NumpyNullableType::OBJECT;
 		if (is_object_col && out.GetType().id() != LogicalTypeId::VARCHAR) {
 			//! We have determined the underlying logical type of this object column
-			return NumpyScan::ScanObjectColumn(context, src_ptr, numpy_col.stride, count, offset, out);
+			return NumpyScan::ScanObjectColumn(context, src_ptr, numpy_col.stride, MaskedRows(bind_data), count, offset,
+			                                   out);
 		}
 
 		// Get the data pointer and the validity mask of the result vector
@@ -344,16 +356,22 @@ void NumpyScan::Scan(ClientContext &context, PandasColumnBindData &bind_data, id
 		// A str's UTF-8 is reachable only through the C API, which needs the GIL
 		nb::gil_scoped_acquire gil;
 		auto &import_cache = *DuckDBPyConnection::ImportCache();
+		auto masked = MaskedRows(bind_data);
+		auto masked_constant = import_cache.numpy.ma.masked(false);
 
 		// Loop over every row of the arrays contents
 		auto stride = numpy_col.stride;
 		for (idx_t row = 0; row < count; row++) {
+			if (masked && masked[row + offset]) {
+				out_mask.SetInvalid(row);
+				continue;
+			}
 			auto source_idx = stride / sizeof(PyObject *) * (row + offset);
 
 			// Get the pointer to the object
 			PyObject *val = src_ptr[source_idx];
 			if (!nb::isinstance<nb::str>(val)) {
-				if (val == Py_None) {
+				if (val == Py_None || (masked_constant && val == masked_constant.ptr())) {
 					out_mask.SetInvalid(row);
 					continue;
 				}

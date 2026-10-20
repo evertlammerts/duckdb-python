@@ -7,6 +7,7 @@
 #include "duckdb_python/numpy/numpy_type.hpp"
 #include "duckdb_python/pyconnection/pyconnection.hpp"
 #include "duckdb_python/python_conversion.hpp"
+#include "duckdb_python/pyutil.hpp"
 
 namespace duckdb {
 
@@ -18,6 +19,8 @@ idx_t NumpyBind::Bind(ClientContext &context, nb::handle df, vector<PandasColumn
 		(void)import_cache.pandas.NaT();
 		(void)import_cache.pandas.NA();
 	}
+	// No masked array or numpy.ma.masked can exist before numpy.ma is imported
+	bool numpy_ma_imported = false;
 
 	auto keys = nb::list(df.attr("keys")());
 	if (nb::len(keys) == 0) {
@@ -34,6 +37,21 @@ idx_t NumpyBind::Bind(ClientContext &context, nb::handle df, vector<PandasColumn
 		names.emplace_back(bind_data.name);
 
 		auto column = get_fun(keys[col_idx]);
+		// Reading a column runs user code, which can import numpy.ma
+		if (!numpy_ma_imported && NumpyMaIsImported()) {
+			numpy_ma_imported = true;
+			(void)import_cache.numpy.ma.masked();
+		}
+		nb::object mask;
+		if (numpy_ma_imported && duckdb::PyUtil::IsInstance(column, import_cache.numpy.ma.masked_array())) {
+			auto numpy_ma = import_cache.numpy.ma();
+			auto column_mask = numpy_ma.attr("getmask")(column);
+			// nomask, which is not an array, masks no element
+			if (duckdb::PyUtil::IsInstance(column_mask, import_cache.numpy.ndarray())) {
+				mask = std::move(column_mask);
+			}
+			column = numpy_ma.attr("getdata")(column);
+		}
 		// Checked before any conversion, because numpy below 2 flattens the codes np.unique returns.
 		if (col_idx == 0) {
 			row_count = ColumnArrayRows(bind_data.name, column);
@@ -47,6 +65,12 @@ idx_t NumpyBind::Bind(ClientContext &context, nb::handle df, vector<PandasColumn
 		} else {
 			bind_data.numpy_type = ConvertNumpyType(dtype);
 		}
+		// After the dtype check, because the mask of a structured dtype cannot be cast to bool
+		if (mask.is_valid()) {
+			bind_data.mask = RegisterMask(mask);
+			CheckColumnArray(bind_data.name, bind_data.mask->numpy_array.GetArray(), row_count,
+			                 col_idx == 0 ? "its data" : counted_from);
+		}
 
 		nb::object data;
 		if (bind_data.numpy_type.type == NumpyNullableType::FLOAT_16) {
@@ -55,12 +79,24 @@ idx_t NumpyBind::Bind(ClientContext &context, nb::handle df, vector<PandasColumn
 			duckdb_col_type = NumpyToLogicalType(bind_data.numpy_type);
 		} else if (bind_data.numpy_type.type == NumpyNullableType::STRING) {
 			bind_data.numpy_type.type = NumpyNullableType::CATEGORY;
-			// here we call numpy.unique
-			// this function call will return the unique values of a given array
-			// together with the indices to reconstruct the given array
-			auto uniq = nb::cast<nb::tuple>(nb::module_::import_("numpy").attr("unique")(column, false, true));
+			auto numpy = nb::module_::import_("numpy");
+			nb::object uniques;
+			if (bind_data.mask) {
+				// Masked rows take code -1, which reads as NULL, so their values stay out of the dictionary
+				auto &row_mask = bind_data.mask->numpy_array.GetArray();
+				uniques = numpy.attr("unique")(column.attr("__getitem__")(row_mask.attr("__invert__")()));
+				data = numpy.attr("searchsorted")(uniques, column);
+				data.attr("__setitem__")(row_mask, -1);
+			} else {
+				// here we call numpy.unique
+				// this function call will return the unique values of a given array
+				// together with the indices to reconstruct the given array
+				auto uniq = nb::cast<nb::tuple>(numpy.attr("unique")(column, false, true));
+				uniques = uniq[0];
+				data = uniq[1];
+			}
 			vector<string> enum_entries;
-			for (auto entry : uniq.attr("__getitem__")(0)) {
+			for (auto entry : uniques) {
 				enum_entries.push_back(TransformPythonString(nb::str(entry)));
 			}
 			idx_t size = enum_entries.size();
@@ -70,21 +106,20 @@ idx_t NumpyBind::Bind(ClientContext &context, nb::handle df, vector<PandasColumn
 				enum_entries_ptr[i] = StringVector::AddStringOrBlob(enum_entries_vec, enum_entries[i]);
 			}
 			duckdb_col_type = LogicalType::ENUM(enum_entries_vec, size);
-			data = uniq.attr("__getitem__")(1);
 			bind_data.internal_categorical_type = nb::cast<std::string>(nb::str(nb::object(data.attr("dtype"))));
 		} else {
 			data = column;
 			duckdb_col_type = NumpyToLogicalType(bind_data.numpy_type);
 		}
 
-		bind_data.pandas_col = std::make_unique<PandasNumpyColumn>(NumpyArray(std::move(data)));
-
+		auto numpy_column = std::make_unique<PandasNumpyColumn>(NumpyArray(std::move(data)));
 		if (bind_data.numpy_type.type == NumpyNullableType::OBJECT) {
 			PandasAnalyzer analyzer(context);
-			if (analyzer.Analyze(column)) {
+			if (analyzer.Analyze(*numpy_column, row_count, bind_data.mask.get())) {
 				duckdb_col_type = analyzer.AnalyzedType();
 			}
 		}
+		bind_data.pandas_col = std::move(numpy_column);
 
 		return_types.push_back(duckdb_col_type);
 		bind_columns.push_back(std::move(bind_data));

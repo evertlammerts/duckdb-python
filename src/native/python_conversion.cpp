@@ -518,6 +518,16 @@ bool PandasIsImported(PythonImportCache &import_cache) {
 	return module && module != Py_None;
 }
 
+bool NumpyMaIsImported() {
+	nb::str name("numpy.ma");
+	auto module = nb::steal(PyImport_GetModule(name.ptr()));
+	if (!module.is_valid()) {
+		PyErr_Clear();
+		return false;
+	}
+	return !module.is_none();
+}
+
 PythonObjectType GetPythonObjectType(nb::handle &ele) {
 	auto &import_cache = *DuckDBPyConnection::ImportCache();
 

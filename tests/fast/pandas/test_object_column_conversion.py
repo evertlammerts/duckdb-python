@@ -1229,7 +1229,6 @@ def test_python_error_from_a_conversion_passes_through(duckdb_cursor, frame, rai
 
 
 FALLBACK_ROWS = 4000
-FALLBACK_CALLS_PANDAS = "the all NULL sample falls back to a pandas lookup that misreads this column"
 
 
 def fallback_column(placed, *, base=None, index=None):
@@ -1256,35 +1255,30 @@ def interleaved_cells():
             "SELECT typeof(amount), amount FROM frame WHERE amount IS NOT NULL",
             [("INTEGER", 7)],
             id="duplicate_index_labels",
-            marks=not_yet(FALLBACK_CALLS_PANDAS),
         ),
         pytest.param(
             lambda: fallback_column([(3, np.ma.masked), (5, 5)]),
             "SELECT typeof(amount), amount FROM frame LIMIT 3 OFFSET 3",
             [("INTEGER", None), ("INTEGER", None), ("INTEGER", 5)],
             id="masked_constant_before_the_value",
-            marks=not_yet(FALLBACK_CALLS_PANDAS),
         ),
         pytest.param(
             lambda: fallback_column([(3, Decimal("NaN")), (5, 5)]),
             "SELECT typeof(amount), amount::VARCHAR FROM frame WHERE amount IS NOT NULL",
             [("FLOAT", "nan"), ("FLOAT", "5.0")],
             id="decimal_nan_before_the_value",
-            marks=not_yet(FALLBACK_CALLS_PANDAS),
         ),
         pytest.param(
             lambda: {"amount": np.array([None] * 2001, dtype=object)},
             "SELECT typeof(amount), count(*) FROM frame GROUP BY ALL",
             [('"NULL"', 2001)],
             id="all_none_ndarray",
-            marks=not_yet(FALLBACK_CALLS_PANDAS),
         ),
         pytest.param(
             lambda: {"amount": np.array([None] * 2999 + [5], dtype=object)},
             "SELECT typeof(amount), amount FROM frame WHERE amount IS NOT NULL",
             [("INTEGER", 5)],
             id="ndarray_with_one_late_value",
-            marks=not_yet(FALLBACK_CALLS_PANDAS),
         ),
         pytest.param(
             lambda: {
@@ -1295,7 +1289,6 @@ def interleaved_cells():
             "SELECT typeof(amount), amount FROM frame WHERE amount IS NOT NULL",
             [("INTEGER", 7)],
             id="masked_ndarray_with_one_unmasked_value",
-            marks=not_yet(FALLBACK_CALLS_PANDAS),
         ),
         pytest.param(
             lambda: fallback_column([(3, "x")], index=range(100, FALLBACK_ROWS + 100)),
@@ -1350,7 +1343,6 @@ def interleaved_cells():
             "SELECT typeof(amount), amount FROM frame WHERE amount IS NOT NULL",
             [("INTEGER", 7)],
             id="strided_ndarray",
-            marks=not_yet(FALLBACK_CALLS_PANDAS),
         ),
         pytest.param(
             lambda: pd.DataFrame({"amount": pd.Series([None] * 2001, dtype=object)}),
@@ -1365,7 +1357,6 @@ def test_all_null_sample_falls_back_to_the_first_value(duckdb_cursor, make_sourc
     assert duckdb_cursor.execute(query).fetchall() == expected
 
 
-@not_yet("the all NULL sample falls back to pandas to find the first value")
 def test_all_null_sample_fallback_calls_no_pandas(duckdb_cursor, monkeypatch):
     calls = []
 

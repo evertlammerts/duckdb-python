@@ -13,7 +13,6 @@ import duckdb
 import numpy as np
 import pandas as pd
 
-MASK_NOT_READ = "masked elements of a numpy masked array are read as their hidden values"
 CHILD_TIMEOUT = 60
 
 
@@ -125,7 +124,6 @@ BRANCH_IDS = [
 ]
 
 
-@_xfail(MASK_NOT_READ)
 @pytest.mark.parametrize("route", ["register", "variable"])
 @pytest.mark.parametrize("dtype_id", DTYPE_IDS)
 def test_masked_element_reads_as_null(duckdb_cursor, dtype_id, route):
@@ -143,7 +141,6 @@ def test_masked_array_type_matches_plain(duckdb_cursor, dtype_id, route):
     assert _types(_scan(duckdb_cursor, route, source)) == [sql_type]
 
 
-@_xfail("the dictionary of a masked string column holds the masked placeholder")
 @pytest.mark.parametrize(
     ("cells", "expected_type", "expected"),
     [
@@ -163,17 +160,11 @@ def test_masked_strings_enum_holds_unmasked_values_only(duckdb_cursor, cells, ex
     [
         pytest.param([1, 1.5, 3], "INTEGER", id="scalar"),
         pytest.param([1, "hidden", 3], "INTEGER", id="string"),
-        pytest.param(
-            [1, np.array([1.5]), 3],
-            "INTEGER",
-            id="ndarray_cell",
-            marks=_xfail("a masked array cell still shapes the object column type"),
-        ),
+        pytest.param([1, np.array([1.5]), 3], "INTEGER", id="ndarray_cell"),
         pytest.param(
             [np.array([1, 2], dtype="int64"), np.array([1.5]), np.array([3], dtype="int64")],
             "BIGINT[]",
             id="ndarray_of_other_dtype",
-            marks=_xfail("a masked array cell still shapes the object column type"),
         ),
     ],
 )
@@ -198,7 +189,6 @@ def test_unsupported_dtype_fails_with_or_without_a_mask(duckdb_cursor, dtype, me
         _scan(duckdb_cursor, "variable", source).fetchall()
 
 
-@_xfail(MASK_NOT_READ)
 @pytest.mark.parametrize("route", ["register", "variable"])
 @pytest.mark.parametrize("container", ["dict", "list"])
 def test_masked_columns_in_dict_and_list(duckdb_cursor, container, route):
@@ -209,7 +199,6 @@ def test_masked_columns_in_dict_and_list(duckdb_cursor, container, route):
     assert relation.fetchall() == [(1, None), (None, 5.0), (3, 6.0)]
 
 
-@_xfail(MASK_NOT_READ)
 @pytest.mark.parametrize(
     ("make", "expected"),
     [
@@ -241,7 +230,6 @@ def test_mask_helpers_mark_null(duckdb_cursor, make, expected):
     assert _scan(duckdb_cursor, "variable", source).fetchall() == _rows(expected)
 
 
-@_xfail(MASK_NOT_READ)
 @pytest.mark.parametrize(
     ("cells", "expected"),
     [
@@ -255,16 +243,10 @@ def test_masked_object_with_analyzer_off(duckdb_cursor, cells, expected):
     assert _scan(duckdb_cursor, "variable", source).fetchall() == _rows(expected)
 
 
-@_xfail(MASK_NOT_READ)
 def test_masked_struct_cell_is_null_with_null_children(duckdb_cursor):
     source = _masked(object, [{"a": 1}, {"a": 2}, {"a": 3}], [0, 1, 0])
     relation = _scan(duckdb_cursor, "variable", source, "SELECT column0, column0.a FROM src")
     assert relation.fetchall() == [({"a": 1}, 1), (None, None), ({"a": 3}, 3)]
-
-
-CONVERTED = "a masked element is converted like any other"
-CONVERTED_FAILS = _xfail(CONVERTED, raises=duckdb.InvalidInputException)
-CONVERTED_OUT_OF_RANGE = _xfail(CONVERTED, raises=duckdb.ConversionException)
 
 
 def _view_with_hidden_extreme(dtype):
@@ -278,64 +260,52 @@ def _view_with_hidden_extreme(dtype):
             lambda: _masked(object, [1, "hidden", 3], [0, 1, 0]),
             [1, None, 3],
             id="object_wrong_type",
-            marks=CONVERTED_FAILS,
         ),
         pytest.param(
             lambda: _masked(object, [1, "hidden", 3], [0, 1, 0], hard_mask=True),
             [1, None, 3],
             id="object_wrong_type_hard_mask",
-            marks=CONVERTED_FAILS,
         ),
-        pytest.param(
-            lambda: _masked(object, [1, 1.5, 3], [0, 1, 0]), [1, None, 3], id="object_fraction", marks=_xfail(CONVERTED)
-        ),
+        pytest.param(lambda: _masked(object, [1, 1.5, 3], [0, 1, 0]), [1, None, 3], id="object_fraction"),
         pytest.param(
             lambda: _masked(object, ["a", "\ud800", "c"], [0, 1, 0]),
             ["a", None, "c"],
             id="object_unencodable_str",
-            marks=CONVERTED_FAILS,
         ),
         pytest.param(
             lambda: _masked(object, [{"a": 1}, {"a": "hidden"}, {"a": 3}], [0, 1, 0]),
             [{"a": 1}, None, {"a": 3}],
             id="object_struct_wrong_leaf",
-            marks=CONVERTED_FAILS,
         ),
         pytest.param(
             lambda: _masked(object, [{"a": 1}, {"b": 2}, {"a": 3}], [0, 1, 0]),
             [{"a": 1}, None, {"a": 3}],
             id="object_struct_other_key",
-            marks=CONVERTED_FAILS,
         ),
         pytest.param(
             lambda: _masked(object, [[1], ["x"], [3]], [0, 1, 0]),
             [[1], None, [3]],
             id="object_list_wrong_element",
-            marks=CONVERTED_FAILS,
         ),
         pytest.param(
             lambda: _view_with_hidden_extreme("datetime64[s]"),
             [datetime(1970, 1, 1), None, datetime(1970, 1, 1, 0, 0, 1)],
             id="datetime64_s_out_of_range",
-            marks=CONVERTED_OUT_OF_RANGE,
         ),
         pytest.param(
             lambda: _view_with_hidden_extreme("datetime64[ms]"),
             [datetime(1970, 1, 1), None, datetime(1970, 1, 1, 0, 0, 0, 1000)],
             id="datetime64_ms_out_of_range",
-            marks=CONVERTED_OUT_OF_RANGE,
         ),
         pytest.param(
             lambda: _view_with_hidden_extreme("timedelta64[s]"),
             [timedelta(0), None, timedelta(seconds=1)],
             id="timedelta64_s_overflow",
-            marks=_xfail(CONVERTED),
         ),
         pytest.param(
             lambda: _view_with_hidden_extreme("timedelta64[ms]"),
             [timedelta(0), None, timedelta(milliseconds=1)],
             id="timedelta64_ms_overflow",
-            marks=_xfail(CONVERTED),
         ),
     ],
 )
@@ -401,7 +371,6 @@ def _fetchnumpy_child(literal, read):
     return child.returncode, [json.loads(outcome) for outcome in outcomes], child.stdout + child.stderr
 
 
-ROUND_TRIP_NOT_READ = "a fetchnumpy result with NULLs reads back its hidden slots"
 ROUND_TRIP_CRASHES = "reading back a fetchnumpy object column with NULLs dereferences its empty slots"
 OBJECT_RESULTS = {
     "VARCHAR": "'a'",
@@ -436,8 +405,8 @@ NESTED_RESULTS = {
     "UNION": "1::UNION(i INTEGER, s VARCHAR)",
 }
 ROUND_TRIPS = [
-    *(pytest.param(literal, id=name, marks=_xfail(ROUND_TRIP_NOT_READ)) for name, literal in VALUE_RESULTS.items()),
-    *(pytest.param(literal, id=name, marks=_xfail(ROUND_TRIP_CRASHES)) for name, literal in OBJECT_RESULTS.items()),
+    *(pytest.param(literal, id=name) for name, literal in VALUE_RESULTS.items()),
+    *(pytest.param(literal, id=name) for name, literal in OBJECT_RESULTS.items()),
     *(pytest.param(literal, id=name) for name, literal in NESTED_RESULTS.items()),
 ]
 OBJECT_ROUND_TRIPS = [pytest.param(literal, id=name) for name, literal in OBJECT_RESULTS.items()]
@@ -493,7 +462,7 @@ MISSING_MARKERS = [
 @pytest.mark.parametrize(
     "mask",
     [
-        pytest.param([0, 0, 1, 0], id="other_element_masked", marks=_xfail(MASK_NOT_READ)),
+        pytest.param([0, 0, 1, 0], id="other_element_masked"),
         pytest.param([0, 0, 0, 0], id="all_false"),
     ],
 )
@@ -520,27 +489,9 @@ def test_unset_or_false_mask_reads_like_plain(duckdb_cursor, dtype_id, variant):
     assert (_types(relation), relation.fetchall()) == ([sql_type], _rows(read_back))
 
 
-FULLY_MASKED_CAST = "an object column with every element masked casts its hidden values to the NULL type"
 FULLY_MASKED = [
-    *(
-        pytest.param(
-            case.dtype,
-            case.cells,
-            case.sql_type,
-            id=dtype_id,
-            marks=_xfail(FULLY_MASKED_CAST, raises=duckdb.InvalidInputException)
-            if dtype_id in ("object_str", "object_int", "object_dict", "object_list")
-            else _xfail(MASK_NOT_READ),
-        )
-        for dtype_id, case in DTYPE_BY_ID.items()
-    ),
-    pytest.param(
-        object,
-        [1, "a", 2.5],
-        None,
-        id="object_mixed",
-        marks=_xfail(FULLY_MASKED_CAST, raises=duckdb.InvalidInputException),
-    ),
+    *(pytest.param(case.dtype, case.cells, case.sql_type, id=dtype_id) for dtype_id, case in DTYPE_BY_ID.items()),
+    pytest.param(object, [1, "a", 2.5], None, id="object_mixed"),
 ]
 
 
@@ -572,7 +523,6 @@ def _ten_with_every_third_masked(kind):
     return np.ma.masked_array(data, mask=values % 3 == 0)
 
 
-@_xfail(MASK_NOT_READ)
 @pytest.mark.parametrize(
     "make",
     [
@@ -615,7 +565,6 @@ LONG_COLUMNS = {
 }
 # A cell of another type on a masked row, which an object column reads right only by skipping it.
 OTHER_TYPE_CELL = {"object_str": 7, "object_int": "hidden", "object_dict": "hidden"}
-CONVERTS_HIDDEN_CELL = ("object_int", "object_dict")
 
 
 def _long_masked_column(column_id, rows, hidden_rows, other_type_row):
@@ -628,26 +577,13 @@ def _long_masked_column(column_id, rows, hidden_rows, other_type_row):
     return {"i": np.arange(rows, dtype="int64"), "v": np.ma.masked_array(data, mask=mask)}
 
 
-def _long_column_params(column_ids):
-    return [
-        pytest.param(
-            column_id,
-            id=column_id,
-            marks=_xfail(MASK_NOT_READ, raises=duckdb.InvalidInputException)
-            if column_id in CONVERTS_HIDDEN_CELL
-            else _xfail(MASK_NOT_READ),
-        )
-        for column_id in column_ids
-    ]
-
-
 def _null_rows_and_matches(con, route, source, column_id):
     check = LONG_COLUMNS[column_id][1]
     query = f"SELECT list(i ORDER BY i) FILTER (WHERE v IS NULL), count(*) FILTER (WHERE {check}) FROM src"
     return _scan(con, route, source, query).fetchall()
 
 
-@pytest.mark.parametrize("column_id", _long_column_params(LONG_COLUMNS))
+@pytest.mark.parametrize("column_id", list(LONG_COLUMNS))
 def test_mask_across_vector_boundaries(duckdb_cursor, column_id):
     rows = 5000
     # The analyzer samples every fifth row of 5000, so the cell of another type sits on a sampled row.
@@ -658,7 +594,7 @@ def test_mask_across_vector_boundaries(duckdb_cursor, column_id):
     assert _null_rows_and_matches(duckdb_cursor, "variable", source, column_id) == expected
 
 
-@pytest.mark.parametrize("column_id", _long_column_params(["int64", "object_str", "object_int"]))
+@pytest.mark.parametrize("column_id", ["int64", "object_str", "object_int"])
 def test_mask_across_partition_boundaries(duckdb_cursor, column_id):
     rows = 300_000
     # The analyzer samples every 300th row of 300000, so the cell of another type sits on a sampled row.
@@ -684,7 +620,6 @@ def _two_dimensional(order):
     return np.ma.masked_array(data, mask=np.asfortranarray(np.array([[0, 1, 0], [0, 0, 1]], dtype=bool)))
 
 
-@_xfail(MASK_NOT_READ)
 @pytest.mark.parametrize("route", ["register", "variable"])
 @pytest.mark.parametrize("order", ["c_order", "fortran_order"])
 def test_two_dimensional_mask_follows_its_element(duckdb_cursor, order, route):
@@ -693,7 +628,6 @@ def test_two_dimensional_mask_follows_its_element(duckdb_cursor, order, route):
     assert _scan(duckdb_cursor, route, source).fetchall() == expected
 
 
-@_xfail(MASK_NOT_READ)
 @pytest.mark.parametrize(
     "container",
     ["1d_nomask", "1d_existing_mask", "dict", "list"],
@@ -723,7 +657,7 @@ def _cells_except(rows, plain_rows, left_open):
     [
         # A registered 2d array is split into rows once, so a mask added later to an array without one is not promised.
         pytest.param(False, set(), {2}, id="nomask_at_registration"),
-        pytest.param(True, {2}, set(), id="mask_at_registration", marks=_xfail(MASK_NOT_READ)),
+        pytest.param(True, {2}, set(), id="mask_at_registration"),
     ],
 )
 def test_registered_2d_mask_change(duckdb_cursor, mask_at_registration, hidden, left_open):
@@ -741,16 +675,12 @@ def test_registered_2d_mask_change(duckdb_cursor, mask_at_registration, hidden, 
     assert _cells_except(rows, plain_rows, left_open) == expected
 
 
-@_xfail(MASK_NOT_READ)
 def test_2d_mask_added_later_shows_through_variable_scan(duckdb_cursor):
     source = np.ma.masked_array(np.array([[1, 2, 3], [4, 5, 6]], dtype="int64"))
     duckdb_cursor.sql("SELECT * FROM source").fetchall()
     source[0, 1] = np.ma.masked
     expected = _like_plain_with_hidden(duckdb_cursor, np.ma.getdata(source), {2})
     assert duckdb_cursor.sql("SELECT * FROM source").fetchall() == expected
-
-
-MASKED_CONSTANT_IN_TEXT = "the masked constant stored as a value reads as its placeholder text"
 
 
 @pytest.mark.parametrize(
@@ -761,28 +691,24 @@ MASKED_CONSTANT_IN_TEXT = "the masked constant stored as a value reads as its pl
             None,
             ["a", None, "c"],
             id="numpy_varchar",
-            marks=_xfail(MASKED_CONSTANT_IN_TEXT),
         ),
         pytest.param(
             lambda: _array(object, ["a", np.ma.masked, "c"]),
             "SET pandas_analyze_sample=0",
             ["a", None, "c"],
             id="numpy_varchar_analyzer_off",
-            marks=_xfail(MASKED_CONSTANT_IN_TEXT),
         ),
         pytest.param(
             lambda: _masked(object, ["a", np.ma.masked, "c"], [0, 0, 0]),
             None,
             ["a", None, "c"],
             id="masked_array_varchar",
-            marks=_xfail(MASKED_CONSTANT_IN_TEXT),
         ),
         pytest.param(
             lambda: pd.DataFrame({"x": pd.Series(["a", np.ma.masked, "c"], dtype=object)}),
             None,
             ["a", None, "c"],
             id="pandas_varchar",
-            marks=_xfail(MASKED_CONSTANT_IN_TEXT),
         ),
         pytest.param(lambda: _array(object, [1, np.ma.masked, 3]), None, [1, None, 3], id="numpy_integer"),
         pytest.param(lambda: _array(object, [1.5, np.ma.masked, 2.5]), None, [1.5, None, 2.5], id="numpy_double"),

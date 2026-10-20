@@ -564,7 +564,6 @@ def test_nullable_column_with_a_mask_of_another_length_is_refused(path, length):
     assert _refusal(_run_child(body), expected["words"]) == expected
 
 
-@pytest.mark.xfail(strict=True, reason="bind does not compare a numpy masked array's mask length with its row count")
 @pytest.mark.parametrize("path", PATHS)
 @pytest.mark.parametrize("length", RESIZED_MASK_LENGTHS)
 def test_masked_array_with_a_mask_of_another_length_is_refused(path, length):

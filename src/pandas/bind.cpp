@@ -205,14 +205,15 @@ static LogicalType BindColumn(ClientContext &context, PandasBindColumn &column_p
 		column_type = NumpyToLogicalType(bind_data.numpy_type);
 	}
 	CheckColumnArray(bind_data.name, data, row_count, counted_from);
-	bind_data.pandas_col = std::make_unique<PandasNumpyColumn>(NumpyArray(std::move(data)));
+	auto numpy_column = std::make_unique<PandasNumpyColumn>(NumpyArray(std::move(data)));
 	// Analyze the inner data type of the 'object' column
 	if (bind_data.numpy_type.type == NumpyNullableType::OBJECT) {
 		PandasAnalyzer analyzer(context);
-		if (analyzer.Analyze(column)) {
+		if (analyzer.Analyze(*numpy_column, row_count, bind_data.mask.get())) {
 			column_type = analyzer.AnalyzedType();
 		}
 	}
+	bind_data.pandas_col = std::move(numpy_column);
 	return column_type;
 }
 
@@ -234,6 +235,9 @@ idx_t Pandas::Bind(ClientContext &context, nb::handle df_p, vector<PandasColumnB
 	}
 	(void)import_cache.pandas.NA();
 	(void)import_cache.pandas.NaT();
+	if (NumpyMaIsImported()) {
+		(void)import_cache.numpy.ma.masked();
+	}
 
 	return_types.reserve(column_count);
 	names.reserve(column_count);
