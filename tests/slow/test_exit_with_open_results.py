@@ -155,6 +155,10 @@ class TestOpenResultAtExit:
         _assert_exit(proc, status=1, body_done=False)
         assert "RuntimeError: boom" in proc.stderr
 
+    @pytest.mark.skipif(
+        sys.version_info < (3, 13),
+        reason="before 3.13 a daemon thread woken after finalization unwinds through duckdb and aborts",
+    )
     def test_a_result_open_on_a_busy_thread_does_not_block_the_exit(self) -> None:
         body = """
         import threading
