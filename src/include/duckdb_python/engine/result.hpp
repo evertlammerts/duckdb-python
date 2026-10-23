@@ -55,7 +55,7 @@ class ConnectionClaim;
 //! A submitted statement. Retention is settled by the first consumer: a fetch opens a stream, Retain and the
 //! Take calls keep every row. Every call that drives the query claims the connection, takes the client context
 //! lock and may wait for running tasks, so callers must not hold a lock those tasks need.
-class Result {
+class Result : public enable_shared_from_this<Result> {
 public:
 	//! written_type is the submitted statement's own type, since the handle of a prepared execution reports EXECUTE
 	Result(unique_ptr<QueryResult> submitted, StatementType written_type, Format format);
@@ -133,6 +133,11 @@ public:
 
 	//! Ends the query if it is still running. Idempotent, and safe while another thread is fetching.
 	void Close();
+	void EndIfRunning();
+	//! Called once the shared owner exists, which Live needs
+	static void Register(const shared_ptr<Result> &result);
+	static vector<shared_ptr<Result>> Live();
+	static void AfterForkInChild();
 	//! The rows a completed DML statement changed, or -1
 	int64_t ChangedRows();
 
@@ -162,6 +167,8 @@ private:
 	mutable mutex handle_lock;
 	//! The error that ended the query, set when a driving call failed
 	std::exception_ptr failure;
+	//! Set after failure, which never changes again, so a reader needs no handle_lock
+	atomic<bool> failed {false};
 	//! The state of the connection the query runs on, whose claim every driving call takes
 	shared_ptr<ConnectionState> connection_state;
 	//! Weak, so a result never keeps a connection's database alive, and never reads a context that is gone

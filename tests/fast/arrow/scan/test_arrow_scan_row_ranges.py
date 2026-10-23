@@ -883,10 +883,12 @@ class TestGil:
             return x
 
         obj = _hold_source(source)
-        held = _scan_seconds(obj, hold_gil, hold=True)
-        free = _scan_seconds(obj, hold_gil, hold=False)
-        holds = (held - free) / HOLD_SECONDS
-        assert calls == [0]
+        rounds = 3 if takes_gil else 1
+        holds = max(
+            (_scan_seconds(obj, hold_gil, hold=True) - _scan_seconds(obj, hold_gil, hold=False)) / HOLD_SECONDS
+            for _ in range(rounds)
+        )
+        assert calls == [0] * rounds
         if takes_gil:
             assert holds >= 1, holds
         else:

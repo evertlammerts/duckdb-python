@@ -143,3 +143,22 @@ class TestDateTimeTimeStamp:
 
         pd.testing.assert_frame_equal(utc_usecond, utc_other)
         pd.testing.assert_frame_equal(us_usecond, us_other)
+
+
+class TestConvertedColumnsKeepTheirPlace:
+    @pytest.mark.parametrize(
+        ("column", "kwargs"),
+        [
+            pytest.param("TIMESTAMPTZ '2020-01-01 00:00:00+00'", {}, id="timestamptz"),
+            pytest.param("DATE '2020-01-01'", {"date_as_object": True}, id="date_as_object"),
+        ],
+    )
+    def test_df_replaces_the_column_without_a_pandas_warning(self, duckdb_cursor, column, kwargs):
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            df = duckdb_cursor.sql(f"SELECT 1 AS a, {column} AS converted, 2 AS b").df(**kwargs)
+        assert list(df.columns) == ["a", "converted", "b"]
+        assert df["a"].tolist() == [1]
+        assert df["b"].tolist() == [2]
