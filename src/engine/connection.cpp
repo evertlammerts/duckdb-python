@@ -328,7 +328,9 @@ shared_ptr<Result> Session::SubmitClaimed(unique_ptr<SQLStatement> statement,
 	registry->CountStatement(written_type);
 	auto handle = context->Submit(std::move(statement), values, QueryParameters(format.EngineFormat()));
 	NameRefusal(*state, *handle);
-	return make_shared_ptr<Result>(std::move(handle), written_type, format);
+	auto result = make_shared_ptr<Result>(std::move(handle), written_type, format);
+	Result::Register(result);
+	return result;
 }
 
 shared_ptr<Result> Session::Submit(Prepared &prepared, identifier_map_t<BoundParameterData> &values,
@@ -341,7 +343,9 @@ shared_ptr<Result> Session::Submit(Prepared &prepared, identifier_map_t<BoundPar
 		handle = prepared.statement->Submit(values, QueryParameters(format.EngineFormat()));
 	}
 	NameRefusal(*state, *handle);
-	return make_shared_ptr<Result>(std::move(handle), prepared.statement->GetStatementType(), format);
+	auto result = make_shared_ptr<Result>(std::move(handle), prepared.statement->GetStatementType(), format);
+	Result::Register(result);
+	return result;
 }
 
 shared_ptr<Result> Session::Submit(unique_ptr<ColumnDataCollection> collection, const vector<Identifier> &names,

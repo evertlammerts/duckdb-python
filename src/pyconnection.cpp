@@ -167,7 +167,14 @@ void DbapiResult::Supersede() {
 		return;
 	}
 	auto superseded = std::move(result);
-	if (superseded->HasWritesToRun()) {
+	bool writes;
+	{
+		// Waiting here with the GIL held deadlocks a close on another thread
+		DUCKDB_PY_ASSERT_GIL_HELD();
+		nb::gil_scoped_release release;
+		writes = superseded->HasWritesToRun();
+	}
+	if (writes) {
 		superseded->Complete();
 	} else {
 		superseded->Close();
