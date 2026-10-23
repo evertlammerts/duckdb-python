@@ -92,11 +92,20 @@ private:
 
 void OnInterpreterExit() {
 	interpreter_exiting = true;
-	nb::gil_scoped_release release;
-	// Not bounded: a call let in may need the GIL again before it returns, which it never gets once the interpreter
-	// finalizes, so a slow source delays the exit instead of hanging it.
-	while (calls_in_flight.load() > 0) {
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	auto results = engine::Result::Live();
+	{
+		nb::gil_scoped_release release;
+		for (auto &result : results) {
+			try {
+				result->EndIfRunning();
+			} catch (...) { // NOLINT: a result that fails to end must not keep the others running
+			}
+		}
+		// Not bounded: a call let in may need the GIL again before it returns, which it never gets once the
+		// interpreter finalizes, so a slow source delays the exit instead of hanging it.
+		while (calls_in_flight.load() > 0) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
 	}
 }
 
@@ -104,6 +113,7 @@ void OnInterpreterExit() {
 //! A forked child keeps the exit flag, as it continues from the parent's place among the exit handlers.
 void AfterForkInChild() {
 	calls_in_flight = calls_on_this_thread;
+	engine::Result::AfterForkInChild();
 }
 #endif
 
