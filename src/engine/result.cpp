@@ -238,6 +238,17 @@ void Result::CloseAfterFailure(std::exception_ptr error) noexcept {
 	}
 }
 
+void Result::CloseWithError(std::exception_ptr error) {
+	// The claim makes Python code that the close runs refuse to reenter the connection, and a busy or closed
+	// connection ends the query without it, as Close does
+	unique_ptr<ConnectionClaim> claim;
+	try {
+		claim = ClaimWhileRunning();
+	} catch (...) { // NOLINT
+	}
+	CloseAfterFailure(std::move(error));
+}
+
 void Result::ThrowIfFailed() const {
 	if (failed) {
 		std::rethrow_exception(failure);
