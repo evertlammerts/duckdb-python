@@ -6,6 +6,7 @@ exit status and no fatal error.
 
 from __future__ import annotations
 
+import importlib.util
 import subprocess
 import sys
 import textwrap
@@ -110,6 +111,7 @@ OPEN_RESULT_CASES = [
         print(reader.read_next_batch().num_rows)
         """,
         id="arrow_reader",
+        marks=pytest.mark.skipif(importlib.util.find_spec("pyarrow") is None, reason="needs pyarrow"),
     ),
     pytest.param(
         """
