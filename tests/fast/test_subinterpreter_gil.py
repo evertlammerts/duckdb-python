@@ -191,10 +191,6 @@ con.execute("SET threads = 4")
     return setup + "".join(f"{statement}\n" for statement in statements)
 
 
-def _text(stream: str | bytes | None) -> str:
-    return stream.decode() if isinstance(stream, bytes) else stream or ""
-
-
 def _run(imports: str, body: str) -> subprocess.CompletedProcess[str]:
     script = "".join(
         textwrap.dedent(part)
@@ -210,20 +206,30 @@ def _run(imports: str, body: str) -> subprocess.CompletedProcess[str]:
             f"print({BODY_DONE!r})\n",
         )
     )
+    child = subprocess.Popen(
+        [sys.executable, "-u", "-c", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
     try:
-        return subprocess.run(
-            [sys.executable, "-u", "-c", script],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
+        stdout, stderr = child.communicate(timeout=60)
     except subprocess.TimeoutExpired as hang:
-        started = _text(hang.stdout)
-        where = "after" if STARTED in started else "before"
+        stacks = _native_stacks(child.pid)
+        child.kill()
+        stdout, stderr = child.communicate()
+        where = "after" if STARTED in stdout else "before"
         msg = f"the child hung {where} reaching the statement under test"
-        msg += f"\nstdout:\n{started[-2000:]}\nstderr:\n{_text(hang.stderr)[-2000:]}"
+        msg += f"\nstdout:\n{stdout[-2000:]}\nstderr:\n{stderr[-2000:]}{stacks}"
         raise AssertionError(msg) from hang
+    return subprocess.CompletedProcess(child.args, child.returncode, stdout, stderr)
+
+
+def _native_stacks(pid: int) -> str:
+    if sys.platform != "darwin":
+        return ""
+    try:
+        sample = subprocess.run(["sample", str(pid), "2"], capture_output=True, text=True, timeout=30, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return f"\nnative stacks of the hung child:\n{sample.stdout[-6000:]}"
 
 
 @_needs(INTERPRETERS)
