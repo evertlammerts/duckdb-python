@@ -1,5 +1,6 @@
 #include "duckdb_python/engine/result.hpp"
 #include "duckdb_python/engine/connection.hpp"
+#include "duckdb_python/pyutil.hpp"
 
 #include "duckdb/common/arrow/arrow_converter.hpp"
 #include "duckdb/common/arrow/nanoarrow/nanoarrow.hpp"
@@ -218,11 +219,13 @@ shared_ptr<ClientContext> Result::TryGetContext() const {
 }
 
 void Result::Retain(const InterruptCheck &check) {
+	DUCKDB_PY_ASSERT_GIL_RELEASED();
 	auto claim = ClaimWhileRunning();
 	RetainClaimed(check);
 }
 
 void Result::CloseAfterFailure(std::exception_ptr error) noexcept {
+	DUCKDB_PY_ASSERT_GIL_RELEASED();
 	{
 		lock_guard<mutex> guard(handle_lock);
 		if (!failed) {
@@ -236,6 +239,17 @@ void Result::CloseAfterFailure(std::exception_ptr error) noexcept {
 		Close();
 	} catch (...) { // NOLINT: the error of the failed call is the one to report
 	}
+}
+
+void Result::CloseWithError(std::exception_ptr error) {
+	// The claim makes Python code that the close runs refuse to reenter the connection, and a busy or closed
+	// connection ends the query without it, as Close does
+	unique_ptr<ConnectionClaim> claim;
+	try {
+		claim = ClaimWhileRunning();
+	} catch (...) { // NOLINT
+	}
+	CloseAfterFailure(std::move(error));
 }
 
 void Result::ThrowIfFailed() const {
@@ -253,6 +267,7 @@ unique_ptr<ConnectionClaim> Result::ClaimWhileRunning() {
 }
 
 void Result::RetainClaimed(const InterruptCheck &check) {
+	DUCKDB_PY_ASSERT_GIL_RELEASED();
 	if (state != State::PENDING) {
 		return;
 	}
@@ -267,11 +282,13 @@ void Result::RetainClaimed(const InterruptCheck &check) {
 }
 
 void Result::Settle(const InterruptCheck &check) {
+	DUCKDB_PY_ASSERT_GIL_RELEASED();
 	auto claim = ClaimWhileRunning();
 	SettleClaimed(check);
 }
 
 void Result::SettleClaimed(const InterruptCheck &check) {
+	DUCKDB_PY_ASSERT_GIL_RELEASED();
 	if (state != State::PENDING) {
 		return;
 	}
@@ -297,6 +314,7 @@ void Result::SettleClaimed(const InterruptCheck &check) {
 }
 
 idx_t Result::RowCount(const InterruptCheck &check) {
+	DUCKDB_PY_ASSERT_GIL_RELEASED();
 	ThrowIfFailed();
 	auto claim = ClaimWhileRunning();
 	RetainClaimed(check);
@@ -307,6 +325,7 @@ idx_t Result::RowCount(const InterruptCheck &check) {
 }
 
 unique_ptr<DataChunk> Result::FetchChunk(const InterruptCheck &check) {
+	DUCKDB_PY_ASSERT_GIL_RELEASED();
 	D_ASSERT(!format.IsArrow());
 	ThrowIfFailed();
 	auto claim = ClaimWhileRunning();
@@ -333,6 +352,7 @@ unique_ptr<DataChunk> Result::FetchChunk(const InterruptCheck &check) {
 }
 
 unique_ptr<ArrowArrayWrapper> Result::FetchArray(const InterruptCheck &check) {
+	DUCKDB_PY_ASSERT_GIL_RELEASED();
 	D_ASSERT(format.IsArrow());
 	ThrowIfFailed();
 	auto claim = ClaimWhileRunning();
@@ -354,6 +374,7 @@ unique_ptr<ArrowArrayWrapper> Result::FetchArray(const InterruptCheck &check) {
 }
 
 unique_ptr<ColumnDataCollection> Result::TakeChunks(const InterruptCheck &check) {
+	DUCKDB_PY_ASSERT_GIL_RELEASED();
 	D_ASSERT(!format.IsArrow());
 	ThrowIfFailed();
 	// Claimed only while the query can still run engine work: rows already in the client need no connection
@@ -382,6 +403,7 @@ unique_ptr<ColumnDataCollection> Result::TakeChunks(const InterruptCheck &check)
 }
 
 vector<unique_ptr<ArrowArrayWrapper>> Result::TakeArrays(const InterruptCheck &check) {
+	DUCKDB_PY_ASSERT_GIL_RELEASED();
 	D_ASSERT(format.IsArrow());
 	ThrowIfFailed();
 	// Claimed only while the query can still run engine work, as in TakeChunks
@@ -454,6 +476,7 @@ int64_t Result::ChangedRows() {
 }
 
 bool Result::Running() const {
+	DUCKDB_PY_ASSERT_GIL_RELEASED();
 	lock_guard<mutex> guard(handle_lock);
 	if (state == State::PENDING) {
 		return handle && handle->IsOpen();
@@ -468,6 +491,11 @@ void Result::Close() {
 	if (state == State::CLOSED) {
 		return;
 	}
+	// Only a query that can still run waits here: a retained or drained one dropped its context when it completed, and
+	// the client's destructors drop those with the GIL held
+	if (state == State::PENDING || state == State::STREAMING) {
+		DUCKDB_PY_ASSERT_GIL_RELEASED();
+	}
 	{
 		lock_guard<mutex> guard(handle_lock);
 		if (stream) {
@@ -480,6 +508,7 @@ void Result::Close() {
 }
 
 void Result::EndIfRunning() {
+	DUCKDB_PY_ASSERT_GIL_RELEASED();
 	auto context = context_owner.lock();
 	if (!context) {
 		return;

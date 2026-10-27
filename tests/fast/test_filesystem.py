@@ -1,6 +1,9 @@
 import datetime
+import io
 import logging
+import re
 import sys
+import threading
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from shutil import copyfileobj
@@ -107,6 +110,40 @@ class TestPythonFilesystem:
             duckdb_cursor.execute(f"select * from '{protocol}:///{FILENAME}'")
 
             assert duckdb_cursor.fetchall() == [(1, 10, 0), (2, 50, 30)]
+
+    def test_a_python_error_from_a_read_on_an_engine_thread_reaches_the_caller_with_its_text(
+        self, memory: fsspec.AbstractFileSystem
+    ):
+        # The submitting thread's reads, the sniff at bind among them, are served; an engine thread's raises.
+        class UnreadableOffTheMainThread(io.BytesIO):
+            def read(self, size=-1) -> bytes:
+                thread = threading.current_thread()
+                if thread is not threading.main_thread():
+                    msg = f"no bytes on {thread.name}"
+                    raise ValueError(msg)
+                return super().read(size)
+
+        class UnreadableFileSystem(fsspec.implementations.memory.MemoryFileSystem):
+            def _open(self, path, mode="rb", **kwargs):
+                if "r" in mode:
+                    return UnreadableOffTheMainThread(self.store[self._strip_protocol(path)].getvalue())
+                return super()._open(path, mode, **kwargs)
+
+        unreadable = independent_memory_filesystem(UnreadableFileSystem)
+        with unreadable.open("big.csv", "wb") as file:
+            file.write(b"a,b\n" + b"".join(b"%d,%d\n" % (i, i * 7) for i in range(100_000)))
+        with duckdb.connect(config={"threads": 4}) as con:
+            con.register_filesystem(unreadable)
+            # About 1.3 MB in buffers of 256 KB, so the scan reads on several threads.
+            with pytest.raises(duckdb.Error, match=r"ValueError: no bytes on \S+") as raised:
+                con.read_csv("memory://big.csv", buffer_size=256 * 1024).aggregate("count(*)").fetchall()
+            assert type(raised.value) is duckdb.Error
+            raising_thread = re.search(r"ValueError: no bytes on (\S+)", str(raised.value)).group(1)
+            assert raising_thread != threading.main_thread().name
+            assert con.execute("select 42").fetchall() == [(42,)]
+            con.unregister_filesystem("memory")
+            con.register_filesystem(memory)
+            assert con.read_csv(f"memory://{FILENAME}").fetchall() == [(1, 10, 0), (2, 50, 30)]
 
     def test_write(self, duckdb_cursor: DuckDBPyConnection, memory: fsspec.AbstractFileSystem):
         duckdb_cursor.register_filesystem(memory)

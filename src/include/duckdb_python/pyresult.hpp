@@ -116,6 +116,9 @@ private:
 	unique_ptr<DataChunk> FetchNext();
 	unique_ptr<DataChunk> FetchNextRaw();
 	unique_ptr<DataChunk> TakeBufferedRows();
+	//! Called while handling an error from reading rows: ends the result, so the connection is free and every later
+	//! fetch raises the error again
+	void EndWithCurrentError();
 	std::unique_ptr<NumpyResultConversion> InitializeNumpyConversion(bool pandas = false);
 
 	template <typename T>

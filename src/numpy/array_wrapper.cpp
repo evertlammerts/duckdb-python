@@ -9,6 +9,7 @@
 #include "duckdb_python/python_objects.hpp"
 #include "duckdb_python/pyconnection/pyconnection.hpp"
 #include "duckdb/common/types/uuid.hpp"
+#include "duckdb/main/error_manager.hpp"
 #include "duckdb/common/vector/list_vector.hpp"
 #include "duckdb/common/vector/array_vector.hpp"
 
@@ -167,7 +168,15 @@ struct StringConvert {
 		(void)append_data;
 		auto data = const_data_ptr_cast(val.GetData());
 		auto len = val.GetSize();
-		return PyUnicode_FromStringAndSize(const_char_ptr_cast(data), len);
+		auto str = PyUnicode_FromStringAndSize(const_char_ptr_cast(data), len);
+		if (!str) {
+			if (!PyErr_ExceptionMatches(PyExc_UnicodeDecodeError)) {
+				throw nb::python_error();
+			}
+			PyErr_Clear();
+			throw ErrorManager::InvalidUnicodeError(val.GetString(), "value construction");
+		}
+		return str;
 	}
 	template <class NUMPY_T, bool PANDAS>
 	static NUMPY_T NullValue(bool &set_mask) {
