@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import uuid
 from decimal import Decimal
 
@@ -1473,6 +1474,94 @@ def test_python_error_from_a_conversion_passes_through(duckdb_cursor, frame, rai
         duckdb_cursor.execute("SELECT amount FROM frame").fetchall()
     assert type(error.value) is duckdb.Error
     assert re.fullmatch(rf"Traceback \(most recent call last\):\n(.*\n)*{re.escape(raised)}\n?", str(error.value))
+
+
+# The rows one pandas scan task reads, so a frame of several parts is read by several tasks
+PART_ROWS = 50 * 2048
+PARTS = 5
+
+
+class RaisesOffTheSubmittingThread:
+    """Raises `error` once, on the first thread other than the submitting one; the submitting thread waits for it."""
+
+    def __init__(self, error) -> None:
+        self.submitting = threading.get_ident()
+        self.error = error
+        self.raised_on = []
+        self.raised = threading.Event()
+        self.timed_out = threading.Event()
+        self.lock = threading.Lock()
+
+    def check(self):
+        if threading.get_ident() == self.submitting:
+            # Waiting releases the GIL and holds this task, so an engine thread takes another one and raises.
+            if not self.raised.wait(timeout=10):
+                # Raising ends the query, so the wait is not repeated for every cell of this thread.
+                self.timed_out.set()
+                msg = "no engine thread raised within 10 seconds"
+                raise TimeoutError(msg)
+            return
+        with self.lock:
+            if self.raised_on:
+                return
+            self.raised_on.append(threading.get_ident())
+        self.raised.set()
+        raise self.error
+
+
+class StrRaisingOffTheSubmittingThread:
+    def __init__(self, raiser) -> None:
+        self.raiser = raiser
+
+    def __str__(self) -> str:
+        self.raiser.check()
+        return "converted"
+
+
+class DecimalRaisingOffTheSubmittingThread(Decimal):
+    def as_tuple(self):
+        self.raiser.check()
+        return super().as_tuple()
+
+
+def text_cell(raiser):
+    return StrRaisingOffTheSubmittingThread(raiser)
+
+
+def integer_cell(raiser):
+    cell = DecimalRaisingOffTheSubmittingThread("2")
+    cell.raiser = raiser
+    return cell
+
+
+@pytest.mark.parametrize(
+    ("base", "make_cell", "error"),
+    [
+        pytest.param("a", text_cell, ValueError("bad string"), id="text_column"),
+        pytest.param(1, integer_cell, ZeroDivisionError("no tuple"), id="integer_column"),
+    ],
+)
+@pytest.mark.timeout(60)
+def test_python_error_from_a_conversion_on_an_engine_thread_passes_through(base, make_cell, error):
+    raiser = RaisesOffTheSubmittingThread(error)
+    values = [base] * (PARTS * PART_ROWS)
+    for part in range(PARTS):
+        # The analyzer samples every 512th row of this frame, so it never converts these cells.
+        values[part * PART_ROWS + 1] = make_cell(raiser)
+    con = duckdb.connect(config={"threads": 4})
+    con.register("frame", pd.DataFrame({"amount": pd.Series(values, dtype=object)}))
+    with pytest.raises(duckdb.Error) as raised:
+        con.execute("SELECT amount FROM frame").fetchall()
+    if raiser.timed_out.is_set():
+        pytest.fail("no engine thread raised within 10 seconds")
+    assert raiser.raised_on, "every conversion ran on the submitting thread, so no engine thread raised"
+    assert raiser.raised_on[0] != raiser.submitting
+    assert type(raised.value) is duckdb.Error
+    text = re.escape(f"{type(error).__name__}: {error}")
+    assert re.fullmatch(rf"Traceback \(most recent call last\):\n(.*\n)*{text}\n?", str(raised.value))
+    assert_connection_answers(con)
+    con.register("frame", pd.DataFrame({"amount": pd.Series([base] * (PARTS * PART_ROWS), dtype=object)}))
+    assert con.execute("SELECT count(amount) FROM frame").fetchall() == [(PARTS * PART_ROWS,)]
 
 
 FALLBACK_ROWS = 4000

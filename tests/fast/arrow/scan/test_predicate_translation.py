@@ -270,9 +270,8 @@ REFUSALS = [
     p("n = 3 AND rowid < 5", ("(n = 3)", '("n" = 3)'), ("(rowid < 5)", REFUSED), id="top-level-and-keeps-the-rest"),
     p(
         "dec BETWEEN 1 AND 2.555",
-        ("(dec >= 1.00)", "(\"dec\" >= CAST('1.00' AS DECIMAL(10, 2)))"),
-        ("(CAST(dec AS DECIMAL(13,3)) <= 2.555)", REFUSED),
-        id="between-split-by-a-cast-bound",
+        ("(CAST(dec AS DECIMAL(13,3)) BETWEEN 1.000 AND 2.555)", REFUSED),
+        id="between-with-a-cast-bound",
     ),
     # constants without an exact Python value of the column's type
     p("n IN (1, NULL)", ("(n IN (1, NULL::INTEGER))", REFUSED), id="null-in-in"),

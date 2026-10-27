@@ -14,6 +14,7 @@
 #include "duckdb_python/numpy/numpy_type.hpp"
 #include "duckdb/function/scalar/nested_functions.hpp"
 #include "duckdb_python/numpy/numpy_scan.hpp"
+#include "duckdb_python/exceptions.hpp"
 #include "duckdb_python/numpy/numpy_array.hpp"
 #include "duckdb_python/pandas/column/pandas_numpy_column.hpp"
 
@@ -247,12 +248,16 @@ void NumpyScan::ScanObjectColumn(ClientContext &context, PyObject **col, idx_t s
                                  idx_t count, idx_t offset, Vector &out) {
 	// numpy_col is a sequential list of objects, that make up one "column" (Vector)
 	out.SetVectorType(VectorType::FLAT_VECTOR);
-	nb::gil_scoped_acquire gil; // We're creating python objects here, so we need the GIL
+	PyUtil::QueryGil gil(context); // We're creating python objects here, so we need the GIL
 
-	if (masked) {
-		ScanObjectRows<true>(context, col, stride, masked, count, offset, out);
-	} else {
-		ScanObjectRows<false>(context, col, stride, masked, count, offset, out);
+	try {
+		if (masked) {
+			ScanObjectRows<true>(context, col, stride, masked, count, offset, out);
+		} else {
+			ScanObjectRows<false>(context, col, stride, masked, count, offset, out);
+		}
+	} catch (nb::python_error &error) {
+		throw AsDuckDBError(error);
 	}
 	VerifyTypeConstraints(out, count);
 }
@@ -315,14 +320,13 @@ static void ScanNumpyTimedelta(PandasColumnBindData &bind_data, NumpyArray &arra
 	}
 }
 
+//! Call with the GIL held
 template <bool HAS_MASK>
-static void ScanNumpyStrings(PandasColumnBindData &bind_data, PyObject **src_ptr, idx_t stride, idx_t count,
-                             idx_t offset, Vector &out) {
+static void ScanNumpyStringRows(PandasColumnBindData &bind_data, PyObject **src_ptr, idx_t stride, idx_t count,
+                                idx_t offset, Vector &out) {
 	// Get the data pointer and the validity mask of the result vector
 	auto tgt_ptr = FlatVector::GetDataMutable<string_t>(out);
 	auto &out_mask = FlatVector::ValidityMutable(out);
-	// A str's UTF-8 is reachable only through the C API, which needs the GIL
-	nb::gil_scoped_acquire gil;
 	auto &import_cache = *DuckDBPyConnection::ImportCache();
 	auto masked_constant = import_cache.numpy.ma.masked(false);
 
@@ -381,6 +385,21 @@ static void ScanNumpyStrings(PandasColumnBindData &bind_data, PyObject **src_ptr
 			}
 			tgt_ptr[row] = string_t(utf8, UnsafeNumericCast<uint32_t>(size));
 		}
+	}
+}
+
+static void ScanNumpyStrings(ClientContext &context, PandasColumnBindData &bind_data, PyObject **src_ptr, idx_t stride,
+                             idx_t count, idx_t offset, Vector &out) {
+	// A str's UTF-8 is reachable only through the C API, which needs the GIL
+	PyUtil::QueryGil gil(context);
+	try {
+		if (bind_data.mask) {
+			ScanNumpyStringRows<true>(bind_data, src_ptr, stride, count, offset, out);
+		} else {
+			ScanNumpyStringRows<false>(bind_data, src_ptr, stride, count, offset, out);
+		}
+	} catch (nb::python_error &error) {
+		throw AsDuckDBError(error);
 	}
 }
 
@@ -513,11 +532,7 @@ void NumpyScan::Scan(ClientContext &context, PandasColumnBindData &bind_data, id
 			                                   out);
 		}
 
-		if (bind_data.mask) {
-			ScanNumpyStrings<true>(bind_data, src_ptr, numpy_col.stride, count, offset, out);
-		} else {
-			ScanNumpyStrings<false>(bind_data, src_ptr, numpy_col.stride, count, offset, out);
-		}
+		ScanNumpyStrings(context, bind_data, src_ptr, numpy_col.stride, count, offset, out);
 		break;
 	}
 	case NumpyNullableType::CATEGORY: {

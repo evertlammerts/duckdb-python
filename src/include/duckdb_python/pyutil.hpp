@@ -4,12 +4,15 @@
 #include <nanobind/stl/string.h>
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/helper.hpp"
+#include "duckdb/common/optional_ptr.hpp"
 #include <cassert>
 #include <string>
 
 namespace nb = nanobind;
 
 namespace duckdb {
+
+class ClientContext;
 
 // Python interop helpers: raw CPython accessors plus duckdb extensions over nanobind (guarded isinstance,
 // lenient string coercion, immutable-tuple builder, GIL and collection predicates). Self-contained on
@@ -90,6 +93,34 @@ struct PyUtil {
 
 	private:
 		PyThreadState *saved;
+	};
+
+	// Takes the GIL for work of a query, or throws before entering Python when the interpreter can no longer take this
+	// thread, which would then hang or crash the process. context is the query's, or null when no query is known;
+	// opened_during_exit says whether the work continues on something opened by work let in after the exit hook.
+	class QueryGil {
+	public:
+		explicit QueryGil(optional_ptr<ClientContext> context, bool opened_during_exit = false)
+		    : admitted_during_exit(Admit(context, opened_during_exit)) {
+			if (!gil.is_valid()) {
+				ThrowShuttingDown();
+			}
+		}
+		QueryGil(const QueryGil &) = delete;
+		QueryGil &operator=(const QueryGil &) = delete;
+
+		// Whether the work was let in after the exit hook ran and before the interpreter started to finalize
+		bool AdmittedDuringExit() const {
+			return admitted_during_exit;
+		}
+
+	private:
+		static bool Admit(optional_ptr<ClientContext> context, bool opened_during_exit);
+		[[noreturn]] static void ThrowShuttingDown();
+
+		// Declared before gil, so Admit runs and can throw before the GIL is taken.
+		bool admitted_during_exit;
+		nb::gil_scoped_acquire gil;
 	};
 
 	// Collection predicates consulting the connection's ImportCache (collections.abc Iterable/Mapping).

@@ -362,6 +362,14 @@ class TestSubmit:
             con._submit("SELECT 1")
         con.execute("ROLLBACK")
 
+    def test_parse_error_in_explicit_transaction(self, con):
+        con.execute("BEGIN")
+        with pytest.raises(duckdb.ParserException):
+            con._submit("SELEC 1")
+        with pytest.raises(duckdb.TransactionException):
+            con._submit("SELECT 1")
+        con.execute("ROLLBACK")
+
 
 class TestTableKind:
     @pytest.fixture
