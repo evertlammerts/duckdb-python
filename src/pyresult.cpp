@@ -680,6 +680,7 @@ void DuckDBPyResult::Close() {
 		// Ending the query waits for its running tasks, and a task inside a Python UDF cannot finish
 		// until the GIL is free.
 		duckdb::PyUtil::GilReleaseIfHeld release;
+		DUCKDB_PY_ASSERT_GIL_RELEASED();
 		result->Close();
 	}
 	result.reset();

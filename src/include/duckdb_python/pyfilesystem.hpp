@@ -47,14 +47,18 @@ public:
 
 class PythonFileHandle : public FileHandle {
 public:
-	PythonFileHandle(FileSystem &file_system, const string &path, const nb::object &handle, FileOpenFlags flags);
+	//! opened_during_exit is the opening QueryGil's AdmittedDuringExit, which later calls on the handle carry
+	PythonFileHandle(FileSystem &file_system, const string &path, const nb::object &handle, FileOpenFlags flags,
+	                 bool opened_during_exit);
 	~PythonFileHandle() override;
 	void Close() override;
 
 	static const nb::object &GetHandle(const FileHandle &handle);
+	static bool OpenedDuringExit(const FileHandle &handle);
 
 private:
 	nb::object handle;
+	bool opened_during_exit;
 };
 
 class PythonFilesystem : public FileSystem {
@@ -62,7 +66,7 @@ private:
 	const vector<string> protocols;
 	AbstractFileSystem filesystem;
 	std::string DecodeFlags(FileOpenFlags flags);
-	bool Exists(const string &filename, const char *func_name) const;
+	bool Exists(const string &filename, const char *func_name, optional_ptr<FileOpener> opener) const;
 
 public:
 	explicit PythonFilesystem(vector<string> protocols, AbstractFileSystem filesystem)

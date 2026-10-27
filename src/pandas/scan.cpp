@@ -103,7 +103,7 @@ unique_ptr<FunctionData> PandasScanFunction::PandasScanBind(ClientContext &conte
 	}
 	DynamicCastCheck<PandasScanInfo>(input.ref.bind_info.get());
 	auto info = shared_ptr_cast<TableFunctionInfo, PandasScanInfo>(input.ref.bind_info);
-	nb::gil_scoped_acquire acquire;
+	PyUtil::QueryGil acquire(context);
 	engine::CallbackScope callback(context);
 	nb::handle df(info->df.obj);
 

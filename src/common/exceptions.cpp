@@ -326,6 +326,10 @@ static void UnsetPythonException() {
 	}
 }
 
+Exception AsDuckDBError(const nb::python_error &error) {
+	return Exception(ExceptionType::INVALID, error.what());
+}
+
 /**
  * @see https://peps.python.org/pep-0249/#exceptions
  */

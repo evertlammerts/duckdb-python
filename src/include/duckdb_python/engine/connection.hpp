@@ -50,6 +50,13 @@ private:
 	CallbackScope *outer;
 };
 
+//! Called by the client's exit hook, on the thread that runs the exit handlers and then finalizes the interpreter.
+//! From then on another thread runs Python only for the work of a connection that thread claimed last.
+void BeginExit();
+bool Exiting();
+//! Whether this is the thread that ran the exit hook, once it has
+bool OnExitThread();
+
 //! Client state kept on the engine's connection. It never owns a result: a result holds the context, and
 //! the context holds this state.
 class ConnectionState : public ClientContextState {
@@ -75,9 +82,15 @@ public:
 	unique_ptr<TableRef> RecallResolved(const string &name);
 	bool PinnedExclusively();
 
+	//! Whether the exit thread made the latest claim, after the exit hook
+	bool AdmittedDuringExit() const {
+		return admitted_during_exit;
+	}
+
 private:
 	friend class ConnectionClaim;
 
+	atomic<bool> admitted_during_exit {false};
 	atomic<bool> busy {false};
 	mutex lock;
 	weak_ptr<Result> dbapi_result;
