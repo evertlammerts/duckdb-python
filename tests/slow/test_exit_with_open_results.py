@@ -204,6 +204,60 @@ class TestAfterTheHook:
         _assert_exit(proc)
         assert f"AFTER ({ROWS},)" in proc.stdout, proc.stdout
 
+    def test_a_later_exit_handler_converts_object_cells_on_worker_threads(self) -> None:
+        # Registered before the import, so it runs after duckdb's exit hook; four threads read the frame's ten parts.
+        handler = """
+        import atexit
+
+        state = {}
+
+        def after():
+            print("AFTER", state["con"].execute("SELECT count(s), min(s) FROM df").fetchone(), flush=True)
+
+        atexit.register(after)
+        """
+        body = """
+        con = duckdb.connect(config={"threads": 4})
+        state["con"] = con
+        """
+        proc = _run(body, head=textwrap.dedent(handler) + FRAME)
+        _assert_exit(proc)
+        assert f"AFTER ({ROWS}, 'v0')" in proc.stdout, proc.stdout
+
+    def test_a_query_a_daemon_thread_starts_after_the_hook_is_refused(self) -> None:
+        # The exit handler runs after duckdb's exit hook and waits while the daemon thread queries.
+        handler = """
+        import atexit
+        import threading
+
+        state = {"go": threading.Event(), "done": threading.Event()}
+
+        def after():
+            state["go"].set()
+            state["done"].wait(30)
+            print("DAEMON", state.get("outcome"), flush=True)
+
+        atexit.register(after)
+        """
+        body = """
+        con = duckdb.connect(config={"threads": 4})
+
+        def query_after_the_hook():
+            state["go"].wait()
+            try:
+                state["outcome"] = con.cursor().execute("SELECT count(s), min(s) FROM df").fetchone()
+            except duckdb.Error as error:
+                state["outcome"] = f"{type(error).__name__}: {error}"
+            state["done"].set()
+
+        threading.Thread(target=query_after_the_hook, daemon=True).start()
+        """
+        proc = _run(body, head=textwrap.dedent(handler) + FRAME)
+        _assert_exit(proc)
+        outcome = next((line for line in proc.stdout.splitlines() if line.startswith("DAEMON ")), "")
+        assert outcome.startswith("DAEMON InvalidInputException: "), proc.stdout
+        assert outcome.endswith("the Python interpreter is shutting down"), proc.stdout
+
 
 class TestUnchangedExits:
     @pytest.mark.parametrize(

@@ -138,6 +138,8 @@ public:
 	static void Register(const shared_ptr<Result> &result);
 	static vector<shared_ptr<Result>> Live();
 	static void AfterForkInChild();
+	//! Close, keeping the error for any later use of the result to report
+	void CloseWithError(std::exception_ptr error);
 	//! The rows a completed DML statement changed, or -1
 	int64_t ChangedRows();
 
