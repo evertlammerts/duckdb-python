@@ -284,6 +284,42 @@ debugscripts/<issue_number>_repro/generate_data.py   # if synthetic data needed
 
 This convention keeps repro scripts organized by issue and makes them easy to find, share, or reference in bug reports.
 
+## The GIL and the engine
+
+Queries run on engine threads; Python objects may be touched only by the thread holding the GIL. Every GIL bug in the
+bindings had one shape: a thread holds one of the two (the GIL, or an engine lock or the tasks of a query) and waits
+for the other, while another thread does the opposite. Five rules keep that from happening. Check any change that
+touches the GIL against all five.
+
+1. **A thread lets go of the GIL before it waits on the engine.** Every call that can run or wait for tasks (execute,
+   fetch, bind, close, cancel, asking a result whether it still runs) releases the GIL first and takes it back after.
+   `PyUtil::GilReleaseIfHeld` and the explicit `nb::gil_scoped_release` scopes are the mechanism; `ConnectionLockGuard`
+   releases the GIL while it waits for the connection mutex. Debug builds assert this at the engine wait points with
+   `DUCKDB_PY_ASSERT_GIL_RELEASED()`. Two paths still take the context lock with the GIL held, the transaction that
+   registers a UDF and `LoadExternalExtension`; both run under a claim after the open result check, so no query of that
+   connection can be holding the lock.
+2. **An engine task that needs Python takes the GIL through `PyUtil::QueryGil`, once per unit of work.** One block of
+   cells, one Arrow batch, one UDF chunk, one file call. Never write `nb::gil_scoped_acquire` on a path an engine
+   thread can reach: the gate is where shutdown is decided (rule 5), and a raw acquisition reopens the exit crash. The
+   one allowed exception is `src/arrow/arrow_export_utils.cpp`, which runs with the GIL already held on the calling
+   thread and acquires only to satisfy nanobind. Nothing in the gate costs per row.
+3. **Python code called from inside a query may not reenter its connection.** Every statement takes a `ConnectionClaim`
+   on the connection's `ConnectionState`; a claim attempt while one is held, or from inside a `CallbackScope`, is refused
+   with "busy" instead of waiting on a lock the caller holds. Code that ends a result takes the claim first for the
+   same reason.
+4. **A Python error never leaves an engine task as a Python object.** Convert it under the GIL with `AsDuckDBError`
+   (map, UDFs, the numpy scans, the Python file system do). The engine stores and formats errors later on any thread
+   without the GIL; a `nb::python_error` there needs the GIL at a moment nobody can give it.
+5. **Shutdown has an order.** The atexit hook (`OnInterpreterExit`) calls `engine::BeginExit`, then ends every live
+   result (`engine::Result::Live`, `EndIfRunning`) with the GIL released so their tasks can finish. From then on only
+   the exit thread's own queries may enter Python; a query another thread starts late fails at the gate with "the
+   Python interpreter is shutting down". Once `Py_IsInitialized()` is false, CPython still lets the exit thread in and so
+   does the gate, but what that thread opens then admits no other thread; every other thread is refused. Results join
+   the registry through `Result::Register` at submit and leave in their destructor.
+
+Known gaps: five destructors reach Python through nanobind's cleanup guard during finalization; before Python 3.13 a
+daemon thread woken after finalization aborts through the engine's frames (tests skip those cases on 3.12).
+
 ## Project structure
 
 ```

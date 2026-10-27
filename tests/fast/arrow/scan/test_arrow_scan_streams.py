@@ -285,6 +285,40 @@ class TestStreams:
         with pytest.raises(duckdb.InvalidInputException, match=r"registered as 'bad' failed: .*no more rows for you"):
             rows(con, "SELECT sum(a) FROM bad")
 
+    @pytest.mark.parametrize("pull_under_gil", [False, True])
+    def test_a_python_error_in_a_pull_on_an_engine_thread_fails_the_query(self, con, pull_under_gil):
+        con.execute("SET threads = 4")
+        arrow_schema = pa.schema([("a", pa.int64())])
+        submitting = threading.get_ident()
+        raised_on = []
+
+        def batches():
+            for i in range(2000):
+                if threading.get_ident() != submitting:
+                    raised_on.append(threading.get_ident())
+                    message = "no more rows for you"
+                    raise ValueError(message)
+                yield pa.record_batch([pa.array([i])], schema=arrow_schema)
+
+        class Pulled:
+            def __init__(self) -> None:
+                super().__init__(None)
+                self.pull_under_gil = pull_under_gil
+
+            def __arrow_c_schema__(self) -> object:
+                return arrow_schema.__arrow_c_schema__()
+
+            def stream(self, columns, filters) -> tuple[object, bool]:
+                return pa.RecordBatchReader.from_batches(arrow_schema, batches()).__arrow_c_stream__(), False
+
+        con._register_arrow_source("t", scan_source(Pulled))
+        with pytest.raises(duckdb.InvalidInputException, match=r"registered as 't' failed: .*no more rows for you"):
+            rows(con, "SELECT sum(a) FROM t")
+        assert raised_on, "every pull ran on the submitting thread, so no engine thread raised"
+        assert rows(con, "SELECT 42") == [(42,)]
+        con.register("good", pa.table({"a": [1, 2, 3]}))
+        assert rows(con, "SELECT sum(a) FROM good") == [(6,)]
+
     def test_a_stream_read_by_four_threads_is_pulled_one_at_a_time(self, con):
         con.execute("SET threads = 4")
         arrow_schema = pa.schema([("n", pa.int64()), ("s", pa.string())])

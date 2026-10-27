@@ -11,6 +11,7 @@
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
 #include "duckdb/transaction/meta_transaction.hpp"
+#include "duckdb_python/pyutil.hpp"
 
 namespace duckdb {
 namespace engine {
@@ -29,6 +30,23 @@ static constexpr const char *UNFINISHED_EXECUTE_ERROR =
     "no rows, before other work on this connection, or use a separate connection from cursor()";
 
 static thread_local CallbackScope *innermost_callback = nullptr;
+
+static atomic<bool> exiting {false};
+//! Written once, before exiting is set, and read only after exiting reads true
+static std::thread::id exit_thread;
+
+void BeginExit() {
+	exit_thread = std::this_thread::get_id();
+	exiting = true;
+}
+
+bool Exiting() {
+	return exiting.load();
+}
+
+bool OnExitThread() {
+	return Exiting() && std::this_thread::get_id() == exit_thread;
+}
 
 CallbackScope::CallbackScope(const ClientContext &context_p) : context(context_p), outer(innermost_callback) {
 	innermost_callback = this;
@@ -53,6 +71,9 @@ ConnectionClaim::ConnectionClaim(ConnectionState &state_p, const ClientContext &
 	}
 	if (state.busy.exchange(true)) {
 		throw ResourceInUseException(BUSY_ERROR);
+	}
+	if (Exiting()) {
+		state.admitted_during_exit = OnExitThread();
 	}
 }
 
@@ -275,6 +296,9 @@ void ConnectionState::NameRefusal(const ErrorData &error) {
 }
 
 void VerifyNoOpenResult(ClientContext &context) {
+	// The check takes the context lock and may ask the DB-API result whether it still runs; both can wait on another
+	// thread whose tasks need the GIL
+	PyUtil::GilReleaseIfHeld release;
 	try {
 		context.VerifyNoOpenResult();
 	} catch (std::exception &error) {

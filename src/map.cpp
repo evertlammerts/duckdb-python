@@ -1,5 +1,6 @@
 #include "duckdb_python/map.hpp"
 #include "duckdb_python/engine/connection.hpp"
+#include "duckdb_python/exceptions.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "duckdb_python/numpy/numpy_scan.hpp"
 #include "duckdb_python/pandas/pandas_bind.hpp"
@@ -62,11 +63,6 @@ static nb::object FunctionCall(NumpyResultConversion &conversion, const vector<I
 	}
 
 	return df;
-}
-
-//! Converting here releases the traceback, and any DataFrames it holds, under the GIL and the callback scope.
-static Exception AsDuckDBError(const nb::python_error &error) {
-	return Exception(ExceptionType::INVALID, error.what());
 }
 
 static bool ContainsNullType(const vector<LogicalType> &types) {
@@ -179,7 +175,7 @@ unique_ptr<FunctionData> MapFunction::MapFunctionBind(ClientContext &context, Ta
 	}
 	DynamicCastCheck<MapFunctionInfo>(input.ref.bind_info.get());
 	auto info = shared_ptr_cast<TableFunctionInfo, MapFunctionInfo>(input.ref.bind_info);
-	nb::gil_scoped_acquire acquire;
+	PyUtil::QueryGil acquire(context);
 	engine::CallbackScope callback(context);
 	try {
 		return BindMap(context, std::move(info), input, return_types, names);
@@ -242,7 +238,7 @@ static OperatorResultType ExecuteMap(ExecutionContext &context, TableFunctionInp
 
 OperatorResultType MapFunction::MapFunctionExec(ExecutionContext &context, TableFunctionInput &data_p, DataChunk &input,
                                                 DataChunk &output) {
-	nb::gil_scoped_acquire acquire;
+	PyUtil::QueryGil acquire(context.client);
 	engine::CallbackScope callback(context.client);
 	try {
 		return ExecuteMap(context, data_p, input, output);

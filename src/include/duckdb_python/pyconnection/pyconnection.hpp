@@ -280,6 +280,7 @@ public:
 			// The holder of the mutex may be running a query that is waiting for this very call
 			conn.con.ThrowIfBusy();
 			nb::gil_scoped_release release;
+			DUCKDB_PY_ASSERT_GIL_RELEASED();
 			lock_.lock();
 		}
 
