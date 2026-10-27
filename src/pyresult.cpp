@@ -136,6 +136,27 @@ unique_ptr<ColumnDataCollection> DuckDBPyResult::TakeRows(const engine::Interrup
 	return rows;
 }
 
+void DuckDBPyResult::EndWithCurrentError() {
+	std::exception_ptr error;
+	try {
+		throw;
+	} catch (nb::python_error &python_error) {
+		// Raising a python_error consumes it, so a later fetch raises its text instead
+		error = std::make_exception_ptr(InvalidInputException(python_error.what()));
+	} catch (...) {
+		error = std::current_exception();
+	}
+	current_chunk.reset();
+	chunk_offset = 0;
+	try {
+		// Ending the query waits for its running tasks, and a task inside a Python UDF cannot finish until the GIL
+		// is free
+		duckdb::PyUtil::GilReleaseIfHeld release;
+		result->CloseWithError(std::move(error));
+	} catch (...) { // NOLINT: the conversion error the caller rethrows is the one to report
+	}
+}
+
 Optional<nb::tuple> DuckDBPyResult::Fetchone() {
 	if (Empty()) {
 		throw InvalidInputException("result closed");
@@ -154,14 +175,19 @@ Optional<nb::tuple> DuckDBPyResult::Fetchone() {
 	auto &types = GetTypes();
 	auto &client_properties = GetClientProperties();
 	duckdb::PyUtil::TupleBuilder row(types.size());
-	for (idx_t col_idx = 0; col_idx < types.size(); col_idx++) {
-		auto &mask = FlatVector::Validity(current_chunk->data[col_idx]);
-		if (!mask.RowIsValid(chunk_offset)) {
-			row.append(nb::none());
-		} else {
-			auto val = current_chunk->data[col_idx].GetValue(chunk_offset);
-			row.append(PythonObject::FromValue(val, types[col_idx], client_properties));
+	try {
+		for (idx_t col_idx = 0; col_idx < types.size(); col_idx++) {
+			auto &mask = FlatVector::Validity(current_chunk->data[col_idx]);
+			if (!mask.RowIsValid(chunk_offset)) {
+				row.append(nb::none());
+			} else {
+				auto val = current_chunk->data[col_idx].GetValue(chunk_offset);
+				row.append(PythonObject::FromValue(val, types[col_idx], client_properties));
+			}
 		}
+	} catch (...) {
+		EndWithCurrentError();
+		throw;
 	}
 	chunk_offset++;
 	return row.take();
@@ -267,37 +293,42 @@ nb::dict DuckDBPyResult::FetchNumpyInternal(bool chunked, idx_t vectors_per_chun
 	}
 
 	idx_t count_vec = 0;
-	if (vectors_per_chunk > 0) {
-		auto buffered = TakeBufferedRows();
-		if (buffered) {
-			conversion.Append(*buffered);
-			count_vec++;
+	try {
+		if (vectors_per_chunk > 0) {
+			auto buffered = TakeBufferedRows();
+			if (buffered) {
+				conversion.Append(*buffered);
+				count_vec++;
+			}
 		}
-	}
-	for (; count_vec < vectors_per_chunk; count_vec++) {
-		unique_ptr<DataChunk> chunk;
-		{
-			DUCKDB_PY_ASSERT_GIL_HELD();
-			nb::gil_scoped_release release;
-			chunk = FetchNextRaw();
+		for (; count_vec < vectors_per_chunk; count_vec++) {
+			unique_ptr<DataChunk> chunk;
+			{
+				DUCKDB_PY_ASSERT_GIL_HELD();
+				nb::gil_scoped_release release;
+				chunk = FetchNextRaw();
+			}
+			if (!chunk || chunk->size() == 0) {
+				break;
+			}
+			conversion.Append(*chunk);
 		}
-		if (!chunk || chunk->size() == 0) {
-			break;
-		}
-		conversion.Append(*chunk);
-	}
-	InsertCategory(GetTypes(), categories);
+		InsertCategory(GetTypes(), categories);
 
-	// now that we have materialized the result in contiguous arrays, construct the actual NumPy arrays or categorical
-	// types
-	nb::dict res;
-	auto names = ResultNames();
-	QueryResult::DeduplicateColumns(names);
-	for (idx_t col_idx = 0; col_idx < names.size(); col_idx++) {
-		auto &name = names[col_idx];
-		FillNumpy(res, col_idx, conversion, name.c_str());
+		// now that we have materialized the result in contiguous arrays, construct the actual NumPy arrays or
+		// categorical types
+		nb::dict res;
+		auto names = ResultNames();
+		QueryResult::DeduplicateColumns(names);
+		for (idx_t col_idx = 0; col_idx < names.size(); col_idx++) {
+			auto &name = names[col_idx];
+			FillNumpy(res, col_idx, conversion, name.c_str());
+		}
+		return res;
+	} catch (...) {
+		EndWithCurrentError();
+		throw;
 	}
-	return res;
 }
 
 static void ReplaceDFColumn(PandasDataFrame &df, const char *col_name, idx_t idx, const nb::handle &new_value) {
@@ -405,12 +436,24 @@ PandasDataFrame DuckDBPyResult::FrameFromNumpy(bool date_as_object, const nb::ha
 
 PandasDataFrame DuckDBPyResult::FetchDF(bool date_as_object) {
 	auto conversion = InitializeNumpyConversion(true);
-	return FrameFromNumpy(date_as_object, FetchNumpyInternal(false, 1, std::move(conversion)));
+	auto arrays = FetchNumpyInternal(false, 1, std::move(conversion));
+	try {
+		return FrameFromNumpy(date_as_object, arrays);
+	} catch (...) {
+		EndWithCurrentError();
+		throw;
+	}
 }
 
 PandasDataFrame DuckDBPyResult::FetchDFChunk(idx_t num_of_vectors, bool date_as_object) {
 	auto conversion = InitializeNumpyConversion(true);
-	return FrameFromNumpy(date_as_object, FetchNumpyInternal(true, num_of_vectors, std::move(conversion)));
+	auto arrays = FetchNumpyInternal(true, num_of_vectors, std::move(conversion));
+	try {
+		return FrameFromNumpy(date_as_object, arrays);
+	} catch (...) {
+		EndWithCurrentError();
+		throw;
+	}
 }
 
 nb::dict DuckDBPyResult::FetchPyTorch() {

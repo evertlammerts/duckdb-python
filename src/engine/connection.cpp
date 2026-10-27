@@ -464,7 +464,8 @@ void Session::Run(unique_ptr<SQLStatement> statement, const ResolvedTables &tabl
 
 StatementGroup::StatementGroup(Session session_p, const string &sql, bool aborts_transaction_p)
     : session(std::move(session_p)), query(sql), aborts_transaction(aborts_transaction_p),
-      iterator(make_uniq<StatementIterator>(session.Context().IterateStatements(sql))) {
+      // On a parse error the engine aborts the active transaction, the autocommit one of an open result included
+      iterator(make_uniq<StatementIterator>(session.Context().IterateStatements(sql, aborts_transaction_p))) {
 }
 
 StatementGroup::StatementGroup(Session session_p, unique_ptr<SQLStatement> statement)
@@ -563,9 +564,10 @@ void StatementGroup::Fail(ErrorData error) {
 	auto &context = session.Context();
 	// As in the engine's Query: the error gets the location of its statement in the query, or becomes JSON
 	context.ProcessError(error, query);
-	// Workaround: the engine applies its transaction policy to such an error in ErrorResult, which is private; the
-	// catch block of RunFunctionInTransactionInternal applies the same policy, so the error is rethrown through it.
-	// Only an explicit transaction is aborted, as in the engine's Query; an autocommit one belongs to an open result.
+	// Workaround: the engine applies its transaction policy under its context lock, which is private; the catch block
+	// of RunFunctionInTransactionInternal applies the same policy, so the error is rethrown through it.
+	// A parse error already aborted the transaction in the parser; the parameter refusal aborts only an explicit one,
+	// as in the engine's Query, since an autocommit one belongs to an open result.
 	if (aborts_transaction && !context.transaction.IsAutoCommit()) {
 		context.RunFunctionInTransaction([&]() { error.Throw(); }, false);
 	}

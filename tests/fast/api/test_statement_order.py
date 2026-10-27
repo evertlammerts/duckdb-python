@@ -627,6 +627,16 @@ class TestAnOpenResult:
         assert con.fetchone() == (1,)
         assert tables(con) == []
 
+    def test_a_parse_error_aborts_the_open_results_autocommit_transaction(self, con):
+        pytest.importorskip("pyarrow")
+        con.execute(f"SELECT * FROM range({ROWS})")
+        con.fetchone()
+        with pytest.raises(duckdb.ParserException):
+            con.execute("SELEC 1")
+        with pytest.raises(duckdb.TransactionException, match=ABORTED), pytest.warns(UserWarning, match="extra copy"):
+            con.to_arrow_table()
+        assert con.execute("SELECT 42").fetchall() == [(42,)]
+
     def test_a_parse_error_in_a_later_statement_comes_after_the_open_result_made_way(self, con):
         con.execute(f"SELECT * FROM range({ROWS})")
         con.fetchone()

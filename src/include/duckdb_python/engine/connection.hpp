@@ -239,8 +239,8 @@ private:
 //! before it have run, and the engine expands it, a PRAGMA for example, when it is submitted
 class StatementGroup {
 public:
-	//! aborts_transaction false only parses, as the engine's ExtractStatements does: a parse error leaves an explicit
-	//! transaction valid
+	//! aborts_transaction false only parses: a parse error leaves the active transaction valid, explicit or the
+	//! autocommit one of an open result
 	StatementGroup(Session session, const string &sql, bool aborts_transaction = true);
 	//! A group of one statement parsed earlier
 	StatementGroup(Session session, unique_ptr<SQLStatement> statement);

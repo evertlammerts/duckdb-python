@@ -96,13 +96,15 @@ class TestStateAcrossPrepareAndExecute:
         assert rows(con, query) == [(1, 2), (5, 6)]
 
     @pytest.mark.parametrize("make", REPEATABLE)
-    def test_a_prepared_statement_over_a_registration_survives_unregister(self, con, make):
+    def test_a_prepared_statement_over_a_registration_fails_after_unregister(self, con, make):
         con.register("t", make())
         con.execute("PREPARE q AS SELECT s FROM t WHERE n < 2 ORDER BY n")
+        assert rows(con, "EXECUTE q") == [("0",), ("1",)]
         con.unregister("t")
         gc.collect()
-        for _ in range(2):
-            assert rows(con, "EXECUTE q") == [("0",), ("1",)]
+        # The engine rebinds a prepared statement when a view it uses changes, and the registration was a view
+        with pytest.raises(duckdb.CatalogException):
+            rows(con, "EXECUTE q")
         with pytest.raises(duckdb.CatalogException):
             rows(con, "SELECT * FROM t")
 
