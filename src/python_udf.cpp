@@ -235,17 +235,28 @@ static void VerifyVectorizedNullHandling(Vector &result, idx_t count) {
 	throw InvalidInputException(NullHandlingError());
 }
 
+//! Runs a UDF's body with the GIL and the callback scope; a Python error the body raises leaves as an engine error
+static scalar_function_t RunsPython(scalar_function_t body) {
+	return [body](DataChunk &input, ExpressionState &state, Vector &result) {
+		optional_ptr<ClientContext> context = state.HasContext() ? &state.GetContext() : nullptr;
+		PyUtil::QueryGil gil(context);
+		std::optional<engine::CallbackScope> callback;
+		if (context) {
+			callback.emplace(*context);
+		}
+		try {
+			body(input, state, result);
+		} catch (nb::python_error &error) {
+			throw AsDuckDBError(error);
+		}
+	};
+}
+
 static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExceptionHandling exception_handling,
                                                   FunctionNullHandling null_handling) {
 	// Through the capture of the lambda, we have access to the function pointer
 	// We just need to make sure that it doesn't get garbage collected
-	scalar_function_t func = [=](DataChunk &input, ExpressionState &state, Vector &result) -> void {
-		nb::gil_scoped_acquire gil;
-		std::optional<engine::CallbackScope> callback;
-		if (state.HasContext()) {
-			callback.emplace(state.GetContext());
-		}
-
+	scalar_function_t func = RunsPython([=](DataChunk &input, ExpressionState &state, Vector &result) -> void {
 		const bool default_null_handling = null_handling == FunctionNullHandling::DEFAULT_NULL_HANDLING;
 
 		// owning references
@@ -371,7 +382,7 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 		if (input_size == 1) {
 			result.SetVectorType(VectorType::CONSTANT_VECTOR);
 		}
-	};
+	});
 	return func;
 }
 
@@ -380,61 +391,56 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
                                               FunctionNullHandling null_handling) {
 	// Through the capture of the lambda, we have access to the function pointer
 	// We just need to make sure that it doesn't get garbage collected
-	scalar_function_t func = [=](DataChunk &input, ExpressionState &state, Vector &result) -> void { // NOLINT
-		nb::gil_scoped_acquire gil;
-		std::optional<engine::CallbackScope> callback;
-		if (state.HasContext()) {
-			callback.emplace(state.GetContext());
-		}
+	scalar_function_t func =
+	    RunsPython([=](DataChunk &input, ExpressionState &state, Vector &result) -> void { // NOLINT
+		    const bool default_null_handling = null_handling == FunctionNullHandling::DEFAULT_NULL_HANDLING;
 
-		const bool default_null_handling = null_handling == FunctionNullHandling::DEFAULT_NULL_HANDLING;
+		    for (idx_t row = 0; row < input.size(); row++) {
 
-		for (idx_t row = 0; row < input.size(); row++) {
+			    nb::object ret;
+			    if (input.ColumnCount() > 0) {
+				    duckdb::PyUtil::TupleBuilder parameter_builder(input.ColumnCount());
+				    bool contains_null = false;
+				    for (idx_t i = 0; i < input.ColumnCount(); i++) {
+					    // Fill the tuple with the arguments for this row
+					    auto &column = input.data[i];
+					    auto value = column.GetValue(row);
+					    if (value.IsNull() && default_null_handling) {
+						    contains_null = true;
+						    break;
+					    }
+					    parameter_builder.append(PythonObject::FromValue(value, column.GetType(), client_properties));
+				    }
+				    if (contains_null) {
+					    // Immediately insert None, no need to call the function
+					    FlatVector::SetNull(result, row, true);
+					    continue;
+				    }
+				    // Call the function
+				    auto bundled_parameters = parameter_builder.take();
+				    ret = nb::steal<nb::object>(PyObject_CallObject(function, bundled_parameters.ptr()));
+			    } else {
+				    ret = nb::steal<nb::object>(PyObject_CallObject(function, nullptr));
+			    }
 
-			nb::object ret;
-			if (input.ColumnCount() > 0) {
-				duckdb::PyUtil::TupleBuilder parameter_builder(input.ColumnCount());
-				bool contains_null = false;
-				for (idx_t i = 0; i < input.ColumnCount(); i++) {
-					// Fill the tuple with the arguments for this row
-					auto &column = input.data[i];
-					auto value = column.GetValue(row);
-					if (value.IsNull() && default_null_handling) {
-						contains_null = true;
-						break;
-					}
-					parameter_builder.append(PythonObject::FromValue(value, column.GetType(), client_properties));
-				}
-				if (contains_null) {
-					// Immediately insert None, no need to call the function
-					FlatVector::SetNull(result, row, true);
-					continue;
-				}
-				// Call the function
-				auto bundled_parameters = parameter_builder.take();
-				ret = nb::steal<nb::object>(PyObject_CallObject(function, bundled_parameters.ptr()));
-			} else {
-				ret = nb::steal<nb::object>(PyObject_CallObject(function, nullptr));
-			}
+			    if (!ret || ret.is_none()) {
+				    if (PyErr_Occurred()) {
+					    auto exception = nb::python_error();
+					    ThrowUnlessReturnNull(exception_handling, exception);
+					    FlatVector::SetNull(result, row, true);
+					    continue;
+				    }
+				    if (default_null_handling) {
+					    throw InvalidInputException(NullHandlingError());
+				    }
+			    }
+			    TransformPythonObject(state.GetContext(), ret, result, row);
+		    }
 
-			if (!ret || ret.is_none()) {
-				if (PyErr_Occurred()) {
-					auto exception = nb::python_error();
-					ThrowUnlessReturnNull(exception_handling, exception);
-					FlatVector::SetNull(result, row, true);
-					continue;
-				}
-				if (default_null_handling) {
-					throw InvalidInputException(NullHandlingError());
-				}
-			}
-			TransformPythonObject(state.GetContext(), ret, result, row);
-		}
-
-		if (input.size() == 1) {
-			result.SetVectorType(VectorType::CONSTANT_VECTOR);
-		}
-	};
+		    if (input.size() == 1) {
+			    result.SetVectorType(VectorType::CONSTANT_VECTOR);
+		    }
+	    });
 	return func;
 }
 

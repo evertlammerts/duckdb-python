@@ -463,9 +463,12 @@ ORDINARY_SHUTDOWN = [
         con = duckdb.connect()
 
         def work():
-            cursor = con.cursor()
-            while True:
-                cursor.execute("select sum(range) from range(200000)").fetchall()
+            try:
+                cursor = con.cursor()
+                while True:
+                    cursor.execute("select sum(range) from range(200000)").fetchall()
+            except duckdb.Error:
+                pass
 
         for _ in range(4):
             threading.Thread(target=work, daemon=True).start()
@@ -632,8 +635,12 @@ ORDINARY_SHUTDOWN = [
 
         def work():
             cursor = con.cursor()
-            while True:
-                cursor.execute("select count(s), min(a), max(s) from tbl").fetchall()
+            # A traceback printed during the stderr teardown aborts the process
+            try:
+                while True:
+                    cursor.execute("select count(s), min(a), max(s) from tbl").fetchall()
+            except duckdb.Error:
+                pass
 
         for _ in range(4):
             threading.Thread(target=work, daemon=True).start()
@@ -665,8 +672,11 @@ ORDINARY_SHUTDOWN = [
 
             def work():
                 cursor = con.cursor()
-                while True:
-                    cursor.execute("select count(a), min(a) from frame").fetchall()
+                try:
+                    while True:
+                        cursor.execute("select count(a), min(a) from frame").fetchall()
+                except duckdb.Error:
+                    pass
 
             for _ in range(4):
                 threading.Thread(target=work, daemon=True).start()

@@ -167,7 +167,14 @@ void DbapiResult::Supersede() {
 		return;
 	}
 	auto superseded = std::move(result);
-	if (superseded->HasWritesToRun()) {
+	bool writes;
+	{
+		// Waiting here with the GIL held deadlocks a close on another thread
+		DUCKDB_PY_ASSERT_GIL_HELD();
+		nb::gil_scoped_release release;
+		writes = superseded->HasWritesToRun();
+	}
+	if (writes) {
 		superseded->Complete();
 	} else {
 		superseded->Close();
@@ -458,6 +465,8 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::UnregisterUDF(const stri
 		throw InvalidInputException("No function by the name of '%s' was found in the list of registered functions",
 		                            name);
 	}
+	// Held from here on, as close() takes it too: the check below releases the GIL while it uses the context
+	ConnectionLockGuard conn_lock(*this);
 
 	auto &connection = con.GetConnection();
 	auto &context = *connection.context;
@@ -486,11 +495,16 @@ DuckDBPyConnection::RegisterScalarUDF(const string &name, const nb::callable &ud
                                       const nb::object &return_type_p, PythonUDFType type,
                                       FunctionNullHandling null_handling, PythonExceptionHandling exception_handling,
                                       bool side_effects) {
-	// Refused before any user code or type lookup runs, so neither works on a busy connection or on its open result
-	engine::VerifyNoOpenResult(*con.GetConnection().context);
+	{
+		// Held while the check releases the GIL, as close() takes it too; not across the user code below
+		ConnectionLockGuard conn_lock(*this);
+		// Refused before any user code or type lookup runs, so neither works on a busy connection or on its open result
+		engine::VerifyNoOpenResult(*con.GetConnection().context);
+	}
 	// Converted before the claim, because a type name is parsed on this connection, which refuses while claimed
 	auto scalar_function = CreateScalarUDF(name, udf, parameters_p, return_type_p, type == PythonUDFType::ARROW,
 	                                       null_handling, exception_handling, side_effects);
+	ConnectionLockGuard conn_lock(*this);
 	auto &connection = con.GetConnection();
 	auto &context = *connection.context;
 	// Held from the check to the change, so no result can open in between and be ended by it, and checked again
@@ -784,7 +798,13 @@ shared_ptr<engine::Result> DuckDBPyConnection::ExecuteInternal(engine::Prepared 
 
 		res = session.Submit(prep, named_values, engine::Format::Chunks());
 		if (parameters_given && ExpandedToNothing(*res)) {
-			statements.RefuseParameters();
+			try {
+				statements.RefuseParameters();
+			} catch (...) {
+				// Ended here, with the GIL released, since ending the pending query waits for its tasks
+				res->Close();
+				throw;
+			}
 		}
 		statements.ReleaseIfReplaced(*res);
 		res->Retain(CheckSignals);
@@ -862,7 +882,14 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::Execute(const nb::object
 	if (last_statement) {
 		res = PrepareAndSubmitInternal(std::move(last_statement), std::move(params));
 		if (parameters_given && ExpandedToNothing(*res)) {
-			RefuseParameters(statements);
+			try {
+				RefuseParameters(statements);
+			} catch (...) {
+				// Ending the pending query waits for its tasks, so the GIL is released for it
+				duckdb::PyUtil::GilReleaseIfHeld release;
+				res->Close();
+				throw;
+			}
 		}
 	}
 	{
@@ -1220,6 +1247,8 @@ void DuckDBPyConnection::InstallExtension(const string &extension, bool force_in
 }
 
 void DuckDBPyConnection::LoadExtension(const string &extension) {
+	// Held for the call, as close() takes it too: the check below releases the GIL while it uses the context
+	ConnectionLockGuard conn_lock(*this);
 	auto &connection = con.GetConnection();
 	// Held from the check to the change, so no result can open in between and be ended by it
 	engine::ConnectionClaim claim(*connection.context);

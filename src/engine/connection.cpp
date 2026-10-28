@@ -11,6 +11,7 @@
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
 #include "duckdb/transaction/meta_transaction.hpp"
+#include "duckdb_python/pyutil.hpp"
 
 namespace duckdb {
 namespace engine {
@@ -29,6 +30,23 @@ static constexpr const char *UNFINISHED_EXECUTE_ERROR =
     "no rows, before other work on this connection, or use a separate connection from cursor()";
 
 static thread_local CallbackScope *innermost_callback = nullptr;
+
+static atomic<bool> exiting {false};
+//! Written once, before exiting is set, and read only after exiting reads true
+static std::thread::id exit_thread;
+
+void BeginExit() {
+	exit_thread = std::this_thread::get_id();
+	exiting = true;
+}
+
+bool Exiting() {
+	return exiting.load();
+}
+
+bool OnExitThread() {
+	return Exiting() && std::this_thread::get_id() == exit_thread;
+}
 
 CallbackScope::CallbackScope(const ClientContext &context_p) : context(context_p), outer(innermost_callback) {
 	innermost_callback = this;
@@ -53,6 +71,9 @@ ConnectionClaim::ConnectionClaim(ConnectionState &state_p, const ClientContext &
 	}
 	if (state.busy.exchange(true)) {
 		throw ResourceInUseException(BUSY_ERROR);
+	}
+	if (Exiting()) {
+		state.admitted_during_exit = OnExitThread();
 	}
 }
 
@@ -275,6 +296,9 @@ void ConnectionState::NameRefusal(const ErrorData &error) {
 }
 
 void VerifyNoOpenResult(ClientContext &context) {
+	// The check takes the context lock and may ask the DB-API result whether it still runs; both can wait on another
+	// thread whose tasks need the GIL
+	PyUtil::GilReleaseIfHeld release;
 	try {
 		context.VerifyNoOpenResult();
 	} catch (std::exception &error) {
@@ -328,7 +352,9 @@ shared_ptr<Result> Session::SubmitClaimed(unique_ptr<SQLStatement> statement,
 	registry->CountStatement(written_type);
 	auto handle = context->Submit(std::move(statement), values, QueryParameters(format.EngineFormat()));
 	NameRefusal(*state, *handle);
-	return make_shared_ptr<Result>(std::move(handle), written_type, format);
+	auto result = make_shared_ptr<Result>(std::move(handle), written_type, format);
+	Result::Register(result);
+	return result;
 }
 
 shared_ptr<Result> Session::Submit(Prepared &prepared, identifier_map_t<BoundParameterData> &values,
@@ -341,7 +367,9 @@ shared_ptr<Result> Session::Submit(Prepared &prepared, identifier_map_t<BoundPar
 		handle = prepared.statement->Submit(values, QueryParameters(format.EngineFormat()));
 	}
 	NameRefusal(*state, *handle);
-	return make_shared_ptr<Result>(std::move(handle), prepared.statement->GetStatementType(), format);
+	auto result = make_shared_ptr<Result>(std::move(handle), prepared.statement->GetStatementType(), format);
+	Result::Register(result);
+	return result;
 }
 
 shared_ptr<Result> Session::Submit(unique_ptr<ColumnDataCollection> collection, const vector<Identifier> &names,
@@ -436,7 +464,8 @@ void Session::Run(unique_ptr<SQLStatement> statement, const ResolvedTables &tabl
 
 StatementGroup::StatementGroup(Session session_p, const string &sql, bool aborts_transaction_p)
     : session(std::move(session_p)), query(sql), aborts_transaction(aborts_transaction_p),
-      iterator(make_uniq<StatementIterator>(session.Context().IterateStatements(sql))) {
+      // On a parse error the engine aborts the active transaction, the autocommit one of an open result included
+      iterator(make_uniq<StatementIterator>(session.Context().IterateStatements(sql, aborts_transaction_p))) {
 }
 
 StatementGroup::StatementGroup(Session session_p, unique_ptr<SQLStatement> statement)
@@ -535,9 +564,10 @@ void StatementGroup::Fail(ErrorData error) {
 	auto &context = session.Context();
 	// As in the engine's Query: the error gets the location of its statement in the query, or becomes JSON
 	context.ProcessError(error, query);
-	// Workaround: the engine applies its transaction policy to such an error in ErrorResult, which is private; the
-	// catch block of RunFunctionInTransactionInternal applies the same policy, so the error is rethrown through it.
-	// Only an explicit transaction is aborted, as in the engine's Query; an autocommit one belongs to an open result.
+	// Workaround: the engine applies its transaction policy under its context lock, which is private; the catch block
+	// of RunFunctionInTransactionInternal applies the same policy, so the error is rethrown through it.
+	// A parse error already aborted the transaction in the parser; the parameter refusal aborts only an explicit one,
+	// as in the engine's Query, since an autocommit one belongs to an open result.
 	if (aborts_transaction && !context.transaction.IsAutoCommit()) {
 		context.RunFunctionInTransaction([&]() { error.Throw(); }, false);
 	}

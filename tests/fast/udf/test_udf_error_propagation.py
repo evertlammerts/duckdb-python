@@ -203,6 +203,51 @@ class TestUDFErrorPropagation:
         assert f"{FORWARDED}MemoryError: boom in udf" in forwarded
         assert con.sql("select 42").fetchall() == [(42,)]
 
+    @pytest.mark.timeout(60)
+    def test_a_python_error_converting_the_result_on_a_worker_thread_passes_through(self):
+        submitting = threading.get_ident()
+        raised_on = []
+        raised = threading.Event()
+        timed_out = threading.Event()
+        lock = threading.Lock()
+
+        class UnsizedList(list):
+            def __len__(self) -> int:
+                msg = "no length"
+                raise ValueError(msg)
+
+        def unsized_once_off_the_submitting_thread(x):
+            if threading.get_ident() == submitting:
+                # Waiting releases the GIL and holds this task, so a worker thread takes another one and raises.
+                if not raised.wait(timeout=10):
+                    # Raising ends the query, so the wait is not repeated for every row of this thread.
+                    timed_out.set()
+                    msg = "no worker thread raised within 10 seconds"
+                    raise TimeoutError(msg)
+                return [x]
+            with lock:
+                if raised_on:
+                    return [x]
+                raised_on.append(threading.get_ident())
+            raised.set()
+            return UnsizedList([x])
+
+        con = duckdb.connect(config={"threads": 4})
+        # Three row groups give the scan several tasks, where range() gives one.
+        con.execute("create table t as select range i from range(250000)")
+        con.create_function("unsized", unsized_once_off_the_submitting_thread, [BIGINT], "BIGINT[]")
+        with pytest.raises(duckdb.Error) as error:
+            con.sql("select sum(len(unsized(i))) from t").fetchall()
+        if timed_out.is_set():
+            pytest.fail("no worker thread raised within 10 seconds")
+        assert raised_on, "every call of the UDF ran on the submitting thread, so no engine worker thread raised"
+        assert raised_on[0] != submitting
+        # Raised by the conversion around the UDF, not by the UDF, so it is not the UDF's forwarded error.
+        assert type(error.value) is duckdb.Error
+        assert re.fullmatch(r"Traceback \(most recent call last\):\n(.*\n)*ValueError: no length\n?", str(error.value))
+        assert con.sql("select 42").fetchall() == [(42,)]
+        assert con.sql("select unsized(1)").fetchall() == [([1],)]
+
     def test_arrow_table_conversion_error_names_the_pyarrow_reason(self):
         con = duckdb.connect()
         con.create_function("mixed", lambda x: [1, "a"], [BIGINT], BIGINT, type="arrow")

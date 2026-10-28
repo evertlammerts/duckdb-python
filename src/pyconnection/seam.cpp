@@ -145,9 +145,9 @@ static Connection &OpenConnection(DuckDBPyConnection &self) {
 	return self.con.GetConnection();
 }
 
-static unique_ptr<SQLStatement> ParseOneStatement(const engine::Session &session, const string &sql) {
-	// Parsing alone, so an error leaves an explicit transaction usable
-	engine::StatementGroup statements(session, sql, false);
+static unique_ptr<SQLStatement> ParseOneStatement(const engine::Session &session, const string &sql,
+                                                  bool aborts_transaction) {
+	engine::StatementGroup statements(session, sql, aborts_transaction);
 	vector<unique_ptr<SQLStatement>> parsed;
 	while (auto statement = statements.Next()) {
 		parsed.push_back(std::move(statement));
@@ -661,7 +661,7 @@ static nb::tuple Bind(DuckDBPyConnection &self, const nb::object &sql, bool capt
 		DUCKDB_PY_ASSERT_GIL_HELD();
 		nb::gil_scoped_release release;
 		// A statement parsed earlier is copied rather than parsed again
-		auto statement = parsed ? parsed->GetStatement() : ParseOneStatement(session, text);
+		auto statement = parsed ? parsed->GetStatement() : ParseOneStatement(session, text, false);
 		statement_type = statement->type;
 		if (values.is_none()) {
 			signature = session.Bind(std::move(statement), tables);
@@ -730,7 +730,7 @@ static std::shared_ptr<DuckDBPyResult> Submit(DuckDBPyConnection &self, const st
 	{
 		DUCKDB_PY_ASSERT_GIL_HELD();
 		nb::gil_scoped_release release;
-		auto statement = ParseOneStatement(session, sql);
+		auto statement = ParseOneStatement(session, sql, true);
 		// One claim from submission to the last row, or to the first unit of a stream, so no other call takes the
 		// connection while the statement is half run
 		auto claim = session.Claim();

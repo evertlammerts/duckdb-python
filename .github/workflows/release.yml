@@ -454,7 +454,7 @@ jobs:
           echo "* CI Environment: ${{ needs.workflow_state.outputs.ci_env }}" >> $GITHUB_STEP_SUMMARY
 
       - name: Record client status
-        if: ${{ github.repository_owner == 'duckdb' && inputs.duckdb-version != '' }}
+        if: ${{ !cancelled() && github.repository_owner == 'duckdb' && inputs.duckdb-version != '' }}
         uses: duckdb/duckdb-workflow-trigger/dispatch@main
         with:
           github_token: ${{ secrets.DUCKDB_RELEASE_DISPATCH_TOKEN }}
@@ -462,5 +462,5 @@ jobs:
           client: python
           duckdb_version: ${{ inputs.duckdb-version }}
           duckdb_commit: ${{ inputs.duckdb-sha }}
-          status: ${{ contains(needs.*.result, 'failure') && 'failure' || contains(needs.*.result, 'cancelled') && 'cancelled' || 'success' }}
+          status: ${{ (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) && 'failure' || 'success' }}
           message: DuckDB Python client ready

@@ -53,11 +53,9 @@ string StreamError(ArrowArrayStream &stream, int code) {
 	return text;
 }
 
-//! Set by an atexit hook: from then on no scan calls into a source, since a thread that waits for the GIL while the
-//! interpreter finalizes never gets it, and the thread finalizing may itself be waiting for that scan to end. A scan
-//! an exit handler starts after the hook is still read, as the interpreter only finalizes once every handler ran.
-atomic<bool> interpreter_exiting {false};
 //! Calls into a source that were let in and have not returned; the atexit hook waits for them with the GIL released.
+//! From the hook on only a scan an exit handler started after it calls into its source, since a thread that waits for
+//! the GIL while the interpreter finalizes never gets it, and the thread finalizing may be waiting for that scan.
 atomic<idx_t> calls_in_flight {0};
 //! The calls among them made on this thread, the only ones still in flight in a child this thread forks
 thread_local idx_t calls_on_this_thread = 0;
@@ -66,7 +64,7 @@ class SourceCall {
 public:
 	explicit SourceCall(bool started_during_exit = false) {
 		calls_in_flight++;
-		admitted = !interpreter_exiting.load() || started_during_exit;
+		admitted = !engine::Exiting() || started_during_exit;
 		if (!admitted) {
 			calls_in_flight -= 1;
 		} else {
@@ -91,12 +89,21 @@ private:
 };
 
 void OnInterpreterExit() {
-	interpreter_exiting = true;
-	nb::gil_scoped_release release;
-	// Not bounded: a call let in may need the GIL again before it returns, which it never gets once the interpreter
-	// finalizes, so a slow source delays the exit instead of hanging it.
-	while (calls_in_flight.load() > 0) {
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	engine::BeginExit();
+	auto results = engine::Result::Live();
+	{
+		nb::gil_scoped_release release;
+		for (auto &result : results) {
+			try {
+				result->EndIfRunning();
+			} catch (...) { // NOLINT: a result that fails to end must not keep the others running
+			}
+		}
+		// Not bounded: a call let in may need the GIL again before it returns, which it never gets once the
+		// interpreter finalizes, so a slow source delays the exit instead of hanging it.
+		while (calls_in_flight.load() > 0) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
 	}
 }
 
@@ -104,14 +111,9 @@ void OnInterpreterExit() {
 //! A forked child keeps the exit flag, as it continues from the parent's place among the exit handlers.
 void AfterForkInChild() {
 	calls_in_flight = calls_on_this_thread;
+	engine::Result::AfterForkInChild();
 }
 #endif
-
-//! Whether this call comes from an exit handler running after the exit hook, which the hook lets through; call with
-//! the GIL held
-bool StartedDuringExit() {
-	return interpreter_exiting.load() && !nb::cast<bool>(nb::module_::import_("sys").attr("is_finalizing")());
-}
 
 //! Releases an Arrow struct taken from a source: under the GIL when the source asked for it, directly otherwise, and
 //! not at all once the interpreter is exiting, since even pyarrow's own release can enter Python.
@@ -358,8 +360,9 @@ void ResolveBatchSchema(ClientContext &context, ArrowTableSchema &table, const A
 }
 
 //! The source's schema, read without consuming a stream: from a schema hook, asked once for the life of a source whose
-//! schema is stable and at every bind otherwise, else from a stream that is only borrowed; call with the GIL held
-shared_ptr<CachedArrowSchema> SchemaOf(PythonArrowSourceInfo &info) {
+//! schema is stable and at every bind otherwise, else from a stream that is only borrowed; call with the GIL held.
+//! admitted_during_exit is the bind's QueryGil::AdmittedDuringExit.
+shared_ptr<CachedArrowSchema> SchemaOf(PythonArrowSourceInfo &info, bool admitted_during_exit) {
 	if (info.schema) {
 		return info.schema;
 	}
@@ -393,7 +396,7 @@ shared_ptr<CachedArrowSchema> SchemaOf(PythonArrowSourceInfo &info) {
 	if (!result->schema) {
 		throw InvalidInputException("reading the schema of %s failed: it gave a released schema", subject);
 	}
-	result->schema.admitted_during_exit = StartedDuringExit();
+	result->schema.admitted_during_exit = admitted_during_exit;
 	result->wrapped = !IsBatch(result->schema.value);
 	if (result->wrapped) {
 		WrapAsBatch(result->schema.value);
@@ -414,10 +417,10 @@ unique_ptr<FunctionData> PythonArrowScanBind(ClientContext &context, TableFuncti
 	auto result = make_uniq<PythonArrowScanBindData>(info);
 	shared_ptr<CachedArrowSchema> schema;
 	{
-		nb::gil_scoped_acquire gil;
+		PyUtil::QueryGil gil(context);
 		engine::CallbackScope callback(context);
 		try {
-			schema = SchemaOf(*info);
+			schema = SchemaOf(*info, gil.AdmittedDuringExit());
 		} catch (nb::python_error &error) {
 			throw InvalidInputException("reading the schema of %s failed: %s",
 			                            Subject(info->name, info->kind, "object"), FormatUDFPythonError(error));
@@ -473,7 +476,7 @@ void PythonArrowScanPushdown(ClientContext &context, LogicalGet &get, FunctionDa
 		return;
 	}
 	auto &column_ids = get.GetColumnIds();
-	nb::gil_scoped_acquire gil;
+	PyUtil::QueryGil gil(context);
 	engine::CallbackScope callback(context);
 	try {
 		nb::object fragment;
@@ -593,9 +596,9 @@ unique_ptr<GlobalTableFunctionState> PythonArrowScanInitGlobal(ClientContext &co
 	const auto subject = Subject(info.name, info.kind, "object");
 	const auto source_subject = Subject(info.name, info.kind, "source");
 
-	nb::gil_scoped_acquire gil;
+	PyUtil::QueryGil gil(context);
 	engine::CallbackScope callback(context);
-	result->started_during_exit = StartedDuringExit();
+	result->started_during_exit = gil.AdmittedDuringExit();
 	// Kept only once every check passed, so a scan refused before reading a row leaves a single use reader readable.
 	unique_ptr<ConsumedReaderMark> mark;
 	Exported exported;
@@ -715,7 +718,7 @@ void PullNext(ClientContext &context, PythonArrowScanGlobalState &global, ArrowA
 	int code;
 	string error;
 	if (global.python_callbacks) {
-		nb::gil_scoped_acquire gil;
+		PyUtil::QueryGil gil(context, global.started_during_exit);
 		code = stream.get_next(&stream, &out);
 		if (code != 0) {
 			error = StreamError(stream, code);
