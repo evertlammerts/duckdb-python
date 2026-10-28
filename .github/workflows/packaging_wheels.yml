@@ -243,8 +243,9 @@ jobs:
         run: |
           set -eo pipefail
           uv venv --python "${{ matrix.python }}" .venv-wheel
-          uv export --only-group test --no-emit-project --quiet --output-file pylock.toml
-          uv pip install --python .venv-wheel -r pylock.toml
+          # A sync installs only this platform's wheels; an export to a pylock downloads every wheel of the universal
+          # resolution that has no index hash to compute one, such as a new torch release's wheels for every platform.
+          UV_PROJECT_ENVIRONMENT="$PWD/.venv-wheel" uv sync --only-group test --no-install-project --python "${{ matrix.python }}"
           uv pip install --python .venv-wheel wheelhouse/*.whl
           venv="$PWD/.venv-wheel"
           testrun=$(uv run --no-project --python "$venv" python -c 'import tempfile; print(tempfile.mkdtemp(prefix="duckdb-testrun-"))')
