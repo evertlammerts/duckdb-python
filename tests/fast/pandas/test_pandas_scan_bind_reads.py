@@ -959,6 +959,20 @@ def test_nullable_column_with_strided_data_keeps_its_mask(duckdb_cursor, path, d
     assert _length_and_first_differences(result, expected) == (len(expected), [])
 
 
+@pytest.mark.parametrize("path", PATHS)
+@pytest.mark.parametrize("dtype", ["bool", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64"])
+def test_sliced_numpy_column_reads_its_rows(duckdb_cursor, path, dtype):
+    positions = np.arange(_SLICED_ROWS, dtype="int64")
+    values = positions % 5 < 2 if dtype == "bool" else positions.astype(dtype)
+    source = pd.DataFrame({"i": positions, "x": values}).iloc[1::3]
+    column = source["x"].to_numpy()
+    assert column.strides[0] == 3 * column.itemsize
+    expected = column.tolist()
+    assert len(expected) > PANDAS_PARTITION_ROWS
+    result = _scan_in_order(duckdb_cursor, source, path)
+    assert _length_and_first_differences(result, expected) == (len(expected), [])
+
+
 BIND_HEAP_ROWS = 200_000
 
 

@@ -1104,11 +1104,16 @@ class TestFragments:
 
 SUBINTERPRETER_TESTS = Path(__file__).resolve().parents[2] / "test_subinterpreter_gil.py"
 
-# Scanned after the process created a subinterpreter, a Python generator backed reader must still be pulled safely.
-GENERATOR_INPUT = """
+# pyarrow imports pandas when it first builds an array from a Python object, an import the spinner slows to a minute
+# or more, as every file access then waits a switch interval for the GIL.
+GENERATOR_IMPORTS = """
 import pyarrow as pa
 
+pa.array([0])
+"""
 
+# Scanned after the process created a subinterpreter, a Python generator backed reader must still be pulled safely.
+GENERATOR_INPUT = """
 def produce():
     for index in range(200):
         yield pa.record_batch([pa.array(range(index * 100, index * 100 + 100))], names=["n"])
@@ -1126,10 +1131,6 @@ for threads in (1, 4):
 
 
 class TestAfterASubinterpreter:
-    @pytest.mark.skipif(
-        sys.platform == "win32",
-        reason="the child process hangs in the scan on Windows once a subinterpreter exists; Linux and macOS pass",
-    )
     @pytest.mark.timeout(120)
     def test_a_generator_backed_reader_is_scanned_at_one_and_four_threads(self):
         import importlib.util
@@ -1139,7 +1140,7 @@ class TestAfterASubinterpreter:
         spec.loader.exec_module(harness)
         if importlib.util.find_spec(harness.INTERPRETERS) is None:
             pytest.skip(f"{harness.INTERPRETERS} is not available")
-        proc = harness._run("", GENERATOR_INPUT)
+        proc = harness._run(GENERATOR_IMPORTS, GENERATOR_INPUT)
         report = f"exit status {proc.returncode}\nstdout:\n{proc.stdout[-2000:]}\nstderr:\n{proc.stderr[-2000:]}"
         answers = [line.removeprefix(harness.PRECONDITION) for line in proc.stdout.splitlines()]
         answers = [line for line in answers if line in ("0", "1")]
