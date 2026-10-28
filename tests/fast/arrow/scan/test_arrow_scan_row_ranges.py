@@ -17,7 +17,7 @@ import threading
 import time
 
 import pytest
-from conftest import PANDAS_GE_3
+from conftest import ENGINE_GE_2_1, PANDAS_GE_3
 
 import duckdb
 
@@ -920,10 +920,11 @@ class TestEngineConversions:
             assert con.execute("SELECT d FROM src").fetchall() == expected
 
     @pytest.mark.xfail(
+        not ENGINE_GE_2_1,
         strict=True,
         raises=duckdb.InternalException,
         reason=(
-            "the engine fails to read a list of dictionaries whose first vector holds only empty lists: it "
+            "the 2.0 engine fails to read a list of dictionaries whose first vector holds only empty lists: it "
             "dereferences a dictionary it never built"
         ),
     )

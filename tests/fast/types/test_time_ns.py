@@ -2,7 +2,7 @@ import datetime
 
 import pytest
 
-from duckdb import ConversionException, sqltypes
+from duckdb import sqltypes
 
 
 def test_time_ns_select(duckdb_cursor):
@@ -12,10 +12,6 @@ def test_time_ns_select(duckdb_cursor):
     assert isinstance(result, datetime.time)
 
 
-@pytest.mark.xfail(
-    raises=ConversionException,
-    reason="Conversion Error: Unimplemented type for cast (TIME -> TIME_NS)",
-)
 def test_time_ns_insert(duckdb_cursor):
     """This tests that datetime.time values can be inserted as TIME_NS."""
     duckdb_cursor.execute("SELECT TIME_NS '1992-09-20 11:30:00.123456'")

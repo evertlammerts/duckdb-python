@@ -26,7 +26,7 @@ void ScanNumpyColumn(NumpyArray &numpy_col, idx_t stride, idx_t offset, Vector &
 	if (stride == sizeof(T)) {
 		FlatVector::SetData(out, data_ptr_cast(src_ptr + offset), count_t(count));
 	} else {
-		auto tgt_ptr = (T *)FlatVector::GetData(out);
+		auto tgt_ptr = FlatVector::GetDataMutable<T>(out);
 		for (idx_t i = 0; i < count; i++) {
 			tgt_ptr[i] = src_ptr[stride / sizeof(T) * (i + offset)];
 		}
@@ -36,7 +36,7 @@ void ScanNumpyColumn(NumpyArray &numpy_col, idx_t stride, idx_t offset, Vector &
 template <class T, class V>
 void ScanNumpyCategoryTemplated(NumpyArray &column, idx_t offset, Vector &out, idx_t count) {
 	auto src_ptr = (T *)column.Data();
-	auto tgt_ptr = (V *)FlatVector::GetData(out);
+	auto tgt_ptr = FlatVector::GetDataMutable<V>(out);
 	auto &tgt_mask = FlatVector::ValidityMutable(out);
 	for (idx_t i = 0; i < count; i++) {
 		if (src_ptr[i + offset] == -1) {
