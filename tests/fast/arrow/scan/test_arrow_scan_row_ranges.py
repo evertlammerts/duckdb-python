@@ -919,14 +919,6 @@ class TestEngineConversions:
             con.register("src", pa.table({"d": column}))
             assert con.execute("SELECT d FROM src").fetchall() == expected
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=duckdb.InternalException,
-        reason=(
-            "the engine fails to read a list of dictionaries whose first vector holds only empty lists: it "
-            "dereferences a dictionary it never built"
-        ),
-    )
     @pytest.mark.timeout(60)
     @pytest.mark.parametrize("threads", [1, 8])
     @pytest.mark.parametrize(("empty", "valued"), [(2048, 1), (300_000, 1000)], ids=["one_vector", "several_ranges"])
