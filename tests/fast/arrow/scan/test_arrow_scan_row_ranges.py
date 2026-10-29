@@ -17,7 +17,7 @@ import threading
 import time
 
 import pytest
-from conftest import ENGINE_GE_2_1, PANDAS_GE_3
+from conftest import PANDAS_GE_3
 
 import duckdb
 
@@ -919,15 +919,6 @@ class TestEngineConversions:
             con.register("src", pa.table({"d": column}))
             assert con.execute("SELECT d FROM src").fetchall() == expected
 
-    @pytest.mark.xfail(
-        not ENGINE_GE_2_1,
-        strict=True,
-        raises=duckdb.InternalException,
-        reason=(
-            "the 2.0 engine fails to read a list of dictionaries whose first vector holds only empty lists: it "
-            "dereferences a dictionary it never built"
-        ),
-    )
     @pytest.mark.timeout(60)
     @pytest.mark.parametrize("threads", [1, 8])
     @pytest.mark.parametrize(("empty", "valued"), [(2048, 1), (300_000, 1000)], ids=["one_vector", "several_ranges"])

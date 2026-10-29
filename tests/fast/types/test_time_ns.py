@@ -62,7 +62,7 @@ def test_time_ns_pandas_roundtrip(duckdb_cursor):
 
 
 def test_time_pandas_roundtrip(duckdb_cursor):
-    """For Pandas, creating a table using CREATE .... AS SELECT FROM df, will create TIME_NS cols by default."""
+    """A pandas column of datetime.time values comes back as TIME, not TIME_NS."""
     pytest.importorskip("pandas")
     df = duckdb_cursor.execute("SELECT TIME '12:34:56.123456789' AS time_col").df()
     assert df["time_col"].dtype == "object"

@@ -229,7 +229,9 @@ def _native_stacks(pid: int) -> str:
         sample = subprocess.run(["sample", str(pid), "2"], capture_output=True, text=True, timeout=30, check=False)
     except (OSError, subprocess.TimeoutExpired):
         return ""
-    return f"\nnative stacks of the hung child:\n{sample.stdout[-6000:]}"
+    # The report ends in a list of loaded images longer than any cap, so only the call graph before it is kept.
+    call_graph = sample.stdout.partition("Binary Images:")[0]
+    return f"\nnative stacks of the hung child:\n{call_graph[:40000]}"
 
 
 @_needs(INTERPRETERS)

@@ -88,11 +88,9 @@ class TestAConversionErrorEndsTheResult:
             assert str(again.value) == str(first.value)
         assert con.sql("SELECT 42").fetchall() == [(42,)]
 
-    @needs_icu
     def test_a_python_error_is_raised_again_as_its_text(self, con):
-        # The instant fits a datetime in UTC, but its wall clock in Tokyo is past datetime.max.
-        con.execute("SET TimeZone = 'Asia/Tokyo'")
-        con.execute("SELECT TIMESTAMPTZ '9999-12-31 23:59:59+00'")
+        # The day count fits the engine's interval, but datetime.timedelta caps days at 999999999.
+        con.execute("SELECT INTERVAL 1000000000 DAYS")
         with pytest.raises(OverflowError) as first:
             con.fetchone()
         with pytest.raises(duckdb.InvalidInputException, match=re.escape(str(first.value))):
