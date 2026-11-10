@@ -28,11 +28,13 @@ enum class TypeSource : uint8_t {
 	SCHEMA,
 	//! The empty bind frame typed the column, or the object input column of its name lent its type: an object
 	//! column's cells are read into it only when they are of its kind, since a function that changed what they hold
-	//! would otherwise see them cast back
+	//! would otherwise see them cast back; a plain VARCHAR column excepted, which reads a cell that is no str as its
+	//! text, as the input scan reads a VARCHAR column
 	INFERRED,
 	//! The input column of its name lent its type, but the function got that input typed, or as the member values of
 	//! a UNION, whose tags cannot travel: an object column is read into it only from cells of its kind, as an
-	//! inferred one is, and a typed column must have the type, or one that widens into it losslessly
+	//! inferred one is (with the same VARCHAR exception), and a typed column must have the type, or one that widens
+	//! into it losslessly
 	GUESSED,
 	//! Nothing typed the column: it may hold only missing values
 	UNTYPED

@@ -2,8 +2,11 @@
 
 import collections
 import datetime
+import enum
+import ipaddress
 import json
 import re
+import uuid
 import zoneinfo
 from decimal import Decimal
 from fractions import Fraction
@@ -1353,6 +1356,8 @@ def test_map_declared_column_read_error_names_the_column(duckdb_cursor):
         # A text cell and cells of other kinds in one vector, the NULL among them
         pytest.param(["a", 5, 6, "b", None, 7, "c"], ["a", "5", "6", "b", None, "7", "c"], id="str_int_and_null"),
         pytest.param(["a", 5, np.str_("c"), None], ["a", "5", "c", None], id="with_a_str_subclass"),
+        # A stated VARCHAR reads bytes through the engine's cast, as con.append does; an inferred one reads str()
+        pytest.param(["a", b"xy"], ["a", "xy"], id="bytes_as_the_cast_reads_them"),
     ],
 )
 def test_map_text_column_mixing_str_with_other_cells_reads_each_as_text_in_the_schema_type(
@@ -1379,11 +1384,201 @@ def test_map_text_column_of_str_subclass_cells_reads_them_without_a_schema(duckd
     assert mapped.fetchall() == [("a",), ("c",), (None,)]
 
 
-def test_map_text_column_with_a_cell_of_another_kind_is_refused_without_a_schema(duckdb_cursor):
+class _Plain:
+    pass
+
+
+class _StrEnum(str, enum.Enum):
+    A = "a"
+
+
+class _Shouting(str):
+    def __str__(self) -> str:
+        return self.upper()
+
+
+class _Unprintable:
+    def __str__(self) -> str:
+        message = "no text"
+        raise ValueError(message)
+
+
+class _PrintsBytes:
+    def __str__(self) -> bytes:
+        return b"x"
+
+
+TEXT_SCALARS = [
+    pytest.param(5, id="int"),
+    pytest.param(1.5, id="float"),
+    pytest.param(True, id="bool"),
+    pytest.param(Decimal("1.50"), id="Decimal"),
+    pytest.param(datetime.date(2024, 5, 6), id="date"),
+    pytest.param(datetime.time(7, 8, 9), id="time"),
+    pytest.param(datetime.datetime(2024, 5, 6, 7, 8, 9), id="datetime"),
+    pytest.param(datetime.timedelta(days=1), id="timedelta"),
+    pytest.param(uuid.UUID(int=2), id="UUID"),
+    pytest.param(np.int64(5), id="numpy_int64"),
+    pytest.param(np.datetime64("2024-05-06T07:08:09.123456789"), id="nanosecond_datetime64"),
+    pytest.param(Fraction(1, 3), id="Fraction"),
+    pytest.param(ipaddress.ip_address("10.0.0.1"), id="IPv4Address"),
+    pytest.param(_Plain(), id="object_with_the_default_repr"),
+]
+
+
+@pytest.mark.parametrize("cell", TEXT_SCALARS)
+def test_map_text_column_reads_a_scalar_of_another_kind_as_its_text_without_a_schema(duckdb_cursor, cell):
+    # The input scan reads a VARCHAR column as str() of each value, so the function's column reads as the scan would
     mapped = duckdb_cursor.sql("select i::VARCHAR as a from range(4) t(i)").map(
-        _text_cells(["a", np.str_("c"), 5, None])
+        _text_cells(["a", np.str_("c"), cell, None])
     )
-    expected = "Invalid Input Error: UDF column type mismatch, expected [VARCHAR], got [INTEGER]"
+    assert mapped.types == [duckdb.sqltypes.VARCHAR]
+    assert mapped.fetchall() == [("a",), ("c",), (str(cell),), (None,)]
+
+
+@pytest.mark.parametrize(
+    "cell",
+    [pytest.param(_StrEnum.A, id="str_enum_member"), pytest.param(_Shouting("quiet"), id="subclass_with_its_own_str")],
+)
+def test_map_text_column_reads_a_str_subclass_by_its_content_without_a_schema(duckdb_cursor, cell):
+    assert str(cell) != str.__str__(cell)
+    mapped = duckdb_cursor.sql("select i::VARCHAR as a from range(2) t(i)").map(_text_cells(["a", cell]))
+    assert mapped.fetchall() == [("a",), (str.__str__(cell),)]
+
+
+def _zero_dimensional(value):
+    cell = np.empty((), dtype=object)
+    cell[()] = value
+    return cell
+
+
+@pytest.mark.parametrize(
+    ("value", "read"),
+    [pytest.param(5, "5", id="int"), pytest.param("a", "a", id="str"), pytest.param([1, 2], None, id="list")],
+)
+def test_map_text_column_reads_a_zero_dimensional_object_array_as_its_value(duckdb_cursor, value, read):
+    mapped = duckdb_cursor.sql("select i::VARCHAR as a from range(2) t(i)").map(
+        _text_cells(["a", _zero_dimensional(value)])
+    )
+    if read is None:
+        expected = "Invalid Input Error: UDF column type mismatch, expected [VARCHAR], got [INTEGER[]]"
+        with pytest.raises(duckdb.InvalidInputException, match=f"^{re.escape(expected)}$"):
+            mapped.fetchall()
+    else:
+        assert mapped.fetchall() == [("a",), (read,)]
+
+
+@pytest.mark.parametrize(
+    ("cell", "detail"),
+    [
+        pytest.param(_Unprintable(), "ValueError: no text", id="raising_str"),
+        pytest.param(_PrintsBytes(), "TypeError: __str__ returned non-string", id="str_returning_bytes"),
+    ],
+)
+def test_map_text_column_whose_cell_cannot_print_raises_and_the_connection_stays_usable(duckdb_cursor, cell, detail):
+    mapped = duckdb_cursor.sql("select i::VARCHAR as a from range(2) t(i)").map(_text_cells(["a", cell]))
+    with pytest.raises(duckdb.Error, match=re.escape(detail)):
+        mapped.fetchall()
+    assert duckdb_cursor.execute("select 1").fetchall() == [(1,)]
+
+
+def test_map_json_column_keeps_the_kind_check_for_a_cell_of_another_kind(duckdb_cursor):
+    # JSON is VARCHAR with an alias, so the int reads through the kind check's cast, not through the text exception
+    source = duckdb_cursor.sql("""select ('{"k": ' || i || '}')::JSON as a from range(2) t(i)""")
+    mapped = source.map(lambda df: df.assign(a=pd.Series(['{"k": 0}', 5][: len(df)], dtype=object, index=df.index)))
+    assert mapped.types == source.types
+    assert mapped.fetchall() == [('{"k": 0}',), ("5",)]
+
+
+def test_map_collated_text_column_reads_a_cell_of_another_kind_as_its_text(duckdb_cursor):
+    source = duckdb_cursor.sql("select (i::VARCHAR) collate nocase as a from range(2) t(i)")
+    mapped = source.map(_text_cells(["a", 5]))
+    assert mapped.types == [duckdb.sqltypes.VARCHAR]
+    assert mapped.fetchall() == [("a",), ("5",)]
+
+
+@pytest.mark.parametrize("make_missing", MISSING_VALUES)
+def test_map_text_column_reads_a_missing_value_among_its_text_as_null(duckdb_cursor, make_missing):
+    mapped = duckdb_cursor.sql("select i::VARCHAR as a from range(3) t(i)").map(_text_cells(["a", make_missing(), "b"]))
+    assert mapped.fetchall() == [("a",), (None,), ("b",)]
+
+
+def test_map_text_column_filled_with_an_int_reads_it_as_text(duckdb_cursor):
+    source = duckdb_cursor.sql("select * from (values ('a'), (NULL), ('b')) t(a)")
+    mapped = source.map(lambda df: df.assign(a=df["a"].astype(object).fillna(0)))
+    assert mapped.types == source.types
+    assert mapped.fetchall() == [("a",), ("0",), ("b",)]
+
+
+def test_map_text_column_handed_back_as_ints_reads_their_text(duckdb_cursor):
+    # 2.0.0 typed the returned column from its values, INTEGER, and refused it with a mismatch
+    source = duckdb_cursor.sql("select i::VARCHAR as a from range(3) t(i)")
+    mapped = source.map(lambda df: df.assign(a=pd.Series([int(v) for v in df["a"]], dtype=object, index=df.index)))
+    assert mapped.types == source.types
+    assert mapped.fetchall() == [("0",), ("1",), ("2",)]
+
+
+def _mismatch(returned):
+    return (
+        duckdb.InvalidInputException,
+        f"Invalid Input Error: UDF column type mismatch, expected [VARCHAR], got [{returned}]",
+    )
+
+
+def _no_conversion(python_type):
+    message = (
+        f"Not implemented Error: UDF column 'a': Unable to transform python value of type '<class '{python_type}'>' "
+        "to DuckDB LogicalType"
+    )
+    return duckdb.NotImplementedException, message
+
+
+@pytest.mark.parametrize(
+    ("cell", "refusal"),
+    [
+        # A container is any iterable that is no str; its text would be a Python repr
+        pytest.param([1, 2], _mismatch("INTEGER[]"), id="list"),
+        pytest.param((1, 2), _mismatch("INTEGER[]"), id="tuple"),
+        pytest.param({"k": 1}, _mismatch("STRUCT(k INTEGER)"), id="dict"),
+        pytest.param(np.array([1, 2]), _mismatch("INTEGER[]"), id="array"),
+        pytest.param(b"xy", _mismatch("BLOB"), id="bytes"),
+        pytest.param(bytearray(b"xy"), _mismatch("BLOB"), id="bytearray"),
+        pytest.param(memoryview(b"xy"), _mismatch("BLOB"), id="memoryview"),
+        pytest.param({"b"}, _no_conversion("set"), id="set"),
+        pytest.param(frozenset({"b"}), _no_conversion("frozenset"), id="frozenset"),
+        pytest.param(collections.deque([1, 2]), _no_conversion("collections.deque"), id="deque"),
+        pytest.param(range(3), _no_conversion("range"), id="range"),
+        pytest.param(pd.Series([1, 2]), _no_conversion(f"{pd.Series.__module__}.Series"), id="Series"),
+        pytest.param({"k": 1}.keys(), _no_conversion("dict_keys"), id="dict_keys"),
+        pytest.param((v for v in [1]), _no_conversion("generator"), id="generator"),
+    ],
+)
+def test_map_text_column_with_a_container_cell_is_refused_without_a_schema(duckdb_cursor, cell, refusal):
+    mapped = duckdb_cursor.sql("select i::VARCHAR as a from range(2) t(i)").map(_text_cells(["a", cell]))
+    error, message = refusal
+    with pytest.raises(error, match=f"^{re.escape(message)}$"):
+        mapped.fetchall()
+
+
+@pytest.mark.parametrize(
+    ("value", "sql_type"),
+    [
+        pytest.param("i", "BIGINT", id="BIGINT"),
+        pytest.param("i::DOUBLE", "DOUBLE", id="DOUBLE"),
+        pytest.param("i = 1", "BOOLEAN", id="BOOLEAN"),
+        pytest.param("TIMESTAMP '2020-01-01' + to_seconds(i)", "TIMESTAMP", id="TIMESTAMP"),
+        pytest.param("to_seconds(i)", "INTERVAL", id="INTERVAL"),
+        pytest.param("md5(i::VARCHAR)::UUID", "UUID", id="UUID"),
+        pytest.param("i::VARCHAR::BLOB", "BLOB", id="BLOB"),
+        pytest.param("[i::INTEGER]", "INTEGER[]", id="list"),
+        pytest.param("{'x': i::INTEGER}", "STRUCT(x INTEGER)", id="struct"),
+        pytest.param("MAP {'k': i::INTEGER}", "MAP(VARCHAR, INTEGER)", id="map"),
+    ],
+)
+def test_map_column_of_another_type_given_text_is_refused_without_a_schema(duckdb_cursor, value, sql_type):
+    # Only a VARCHAR column reads a cell of another kind as its text
+    mapped = duckdb_cursor.sql(f"select {value} as a from range(2) t(i)").map(_odd_cell_at(1, "x"))
+    expected = f"Invalid Input Error: UDF column type mismatch, expected [{sql_type}], got [VARCHAR]"
     with pytest.raises(duckdb.InvalidInputException, match=f"^{re.escape(expected)}$"):
         mapped.fetchall()
 
@@ -1400,24 +1595,23 @@ def test_map_blob_column_mixing_bytes_with_other_cells_reads_each(duckdb_cursor,
     assert mapped.fetchall() == [(b"a",), (b"b",), (None,), (b"c",), (b"\x00d",)]
 
 
-@pytest.mark.parametrize(
-    ("cell", "name"),
-    [pytest.param(Fraction(1, 3), "fractions.Fraction", id="Fraction"), pytest.param({"b"}, "set", id="set")],
-)
-def test_map_text_column_with_an_object_without_a_duckdb_type_is_refused_without_a_schema(duckdb_cursor, cell, name):
-    mapped = duckdb_cursor.sql("select i::VARCHAR as a from range(2) t(i)").map(_text_cells(["a", cell]))
-    expected = (
-        f"Not implemented Error: UDF column 'a': Unable to transform python value of type '<class '{name}'>' to "
-        "DuckDB LogicalType"
-    )
-    with pytest.raises(duckdb.NotImplementedException, match=f"^{re.escape(expected)}$"):
-        mapped.fetchall()
-
-
 def test_map_text_column_with_an_object_without_a_duckdb_type_reads_its_text_in_the_schema_type(duckdb_cursor):
     source = duckdb_cursor.sql("select i::VARCHAR as a from range(2) t(i)")
     mapped = source.map(_text_cells(["a", Fraction(1, 3)]), schema={"a": duckdb.sqltypes.VARCHAR})
     assert mapped.fetchall() == [("a",), ("1/3",)]
+
+
+@SCHEMAS
+def test_map_struct_field_holding_an_object_without_a_duckdb_type_is_refused(duckdb_cursor, explicit_schema):
+    # Only a top level cell of a VARCHAR column reads as its text; at depth the conversion has no reading for it
+    source = duckdb_cursor.sql("select {'x': i::VARCHAR} as a from range(2) t(i)")
+    mapped = source.map(_apply_to_a(lambda d: {"x": Fraction(1, 3)}), schema=_schema_of(source, explicit_schema))
+    expected = (
+        "Not implemented Error: UDF column 'a': Unable to transform python value of type "
+        "'<class 'fractions.Fraction'>' to DuckDB LogicalType"
+    )
+    with pytest.raises(duckdb.NotImplementedException, match=f"^{re.escape(expected)}$"):
+        mapped.fetchall()
 
 
 @SCHEMAS
