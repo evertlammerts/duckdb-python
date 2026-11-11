@@ -296,14 +296,34 @@ private:
 	vector<Entry> casts;
 };
 
+//! Whether a value in an implied VARCHAR column reads as str() of its cell, as the input scan reads a VARCHAR column.
+//! A str subclass reads its content, since its str() may be another text (an Enum member's name); a value the
+//! conversion types as a LIST, STRUCT, MAP or ARRAY keeps the kind check, as every nested type does
+static bool ReadsAsText(nb::handle value) {
+	switch (GetPythonObjectType(value)) {
+	case PythonObjectType::None:
+	case PythonObjectType::Value:
+	case PythonObjectType::String:
+	case PythonObjectType::List:
+	case PythonObjectType::Tuple:
+	case PythonObjectType::Dict:
+	case PythonObjectType::NdArray:
+		return false;
+	case PythonObjectType::Float:
+		return !std::isnan(PyFloat_AsDouble(value.ptr()));
+	default:
+		return true;
+	}
+}
+
 //! A declared column converts a cell as the appender converts a value of a row: with the type the value has in
 //! Python, then the engine's cast into the column's type, which reads the connection's settings; NaN reads NULL at
 //! every depth, a numpy scalar reads as its Python value (a datetime64 finer than a microsecond as a TIMESTAMP_NS),
-//! and an object without a DuckDB type reads as its text into a stated VARCHAR and has no kind for an implied one.
-//! The cell converts with the column type's shape (KeyedShape) as its target, or with UNKNOWN for a type that takes
-//! none; a type holding a MAP needs one: without it a dict reads as a STRUCT named by its keys' text, and a key whose
-//! text does not cast back, such as bytes, is lost. Both are built once per vector, since building a type looks up
-//! its type information each time.
+//! and an object without a DuckDB type reads as its text into a stated VARCHAR (an implied VARCHAR reads every
+//! scalar as its text before a Value is built, ReadsAsText). The cell converts with the column type's shape
+//! (KeyedShape) as its target, or with UNKNOWN for a type that takes none; a type holding a MAP needs one: without it
+//! a dict reads as a STRUCT named by its keys' text, and a key whose text does not cast back, such as bytes, is lost.
+//! Both are built once per vector, since building a type looks up its type information each time.
 static Value DeclaredValue(ClientContext &context, const LogicalType &target, nb::handle cell, const LogicalType &shape,
                            bool implied) {
 	if (cell.ptr() == Py_None) {
@@ -996,18 +1016,37 @@ void NumpyScan::ScanDeclaredColumn(ClientContext &context, PyObject **col, idx_t
 	// collation governs comparison only, an alias such as JSON validates the text in its cast. The reader is chosen
 	// once per vector, since a test per cell for every fast path costs the plain path more than the tests themselves.
 	if (target == LogicalType::VARCHAR) {
-		ScanObjectCells(context, col, stride, masked, count, offset, out, [&](nb::handle cell, idx_t row) {
-			if (!PyUnicode_CheckExact(cell.ptr())) {
-				return read(cell, row);
-			}
+		auto write_text = [&](nb::handle text, idx_t row) {
 			Py_ssize_t size;
-			auto text = PyUnicode_AsUTF8AndSize(cell.ptr(), &size);
-			if (!text) {
-				ThrowUnencodableStr(cell);
+			auto utf8 = PyUnicode_AsUTF8AndSize(text.ptr(), &size);
+			if (!utf8) {
+				ThrowUnencodableStr(text);
 			}
 			FlatVector::GetDataMutable<string_t>(out)[row] =
-			    StringVector::AddString(out, text, NumericCast<idx_t>(size));
+			    StringVector::AddString(out, utf8, NumericCast<idx_t>(size));
 			staged.MarkWritten(row);
+		};
+		// An implied VARCHAR column reads a cell that is no str as the input scan reads a VARCHAR column, str() of it,
+		// where every other implied type refuses a cell of another kind (ReadsAsText)
+		auto read_text = [&](nb::handle cell, idx_t row) {
+			timestamp_ns_t nanoseconds;
+			auto plain = PythonValueOfNumpyScalar(cell, nanoseconds);
+			// A datetime64 finer than a microsecond has no Python value and reads as numpy's own text
+			if (!plain.is_valid() || ReadsAsText(plain)) {
+				return write_text(nb::str(cell), row);
+			}
+			if (plain.ptr() != Py_None) {
+				accept(cell, row, TransformPythonValue(context, plain, shape, true));
+			}
+		};
+		ScanObjectCells(context, col, stride, masked, count, offset, out, [&](nb::handle cell, idx_t row) {
+			if (PyUnicode_CheckExact(cell.ptr())) {
+				return write_text(cell, row);
+			}
+			if (implied_type) {
+				return read_text(cell, row);
+			}
+			read(cell, row);
 		});
 	} else if (target == LogicalType::BLOB) {
 		// df() hands a BLOB cell to the function as a bytearray
