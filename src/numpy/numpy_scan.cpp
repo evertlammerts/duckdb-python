@@ -297,27 +297,22 @@ private:
 };
 
 //! Whether a value in an implied VARCHAR column reads as str() of its cell, as the input scan reads a VARCHAR column.
-//! A str subclass reads its content, since its str() may be another text (an Enum member's name); an iterable keeps
-//! the kind check, since its text is a Python repr, unstable for a set and an address for a generator or a memoryview
+//! A str subclass reads its content, since its str() may be another text (an Enum member's name); a value the
+//! conversion types as a LIST, STRUCT, MAP or ARRAY keeps the kind check, as every nested type does
 static bool ReadsAsText(nb::handle value) {
 	switch (GetPythonObjectType(value)) {
 	case PythonObjectType::None:
 	case PythonObjectType::Value:
 	case PythonObjectType::String:
+	case PythonObjectType::List:
+	case PythonObjectType::Tuple:
+	case PythonObjectType::Dict:
+	case PythonObjectType::NdArray:
 		return false;
 	case PythonObjectType::Float:
 		return !std::isnan(PyFloat_AsDouble(value.ptr()));
-	case PythonObjectType::Bool:
-	case PythonObjectType::Integer:
-	case PythonObjectType::Decimal:
-	case PythonObjectType::Uuid:
-	case PythonObjectType::Datetime:
-	case PythonObjectType::Date:
-	case PythonObjectType::Time:
-	case PythonObjectType::Timedelta:
-		return true;
 	default:
-		return !nb::hasattr(value.type(), "__iter__");
+		return true;
 	}
 }
 

@@ -5,6 +5,7 @@ import datetime
 import enum
 import ipaddress
 import json
+import pathlib
 import re
 import uuid
 import zoneinfo
@@ -1408,7 +1409,11 @@ class _PrintsBytes:
         return b"x"
 
 
-TEXT_SCALARS = [
+class _Color(enum.Enum):
+    RED = 1
+
+
+TEXT_CELLS = [
     pytest.param(5, id="int"),
     pytest.param(1.5, id="float"),
     pytest.param(True, id="bool"),
@@ -1422,12 +1427,26 @@ TEXT_SCALARS = [
     pytest.param(np.datetime64("2024-05-06T07:08:09.123456789"), id="nanosecond_datetime64"),
     pytest.param(Fraction(1, 3), id="Fraction"),
     pytest.param(ipaddress.ip_address("10.0.0.1"), id="IPv4Address"),
+    pytest.param(pathlib.PurePosixPath("/tmp/x"), id="Path"),
+    pytest.param(_Color.RED, id="enum_member"),
     pytest.param(_Plain(), id="object_with_the_default_repr"),
+    # 2.0.0 refused the three bytes like cells as BLOB; under one rule for text columns they read str() like the rest
+    pytest.param(b"xy", id="bytes"),
+    pytest.param(bytearray(b"xy"), id="bytearray"),
+    pytest.param(memoryview(b"xy"), id="memoryview"),
+    # Python containers the conversion has no DuckDB type for read their repr, as 2.0.0 read them
+    pytest.param({"b"}, id="set"),
+    pytest.param(frozenset({"b"}), id="frozenset"),
+    pytest.param(collections.deque([1, 2]), id="deque"),
+    pytest.param(range(3), id="range"),
+    pytest.param(pd.Series([1, 2]), id="Series"),
+    pytest.param({"k": 1}.keys(), id="dict_keys"),
+    pytest.param((v for v in [1]), id="generator"),
 ]
 
 
-@pytest.mark.parametrize("cell", TEXT_SCALARS)
-def test_map_text_column_reads_a_scalar_of_another_kind_as_its_text_without_a_schema(duckdb_cursor, cell):
+@pytest.mark.parametrize("cell", TEXT_CELLS)
+def test_map_text_column_reads_a_cell_of_another_kind_as_its_text_without_a_schema(duckdb_cursor, cell):
     # The input scan reads a VARCHAR column as str() of each value, so the function's column reads as the scan would
     mapped = duckdb_cursor.sql("select i::VARCHAR as a from range(4) t(i)").map(
         _text_cells(["a", np.str_("c"), cell, None])
@@ -1518,45 +1537,20 @@ def test_map_text_column_handed_back_as_ints_reads_their_text(duckdb_cursor):
     assert mapped.fetchall() == [("0",), ("1",), ("2",)]
 
 
-def _mismatch(returned):
-    return (
-        duckdb.InvalidInputException,
-        f"Invalid Input Error: UDF column type mismatch, expected [VARCHAR], got [{returned}]",
-    )
-
-
-def _no_conversion(python_type):
-    message = (
-        f"Not implemented Error: UDF column 'a': Unable to transform python value of type '<class '{python_type}'>' "
-        "to DuckDB LogicalType"
-    )
-    return duckdb.NotImplementedException, message
-
-
 @pytest.mark.parametrize(
-    ("cell", "refusal"),
+    ("cell", "returned"),
     [
-        # A container is any iterable that is no str; its text would be a Python repr
-        pytest.param([1, 2], _mismatch("INTEGER[]"), id="list"),
-        pytest.param((1, 2), _mismatch("INTEGER[]"), id="tuple"),
-        pytest.param({"k": 1}, _mismatch("STRUCT(k INTEGER)"), id="dict"),
-        pytest.param(np.array([1, 2]), _mismatch("INTEGER[]"), id="array"),
-        pytest.param(b"xy", _mismatch("BLOB"), id="bytes"),
-        pytest.param(bytearray(b"xy"), _mismatch("BLOB"), id="bytearray"),
-        pytest.param(memoryview(b"xy"), _mismatch("BLOB"), id="memoryview"),
-        pytest.param({"b"}, _no_conversion("set"), id="set"),
-        pytest.param(frozenset({"b"}), _no_conversion("frozenset"), id="frozenset"),
-        pytest.param(collections.deque([1, 2]), _no_conversion("collections.deque"), id="deque"),
-        pytest.param(range(3), _no_conversion("range"), id="range"),
-        pytest.param(pd.Series([1, 2]), _no_conversion(f"{pd.Series.__module__}.Series"), id="Series"),
-        pytest.param({"k": 1}.keys(), _no_conversion("dict_keys"), id="dict_keys"),
-        pytest.param((v for v in [1]), _no_conversion("generator"), id="generator"),
+        # A cell the conversion types as a LIST, STRUCT, MAP or ARRAY is judged by its kind like every nested value
+        pytest.param([1, 2], "INTEGER[]", id="list"),
+        pytest.param((1, 2), "INTEGER[]", id="tuple"),
+        pytest.param({"k": 1}, "STRUCT(k INTEGER)", id="dict"),
+        pytest.param(np.array([1, 2]), "INTEGER[]", id="array"),
     ],
 )
-def test_map_text_column_with_a_container_cell_is_refused_without_a_schema(duckdb_cursor, cell, refusal):
+def test_map_text_column_with_a_container_cell_is_refused_without_a_schema(duckdb_cursor, cell, returned):
     mapped = duckdb_cursor.sql("select i::VARCHAR as a from range(2) t(i)").map(_text_cells(["a", cell]))
-    error, message = refusal
-    with pytest.raises(error, match=f"^{re.escape(message)}$"):
+    expected = f"Invalid Input Error: UDF column type mismatch, expected [VARCHAR], got [{returned}]"
+    with pytest.raises(duckdb.InvalidInputException, match=f"^{re.escape(expected)}$"):
         mapped.fetchall()
 
 
